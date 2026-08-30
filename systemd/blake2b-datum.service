@@ -1,0 +1,13 @@
+[Unit]
+Description=DATUM Gateway BLAKE2b Stratum
+After=blake2b-bitcoind.service
+
+[Service]
+Type=simple
+Environment=LD_LIBRARY_PATH=/home/umbrel/blake2b/lib
+ExecStart=/home/umbrel/blake2b/bin/datum-gateway.sh
+Restart=on-failure
+RestartSec=8
+
+[Install]
+WantedBy=default.target

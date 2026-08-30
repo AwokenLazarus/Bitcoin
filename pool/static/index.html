@@ -1,0 +1,145 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lazarus — BLAKE2b pool</title>
+<meta name="description" content="Lazarus mining pool. BLAKE2b Bitcoin, 0.5% fee, Ocean-style coinbase payouts.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;1,400&family=Newsreader:ital,opsz,wght@0,6..72,500;1,6..72,400;1,6..72,500&display=swap">
+<link rel="stylesheet" href="/static/pool.css">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' fill='%231c1914'/%3E%3Cpath d='M8 24V8h6.2c4.4 0 7.2 2.5 7.2 6.4 0 3.8-2.8 6.3-7.2 6.3H11v3.3H8zm3-6.1h2.8c2.4 0 3.8-1.3 3.8-3.5S16.2 11 13.8 11H11v6.9z' fill='%23d4b45a'/%3E%3C/svg%3E">
+</head>
+<body>
+<header class="site-header">
+  <div class="brand">
+    <a class="wordmark" href="/">Lazarus <em>Pool</em></a>
+    <p class="lede">BLAKE2b Bitcoin · <i>Proverbs 11:1</i> · paid in the coinbase · 0.5% fee</p>
+  </div>
+  <div class="header-meta" aria-live="polite">
+    <span class="chip" data-live><span>Pool</span> <b id="live-hr">—</b></span>
+    <span class="chip">Fee <b>0.5%</b></span>
+    <span class="chip">Tip <b id="live-tip">—</b></span>
+  </div>
+  <nav class="nav" aria-label="Sections">
+    <a href="#mine">Browser</a>
+    <a href="#connect">Connect</a>
+    <a href="#dashboard">Your stats</a>
+    <a href="#miners">Miners</a>
+    <a href="#blocks">Blocks</a>
+    <a href="#payouts">Payouts</a>
+    <a href="#how">How it works</a>
+  </nav>
+</header>
+
+<main class="wrap stack">
+  <section aria-label="Pool status">
+    <dl class="ticker" id="stats"></dl>
+    <div class="chart-wrap" style="margin-top:0.7rem">
+      <div class="chart-caption">Pool hashrate, 24h</div>
+      <canvas id="poolchart" width="1100" height="148"></canvas>
+    </div>
+    <p class="note" id="payoutline" style="margin-top:0.7rem"></p>
+  </section>
+
+  <div class="split">
+    <section class="panel" id="mine">
+      <div class="section-head">
+        <h2>Mine in this browser</h2>
+        <p>CPU only. Stop whenever you want.</p>
+      </div>
+      <p class="copy">BLAKE2b runs in this tab. Paste a payout address and start. Shares land as <code>address.browser</code>.</p>
+      <div class="field-row">
+        <label class="sr-only" for="bm-addr">Payout address</label>
+        <input id="bm-addr" placeholder="bc1q…your payout address" spellcheck="false" autocomplete="off">
+        <button class="btn" id="bm-btn" type="button">Start mining</button>
+      </div>
+      <div class="mini-grid">
+        <div class="metric"><small>Your hashrate</small><b id="bm-hr">—</b></div>
+        <div class="metric"><small>Accepted / sent</small><b id="bm-sh">0 / 0</b></div>
+        <div class="metric"><small>Status</small><b id="bm-st">idle</b></div>
+      </div>
+      <p class="note">A laptop is lottery-scale. A GPU is faster. Hashrate is counted in this tab and posted to the miners list. A first share at difficulty 1 can take a long time on a laptop.</p>
+    </section>
+
+    <section class="panel" id="connect">
+      <div class="section-head">
+        <h2>Connect a miner</h2>
+        <p>Username is your payout address.</p>
+      </div>
+      <dl class="facts">
+        <dt>URL</dt><dd class="mono" id="stratum"></dd>
+        <dt>User</dt><dd class="mono">bc1q…youraddress.worker</dd>
+        <dt>Password</dt><dd class="mono">x</dd>
+        <dt>Algo</dt><dd>BLAKE2b — Sia-style header, not SHA-256d</dd>
+        <dt>Payout</dt><dd>Ocean-style coinbase. 99.5% split by accepted work this round; 0.5% pool fee.</dd>
+      </dl>
+    </section>
+  </div>
+
+  <section id="dashboard">
+    <div class="section-head">
+      <h2>Your dashboard</h2>
+      <p>Look up any address that has submitted work.</p>
+    </div>
+    <div class="field-row">
+      <label class="sr-only" for="lookup">Bitcoin address</label>
+      <input id="lookup" placeholder="Paste your Bitcoin address" spellcheck="false" autocomplete="off">
+      <button class="btn" id="go" type="button">Look up</button>
+    </div>
+    <div id="miner"></div>
+    <div class="chart-wrap" style="margin-top:0.7rem">
+      <div class="chart-caption">Your hashrate, 24h</div>
+      <canvas id="chart" width="1100" height="148"></canvas>
+    </div>
+  </section>
+
+  <section id="miners">
+    <div class="section-head">
+      <h2>Miners</h2>
+      <p class="kicker">Online now, then recently seen</p>
+    </div>
+    <div class="scroll"><table id="online"></table></div>
+    <p class="kicker" style="margin:1rem 0 0.45rem">Recently seen</p>
+    <div class="scroll"><table id="seen"></table></div>
+  </section>
+
+  <section id="blocks">
+    <div class="section-head">
+      <h2>Blocks</h2>
+      <p class="kicker">Found by Lazarus, then the rest of the chain</p>
+    </div>
+    <div class="scroll"><table id="found"></table></div>
+    <p class="kicker" style="margin:1rem 0 0.45rem">Recent on this chain</p>
+    <div class="scroll"><table id="blocktable"></table></div>
+  </section>
+
+  <section id="payouts">
+    <div class="section-head">
+      <h2>Payouts</h2>
+      <p class="kicker">On-chain, in the found block</p>
+    </div>
+    <div class="panel">
+      <p class="copy">When the pool finds a block, miners are paid <strong>in that block’s coinbase</strong> — same idea as Ocean. 99.5% is split by accepted difficulty this round; 0.5% is the pool fee.</p>
+      <p class="note">Outputs land when the block is found. They are immature until 100 confirmations, like any coinbase.</p>
+    </div>
+    <div class="scroll" style="margin-top:0.7rem"><table id="paytable"></table></div>
+  </section>
+
+  <section id="how">
+    <div class="section-head">
+      <h2>How it works</h2>
+    </div>
+    <div class="panel note">
+      <p class="copy">Lazarus is a DATUM gateway on a BLAKE2b Knots node. Shares prove work. A found block pays miners in the generation transaction. Coinbase tag is <code>Lazarus</code> plus the required headline.</p>
+      <p class="note" style="margin-top:0.7rem">Explorer: <a href="https://mempool.example.com/mining" target="_blank" rel="noreferrer">mempool.example.com</a></p>
+    </div>
+  </section>
+</main>
+
+<script src="/static/pool.js?v=hr2"></script>
+<script src="/static/blake2b.js?v=hr2"></script>
+<script src="/static/miner.js?v=hr2"></script>
+</body>
+</html>

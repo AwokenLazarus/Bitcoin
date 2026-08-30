@@ -1,0 +1,6 @@
+[Unit]
+Description=Ensure BLAKE2b electrs/datum/pool are running
+
+[Service]
+Type=oneshot
+ExecStart=/home/umbrel/blake2b/bin/ensure-blake2b-services.sh

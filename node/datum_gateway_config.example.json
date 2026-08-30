@@ -1,0 +1,39 @@
+{
+  "bitcoind": {
+    "rpcurl": "http://127.0.0.1:9332",
+    "notify_fallback": true,
+    "rpccookiefile": "<redacted>"
+  },
+  "stratum": {
+    "listen_addr": "0.0.0.0",
+    "listen_port": 23334,
+    "vardiff_min": 1,
+    "vardiff_target_shares_min": 8
+  },
+  "api": {
+    "listen_addr": "0.0.0.0",
+    "listen_port": 7152,
+    "admin_password": "<redacted>",
+    "modify_conf": false
+  },
+  "mining": {
+    "pool_address": "<redacted>",
+    "coinbase_tag_primary": "Lazarus / 8-30 NYPost Deride And Conquer",
+    "coinbase_tag_secondary": "Proverbs 11:1",
+    "pow_algorithm": "auto",
+    "allow_hasher_time_rolling": false,
+    "pool_fee_percent": 0.5
+  },
+  "logger": {
+    "log_to_console": true,
+    "log_to_file": true,
+    "log_file": "/home/umbrel/blake2b/logs/datum.log",
+    "log_rotate_daily": true,
+    "log_level_console": 2,
+    "log_level_file": 1
+  },
+  "datum": {
+    "pool_host": "",
+    "pooled_mining_only": false
+  }
+}

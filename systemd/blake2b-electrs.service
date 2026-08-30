@@ -1,0 +1,13 @@
+[Unit]
+Description=electrs header-v2 BLAKE2b (Electrum)
+After=blake2b-bitcoind.service
+
+[Service]
+Type=simple
+ExecStart=/home/umbrel/blake2b/bin/start-electrs.sh
+Restart=on-failure
+RestartSec=8
+TimeoutStopSec=60
+
+[Install]
+WantedBy=default.target

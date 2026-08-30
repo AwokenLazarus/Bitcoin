@@ -1,0 +1,10 @@
+[Unit]
+Description=Every 3 minutes ensure BLAKE2b services
+
+[Timer]
+OnBootSec=30
+OnUnitActiveSec=180
+AccuracySec=30
+
+[Install]
+WantedBy=timers.target

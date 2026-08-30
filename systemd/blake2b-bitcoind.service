@@ -1,0 +1,13 @@
+[Unit]
+Description=Bitcoin Knots 29.4.1rc4 BLAKE2b node
+After=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/home/umbrel/blake2b/bin/start-node.sh
+Restart=on-failure
+RestartSec=8
+TimeoutStopSec=180
+
+[Install]
+WantedBy=default.target

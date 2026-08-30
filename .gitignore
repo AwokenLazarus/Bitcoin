@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+venv/
+.env
+*.sqlite
+notify-state.json
+miner.log
+*.cookie
+*secrets*
+config.json
+datum-admin.env

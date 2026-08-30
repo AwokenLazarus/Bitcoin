@@ -1,0 +1,15 @@
+[Unit]
+Description=Mempool API hotfix (Electrum port 50001)
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/umbrel/mempool-hotfix/backend
+Environment=NODE_OPTIONS=--max-old-space-size=2048
+ExecStartPre=/bin/cp -f /home/umbrel/mempool-hotfix/mempool-config.json /home/umbrel/mempool-hotfix/backend/mempool-config.json
+ExecStart=/usr/local/bin/node /home/umbrel/mempool-hotfix/backend/package/index.js
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

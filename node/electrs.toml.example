@@ -1,0 +1,11 @@
+network = "bitcoin"
+daemon_dir = "/home/umbrel/umbrel/app-data/bitcoin-knots/data/bitcoin"
+daemon_rpc_addr = "127.0.0.1:9332"
+daemon_p2p_addr = "127.0.0.1:9333"
+electrum_rpc_addr = "0.0.0.0:50011"
+monitoring_addr = "127.0.0.1:4225"
+db_dir = "/home/umbrel/blake2b/electrs-db"
+log_filters = "INFO"
+jsonrpc_timeout = 30
+index_batch_size = 10
+server_banner = "Umbrel electrs header-v2 (BLAKE2b)"

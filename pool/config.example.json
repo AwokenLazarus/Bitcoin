@@ -1,0 +1,14 @@
+{
+  "pool_fee_percent": 0.5,
+  "stratum_host": "stratum.example.com",
+  "stratum_port": 23334,
+  "listen_host": "0.0.0.0",
+  "listen_port": 8888,
+  "datum_url": "http://127.0.0.1:7152",
+  "mempool_api": "http://127.0.0.1:8999",
+  "cookie_file": "/path/to/bitcoin/.cookie",
+  "datum_auth_file": "/path/to/datum-admin.env",
+  "explorer_url": "https://mempool.example.com",
+  "coinbase_tag": "POOL",
+  "public_url": "https://pool.example.com"
+}
