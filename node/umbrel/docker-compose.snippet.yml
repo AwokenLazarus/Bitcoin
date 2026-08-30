@@ -1,0 +1,13 @@
+# Add this volume on the Knots `app` service so the container runs rc4,
+# not the stock image bitcoind. pre-start re-applies it after an app update.
+#
+# Under services.app.volumes, after the data bind:
+#
+#   - ${APP_DATA_DIR}/data:/data
+#   - /home/umbrel/blake2b/prefix/bin/bitcoind:/opt/bitcoind/v29.4.knots20260508/bitcoind:ro
+#
+# Confirm inside the container:
+#   bitcoind -version
+#   # Bitcoin Knots daemon version v29.4.1.knots20260508rc4
+#
+# Do not commit a full live compose file (RPC/Tor env).
