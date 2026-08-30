@@ -10,5 +10,8 @@
   "datum_auth_file": "/path/to/datum-admin.env",
   "explorer_url": "https://mempool.example.com",
   "coinbase_tag": "POOL",
-  "public_url": "https://pool.example.com"
+  "public_url": "https://pool.example.com",
+  "datum_prime_host": "stratum.example.com",
+  "datum_prime_port": 28915,
+  "datum_prime_stats": "http://127.0.0.1:28916/stats.json"
 }

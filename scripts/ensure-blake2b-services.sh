@@ -6,6 +6,9 @@ fi
 if ! pgrep -f 'http.server 8765' >/dev/null; then
   nohup /home/umbrel/blake2b/bin/serve-pools.sh >> /home/umbrel/blake2b/pools-http.log 2>&1 &
 fi
+if ! pgrep -f '/home/umbrel/blake2b/prefix/bin/ratum-prime' >/dev/null; then
+  nohup /home/umbrel/blake2b/bin/start-ratum-prime.sh >> /home/umbrel/blake2b/logs/ratum-prime.log 2>&1 &
+fi
 if ! pgrep -f '/home/umbrel/blake2b/prefix/bin/datum_gateway' >/dev/null; then
   nohup /home/umbrel/blake2b/bin/datum-gateway.sh >> /home/umbrel/blake2b/logs/datum.console 2>&1 &
 fi

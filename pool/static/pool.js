@@ -1,5 +1,40 @@
 (() => {
   const $ = (id) => document.getElementById(id);
+  async function copyValue(text) {
+    if (!text) return false;
+    try {
+      await navigator.clipboard.writeText(text);
+      return true;
+    } catch (e) {
+      const ta = document.createElement("textarea");
+      ta.value = text;
+      ta.setAttribute("readonly", "");
+      ta.style.position = "fixed";
+      ta.style.left = "-9999px";
+      document.body.appendChild(ta);
+      ta.select();
+      const ok = document.execCommand("copy");
+      ta.remove();
+      return ok;
+    }
+  }
+
+  document.addEventListener("click", async (e) => {
+    const btn = e.target.closest(".copy-btn");
+    if (!btn) return;
+    const from = btn.getAttribute("data-copy-from");
+    const text = (from ? ($(from)?.textContent || "") : (btn.getAttribute("data-copy") || "")).trim();
+    if (!(await copyValue(text))) return;
+    btn.setAttribute("data-copied", "");
+    const prev = btn.getAttribute("aria-label") || "Copy";
+    btn.setAttribute("aria-label", "Copied");
+    clearTimeout(btn._copyT);
+    btn._copyT = setTimeout(() => {
+      btn.removeAttribute("data-copied");
+      btn.setAttribute("aria-label", prev.replace(/^Copied$/, "Copy"));
+    }, 1400);
+  });
+
 
   const fmtHr = (ghs) => {
     if (ghs == null || Number.isNaN(ghs)) return "—";
@@ -55,6 +90,23 @@
       .map(([k, v, s]) => `<div><dt>${k}</dt><dd>${v}<small>${s}</small></dd></div>`)
       .join("");
     $("stratum").textContent = p.stratum;
+    const gw = $("gateway-config");
+    if (gw) {
+      const d = p.datum || {};
+      const cfg = { datum: {
+        pool_host: d.pool_host || "stratum.awokenlazarus.xyz",
+        pool_port: d.pool_port || 28915,
+        pool_pubkey: d.pool_pubkey || "29120606bbbfdeb0dcb259d13ed1fba9e6ff198ff6a0152cffb7608dc1c266bd17532393738aee7edf9aa0c9ec93b835256971f186da878f77fb3ed273dff30a",
+        pool_pass_workers: true,
+        pool_pass_full_users: true,
+        pooled_mining_only: true,
+      }};
+      gw.textContent = JSON.stringify(cfg, null, 2);
+    }
+    const dh = $("datum-host");
+    if (dh) dh.textContent = (p.datum && p.datum.pool_host) || "stratum.awokenlazarus.xyz";
+    const dp = $("datum-port");
+    if (dp) dp.textContent = String((p.datum && p.datum.pool_port) || 28915);
     $("payoutline").textContent = p.payout;
     if ($("live-hr")) $("live-hr").textContent = fmtHr(p.pool_hr_ghs);
     if ($("live-tip")) $("live-tip").textContent = p.height || "\u2014";
@@ -146,7 +198,7 @@
     $("miner").innerHTML = `
       <div class="panel miner-card">
         <div class="addr-line">
-          <span>${m.address}</span>
+          <span class="copyable"><span class="mono">${m.address}</span><button type="button" class="copy-btn" data-copy="${m.address}" aria-label="Copy address" title="Copy"></button></span>
           <span class="${m.online ? "ok" : "bad"}">${m.online ? "online" : "offline"}</span>
         </div>
         <dl class="ticker">
@@ -235,7 +287,7 @@
     else btn.removeAttribute("data-on");
   }
 
-  const sectionRe = /^(mine|connect|dashboard|miners|blocks|payouts|how)$/;
+  const sectionRe = /^(mine|connect|datum|dashboard|miners|blocks|payouts|how)$/;
   function fromHash() {
     const a = location.hash.slice(1);
     if (a && !sectionRe.test(a)) {

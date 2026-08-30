@@ -8,7 +8,7 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;1,400&family=Newsreader:ital,opsz,wght@0,6..72,500;1,6..72,400;1,6..72,500&display=swap">
-<link rel="stylesheet" href="/static/pool.css">
+<link rel="stylesheet" href="/static/pool.css?v=datum2">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' fill='%231c1914'/%3E%3Cpath d='M8 24V8h6.2c4.4 0 7.2 2.5 7.2 6.4 0 3.8-2.8 6.3-7.2 6.3H11v3.3H8zm3-6.1h2.8c2.4 0 3.8-1.3 3.8-3.5S16.2 11 13.8 11H11v6.9z' fill='%23d4b45a'/%3E%3C/svg%3E">
 </head>
 <body>
@@ -25,6 +25,7 @@
   <nav class="nav" aria-label="Sections">
     <a href="#mine">Browser</a>
     <a href="#connect">Connect</a>
+    <a href="#datum">DATUM</a>
     <a href="#dashboard">Your stats</a>
     <a href="#miners">Miners</a>
     <a href="#blocks">Blocks</a>
@@ -69,7 +70,8 @@
         <p>Username is your payout address.</p>
       </div>
       <dl class="facts">
-        <dt>URL</dt><dd class="mono" id="stratum"></dd>
+        <dt>URL</dt>
+        <dd class="copyable"><span class="mono" id="stratum"></span><button type="button" class="copy-btn" data-copy-from="stratum" aria-label="Copy stratum URL" title="Copy"></button></dd>
         <dt>User</dt><dd class="mono">bc1q…youraddress.worker</dd>
         <dt>Password</dt><dd class="mono">x</dd>
         <dt>Algo</dt><dd>BLAKE2b — Sia-style header, not SHA-256d</dd>
@@ -77,6 +79,58 @@
       </dl>
     </section>
   </div>
+
+  <section class="panel" id="datum">
+    <div class="section-head">
+      <h2>Connect a DATUM gateway</h2>
+      <p>OCEAN model: your templates, our coinbase split.</p>
+    </div>
+    <p class="copy">Point <strong>your</strong> DATUM gateway at Lazarus — not at another pool. Your Knots node builds the block. Your ASICs talk to your gateway on its stratum port. The gateway talks to Lazarus Prime. A block found by anyone on this pool pays the share window <strong>in that block’s coinbase</strong>, minus 0.5%.</p>
+    <ol class="steps">
+      <li>Run Bitcoin Knots (BLAKE2b) and <code>datum_gateway</code> on your machine.</li>
+      <li>Merge the JSON below into your <code>datum_gateway_config.json</code> <code>datum</code> section. Keep your own <code>bitcoind</code>, <code>mining.pool_address</code>, and <code>stratum</code> settings.</li>
+      <li>Point each miner at <em>your</em> gateway (usually <code>stratum+tcp://127.0.0.1:23334</code>), not at Lazarus stratum.</li>
+      <li>Set each miner username to <code>bc1q…youraddress.worker</code>. The part before the first <code>.</code> is who gets paid.</li>
+    </ol>
+    <dl class="facts">
+      <dt>Host</dt>
+      <dd class="copyable"><span class="mono" id="datum-host">stratum.awokenlazarus.xyz</span><button type="button" class="copy-btn" data-copy-from="datum-host" aria-label="Copy DATUM host" title="Copy"></button></dd>
+      <dt>Port</dt>
+      <dd class="copyable"><span class="mono" id="datum-port">28915</span><button type="button" class="copy-btn" data-copy-from="datum-port" aria-label="Copy DATUM port" title="Copy"></button></dd>
+      <dt>Protocol</dt>
+      <dd>DATUM Prime — not Stratum. Do not use Cloudflare-proxied <code>pool.awokenlazarus.xyz</code> for this port.</dd>
+    </dl>
+    <div class="section-head" style="margin-top:1.1rem">
+      <h3 class="kicker" style="font-size:0.86rem; letter-spacing:0.06em; text-transform:uppercase">Gateway config</h3>
+      <button type="button" class="copy-btn" data-copy-from="gateway-config" aria-label="Copy gateway config" title="Copy"></button>
+    </div>
+    <pre class="cfg" id="gateway-config"></pre>
+    <h3 class="kicker" style="margin:1.1rem 0 0.45rem">Miner usernames</h3>
+    <p class="note">The pool credits work to the stratum username up to the first <code>.</code>. That part must be an address this chain accepts. Anything else is rejected as <code>BadUsername</code> (reason 14).</p>
+    <div class="scroll" style="margin-top:0.6rem">
+      <table>
+        <thead><tr><th>Gateway setting</th><th>Username the pool receives</th><th>Paid to</th></tr></thead>
+        <tbody>
+          <tr>
+            <td><code>pool_pass_full_users: true</code><br>(the config above)</td>
+            <td>the miner’s own stratum username, unchanged</td>
+            <td>each miner’s address, so miners behind one gateway are paid separately</td>
+          </tr>
+          <tr>
+            <td><code>pool_pass_workers: true</code><br><code>pool_pass_full_users: false</code></td>
+            <td>the gateway’s <code>mining.pool_address</code>, then <code>.</code> and the miner username</td>
+            <td>the gateway address; the worker name still reaches the pool</td>
+          </tr>
+          <tr>
+            <td>both <code>false</code></td>
+            <td>the gateway’s <code>mining.pool_address</code> alone</td>
+            <td>the gateway address; no worker name reaches the pool</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="note" style="margin-top:0.7rem">ASICs that should <em>not</em> build their own templates can still use public stratum <span class="mono">stratum.awokenlazarus.xyz:23334</span> with the same address username.</p>
+  </section>
 
   <section id="dashboard">
     <div class="section-head">
@@ -121,7 +175,7 @@
       <p class="kicker">On-chain, in the found block</p>
     </div>
     <div class="panel">
-      <p class="copy">When the pool finds a block, miners are paid <strong>in that block’s coinbase</strong> — same idea as Ocean. 99.5% is split by accepted difficulty this round; 0.5% is the pool fee.</p>
+      <p class="copy">When anyone on the pool finds a block — your gateway or ours — miners are paid <strong>in that block’s coinbase</strong>. 99.5% is split by accepted work in the current window (OCEAN / TIDES); 0.5% is the pool fee.</p>
       <p class="note">Outputs land when the block is found. They are immature until 100 confirmations, like any coinbase.</p>
     </div>
     <div class="scroll" style="margin-top:0.7rem"><table id="paytable"></table></div>
@@ -132,14 +186,14 @@
       <h2>How it works</h2>
     </div>
     <div class="panel note">
-      <p class="copy">Lazarus is a DATUM gateway on a BLAKE2b Knots node. Shares prove work. A found block pays miners in the generation transaction. Coinbase tag is <code>Lazarus</code> plus the required headline.</p>
-      <p class="note" style="margin-top:0.7rem">Explorer: <a href="https://mempool.example.com/mining" target="_blank" rel="noreferrer">mempool.example.com</a></p>
+      <p class="copy">Lazarus runs a DATUM Prime on this chain. Remote operators point their own DATUM gateway here and keep their own templates. ASICs can still use our public stratum. Shares prove work. A found block pays miners in the generation transaction. Coinbase tag is <code>Lazarus</code> plus the required headline.</p>
+      <p class="note copyable" style="margin-top:0.7rem">Explorer: <a id="explorer-url" href="https://mempool.awokenlazarus.xyz/mining" target="_blank" rel="noreferrer">mempool.awokenlazarus.xyz</a><button type="button" class="copy-btn" data-copy="https://mempool.awokenlazarus.xyz" aria-label="Copy explorer URL" title="Copy"></button></p>
     </div>
   </section>
 </main>
 
-<script src="/static/pool.js?v=hr2"></script>
-<script src="/static/blake2b.js?v=hr2"></script>
-<script src="/static/miner.js?v=hr2"></script>
+<script src="/static/pool.js?v=datum2"></script>
+<script src="/static/blake2b.js?v=copy2"></script>
+<script src="/static/miner.js?v=copy2"></script>
 </body>
 </html>

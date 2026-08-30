@@ -33,7 +33,11 @@
     "log_level_file": 1
   },
   "datum": {
-    "pool_host": "",
+    "pool_host": "127.0.0.1",
+    "pool_port": 28915,
+    "pool_pubkey": "<from Lazarus Prime stats / pool UI>",
+    "pool_pass_workers": true,
+    "pool_pass_full_users": true,
     "pooled_mining_only": false
   }
 }

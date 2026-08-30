@@ -37,7 +37,7 @@ cp config.example.json config.json
 python3 server.py
 ```
 
-Stratum itself is DATUM Gateway (`scripts/datum-gateway.sh`) on port 23334. The pool UI scrapes DATUM `:7152` and Knots RPC via cookie.
+Stratum for ASICs is DATUM Gateway (`scripts/datum-gateway.sh`) on port 23334. Remote operators who run their own gateway point it at DATUM Prime (`scripts/start-ratum-prime.sh`) on port 28915. The pool UI scrapes DATUM `:7152`, Prime stats on localhost `:28916`, and Knots RPC via cookie.
 
 ## Do not commit
 

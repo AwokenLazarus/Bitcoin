@@ -44,7 +44,8 @@ Typical public-fork facts (confirm on *your* chain):
 | `<P2P_PORT>` | **Umbrel Knots app default `9333`** |
 | `<RPC_PORT_B>` | Alternate RPC if you run a *second* bitcoind (example `18332`) |
 | `<P2P_PORT_B>` | Alternate P2P for a second node (example `18333`) |
-| `<STRATUM_PORT>` | DATUM stratum — **`23334`** here |
+| `<STRATUM_PORT>` | DATUM gateway stratum for ASICs — **`23334`** here |
+| `<DATUM_PRIME_PORT>` | DATUM Prime (remote gateways) — **`28915`** here |
 | `<DATUM_HTTP>` | DATUM HTTP — **`7152`** here |
 | `<POOL_UI_PORT>` | Dashboard — **`8888`** here |
 | `<ELECTRS_PORT>` | electrs Electrum RPC — **`50011`** if Fulcrum still owns `50001` |
@@ -68,12 +69,14 @@ Umbrel Knots app  :9332 RPC / :9333 P2P   (datadir = <APP_DATADIR>)
         │ includeconf=blake2b.conf
         │ binary MUST be rc4+ BLAKE2b Knots
         ▼
-DATUM  :23334 stratum   :7152 HTTP
+DATUM Gateway  :23334 stratum   :7152 HTTP   (ASICs / browser)
+DATUM Prime    :28915                         (remote datum_gateway clients)
         ▲
-        │ GET /api/coinbaser
-Pool UI :8888  (+ WS /mine → DATUM)
+        │ GET /api/coinbaser  (local-stratum path)
+Pool UI :8888  (+ WS /mine → local gateway)
         │
-WAN :23334 ──► DATUM     (DNS-only <STRATUM_HOST>)
+WAN :23334 ──► local DATUM Gateway   (DNS-only <STRATUM_HOST>)
+WAN :<DATUM_PRIME_PORT> ──► DATUM Prime  (same DNS-only name, different port)
 WAN :50002 ──► nginx ──► electrs :50011   (after index = tip)
 WAN :8333/:9333 ──► Knots P2P (optional; already common on Umbrel)
 
@@ -303,6 +306,40 @@ User: <payout-address>.<worker>
 Pass: x
 Algo: BLAKE2b (Sia-style 80-byte work)
 ```
+
+---
+
+## 2b. DATUM Prime (remote gateways)
+
+This pool must **accept** incoming DATUM protocol connections so other operators can run
+their own `datum_gateway` + Knots, choose their own templates, and still get paid in the
+coinbase by contributed work (OCEAN model). That is the **pool-side** listener (DATUM Prime),
+not a client of someone else's pool.
+
+Do **not** set `datum.pool_host` to another public pool. Point remote gateways at **this**
+pool's Prime:
+
+```json
+{
+  "datum": {
+    "pool_host": "<STRATUM_HOST>",
+    "pool_port": 28915,
+    "pool_pubkey": "<from this pool's stats / dashboard>",
+    "pool_pass_workers": true,
+    "pool_pass_full_users": true,
+    "pooled_mining_only": true
+  }
+}
+```
+
+Username up to the first `.` must be an address the node accepts (`BadUsername` / reason 14
+otherwise). `pool_pass_full_users: true` pays each miner separately.
+
+Prime listens `0.0.0.0:<DATUM_PRIME_PORT>`. Stats stay on localhost. Advertise
+`<STRATUM_HOST>:<DATUM_PRIME_PORT>` (DNS-only; Cloudflare cannot carry this TCP).
+WAN dest NAT that port the same way as stratum. Local ASICs can keep using `:23334`.
+
+Fee is `--fee-bps` (0–100 = at most 1%). Window is `--window` × network difficulty (OCEAN TIDES, often 8).
 
 ---
 

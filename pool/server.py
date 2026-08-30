@@ -21,17 +21,36 @@ STATIC = ROOT / "static"
 CONF = json.loads((ROOT / "config.json").read_text())
 
 POOL_FEE = float(CONF.get("pool_fee_percent", 0.5))
-STRATUM_HOST = CONF.get("stratum_host", "127.0.0.1")
+STRATUM_HOST = CONF.get("stratum_host", "27.69.0.25")
 STRATUM_PORT = int(CONF.get("stratum_port", 23334))
 STRATUM_TCP_HOST = CONF.get("stratum_tcp_host", "127.0.0.1")
 STRATUM_TCP_PORT = int(CONF.get("stratum_tcp_port", STRATUM_PORT))
 DATUM_URL = CONF.get("datum_url", "http://127.0.0.1:7152")
-MEMPOOL_API = CONF.get("mempool_api", "http://127.0.0.1:8999")
+MEMPOOL_API = CONF.get("mempool_api", "http://10.21.21.27:8999")
 COOKIE = Path(CONF.get("cookie_file", "/home/umbrel/umbrel/app-data/bitcoin-knots/data/bitcoin/.cookie"))
 AUTH_FILE = Path(CONF.get("datum_auth_file", "/home/umbrel/blake2b/secrets/datum-admin.env"))
-EXPLORER = CONF.get("explorer_url", "https://mempool.example.com")
+EXPLORER = CONF.get("explorer_url", "https://mempool.awokenlazarus.xyz")
 COINBASE_TAG = CONF.get("coinbase_tag", "Lazarus")
 SUBSIDY = 3.125
+
+PRIME_STATS = CONF.get("datum_prime_stats", "http://127.0.0.1:28916/stats.json")
+_prime_pubkey_cache = {"v": "", "ts": 0}
+
+
+def _datum_prime_pubkey():
+    now = time.time()
+    if _prime_pubkey_cache["v"] and now - _prime_pubkey_cache["ts"] < 30:
+        return _prime_pubkey_cache["v"]
+    raw = curl(PRIME_STATS, timeout=3)
+    try:
+        pk = (json.loads(raw).get("pool") or {}).get("pubkey") or ""
+    except Exception:
+        pk = ""
+    if pk:
+        _prime_pubkey_cache["v"] = pk
+        _prime_pubkey_cache["ts"] = now
+    return pk or _prime_pubkey_cache["v"]
+
 
 lock = threading.Lock()
 browser_stats = {}  # (address, worker) -> {hs, ts}
@@ -607,6 +626,14 @@ def pool_payload():
         "finder_payout_btc": SUBSIDY * (1 - POOL_FEE / 100.0),
         "payout": f"Ocean-style coinbase: {100-POOL_FEE:g}% split by accepted work this round, paid in the found block; {POOL_FEE:g}% pool fee",
         "payout_scheme": "PROP",
+        "datum": {
+            "pool_host": CONF.get("datum_prime_host", STRATUM_HOST),
+            "pool_port": int(CONF.get("datum_prime_port", 28915)),
+            "pool_pubkey": _datum_prime_pubkey(),
+            "pool_pass_workers": True,
+            "pool_pass_full_users": True,
+            "pooled_mining_only": True,
+        },
         "payouts_onchain": True,
         "explorer": EXPLORER,
         "updated": state.get("ts") or int(time.time()),
