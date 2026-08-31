@@ -25,7 +25,10 @@ STRATUM_HOST = CONF.get("stratum_host", "27.69.0.25")
 STRATUM_PORT = int(CONF.get("stratum_port", 23334))
 STRATUM_TCP_HOST = CONF.get("stratum_tcp_host", "127.0.0.1")
 STRATUM_TCP_PORT = int(CONF.get("stratum_tcp_port", STRATUM_PORT))
+STRATUM_GPU_PORT = int(CONF.get("stratum_gpu_port", 3333))
 DATUM_URL = CONF.get("datum_url", "http://127.0.0.1:7152")
+DATUM_GPU_URL = CONF.get("datum_gpu_url", "http://127.0.0.1:7153")
+DATUM_CLIENT_URLS = [(DATUM_URL, "stratum", STRATUM_PORT), (DATUM_GPU_URL, "gpu", STRATUM_GPU_PORT)]
 MEMPOOL_API = CONF.get("mempool_api", "http://10.21.21.27:8999")
 COOKIE = Path(CONF.get("cookie_file", "/home/umbrel/umbrel/app-data/bitcoin-knots/data/bitcoin/.cookie"))
 AUTH_FILE = Path(CONF.get("datum_auth_file", "/home/umbrel/blake2b/secrets/datum-admin.env"))
@@ -102,9 +105,370 @@ db_conn.executescript(
       round_id INTEGER, address TEXT, work REAL, share REAL, amount_btc REAL, status TEXT,
       PRIMARY KEY (round_id, address)
     );
+    CREATE TABLE IF NOT EXISTS worker_shares (
+      address TEXT NOT NULL,
+      worker TEXT NOT NULL,
+      last_shares_acc INTEGER DEFAULT 0,
+      last_shares_rej INTEGER DEFAULT 0,
+      lifetime_acc INTEGER DEFAULT 0,
+      lifetime_rej INTEGER DEFAULT 0,
+      PRIMARY KEY (address, worker)
+    );
+    CREATE TABLE IF NOT EXISTS prime_miners (
+      address TEXT PRIMARY KEY,
+      work REAL NOT NULL DEFAULT 0,
+      share_percent REAL NOT NULL DEFAULT 0,
+      last_ts INTEGER,
+      peak_work REAL NOT NULL DEFAULT 0
+    );
     """
 )
 db_conn.commit()
+
+
+def _ensure_column(table, col, decl):
+    cols = {r["name"] for r in db(f"PRAGMA table_info({table})")}
+    if col not in cols:
+        db(f"ALTER TABLE {table} ADD COLUMN {col} {decl}", write=True)
+
+
+def _session_delta(cur, prev):
+    cur = int(cur or 0)
+    prev = int(prev or 0)
+    return (cur - prev) if cur >= prev else cur
+
+
+def backfill_share_lifetimes():
+    done = db("SELECT value FROM meta WHERE key='shares_lifetime_backfilled'", one=True)
+    if done and str(done["value"]) == "1":
+        return
+    rows = db("SELECT address, worker, ts, shares_acc, shares_rej FROM samples ORDER BY address, worker, ts")
+    acc = {}
+    for r in rows or []:
+        key = (r["address"], r["worker"] or "")
+        st = acc.setdefault(key, {"last_a": 0, "last_r": 0, "life_a": 0, "life_r": 0})
+        cur_a = int(r["shares_acc"] or 0)
+        cur_r = int(r["shares_rej"] or 0)
+        st["life_a"] += _session_delta(cur_a, st["last_a"])
+        st["life_r"] += _session_delta(cur_r, st["last_r"])
+        st["last_a"], st["last_r"] = cur_a, cur_r
+    for (addr, worker), st in acc.items():
+        db(
+            "INSERT OR REPLACE INTO worker_shares(address,worker,last_shares_acc,last_shares_rej,lifetime_acc,lifetime_rej) VALUES(?,?,?,?,?,?)",
+            (addr, worker, st["last_a"], st["last_r"], st["life_a"], st["life_r"]),
+            write=True,
+        )
+    for row in db("SELECT address FROM miners") or []:
+        rollup_miner_shares(row["address"])
+    db("INSERT OR REPLACE INTO meta(key,value) VALUES('shares_lifetime_backfilled','1')", write=True)
+
+
+def init_share_accounting():
+    _ensure_column("miners", "shares_lifetime", "INTEGER DEFAULT 0")
+    _ensure_column("miners", "shares_session", "INTEGER DEFAULT 0")
+    _ensure_column("miners", "shares_rej_lifetime", "INTEGER DEFAULT 0")
+    db(
+        "CREATE TABLE IF NOT EXISTS prime_miners (address TEXT PRIMARY KEY, work REAL NOT NULL DEFAULT 0, share_percent REAL NOT NULL DEFAULT 0, last_ts INTEGER, peak_work REAL NOT NULL DEFAULT 0)",
+        write=True,
+    )
+    _ensure_column("prime_miners", "work_seen", "REAL DEFAULT 0")
+    _ensure_column("prime_miners", "work_seen_ts", "INTEGER")
+    _ensure_column("prime_miners", "hr_ghs_est", "REAL DEFAULT 0")
+    backfill_share_lifetimes()
+
+
+def rollup_miner_shares(address):
+    tot = db(
+        "SELECT COALESCE(SUM(lifetime_acc),0) AS a, COALESCE(SUM(lifetime_rej),0) AS r, COALESCE(SUM(last_shares_acc),0) AS s FROM worker_shares WHERE address=?",
+        (address,),
+        one=True,
+    )
+    life_a = int(tot["a"]) if tot else 0
+    life_r = int(tot["r"]) if tot else 0
+    sess = int(tot["s"]) if tot else 0
+    db(
+        "UPDATE miners SET shares_lifetime=?, shares_rej_lifetime=?, shares_session=?, shares_acc=?, shares_rej=? WHERE address=?",
+        (life_a, life_r, sess, life_a, life_r, address),
+        write=True,
+    )
+    return life_a, life_r, sess
+
+
+def credit_session_shares(address, worker, shares_acc, shares_rej):
+    worker = worker or ""
+    if not address:
+        return 0, 0
+    row = db("SELECT * FROM worker_shares WHERE address=? AND worker=?", (address, worker), one=True)
+    cur_a, cur_r = int(shares_acc or 0), int(shares_rej or 0)
+    if row:
+        life_a = int(row["lifetime_acc"]) + _session_delta(cur_a, row["last_shares_acc"])
+        life_r = int(row["lifetime_rej"]) + _session_delta(cur_r, row["last_shares_rej"])
+        db(
+            "UPDATE worker_shares SET last_shares_acc=?, last_shares_rej=?, lifetime_acc=?, lifetime_rej=? WHERE address=? AND worker=?",
+            (cur_a, cur_r, life_a, life_r, address, worker),
+            write=True,
+        )
+    else:
+        life_a, life_r = cur_a, cur_r
+        db(
+            "INSERT INTO worker_shares(address,worker,last_shares_acc,last_shares_rej,lifetime_acc,lifetime_rej) VALUES(?,?,?,?,?,?)",
+            (address, worker, cur_a, cur_r, life_a, life_r),
+            write=True,
+        )
+    rollup_miner_shares(address)
+    return life_a, cur_a
+
+
+def address_share_totals(address):
+    tot = db(
+        "SELECT COALESCE(SUM(lifetime_acc),0) AS a, COALESCE(SUM(lifetime_rej),0) AS r, COALESCE(SUM(last_shares_acc),0) AS s FROM worker_shares WHERE address=?",
+        (address,),
+        one=True,
+    )
+    if not tot:
+        return 0, 0, 0
+    return int(tot["a"]), int(tot["r"]), int(tot["s"])
+
+
+def pool_share_totals():
+    tot = db("SELECT COALESCE(SUM(lifetime_acc),0) AS a, COALESCE(SUM(lifetime_rej),0) AS r FROM worker_shares", one=True)
+    return (int(tot["a"]), int(tot["r"])) if tot else (0, 0)
+
+
+def fetch_prime_window():
+    raw = curl(PRIME_STATS, timeout=3)
+    try:
+        data = json.loads(raw) if raw else {}
+    except Exception:
+        return {}, {"shares": 0, "work": 0, "target_work": 0}
+    win = data.get("window") or {}
+    by = {}
+    for m in win.get("miners") or []:
+        ident = (m.get("identity") or "").strip()
+        if not ident:
+            continue
+        try:
+            work = int(float(m.get("work") or 0))
+        except (TypeError, ValueError):
+            work = 0
+        by[ident] = {
+            "window_work": work,
+            "window_percent": float(m.get("share_percent") or 0),
+            "window_sats": int(m.get("payout_sats") or 0),
+            "payable": bool(m.get("payable")),
+        }
+    meta = {
+        "shares": int(win.get("shares") or 0),
+        "work": 0,
+        "target_work": 0,
+    }
+    try:
+        meta["work"] = int(float(win.get("work") or 0))
+        meta["target_work"] = int(float(win.get("target_work") or 0))
+    except (TypeError, ValueError):
+        pass
+    return by, meta
+
+
+# One unit of Prime window work is one difficulty-1 share (2**32 hashes).
+_PRIME_HASHES_PER_WORK = float(1 << 32)
+_PRIME_HR_CAP_GHS = 200000.0
+_prime_uptime_cache = {"ts": 0, "uptime": 0}
+
+
+def _prime_uptime_s():
+    now = time.time()
+    if now - _prime_uptime_cache["ts"] < 15 and _prime_uptime_cache["uptime"]:
+        return _prime_uptime_cache["uptime"]
+    try:
+        out = subprocess.check_output(
+            ["ps", "-o", "etimes=", "-C", "ratum-prime"],
+            stderr=subprocess.DEVNULL,
+            text=True,
+        ).split()
+        up = int(out[0]) if out else 0
+    except Exception:
+        up = 0
+    if up:
+        _prime_uptime_cache.update({"ts": now, "uptime": up})
+    return up
+
+
+def _prime_window_avg_ghs(work):
+    if work <= 0:
+        return 0.0
+    age = _prime_uptime_s() or 0
+    age = max(120, age)  # never treat a brand-new Prime as a 60s spike
+    raw = work * _PRIME_HASHES_PER_WORK / age / 1e9
+    if raw > _PRIME_HR_CAP_GHS:
+        return 0.0
+    return raw
+
+
+def _prime_hr_from_work(addr, work, ts):
+    row = db(
+        "SELECT work_seen, work_seen_ts, hr_ghs_est FROM prime_miners WHERE address=?",
+        (addr,),
+        one=True,
+    )
+    prev_w = float(row["work_seen"] or 0) if row else 0.0
+    prev_t = int(row["work_seen_ts"] or 0) if row and row["work_seen_ts"] else 0
+    prev_hr = float(row["hr_ghs_est"] or 0) if row else 0.0
+    if prev_hr < 1e-6:
+        prev_hr = 0.0
+    seen_w, seen_t = prev_w, prev_t
+    increased = False
+    inst = 0.0
+    if not prev_t:
+        seen_w, seen_t = work, ts
+    elif work + 0.5 < prev_w:
+        seen_w, seen_t = work, ts
+    elif work > prev_w + 0.5:
+        dt = max(1, ts - prev_t)
+        raw = (work - prev_w) * _PRIME_HASHES_PER_WORK / dt / 1e9
+        if 0 < raw <= _PRIME_HR_CAP_GHS:
+            inst = (0.4 * raw + 0.6 * prev_hr) if prev_hr > 1e-6 else raw
+        increased = True
+        seen_w, seen_t = work, ts
+    window_avg = _prime_window_avg_ghs(work)
+    # Instant rate when they are still landing work; otherwise the window average
+    # so a miner who already banked this round is not shown as 0 H/s.
+    est = inst if inst > 1e-6 else window_avg
+    last_share_s = 0.0 if increased or not prev_t else float(max(0, ts - prev_t))
+    return est, last_share_s, seen_w, seen_t
+
+
+def persist_prime_miners(by, ts):
+    for addr, info in by.items():
+        work = int(info.get("window_work") or 0)
+        hr, last_share_s, seen_w, seen_t = _prime_hr_from_work(addr, work, ts)
+        info["hr_ghs"] = hr
+        info["last_share_s"] = last_share_s
+        prev = db("SELECT peak_work FROM prime_miners WHERE address=?", (addr,), one=True)
+        peak = max(int(prev["peak_work"] or 0) if prev else 0, work)
+        if prev:
+            db(
+                "UPDATE prime_miners SET work=?, share_percent=?, last_ts=?, peak_work=?, work_seen=?, work_seen_ts=?, hr_ghs_est=? WHERE address=?",
+                (work, info.get("window_percent") or 0, ts, peak, seen_w, seen_t, hr, addr),
+                write=True,
+            )
+        else:
+            db(
+                "INSERT INTO prime_miners(address,work,share_percent,last_ts,peak_work,work_seen,work_seen_ts,hr_ghs_est) VALUES(?,?,?,?,?,?,?,?)",
+                (addr, work, info.get("window_percent") or 0, ts, peak, seen_w, seen_t, hr),
+                write=True,
+            )
+        row = db("SELECT address FROM miners WHERE address=?", (addr,), one=True)
+        if row:
+            db("UPDATE miners SET last_ts=? WHERE address=?", (ts, addr), write=True)
+        else:
+            db(
+                "INSERT INTO miners(address,first_ts,last_ts,best_hr_ghs,shares_acc,shares_rej,diff_acc,shares_lifetime,shares_session,shares_rej_lifetime) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                (addr, ts, ts, 0, 0, 0, info.get("window_work") or 0, 0, 0, 0),
+                write=True,
+            )
+
+
+def prime_info_for(address):
+    live = (state.get("prime") or {}).get(address) if isinstance(state.get("prime"), dict) else None
+    if live:
+        out = dict(live)
+        if out.get("hr_ghs") is None:
+            row = db("SELECT hr_ghs_est, work_seen_ts FROM prime_miners WHERE address=?", (address,), one=True)
+            if row:
+                out["hr_ghs"] = float(row["hr_ghs_est"] or 0)
+                seen = int(row["work_seen_ts"] or 0) if row["work_seen_ts"] else 0
+                out.setdefault("last_share_s", float(max(0, int(time.time()) - seen)) if seen else 0.0)
+        return out
+    row = db("SELECT work, share_percent, peak_work, last_ts, hr_ghs_est, work_seen_ts FROM prime_miners WHERE address=?", (address,), one=True)
+    if not row:
+        return {}
+    seen = int(row["work_seen_ts"] or 0) if row["work_seen_ts"] else 0
+    return {
+        "window_work": int(row["work"] or 0),
+        "window_percent": float(row["share_percent"] or 0),
+        "window_sats": 0,
+        "payable": True,
+        "window_peak": int(row["peak_work"] or 0),
+        "window_last_ts": int(row["last_ts"] or 0),
+        "hr_ghs": float(row["hr_ghs_est"] or 0),
+        "last_share_s": float(max(0, int(time.time()) - seen)) if seen else 0.0,
+    }
+
+
+def attach_share_fields(rec):
+    addr = rec.get("address") or ""
+    worker = rec.get("worker") or ""
+    life_a, life_r, _ = address_share_totals(addr)
+    wrow = db("SELECT lifetime_acc FROM worker_shares WHERE address=? AND worker=?", (addr, worker), one=True)
+    rec["shares_lifetime"] = int(wrow["lifetime_acc"]) if wrow else life_a
+    rec["shares_session"] = int(rec.get("shares_session") if rec.get("shares_session") is not None else (rec.get("shares_acc") or 0))
+    rec["shares_acc"] = rec["shares_lifetime"] or rec["shares_session"]
+    rec["shares_rej"] = life_r if rec.get("shares_rej") is None else rec.get("shares_rej")
+    info = prime_info_for(addr)
+    rec["window_work"] = int(info.get("window_work") or 0)
+    rec["window_percent"] = float(info.get("window_percent") or 0)
+    rec["window_sats"] = int(info.get("window_sats") or 0)
+    rec["via"] = rec.get("via") or ("stratum" if rec.get("ua") != "DATUM gateway" else "gateway")
+    phr = float(info.get("hr_ghs") or 0)
+    if phr > 1e-6 and (rec.get("via") == "gateway" or rec.get("ua") == "DATUM gateway"):
+        if not rec.get("hr_ghs") or float(rec.get("hr_ghs") or 0) < 1e-6:
+            rec["hr_ghs"] = phr
+        if info.get("last_share_s") is not None and not rec.get("last_share_s"):
+            rec["last_share_s"] = float(info.get("last_share_s") or 0)
+    return rec
+
+
+def merge_prime_online(miners):
+    by = state.get("prime") or {}
+    if not isinstance(by, dict):
+        by = {}
+    have = {m.get("address") for m in miners}
+    for m in miners:
+        addr = m.get("address") or ""
+        info = by.get(addr) or prime_info_for(addr)
+        if info:
+            m["window_work"] = int(info.get("window_work") or 0)
+            m["window_percent"] = float(info.get("window_percent") or 0)
+            m["window_sats"] = int(info.get("window_sats") or 0)
+        if addr in by:
+            if m.get("ua") == "DATUM gateway":
+                m["via"] = "gateway"
+            elif m.get("via") == "gpu":
+                m["via"] = "gpu"
+            elif (m.get("ua") or "").startswith("lazarus-web") or m.get("via") == "stratum":
+                m["via"] = "stratum"
+            elif m.get("host") or (m.get("ua") and m.get("ua") != "DATUM gateway"):
+                m["via"] = "stratum"
+        attach_share_fields(m)
+    extras = []
+    for addr, info in by.items():
+        if addr in have:
+            continue
+        rec = {
+            "address": addr,
+            "worker": "gateway",
+            "user": addr,
+            "host": "",
+            "hr_ghs": float(info.get("hr_ghs") or 0),
+            "vdiff": 0,
+            "diff_acc": int(info.get("window_work") or 0),
+            "shares_acc": 0,
+            "shares_session": 0,
+            "shares_lifetime": 0,
+            "diff_rej": 0,
+            "shares_rej": 0,
+            "last_share_s": float(info.get("last_share_s") or 0),
+            "ua": "DATUM gateway",
+            "online": True,
+            "via": "gateway",
+            "window_work": int(info.get("window_work") or 0),
+            "window_percent": float(info.get("window_percent") or 0),
+            "window_sats": int(info.get("window_sats") or 0),
+        }
+        attach_share_fields(rec)
+        extras.append(rec)
+    return miners + extras
 
 
 def ensure_open_round():
@@ -245,6 +609,8 @@ def online_miners():
                 "vdiff": 0,
                 "diff_acc": 0,
                 "shares_acc": 0,
+                "shares_session": 0,
+                "shares_lifetime": 0,
                 "diff_rej": 0,
                 "shares_rej": 0,
                 "last_share_s": 0,
@@ -252,7 +618,7 @@ def online_miners():
                 "online": True,
             }
         )
-    return miners + extras
+    return merge_prime_online(miners + extras)
 
 
 def ascii_from_hex(hx):
@@ -263,9 +629,8 @@ def ascii_from_hex(hx):
     return "".join(chr(x) if 32 <= x < 127 else "." for x in raw)
 
 
-def scrape():
-    home = curl(DATUM_URL + "/")
-    clients = curl(DATUM_URL + "/clients", digest=True)
+def _scrape_datum_home(url):
+    home = curl(url + "/")
     text_home = re.sub(r"<[^>]+>", " ", home)
     pool_hr = parse_hr(
         re.search(r"Estimated Hashrate:\s*([0-9.]+\s*\w+/s(?:ec)?)", text_home, re.I).group(1)
@@ -283,6 +648,11 @@ def scrape():
         acc = int(ma.group(1))
     if mr:
         rej = int(mr.group(1))
+    return pool_hr, acc, rej
+
+
+def _scrape_datum_clients(url, via, stratum_port):
+    clients = curl(url + "/clients", digest=True)
     miners = []
     for row in re.findall(r"<TR>(.*?)</TR>", clients, re.I | re.S):
         tds = re.findall(r"<TD[^>]*>(.*?)</TD>", row, re.I | re.S)
@@ -309,7 +679,6 @@ def scrape():
             last_s = float(lm.group(1))
         hr_ghs = parse_hr(hr_s)
         reported = lookup_browser_hs(addr, worker)
-        # DATUM only estimates from shares; browser CPUs sit at 0.00 GH/s for hours.
         if reported is not None and (ua.startswith("lazarus-web") or worker.startswith("web") or worker == "browser"):
             hr_ghs = reported / 1e9
         rec = {
@@ -326,8 +695,30 @@ def scrape():
             "last_share_s": last_s,
             "ua": ua,
             "online": True,
+            "via": via,
+            "stratum_port": stratum_port,
         }
+        rec["shares_session"] = rec["shares_acc"]
+        rec["shares_lifetime"] = rec["shares_acc"]
         miners.append(rec)
+    return miners
+
+
+def scrape():
+    pool_hr = acc = rej = 0
+    miners = []
+    seen = set()
+    for url, via, port in DATUM_CLIENT_URLS:
+        phr, a, r = _scrape_datum_home(url)
+        pool_hr += phr
+        acc += a
+        rej += r
+        for rec in _scrape_datum_clients(url, via, port):
+            key = (rec.get("address"), rec.get("worker"), rec.get("via"))
+            if key in seen:
+                continue
+            seen.add(key)
+            miners.append(rec)
     ts = int(time.time())
     for rec in miners:
         db(
@@ -338,26 +729,50 @@ def scrape():
         prev = db("SELECT * FROM miners WHERE address=?", (rec["address"],), one=True)
         if prev:
             db(
-                "UPDATE miners SET last_ts=?, best_hr_ghs=MAX(best_hr_ghs,?), shares_acc=?, shares_rej=?, diff_acc=? WHERE address=?",
-                (ts, rec["hr_ghs"], rec["shares_acc"], rec["shares_rej"], rec["diff_acc"], rec["address"]),
+                "UPDATE miners SET last_ts=?, best_hr_ghs=MAX(best_hr_ghs,?), diff_acc=? WHERE address=?",
+                (ts, rec["hr_ghs"], rec["diff_acc"], rec["address"]),
                 write=True,
             )
         else:
             db(
-                "INSERT INTO miners(address,first_ts,last_ts,best_hr_ghs,shares_acc,shares_rej,diff_acc) VALUES(?,?,?,?,?,?,?)",
-                (rec["address"], ts, ts, rec["hr_ghs"], rec["shares_acc"], rec["shares_rej"], rec["diff_acc"]),
+                "INSERT INTO miners(address,first_ts,last_ts,best_hr_ghs,shares_acc,shares_rej,diff_acc,shares_lifetime,shares_session,shares_rej_lifetime) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                (rec["address"], ts, ts, rec["hr_ghs"], rec["shares_acc"], rec["shares_rej"], rec["diff_acc"], rec["shares_acc"], rec["shares_acc"], rec["shares_rej"]),
                 write=True,
             )
+        life, sess = credit_session_shares(rec["address"], rec["worker"], rec["shares_acc"], rec["shares_rej"])
+        rec["shares_session"] = sess
+        rec["shares_lifetime"] = life
         credit_round_work(rec["address"], rec["diff_acc"])
-    live_hr = sum(m["hr_ghs"] for m in miners) or pool_hr
-    db(
-        "INSERT OR REPLACE INTO pool_samples(ts,hr_ghs,miners,shares_acc,shares_rej) VALUES(?,?,?,?,?)",
-        (ts, live_hr, len(miners), acc, rej),
-        write=True,
-    )
     db("DELETE FROM samples WHERE ts < ?", (ts - 3 * 86400,), write=True)
     db("DELETE FROM pool_samples WHERE ts < ?", (ts - 7 * 86400,), write=True)
-    return {"pool_hr_ghs": live_hr, "shares_acc": acc, "shares_rej": rej, "miners": miners, "ts": ts}
+    prime_by, prime_meta = fetch_prime_window()
+    persist_prime_miners(prime_by, ts)
+    stratum_addrs = {m.get("address") for m in miners}
+    gw_hr = 0.0
+    gw_n = 0
+    for addr, info in prime_by.items():
+        if addr in stratum_addrs:
+            continue
+        hr = float(info.get("hr_ghs") or 0)
+        gw_hr += hr
+        gw_n += 1
+        db(
+            "INSERT INTO samples(ts,address,worker,hr_ghs,vdiff,shares_acc,shares_rej,diff_acc,last_share_s) VALUES(?,?,?,?,?,?,?,?,?)",
+            (ts, addr, "gateway", hr, 0, 0, 0, int(info.get("window_work") or 0), float(info.get("last_share_s") or 0)),
+            write=True,
+        )
+        db(
+            "UPDATE miners SET last_ts=?, best_hr_ghs=MAX(best_hr_ghs,?) WHERE address=?",
+            (ts, hr, addr),
+            write=True,
+        )
+    live_hr = (sum(m["hr_ghs"] for m in miners) + gw_hr) or pool_hr
+    db(
+        "INSERT OR REPLACE INTO pool_samples(ts,hr_ghs,miners,shares_acc,shares_rej) VALUES(?,?,?,?,?)",
+        (ts, live_hr, len(miners) + gw_n, acc, rej),
+        write=True,
+    )
+    return {"pool_hr_ghs": live_hr, "shares_acc": acc, "shares_rej": rej, "miners": miners, "ts": ts, "prime": prime_by, "prime_meta": prime_meta}
 
 
 
@@ -479,7 +894,7 @@ def scan_found_blocks():
         db("INSERT OR REPLACE INTO meta(key,value) VALUES('scan_height',?)", (str(last_ok),), write=True)
 
 
-state = {"pool_hr_ghs": 0, "shares_acc": 0, "shares_rej": 0, "miners": [], "ts": 0}
+state = {"pool_hr_ghs": 0, "shares_acc": 0, "shares_rej": 0, "miners": [], "ts": 0, "prime": {}, "prime_meta": {}}
 
 
 def loop():
@@ -605,14 +1020,21 @@ def pool_payload():
         "tagline": "Proverbs 11:1",
         "fee_percent": POOL_FEE,
         "stratum": f"stratum+tcp://{STRATUM_HOST}:{STRATUM_PORT}",
+        "stratum_asic": f"stratum+tcp://{STRATUM_HOST}:{STRATUM_PORT}",
+        "stratum_gpu": f"stratum+tcp://{STRATUM_HOST}:{STRATUM_GPU_PORT}",
         "host": STRATUM_HOST,
         "port": STRATUM_PORT,
+        "port_gpu": STRATUM_GPU_PORT,
         "pool_hr_ghs": pool_hr,
         "miners_online": online,
         "workers_online": online,
         "miners_seen": int(known["n"]) if known else online,
-        "shares_accepted": state.get("shares_acc") or 0,
-        "shares_rejected": state.get("shares_rej") or 0,
+        "shares_accepted": pool_share_totals()[0] or (state.get("shares_acc") or 0),
+        "shares_session": state.get("shares_acc") or 0,
+        "shares_rejected": pool_share_totals()[1] or (state.get("shares_rej") or 0),
+        "shares_note": "Accepted is cumulative for an address and does not drop if you reconnect or switch from public stratum to your own DATUM gateway. Session is only this public-stratum connection. The payout window is Prime work for that same address — that is what a found block pays.",
+        "window_shares": (state.get("prime_meta") or {}).get("shares") or 0,
+        "window_work": (state.get("prime_meta") or {}).get("work") or 0,
         "height": node.get("height"),
         "difficulty": node.get("difficulty"),
         "network_hr_hs": net,
@@ -670,14 +1092,45 @@ def miner_payload(address):
     round_share = (my_work / tot_work) if tot_work else 0.0
     ttf_s = (600.0 / share) if share else None
     known = bool(stored or recs)
+    life_a, life_r, sess_stored = address_share_totals(address) if address else (0, 0, 0)
+    sess_live = sum(int(m.get("shares_session") or 0) for m in recs if (m.get("via") or "stratum") != "gateway") if recs else 0
+    pinfo = prime_info_for(address) if address else {}
+    if pinfo.get("window_percent"):
+        round_share = float(pinfo["window_percent"]) / 100.0
+    vias = {m.get("via") for m in recs if m.get("via")}
+    if ("stratum" in vias or "gpu" in vias) and "gateway" in vias:
+        via = "both"
+    elif "gateway" in vias and "stratum" not in vias and "gpu" not in vias:
+        via = "gateway"
+    elif "gpu" in vias and "stratum" not in vias:
+        via = "gpu"
+    elif recs:
+        via = "stratum" if "stratum" in vias else (next(iter(vias)) if vias else "stratum")
+    elif pinfo.get("window_work"):
+        via = "gateway"
+        recs = [{
+            "address": address, "worker": "gateway", "hr_ghs": float(pinfo.get("hr_ghs") or 0), "shares_acc": life_a,
+            "shares_session": 0, "shares_lifetime": life_a, "shares_rej": life_r,
+            "vdiff": 0, "last_share_s": float(pinfo.get("last_share_s") or 0), "ua": "DATUM gateway", "via": "gateway",
+            "window_work": pinfo.get("window_work") or 0, "window_percent": pinfo.get("window_percent") or 0,
+        }]
+    else:
+        via = ""
+    known = bool(stored or recs or pinfo.get("window_work") or life_a)
     return {
         "address": address if known else "",
         "known": known,
-        "online": bool(recs),
+        "online": bool(recs) or bool(pinfo.get("window_work")),
         "workers": recs,
         "hr_ghs": hr,
-        "shares_acc": recs[0]["shares_acc"] if recs else (stored["shares_acc"] if stored else 0),
-        "shares_rej": recs[0]["shares_rej"] if recs else (stored["shares_rej"] if stored else 0),
+        "shares_acc": life_a or int(pinfo.get("window_work") or 0),
+        "shares_lifetime": life_a or int(pinfo.get("window_work") or 0),
+        "shares_session": sess_live,
+        "shares_rej": life_r,
+        "via": via,
+        "window_work": int(pinfo.get("window_work") or 0),
+        "window_percent": float(pinfo.get("window_percent") or 0),
+        "window_sats": int(pinfo.get("window_sats") or 0),
         "diff_acc": recs[0]["diff_acc"] if recs else (stored["diff_acc"] if stored else 0),
         "first_seen": stored["first_ts"] if stored else None,
         "last_seen": stored["last_ts"] if stored else None,
@@ -885,7 +1338,20 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/miners":
             online = online_miners()
             seen = db("SELECT * FROM miners ORDER BY last_ts DESC LIMIT 200")
-            self.send_json({"online": online, "seen": [dict(r) for r in seen]})
+            seen_out = []
+            for r in seen or []:
+                d = dict(r)
+                life_a, life_r, sess = address_share_totals(d.get("address") or "")
+                d["shares_lifetime"] = life_a or int(d.get("shares_lifetime") or d.get("shares_acc") or 0)
+                d["shares_session"] = int(sess or d.get("shares_session") or 0)
+                d["shares_acc"] = d["shares_lifetime"]
+                d["shares_rej"] = life_r or int(d.get("shares_rej") or 0)
+                info = prime_info_for(d.get("address") or "")
+                d["window_work"] = int(info.get("window_work") or 0)
+                d["window_percent"] = float(info.get("window_percent") or 0)
+                d["via"] = "gateway" if (d.get("address") in (state.get("prime") or {}) and not any(o.get("address")==d.get("address") and o.get("via") in ("stratum","gpu") for o in online)) else d.get("via")
+                seen_out.append(d)
+            self.send_json({"online": online, "seen": seen_out})
             return
         if path.startswith("/api/miner/"):
             addr = path.split("/api/miner/", 1)[1].strip("/")
@@ -991,6 +1457,7 @@ class Handler(BaseHTTPRequestHandler):
 
 def main():
     ensure_open_round()
+    init_share_accounting()
     threading.Thread(target=loop, daemon=True).start()
     host = CONF.get("listen_host", "0.0.0.0")
     port = int(CONF.get("listen_port", 8888))

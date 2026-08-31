@@ -9,8 +9,11 @@ fi
 if ! pgrep -f '/home/umbrel/blake2b/prefix/bin/ratum-prime' >/dev/null; then
   nohup /home/umbrel/blake2b/bin/start-ratum-prime.sh >> /home/umbrel/blake2b/logs/ratum-prime.log 2>&1 &
 fi
-if ! pgrep -f '/home/umbrel/blake2b/prefix/bin/datum_gateway' >/dev/null; then
+if ! pgrep -f 'datum_gateway -c /home/umbrel/blake2b/etc/datum_gateway_config.json' >/dev/null; then
   nohup /home/umbrel/blake2b/bin/datum-gateway.sh >> /home/umbrel/blake2b/logs/datum.console 2>&1 &
+fi
+if ! pgrep -f 'datum_gateway -c /home/umbrel/blake2b/etc/datum_gateway_gpu.json' >/dev/null; then
+  nohup /home/umbrel/blake2b/bin/datum-gateway-gpu.sh >> /home/umbrel/blake2b/logs/datum-gpu.console 2>&1 &
 fi
 if ! pgrep -f '/home/umbrel/blake2b/lazarus-pool/server.py' >/dev/null; then
   nohup python3 /home/umbrel/blake2b/lazarus-pool/server.py >> /home/umbrel/blake2b/logs/pool-ui.log 2>&1 &

@@ -35,9 +35,16 @@
     }, 1400);
   });
 
+  const pathLabel = (via) => {
+    if (via === "gateway") return "DATUM gateway";
+    if (via === "gpu") return "GPU :3333";
+    if (via === "both") return "stratum + gateway";
+    return "stratum";
+  };
 
   const fmtHr = (ghs) => {
     if (ghs == null || Number.isNaN(ghs)) return "—";
+    if (Number(ghs) < 1e-6) return "0 H/s";
     const hs = Number(ghs) * 1e9;
     if (hs >= 1e15) return (hs / 1e15).toFixed(2) + " PH/s";
     if (hs >= 1e12) return (hs / 1e12).toFixed(2) + " TH/s";
@@ -48,6 +55,7 @@
     return "0 H/s";
   };
 
+  const num = (n) => (n == null || Number.isNaN(Number(n)) ? "—" : Number(n).toLocaleString());
   const short = (a) => (a && a.length > 20 ? a.slice(0, 10) + "\u2026" + a.slice(-8) : a || "\u2014");
   const ago = (ts) => {
     if (!ts) return "\u2014";
@@ -77,19 +85,19 @@
     const cells = [
       ["Hashrate", fmtHr(p.pool_hr_ghs), (p.miners_online || 0) + " worker" + (p.miners_online === 1 ? "" : "s")],
       ["Miners", String(p.miners_seen ?? "\u2014"), (p.miners_online || 0) + " online"],
-      ["Shares", String(p.shares_accepted ?? 0), (p.shares_rejected || 0) + " rejected"],
-      ["Fee", (p.fee_percent ?? 0.5) + "%", "coinbase remainder"],
-      ["Est. BTC/day", btc(p.est_btc_day), "vs the whole network"],
-      ["Time to block", dur(p.ttf_seconds), ((p.pool_share || 0) * 100).toExponential(2) + "% of net"],
+      ["Accepted", num(p.shares_accepted), "kept if you switch path"],
+      ["Window", num(p.window_shares), "Prime work this round"],
+      ["Est. / day", btc(p.est_btc_day), "vs the whole network"],
+      ["To block", dur(p.ttf_seconds), ((p.pool_share || 0) * 100).toExponential(2) + "% of net"],
       ["Found", String(p.blocks_found ?? 0), p.luck_percent == null ? "luck pending" : luck + " luck"],
-      ["Tip", String(p.height || "\u2014"), "diff " + (p.difficulty ? Number(p.difficulty).toExponential(3) : "\u2014")],
-      ["Network", net, "BLAKE2b"],
-      ["Round cut", (p.finder_payout_btc || 0).toFixed(3) + " BTC", "99.5% of a block"],
+      ["Network", net, "tip " + (p.height || "\u2014") + " · diff " + (p.difficulty ? Number(p.difficulty).toExponential(3) : "\u2014")],
     ];
     $("stats").innerHTML = cells
       .map(([k, v, s]) => `<div><dt>${k}</dt><dd>${v}<small>${s}</small></dd></div>`)
       .join("");
     $("stratum").textContent = p.stratum;
+    const sg = $("stratum-gpu");
+    if (sg) sg.textContent = p.stratum_gpu || ("stratum+tcp://" + (p.host || "stratum.awokenlazarus.xyz") + ":" + (p.port_gpu || 3333));
     const gw = $("gateway-config");
     if (gw) {
       const d = p.datum || {};
@@ -108,12 +116,15 @@
     const dp = $("datum-port");
     if (dp) dp.textContent = String((p.datum && p.datum.pool_port) || 28915);
     $("payoutline").textContent = p.payout;
+    const sn = $("shares-note");
+    if (sn) sn.textContent = p.shares_note || "Accepted is tied to your payout address. Switching from public stratum to your own DATUM gateway does not erase it. Session is only the current public-stratum connection.";
     if ($("live-hr")) $("live-hr").textContent = fmtHr(p.pool_hr_ghs);
     if ($("live-tip")) $("live-tip").textContent = p.height || "\u2014";
     draw($("poolchart"), p.history || [], "hr_ghs");
   }
 
   function table(el, headers, rows) {
+    if (!el) return;
     el.innerHTML =
       "<thead><tr>" +
       headers.map((h) => "<th>" + h + "</th>").join("") +
@@ -128,7 +139,7 @@
     const ctx = c.getContext("2d");
     const dpr = Math.max(1, window.devicePixelRatio || 1);
     const cssW = c.clientWidth || c.width;
-    const cssH = c.clientHeight || 148;
+    const cssH = c.clientHeight || 120;
     if (c.width !== Math.round(cssW * dpr) || c.height !== Math.round(cssH * dpr)) {
       c.width = Math.round(cssW * dpr);
       c.height = Math.round(cssH * dpr);
@@ -189,32 +200,42 @@
     const workers = (m.workers || [])
       .map(
         (w) =>
-          `<tr><td>${w.worker || "\u2014"}</td><td>${fmtHr(w.hr_ghs)}</td><td>${w.shares_acc}</td><td>${w.shares_rej}</td><td>${w.vdiff}</td><td>${w.last_share_s ? w.last_share_s.toFixed(0) + "s" : "\u2014"}</td><td>${w.ua || ""}</td></tr>`
+          `<tr><td>${w.worker || "\u2014"}</td><td>${pathLabel(w.via)}</td><td>${fmtHr(w.hr_ghs)}</td><td>${num(w.shares_session ?? 0)}</td><td>${num(w.shares_lifetime ?? w.shares_acc)}</td><td>${w.window_percent != null ? Number(w.window_percent).toFixed(1) + "%" : "\u2014"}</td><td>${num(w.shares_rej)}</td><td>${w.last_share_s ? w.last_share_s.toFixed(0) + "s" : "\u2014"}</td></tr>`
       )
       .join("");
     const pays = (m.blocks_found || [])
       .map((b) => `<tr><td>${b.height}</td><td>${btc(b.miner_btc)}</td><td>${b.ts ? new Date(b.ts * 1000).toLocaleString() : ""}</td></tr>`)
       .join("");
+    const status = !m.online
+      ? "offline"
+      : m.via === "gateway"
+        ? "online via DATUM gateway"
+        : m.via === "gpu"
+          ? "online on GPU :3333"
+        : m.via === "both"
+          ? "online (stratum + gateway)"
+          : "online";
     $("miner").innerHTML = `
       <div class="panel miner-card">
         <div class="addr-line">
           <span class="copyable"><span class="mono">${m.address}</span><button type="button" class="copy-btn" data-copy="${m.address}" aria-label="Copy address" title="Copy"></button></span>
-          <span class="${m.online ? "ok" : "bad"}">${m.online ? "online" : "offline"}</span>
+          <span class="${m.online ? "ok" : "bad"}">${status}</span>
         </div>
         <dl class="ticker">
           <div><dt>Hashrate</dt><dd>${fmtHr(m.hr_ghs || 0)}<small>best ${fmtHr(m.best_hr_ghs || 0)}</small></dd></div>
-          <div><dt>Shares</dt><dd>${m.shares_acc}<small>${m.shares_rej} rejected</small></dd></div>
-          <div><dt>This round</dt><dd>${((m.round_share || 0) * 100).toFixed(1)}%<small>of accepted work</small></dd></div>
+          <div><dt>Accepted</dt><dd>${num(m.shares_lifetime ?? m.shares_acc)}<small>same address keeps this if you switch paths</small></dd></div>
+          <div><dt>This session</dt><dd>${num(m.shares_session ?? 0)}<small>public stratum only · resets on reconnect</small></dd></div>
+          <div><dt>Payout window</dt><dd>${((m.round_share || 0) * 100).toFixed(1)}%<small>${num(m.window_work)} work on Prime</small></dd></div>
           <div><dt>Est. / day</dt><dd>${btc(m.est_btc_day)}<small>${btc(m.est_btc_week)} / week</small></dd></div>
-          <div><dt>If we find one</dt><dd>${btc(m.block_payout_btc)}<small>from current share</small></dd></div>
+          <div><dt>If we find one</dt><dd>${btc(m.block_payout_btc)}<small>from current window</small></dd></div>
           <div><dt>Immature</dt><dd>${btc(m.immature_btc)}</dd></div>
           <div><dt>Unpaid</dt><dd>${btc(m.unpaid_btc)}<small>mature</small></dd></div>
           <div><dt>Paid</dt><dd>${btc(m.paid_btc)}</dd></div>
-          <div><dt>Your TTF</dt><dd>${dur(m.ttf_seconds)}</dd></div>
         </dl>
         <div>
           <p class="kicker" style="margin-bottom:0.45rem">Workers</p>
-          <div class="scroll"><table><thead><tr><th>Worker</th><th>Hashrate</th><th>Shares</th><th>Rejects</th><th>VDiff</th><th>Last</th><th>Agent</th></tr></thead><tbody>${workers || '<tr><td colspan="7">Offline</td></tr>'}</tbody></table></div>
+          <p class="note">Path is public stratum, GPU :3333, or your DATUM gateway. Accepted work stays with the address.</p>
+          <div class="scroll"><table><thead><tr><th>Worker</th><th>Path</th><th>Hashrate</th><th>Session</th><th>Accepted</th><th>Window</th><th>Rejects</th><th>Last</th></tr></thead><tbody>${workers || '<tr><td colspan="8">Offline</td></tr>'}</tbody></table></div>
         </div>
         <div>
           <p class="kicker" style="margin-bottom:0.45rem">Your payouts</p>
@@ -234,25 +255,26 @@
     stats(p);
     table(
       $("online"),
-      ["Address", "Worker", "Hashrate", "Shares", "Rejects", "VDiff", "Last share", "Agent"],
+      ["Address", "Worker", "Path", "Hashrate", "Session", "Accepted", "Window", "Last share"],
       (miners.online || []).map((m) => [
         `<a href="#${m.address}">${short(m.address)}</a>`,
         m.worker || "\u2014",
+        pathLabel(m.via),
         fmtHr(m.hr_ghs),
-        m.shares_acc,
-        m.shares_rej,
-        m.vdiff,
+        num(m.shares_session ?? 0),
+        num(m.shares_lifetime ?? m.shares_acc),
+        m.window_percent != null ? Number(m.window_percent).toFixed(1) + "%" : "\u2014",
         m.last_share_s ? m.last_share_s.toFixed(0) + "s" : "\u2014",
-        m.ua || "",
       ])
     );
     table(
       $("seen"),
-      ["Address", "Best HR", "Shares", "Last seen"],
+      ["Address", "Best HR", "Accepted", "Window", "Last seen"],
       (miners.seen || []).map((m) => [
         `<a href="#${m.address}">${short(m.address)}</a>`,
         fmtHr(m.best_hr_ghs),
-        m.shares_acc,
+        num(m.shares_lifetime ?? m.shares_acc),
+        m.window_percent != null ? Number(m.window_percent).toFixed(1) + "%" : "\u2014",
         ago(m.last_ts),
       ])
     );
@@ -265,7 +287,7 @@
       b.ts ? new Date(b.ts * 1000).toLocaleString() : "",
     ]);
     table($("found"), ["Height", "Hash", "Finder", "Miner paid", "Pool fee", "Time"], found);
-    table($("paytable"), ["Height", "Hash", "Finder", "Miner paid", "Pool fee", "Time"], found);
+    if ($("paytable")) table($("paytable"), ["Height", "Hash", "Finder", "Miner paid", "Pool fee", "Time"], found);
     table(
       $("blocktable"),
       ["Height", "Miner tag", "Time", "Txs", ""],

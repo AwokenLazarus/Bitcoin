@@ -45,6 +45,8 @@ Typical public-fork facts (confirm on *your* chain):
 | `<RPC_PORT_B>` | Alternate RPC if you run a *second* bitcoind (example `18332`) |
 | `<P2P_PORT_B>` | Alternate P2P for a second node (example `18333`) |
 | `<STRATUM_PORT>` | DATUM gateway stratum for ASICs — **`23334`** here |
+| `<STRATUM_GPU_PORT>` | Second DATUM gateway for GPUs / low starting difficulty — **`3333`** here |
+| `<DATUM_HTTP_GPU>` | GPU gateway HTTP — **`7153`** here |
 | `<DATUM_PRIME_PORT>` | DATUM Prime (remote gateways) — **`28915`** here |
 | `<DATUM_HTTP>` | DATUM HTTP — **`7152`** here |
 | `<POOL_UI_PORT>` | Dashboard — **`8888`** here |
@@ -70,12 +72,14 @@ Umbrel Knots app  :9332 RPC / :9333 P2P   (datadir = <APP_DATADIR>)
         │ binary MUST be rc4+ BLAKE2b Knots
         ▼
 DATUM Gateway  :23334 stratum   :7152 HTTP   (ASICs / browser)
+DATUM Gateway  :3333  stratum   :7153 HTTP   (GPUs / low starting difficulty)
 DATUM Prime    :28915                         (remote datum_gateway clients)
         ▲
         │ GET /api/coinbaser  (local-stratum path)
-Pool UI :8888  (+ WS /mine → local gateway)
+Pool UI :8888  (+ WS /mine → local ASIC gateway)
         │
-WAN :23334 ──► local DATUM Gateway   (DNS-only <STRATUM_HOST>)
+WAN :23334 ──► ASIC DATUM Gateway   (DNS-only <STRATUM_HOST>)
+WAN :3333  ──► GPU DATUM Gateway    (same DNS-only name, low vardiff start)
 WAN :<DATUM_PRIME_PORT> ──► DATUM Prime  (same DNS-only name, different port)
 WAN :50002 ──► nginx ──► electrs :50011   (after index = tip)
 WAN :8333/:9333 ──► Knots P2P (optional; already common on Umbrel)
@@ -298,14 +302,22 @@ Unpatched solo pays **100%** to `pool_address` and **ignores** `pool_fee_percent
 
 HTTP fail → 100% pool address (safe).
 
-Miner URL to publish:
+Miner URLs to publish (same user/pass, same DNS-only host):
 
 ```text
-stratum+tcp://<STRATUM_HOST>:<STRATUM_PORT>
+ASIC / high start:  stratum+tcp://<STRATUM_HOST>:<STRATUM_PORT>
+GPU  / low start:   stratum+tcp://<STRATUM_HOST>:<STRATUM_GPU_PORT>
 User: <payout-address>.<worker>
 Pass: x
 Algo: BLAKE2b (Sia-style 80-byte work)
 ```
+
+Run a **second** `datum_gateway` on `<STRATUM_GPU_PORT>` (example `3333`) pointed at the same Prime.
+`vardiff_min` 1 and a lower `vardiff_target_shares_min` so a weak GPU is assigned difficulty 1 on subscribe.
+Prime `min-diff` must also be 1 (or the gateway cannot step below the pool floor — a 1024 floor flatlines small GPUs).
+Do not change the ASIC port for this; GPUs that were stuck at high vdiff reconnect to `:3333`.
+Both gateways share `bitcoind` / `mining.pool_address` / Prime. Separate API port (`7153`) and log file.
+Match ensure-scripts by **config path**, not a bare `datum_gateway` pgrep, or the GPU process will hide a dead ASIC gateway.
 
 ---
 
@@ -396,7 +408,7 @@ Workers + BLAKE2b + WS bridge.
 
 ## 6. Hardware miners
 
-**GPU:** OpenCL/CUDA, header-v2 80-byte work, user `<address>.<worker>`. Persist as a user systemd unit on the GPU box.
+**GPU:** OpenCL/CUDA, header-v2 80-byte work, user `<address>.<worker>`. Point at `<STRATUM_HOST>:<STRATUM_GPU_PORT>` (low starting difficulty), not the ASIC port. Persist as a user systemd unit on the GPU box. If a GPU was assigned a difficulty it cannot meet on `:23334`, it will sit at 0 accepted shares until it reconnects to `:3333`.
 
 **Innosilicon S11 / DragonMint B52 (SiaMaster):** Sia stratum, same work family.
 
@@ -421,10 +433,10 @@ After connect: `shares_acc` climbing and `last_share_s` small matter more than D
 2. Keep `<POOL_UI_HOST>` proxied for HTTPS if you want.
 3. DDNS: one hostname per ddclient account; check-ip = **WAN interface**, not a web checker (VPN exit poison).
 4. AdGuard rewrite `<STRATUM_HOST>` → `<NODE_HOST>`.
-5. OPNsense dest NAT WAN TCP `<STRATUM_PORT>` → `<ALIAS_NODE>`:`<STRATUM_PORT>` + associated pass. Backup `config.xml`. `configctl filter reload`.
-6. Confirm `rdr` + `pass` in `pfctl`. External TCP check from **outside** the LAN (multi-region). Hairpin is not evidence.
-7. `ss` on the node: `ESTAB` from a **public** IP to `:23334`.
-8. `/api/miners`: remote `host` is public, shares climbing.
+5. OPNsense dest NAT WAN TCP `<STRATUM_PORT>` → `<ALIAS_NODE>`:`<STRATUM_PORT>` + associated pass. Clone that pair for `<STRATUM_GPU_PORT>` (`3333`). Backup `config.xml`. `configctl filter reload`.
+6. Confirm `rdr` + `pass` in `pfctl` for **both** ports. External TCP check from **outside** the LAN (multi-region). Hairpin and LAN split-DNS are not evidence.
+7. `ss` on the node: `ESTAB` from a **public** IP to `:23334` and `:3333`.
+8. `/api/miners`: remote `host` is public, shares climbing. GPU clients on `:3333` should show `vdiff` near 1 until they earn shares.
 
 Tell miners **only** `<STRATUM_HOST>`, never the website name.
 
@@ -504,7 +516,7 @@ A 3-minute timer: read heights; when ready, rewrite nginx upstream and `docker r
 5. Pool UI; browsers POST hashrate; GPU/S11 on `<STRATUM_HOST>`.
 6. Explorer header `VARCHAR(512)`; mempool RPC-only until electrs is ready.
 7. electrs index; do not publish wallets early.
-8. DNS-only `<STRATUM_HOST>` + WAN `:23334`; prove with public `ESTAB` + accepted shares.
+8. DNS-only `<STRATUM_HOST>` + WAN `:23334` (ASIC) and `:3333` (GPU); prove with public `ESTAB` + accepted shares.
 9. Never dump cookies/passwords; never add a WAN hostname unasked; never stop GPU-passthrough guests unasked; never GET an ASIC `/api/reboot` by accident.
 
 ---
@@ -515,13 +527,13 @@ A 3-minute timer: read heights; when ready, rewrite nginx upstream and `docker r
 - [ ] Umbrel RPC still **9332** / P2P **9333** if you kept the app (Lightning/mempool unbroken)
 - [ ] `getblockchaininfo` blocks ≥ `<FORK_HEIGHT>`; post-fork header hex **328**
 - [ ] Not stuck at last SHA height with only SHA peers
-- [ ] DATUM subscribe on `<NODE_HOST>:<STRATUM_PORT>`
+- [ ] DATUM subscribe on `<NODE_HOST>:<STRATUM_PORT>` (ASIC) and `:<STRATUM_GPU_PORT>` (GPU starts at difficulty 1)
 - [ ] Coinbaser preview matches the fee split
 - [ ] `/api/miners` shows ASIC/GPU shares; browsers show KH/s from POST
 - [ ] Explorer loads a post-fork block
 - [ ] electrs height ≈ tip before flipping nginx from `:50001`
 - [ ] `<ELECTRUM_HOST>:50002` SSL: version + long header + scripthash
-- [ ] `<STRATUM_HOST>` grey-cloud; WAN rdr+pass; external TCP open
+- [ ] `<STRATUM_HOST>` grey-cloud; WAN rdr+pass for `:23334` and `:3333`; external TCP open on both
 - [ ] Public IP `ESTAB` to DATUM; remote shares accepted
 - [ ] House ASIC uses `<STRATUM_HOST>`, not `<WAN_IP>`
 - [ ] Pool UI stratum string uses `<STRATUM_HOST>`
