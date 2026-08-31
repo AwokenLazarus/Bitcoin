@@ -4,7 +4,7 @@
 set -euo pipefail
 DATUM_JSON="${DATUM_JSON:-/home/umbrel/blake2b/etc/datum_gateway_config.json}"
 CONF="${CONF:-/home/umbrel/blake2b/etc/lazarus-prime.toml}"
-DATA="${DATA:-/home/umbrel/blake2b/ratum-prime}"
+DATA="${DATA:-/home/umbrel/blake2b/lazarus-prime}"
 COOKIE="${COOKIE:-/home/umbrel/umbrel/app-data/bitcoin-knots/data/bitcoin/.cookie}"
 mkdir -p "$DATA" "$(dirname "$CONF")"
 ADDR=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["mining"]["pool_address"])' "$DATUM_JSON")
