@@ -13,6 +13,14 @@ use crate::pow::{self, HeaderV2};
 pub const SPLIT_TOLERANCE_SATS: u64 = 2;
 /// How far a share's height may lead Prime's view of the tip.
 pub const HEIGHT_LEAD: u64 = 2;
+/// How many blocks behind the tip a share's job may be and still be credited.
+///
+/// A miner works the job it was handed, and blocks on this chain arrive about once a
+/// minute, so a share landing a block or two late is normal and the work behind it is
+/// real. Refusing it throws away hashing the miner genuinely did through no fault of its
+/// own. Replaying old work to farm credit is not possible: a repeat is the same share and
+/// is caught by deduplication.
+pub const HEIGHT_LAG: u64 = 3;
 /// Allowed clock skew on the header time, in seconds.
 pub const MAX_TIME_SKEW: u64 = 7200;
 
@@ -115,7 +123,7 @@ pub fn verify_share_against(
 
     if ctx.tip_height > 0 {
         let h = u64::from(job.height);
-        if h < ctx.tip_height || h > ctx.tip_height + HEIGHT_LEAD {
+        if h + HEIGHT_LAG < ctx.tip_height || h > ctx.tip_height + HEIGHT_LEAD {
             return Err(mining::REJECT_STALE);
         }
     }
@@ -283,6 +291,37 @@ mod tests {
             assert_eq!(rebuilt.serialize(), hdr.serialize(), "n={n}");
             assert_eq!(hash, hdr.pow_hash(), "n={n}");
         }
+    }
+
+    /// A share for a job a block or two behind the tip is late, not invalid: the miner did
+    /// the work. Anything older than the lag window is still refused.
+    #[test]
+    fn a_share_a_block_or_two_late_is_still_credited() {
+        let cb = issued_split();
+        let (_, share) = gateway_share(&cb, &txids(4));
+        for behind in 0..=HEIGHT_LAG {
+            let c = ShareContext {
+                issued: Some(&cb),
+                tip_height: u64::from(HEIGHT) + behind,
+                now: 1_800_000_000,
+                min_diff: 1,
+            };
+            assert!(
+                verify_share_against(&share, &c, &easy()).is_ok(),
+                "{behind} block(s) behind should be credited"
+            );
+        }
+        let too_old = ShareContext {
+            issued: Some(&cb),
+            tip_height: u64::from(HEIGHT) + HEIGHT_LAG + 1,
+            now: 1_800_000_000,
+            min_diff: 1,
+        };
+        assert_eq!(
+            verify_share_against(&share, &too_old, &easy()),
+            Err(mining::REJECT_STALE),
+            "past the lag window it is stale"
+        );
     }
 
     #[test]

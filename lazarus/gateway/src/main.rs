@@ -62,6 +62,13 @@ struct Miner {
     vdiff_prev: u64,
     vdiff_prev_until: Instant,
     last_retarget: Instant,
+    /// (job id, difficulty in force when that job was sent to this miner).
+    ///
+    /// A share has to be judged and paid at the difficulty the miner was working under,
+    /// which is the one attached to its job, not whatever the session has been retargeted
+    /// to since. Crediting the difficulty a hash happens to reach instead overpays by a
+    /// factor of (1 + log2(assigned/actual)/2) whenever the two drift apart.
+    job_diffs: VecDeque<(String, u64)>,
     /// (when, work) for a rolling hashrate window. Lifetime acc stays in `acc`.
     recent: VecDeque<(Instant, u64)>,
 }
@@ -72,17 +79,17 @@ const HR_WINDOW: Duration = Duration::from_secs(60);
 const VARDIFF_TARGET_SECS: f64 = 4.0;
 const VARDIFF_INTERVAL: Duration = Duration::from_secs(20);
 const VARDIFF_GRACE: Duration = Duration::from_secs(30);
-/// Difficulty is a power of two because a share target is issued as an exponent.
-/// The largest power-of-two difficulty this hash actually satisfies, capped at the one the
-/// miner was assigned. Returns None if the hash does not even clear difficulty 1.
-///
-/// Crediting achieved work instead of assigned work means a share already in flight when
-/// its target is raised gets paid for what it proved rather than discarded for missing a
-/// target it was never given. It cannot be gamed: credit is proportional to the work
-/// shown either way, so ignoring set_difficulty earns a miner nothing extra.
-fn achieved_pot(hash: &[u8; 32], cap: u8) -> Option<u8> {
-    (0..=cap).rev().find(|&p| pow::meets_target(hash, &pow::target_for_pot(p)))
+/// Job difficulties remembered per session. Matches the gateway job history, so any job a
+/// miner can still name has its difficulty on record.
+const JOB_DIFFS: usize = JOB_HISTORY;
+/// Record the difficulty this job went out at, so its shares are paid at that rate.
+fn assign_job(m: &mut Miner, job_id: &str) {
+    m.job_diffs.push_back((job_id.to_string(), m.vdiff));
+    while m.job_diffs.len() > JOB_DIFFS {
+        m.job_diffs.pop_front();
+    }
 }
+/// Difficulty is a power of two because a share target is issued as an exponent.
 fn vardiff_for(hs: f64, floor: u64) -> u64 {
     if !hs.is_finite() || hs <= 0.0 {
         return floor;
@@ -158,7 +165,6 @@ struct Shared {
     pow_bad: AtomicU64,
     /// Valid shares that landed under the difficulty in force, normally because their
     /// target was raised while they were in flight. Credited for what they proved.
-    underdiff: AtomicU64,
     verify: VerifyMode,
     /// Shares queued for Prime but not yet written, and shares dropped because the
     /// queue was full. Unbounded queueing here once grew to gigabytes of RSS when
@@ -206,10 +212,20 @@ fn notify_line(j: &Job) -> String {
         "", [], "", hex::encode(j.nbits), j.ntime.clone(), true
     ]}))
 }
-fn broadcast(st: &Shared, line: &str) {
+fn broadcast(st: &Shared, line: &str, job_id: &str) {
     let mut dead = Vec::new();
+    // miners before miner_socks, everywhere, or these two deadlock.
+    let mut miners = st.miners.lock().unwrap();
     let mut socks = st.miner_socks.lock().unwrap();
-    for (mid, s) in socks.iter_mut() { if s.write_all(line.as_bytes()).is_err() { dead.push(*mid); } }
+    for (mid, s) in socks.iter_mut() {
+        if s.write_all(line.as_bytes()).is_err() {
+            dead.push(*mid);
+            continue;
+        }
+        if let Some(m) = miners.get_mut(mid) {
+            assign_job(m, job_id);
+        }
+    }
     for d in dead { socks.remove(&d); }
 }
 fn send_prime(st: &Shared, body: Vec<u8>) {
@@ -422,7 +438,7 @@ fn handle_miner(mut sock: TcpStream, st: Arc<Shared>) {
         // pool floor, so a gateway restart briefly puts the whole farm back on
         // difficulty 1 until vardiff catches up.
         last_retarget: now.checked_sub(VARDIFF_INTERVAL - Duration::from_secs(4)).unwrap_or(now),
-        recent: VecDeque::new() });
+        recent: VecDeque::new(), job_diffs: VecDeque::new() });
     for line in rdr.lines() {
         let Ok(line) = line else { break };
         let Ok(msg) = serde_json::from_str::<Value>(&line) else { continue };
@@ -435,8 +451,14 @@ fn handle_miner(mut sock: TcpStream, st: Arc<Shared>) {
                 send_line(&mut sock, &json!({"id": mid, "result": [[["mining.notify", "lz"]], hex::encode(sess_en1), 8], "error": null}));
                 let d0 = st.miners.lock().unwrap().get(&id).map(|m| m.vdiff).unwrap_or(vmin);
                 send_line(&mut sock, &json!({"id": null, "method": "mining.set_difficulty", "params": [d0]}));
-                if let Some(j) = st.job.lock().unwrap().as_ref() {
-                    if j.outputs >= 2 { let _ = write!(sock, "{}", notify_line(j)); }
+                let first_job = st.job.lock().unwrap().clone();
+                if let Some(j) = first_job {
+                    if j.outputs >= 2 {
+                        let _ = write!(sock, "{}", notify_line(&j));
+                        if let Some(m) = st.miners.lock().unwrap().get_mut(&id) {
+                            assign_job(m, &j.id);
+                        }
+                    }
                 }
             }
             "mining.authorize" => {
@@ -487,39 +509,51 @@ fn handle_miner(mut sock: TcpStream, st: Arc<Shared>) {
                 // zero, but a miner is free to roll it, and those bytes are hashed.
                 hdr.time_offset = u32::from_le_bytes(sia_t[0..4].try_into().unwrap_or([0; 4]));
                 hdr.nonce3 = u32::from_le_bytes(sia_t[4..8].try_into().unwrap_or([0; 4]));
-                // Credit and check the share at the difficulty this miner was handed, not
-                // the pool floor. During the grace window after a raise, the easier of the
-                // two targets applies so nothing in flight is lost.
+                // Judge and pay the share at the difficulty its own job went out at. That is
+                // what the miner was working under; the session may have been retargeted
+                // several times since, and holding a share to a target it was never given
+                // would reject work the miner genuinely did.
+                // The difficulty this job went out at, to this session.
+                //
+                // One entry per job now that a retarget no longer re-stamps it, so the min
+                // is just defensive. Falling back to the grace window matters for a share
+                // naming a job older than the history we keep difficulties for.
                 let accept_diff = {
                     let g = st.miners.lock().unwrap();
                     match g.get(&id) {
-                        Some(m) if Instant::now() < m.vdiff_prev_until => m.vdiff.min(m.vdiff_prev),
-                        Some(m) => m.vdiff,
+                        Some(m) => m
+                            .job_diffs
+                            .iter()
+                            .filter(|(jid, _)| *jid == want)
+                            .map(|(_, d)| *d)
+                            .min()
+                            .unwrap_or_else(|| {
+                                if Instant::now() < m.vdiff_prev_until {
+                                    m.vdiff.min(m.vdiff_prev)
+                                } else {
+                                    m.vdiff
+                                }
+                            }),
                         None => vmin,
                     }
                 };
-                let assigned_pot = accept_diff.max(1).ilog2() as u8;
+                let pot = accept_diff.max(1).ilog2() as u8;
+                let credit = accept_diff.max(1);
                 let hash = hdr.pow_hash();
                 *st.last_share_hdr.lock().unwrap() = Some(hdr.clone());
                 *st.last_share_job.lock().unwrap() = Some(j.id.clone());
                 // The rebuilt header is the one we would submit as a block, so a share that
                 // misses the difficulty we handed out means our assembly disagrees with the
                 // miner and a real solve would be thrown away. Measure it on every share.
-                let achieved = achieved_pot(&hash, assigned_pot);
-                let share_ok = achieved.is_some();
-                let pot = achieved.unwrap_or(0);
-                let credit = 1u64 << pot;
+                let share_ok = pow::meets_target(&hash, &pow::target_for_pot(pot));
                 if share_ok {
                     st.pow_ok.fetch_add(1, Ordering::Relaxed);
-                    if pot < assigned_pot {
-                        st.underdiff.fetch_add(1, Ordering::Relaxed);
-                    }
                 } else {
                     let n = st.pow_bad.fetch_add(1, Ordering::Relaxed);
                     if n < 20 || n % 500 == 0 {
                         log::warn!(
-                            "share below difficulty 1 assigned_pot={} job={} nonce={:08x} nonce2={:08x} en2={} hash={:02x}{:02x}{:02x}{:02x}",
-                            assigned_pot, j.id, hdr.nonce, hdr.nonce2, hex::encode(&en2),
+                            "share missed its job target pot={} job={} nonce={:08x} nonce2={:08x} en2={} hash={:02x}{:02x}{:02x}{:02x}",
+                            pot, j.id, hdr.nonce, hdr.nonce2, hex::encode(&en2),
                             hash[0], hash[1], hash[2], hash[3]
                         );
                     }
@@ -550,12 +584,11 @@ fn handle_miner(mut sock: TcpStream, st: Arc<Shared>) {
                 }
                 if let Some(d) = retarget {
                     log::info!("vardiff user={} host={} -> {}", user, host_label, d);
+                    // Difficulty only, and deliberately no new job: it takes effect on the
+                    // next one, which keeps a job id tied to a single difficulty for this
+                    // session. Re-stamping the current job instead makes shares already in
+                    // flight look as though they missed a target they were never given.
                     send_line(&mut sock, &json!({"id": null, "method": "mining.set_difficulty", "params": [d]}));
-                    if let Some(j) = st.job.lock().unwrap().as_ref() {
-                        if j.outputs >= 2 {
-                            let _ = write!(sock, "{}", notify_line(j));
-                        }
-                    }
                 }
                 let en = en12.clone();
                 let submit = PowSubmit {
@@ -644,7 +677,6 @@ fn audit_json(st: &Shared) -> String {
         "prime_queue": st.prime_depth.load(Ordering::Relaxed),
         "prime_dropped": st.prime_dropped.load(Ordering::Relaxed),
         "job_miss": st.job_miss.load(Ordering::Relaxed),
-        "share_underdiff": st.underdiff.load(Ordering::Relaxed),
     }).to_string()
 }
 fn maybe_submit_block(st: &Shared, j: &Job, hdr: &HeaderV2) {
@@ -732,6 +764,7 @@ fn gbt_loop(st: Arc<Shared>) {
                             st.published_outputs.store(j.outputs, Ordering::Relaxed);
                             st.published_height.store(height, Ordering::Relaxed);
                             let line = notify_line(&j);
+                            let jid_str = j.id.clone();
                             {
                                 let mut hist = st.jobs.lock().unwrap();
                                 hist.push_back(j.clone());
@@ -746,7 +779,7 @@ fn gbt_loop(st: Arc<Shared>) {
                             }
                             *st.job.lock().unwrap() = Some(j);
                             last_pub = Instant::now();
-                            broadcast(&st, &line);
+                            broadcast(&st, &line, &jid_str);
                         }
                     } else {
                         log::warn!("no split coinbaser for value={}; not publishing unsplit job", value);
@@ -782,7 +815,7 @@ fn main() {
         job_seq: AtomicU64::new(0), pow_ok: AtomicU64::new(0), pow_bad: AtomicU64::new(0),
         verify: verify_mode(cfg.verify_shares.as_deref()),
         prime_depth: AtomicU64::new(0), prime_dropped: AtomicU64::new(0),
-        job_miss: AtomicU64::new(0), underdiff: AtomicU64::new(0),
+        job_miss: AtomicU64::new(0),
     });
     { let s = st.clone(); thread::spawn(move || prime_loop(s, rx, urx)); }
     { let s = st.clone(); thread::spawn(move || api_loop(s)); }

@@ -88,10 +88,28 @@ Difficulty is per session and a power of two. Every miner sitting at the pool fl
 free: one 1 TH/s rig at difficulty 1 submits over 200 shares a second, which swamps Prime
 and buys no extra accuracy. Vardiff aims for roughly one share per miner every few seconds.
 
-A share is credited for the work it *proves*, capped at the difficulty its session was
-assigned. A share already in flight when its target is raised is therefore paid for what it
-did instead of being discarded, and the rule cannot be gamed, because credit is proportional
-to the work shown either way. Only a share that fails difficulty 1 outright is rejected.
+A share is judged and paid at the difficulty **its own job** was handed out at, which the
+gateway records per session as each job is sent. A session may be retargeted several times
+while a miner is still working an earlier job, and holding that share to a target it was
+never given rejects work the miner genuinely did.
+
+The tempting shortcut — credit whatever difficulty the hash turns out to reach, capped at the
+session's current one — is wrong, and we shipped it briefly. For a miner really working at
+difficulty `d` while assigned `A`, share quality above `d` is Pareto: the chance of also
+clearing `2d` is a half, `4d` a quarter, and so on. Each level contributes `d/2` to the
+expectation and the capped tail another `d`, so the expected credit is
+
+    E[credit] = d * (1 + log2(A/d) / 2)
+
+against a fair value of `d`. Drift of a single doubling overpays by 50%, and a miner that
+simply ignores `mining.set_difficulty` collects the difference — so it is not merely
+imprecise, it is worth gaming. Pinning credit to the job's difficulty removes the free
+parameter: `A` always equals the `d` the miner was working under.
+
+A share whose job is a block or two behind the tip is late, not invalid, and is still paid
+(`HEIGHT_LAG`). Blocks here arrive about once a minute and miners run a few jobs behind, so
+refusing them discarded around a quarter of all submitted work. Replaying old work earns
+nothing: a repeat is the same share and deduplication catches it.
 
 Each session also gets its own extranonce1. Sharing one across the gateway makes identical
 rigs walk identical `(extranonce2, nonce)` pairs, so they submit the same shares and
