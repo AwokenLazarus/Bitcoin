@@ -20,12 +20,30 @@ struct Credit {
     work: u64,
 }
 
+/// A one-time, owner-authorised make-good: pay `beneficiary` up to `owed_sats`, taken only
+/// from `source`'s own coinbase output.
+///
+/// Denominated in satoshis on purpose. Expressing it as ledger work would not survive the
+/// window filling up, because a payout is `value * work / window_work` -- a fixed number of
+/// work units is worth steadily less as `window_work` grows, so a make-good sized today pays
+/// a fraction of its intended value tomorrow.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Bonus {
+    pub beneficiary: String,
+    pub source: String,
+    pub owed_sats: u64,
+    #[serde(default)]
+    pub note: String,
+}
+
 #[derive(Default, Serialize, Deserialize)]
 struct Persist {
     credits: Vec<Credit>,
     carry: HashMap<String, u64>,
     shares: u64,
     accepted_work: u64,
+    #[serde(default)]
+    bonus: Option<Bonus>,
 }
 
 #[derive(Default)]
@@ -41,6 +59,8 @@ pub struct Ledger {
     seen: HashMap<[u8; 16], ()>,
     last_save: Option<Instant>,
     dirty: bool,
+    /// Outstanding make-good, applied to every split we issue until a block retires it.
+    pub bonus: Option<Bonus>,
 }
 
 impl Ledger {
@@ -106,6 +126,7 @@ impl Ledger {
             seen: HashMap::new(),
             last_save: None,
             dirty: before != 0,
+            bonus: p.bonus,
         }
     }
 
@@ -115,6 +136,7 @@ impl Ledger {
             carry: self.carry.clone(),
             shares: self.shares,
             accepted_work: self.accepted_work,
+            bonus: self.bonus.clone(),
         };
         if let Ok(raw) = serde_json::to_string(&p) {
             let tmp = path.with_extension("json.tmp");
@@ -279,8 +301,90 @@ impl Ledger {
                 script: pool_script.to_vec(),
             });
         }
+        if let Some(b) = self.bonus.as_ref().filter(|b| b.owed_sats > 0) {
+            if let (Some(src), Some(dst)) =
+                (identity_script(&b.source), identity_script(&b.beneficiary))
+            {
+                apply_bonus(&mut outputs, &src, &dst, b.owed_sats, min_payout);
+            }
+        }
         CoinbaserV2 { id, outputs }
     }
+
+    /// Retire the make-good once one of our own split blocks is confirmed.
+    ///
+    /// This clears the balance rather than decrementing by the exact sats paid. Working out the
+    /// exact figure would mean identifying which of the cached coinbasers the winning block
+    /// used, and being wrong there risks paying the make-good a second time. Clearing can only
+    /// ever underpay, never double-pay, and the amount moved is logged on every issue, so a
+    /// shortfall is visible and can be re-armed deliberately.
+    pub fn settle_bonus(&mut self) -> Option<Bonus> {
+        let b = self.bonus.take();
+        if b.is_some() {
+            self.dirty = true;
+        }
+        b
+    }
+}
+
+/// Move up to `owed` sats from `src`'s outputs into `dst`'s. Returns the amount moved.
+///
+/// Two invariants matter more than the amount:
+///
+/// 1. **Only `src` is debited.** Every other miner's output is byte-identical whether or not a
+///    make-good is active, which is the whole point -- the pool eats it, not the miners.
+/// 2. **The total is preserved.** Sats are moved between existing outputs, never minted. A
+///    coinbase whose outputs do not sum to the template value is invalid, so any block we
+///    assembled would be rejected. Sub-dust remainders are folded into `dst` rather than left
+///    behind as unspendable outputs, for the same reason.
+fn apply_bonus(
+    outputs: &mut Vec<CoinbaserOutput>,
+    src: &[u8],
+    dst: &[u8],
+    owed: u64,
+    min_payout: u64,
+) -> u64 {
+    if src == dst {
+        return 0;
+    }
+    let avail: u64 = outputs.iter().filter(|o| o.script == src).map(|o| o.sats).sum();
+    let take = owed.min(avail);
+    if take == 0 {
+        return 0;
+    }
+
+    let mut left = take;
+    let mut idx: Vec<usize> = (0..outputs.len()).filter(|&i| outputs[i].script == src).collect();
+    idx.sort_by_key(|&i| std::cmp::Reverse(outputs[i].sats));
+    for i in idx {
+        let d = left.min(outputs[i].sats);
+        outputs[i].sats -= d;
+        left -= d;
+        if left == 0 {
+            break;
+        }
+    }
+
+    let mut moved = take;
+    let mut i = 0;
+    while i < outputs.len() {
+        if outputs[i].script == src && outputs[i].sats < min_payout {
+            moved += outputs[i].sats;
+            outputs.remove(i);
+        } else {
+            i += 1;
+        }
+    }
+
+    if let Some(o) = outputs.iter_mut().find(|o| o.script == dst) {
+        o.sats = o.sats.saturating_add(moved);
+    } else {
+        outputs.push(CoinbaserOutput {
+            sats: moved,
+            script: dst.to_vec(),
+        });
+    }
+    moved
 }
 
 #[cfg(test)]
@@ -375,5 +479,111 @@ mod tests {
         assert_eq!(out[0].work, 8);
         assert_eq!(out[1].work, 7);
         assert_eq!(out[2].ts, 4_980);
+    }
+}
+
+#[cfg(test)]
+mod bonus_tests {
+    use super::*;
+    use lazarus_protocol::identity_script;
+
+    const SRC: &str = "bc1qt5praystcdle0nq04e3h02yjszha82uzhww85x6972lcy40k4eyqz9jfaq";
+    const DST: &str = "bc1qk7zrqfpy4us7wxwsusv0qu4w2w8fx6h7nh3g8l";
+    const OTHER: &str = "bc1qva3nw86tp0uzeldqjhvjj44nh2fzfcawq77tp9";
+
+    fn s(a: &str) -> Vec<u8> {
+        identity_script(a).unwrap()
+    }
+    fn out(a: &str, sats: u64) -> CoinbaserOutput {
+        CoinbaserOutput { sats, script: s(a) }
+    }
+    fn total(v: &[CoinbaserOutput]) -> u64 {
+        v.iter().map(|o| o.sats).sum()
+    }
+    fn sats_of(v: &[CoinbaserOutput], a: &str) -> u64 {
+        let sc = s(a);
+        v.iter().filter(|o| o.script == sc).map(|o| o.sats).sum()
+    }
+
+    #[test]
+    fn takes_from_the_source_and_leaves_other_miners_untouched() {
+        let mut v = vec![
+            out(OTHER, 200_000_000),
+            out(SRC, 70_000_000),
+            out(DST, 17_000_000),
+        ];
+        let before = total(&v);
+        let moved = apply_bonus(&mut v, &s(SRC), &s(DST), 59_000_000, 546);
+        assert_eq!(moved, 59_000_000);
+        assert_eq!(sats_of(&v, OTHER), 200_000_000, "an uninvolved miner was debited");
+        assert_eq!(sats_of(&v, SRC), 11_000_000);
+        assert_eq!(sats_of(&v, DST), 76_000_000);
+        assert_eq!(total(&v), before, "coinbase total changed");
+    }
+
+    #[test]
+    fn cannot_take_more_than_the_source_holds() {
+        let mut v = vec![out(SRC, 32_000_000), out(DST, 17_000_000)];
+        let before = total(&v);
+        let moved = apply_bonus(&mut v, &s(SRC), &s(DST), 59_000_000, 546);
+        assert_eq!(moved, 32_000_000, "took more than the source had");
+        assert_eq!(sats_of(&v, SRC), 0);
+        assert_eq!(total(&v), before);
+    }
+
+    #[test]
+    fn merges_rather_than_duplicating_the_beneficiary_output() {
+        let mut v = vec![out(SRC, 70_000_000), out(DST, 1_000)];
+        apply_bonus(&mut v, &s(SRC), &s(DST), 5_000, 546);
+        let n = v.iter().filter(|o| o.script == s(DST)).count();
+        assert_eq!(n, 1, "beneficiary got a second output with the same script");
+        assert_eq!(sats_of(&v, DST), 6_000);
+    }
+
+    #[test]
+    fn folds_a_sub_dust_source_remainder_in_rather_than_stranding_it() {
+        let mut v = vec![out(SRC, 59_000_400), out(DST, 1_000)];
+        let before = total(&v);
+        let moved = apply_bonus(&mut v, &s(SRC), &s(DST), 59_000_000, 546);
+        assert_eq!(moved, 59_000_400, "the 400 sat remainder was stranded");
+        assert!(!v.iter().any(|o| o.script == s(SRC)), "left an unspendable dust output");
+        assert_eq!(total(&v), before);
+    }
+
+    /// The pool address is both a miner and the remainder script in production, so the debt has
+    /// to survive the source appearing twice in one split.
+    #[test]
+    fn issuing_a_split_never_mutates_the_debt() {
+        let mut led = Ledger::default();
+        assert!(led.credit(SRC.into(), 1_000, [1u8; 16]));
+        assert!(led.credit(DST.into(), 1_000, [2u8; 16]));
+        led.bonus = Some(Bonus {
+            beneficiary: DST.into(),
+            source: SRC.into(),
+            owed_sats: 59_000_000,
+            note: String::new(),
+        });
+        for _ in 0..50 {
+            let cb = led.coinbaser(313_000_000, 0, 546, &s(SRC), 1);
+            assert_eq!(
+                cb.outputs.iter().map(|o| o.sats).sum::<u64>(),
+                313_000_000,
+                "split no longer sums to the template value"
+            );
+            let paid = cb
+                .outputs
+                .iter()
+                .filter(|o| o.script == s(DST))
+                .map(|o| o.sats)
+                .sum::<u64>();
+            assert!(paid > 59_000_000, "beneficiary did not receive the make-good");
+        }
+        assert_eq!(
+            led.bonus.as_ref().unwrap().owed_sats,
+            59_000_000,
+            "issuing splits drained the debt without a block"
+        );
+        assert!(led.settle_bonus().is_some());
+        assert!(led.bonus.is_none(), "debt survived settlement");
     }
 }

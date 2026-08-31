@@ -444,6 +444,15 @@ fn rpc_loop(st: Arc<Shared>) {
                 if let Some(info) = rpc::coinbase_info(&st.cfg.rpc, &auth, &last_hash, &st.cfg.coinbase_tag) {
                     if info.is_ours && info.value_outputs >= 2 {
                         let mut led = st.ledger.lock().unwrap();
+                        if let Some(b) = led.settle_bonus() {
+                            log::info!(
+                                "make-good retired: {} sats were owed to {} out of {} ({})",
+                                b.owed_sats,
+                                b.beneficiary,
+                                b.source,
+                                b.note
+                            );
+                        }
                         led.clear_carry();
                         led.save(&st.ledger_path());
                         log::info!("split coinbase confirmed ({} value outputs); unpaid carry cleared", info.value_outputs);
