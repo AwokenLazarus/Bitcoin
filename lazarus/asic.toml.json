@@ -1,0 +1,12 @@
+{
+  "profile": "asic",
+  "stratum_listen": "0.0.0.0:23334",
+  "api_listen": "0.0.0.0:7152",
+  "vardiff_min": 16384,
+  "rpc": "http://127.0.0.1:9332",
+  "rpc_cookie": "/home/umbrel/umbrel/app-data/bitcoin-knots/data/bitcoin/.cookie",
+  "prime_host": "127.0.0.1",
+  "prime_port": 28915,
+  "pool_pubkey": "<from lazarus-prime /stats.json pool.pubkey>",
+  "coinbase_tag": "Lazarus"
+}

@@ -275,7 +275,7 @@ exec <PREFIX>/bin/datum_gateway -c <DATUM_JSON>
     "pool_address": "<POOL_ADDRESS>",
     "coinbase_tag_primary": "<POOL_TAG> / <CHAIN_HEADLINE>",
     "pow_algorithm": "auto",
-    "pool_fee_percent": 0.5,
+    "pool_fee_percent": 0,
     "allow_hasher_time_rolling": false
   },
   "datum": {
@@ -351,7 +351,7 @@ Prime listens `0.0.0.0:<DATUM_PRIME_PORT>`. Stats stay on localhost. Advertise
 `<STRATUM_HOST>:<DATUM_PRIME_PORT>` (DNS-only; Cloudflare cannot carry this TCP).
 WAN dest NAT that port the same way as stratum. Local ASICs can keep using `:23334`.
 
-Fee is `--fee-bps` (0–100 = at most 1%). Window is `--window` × network difficulty (OCEAN TIDES, often 8).
+Fee is `--fee-bps` (default 0 — no pool fee). Window is `--window` × network difficulty (OCEAN TIDES, often 8).
 
 ---
 

@@ -89,7 +89,7 @@ def compose(block):
         f"When:    {when or '—'}",
         f"Explorer: {EXPLORER}/block/{hx}",
         f"Reward:  {fmt_btc(block.get('reward_btc'))} BTC",
-        f"Fee 0.5%: {fmt_btc(block.get('pool_fee_btc'))} BTC",
+        f"Fee: {fmt_btc(block.get('pool_fee_btc'))} BTC",
         f"Miners:  {fmt_btc(miner_total)} BTC (PROP by this-round accepted work)",
         f"Status:  {block.get('status') or 'immature'} (coinbase matures after 100 confirmations)",
         "",

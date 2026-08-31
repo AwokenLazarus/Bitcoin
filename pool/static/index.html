@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Lazarus — BLAKE2b pool</title>
-<meta name="description" content="Lazarus mining pool. BLAKE2b Bitcoin, 0.5% fee, Ocean-style coinbase payouts.">
+<meta name="description" content="Lazarus mining pool. BLAKE2b Bitcoin, no pool fee, coinbase payouts.">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;1,400&family=Newsreader:ital,opsz,wght@0,6..72,500;1,6..72,400;1,6..72,500&display=swap">
@@ -15,11 +15,11 @@
 <header class="site-header">
   <div class="brand">
     <a class="wordmark" href="/">Lazarus <em>Pool</em></a>
-    <p class="lede">BLAKE2b · <i>Proverbs 11:1</i> · coinbase payouts · 0.5%</p>
+    <p class="lede">BLAKE2b · <i>Proverbs 11:1</i> · coinbase payouts · no fee</p>
   </div>
   <div class="header-meta" aria-live="polite">
     <span class="chip" data-live><span>Pool</span> <b id="live-hr">—</b></span>
-    <span class="chip">Fee <b>0.5%</b></span>
+    <span class="chip">Fee <b>0%</b></span>
     <span class="chip">Tip <b id="live-tip">—</b></span>
   </div>
   <nav class="nav" aria-label="Sections">
@@ -78,7 +78,7 @@
         <dt>User</dt><dd class="mono">bc1q…youraddress.worker</dd>
         <dt>Pass</dt><dd class="mono">x</dd>
         <dt>Algo</dt><dd>BLAKE2b — Sia-style header, not SHA-256d</dd>
-        <dt>Payout</dt><dd>99.5% by accepted work this round, in the coinbase; 0.5% fee</dd>
+        <dt>Payout</dt><dd>100% by accepted work this round, in the coinbase</dd>
       </dl>
       <p class="note callout">This is <strong>public stratum</strong> — our gateway, our templates. GPUs/PyBLOCK use <strong>:3333</strong>; ASICs use <strong>:23334</strong>. DATUM is different: run your own gateway and point it at Prime below. Do not point <code>datum_gateway</code> at these ports.</p>
     </section>
@@ -169,7 +169,7 @@
       <p class="kicker">Found by Lazarus, then the rest of the chain</p>
     </div>
     <div id="payouts" class="payout-blurb">
-      <p class="copy">Paid <strong>in the found block’s coinbase</strong>. 99.5% is split by accepted work in the current window (OCEAN / TIDES); 0.5% is the pool fee. Outputs are immature until 100 confirmations.</p>
+      <p class="copy">Paid <strong>in the found block’s coinbase</strong>. 100% is split by accepted work in the current window (OCEAN / TIDES). There is no pool fee. Outputs are immature until 100 confirmations.</p>
     </div>
     <div class="scroll"><table id="found"></table></div>
     <p class="kicker table-label">Recent on this chain</p>
@@ -182,7 +182,7 @@
     </div>
     <div class="panel compact">
       <p class="copy">DATUM path: miner → your gateway + your node → Prime (<code>stratum.awokenlazarus.xyz:28915</code>). Public stratum (:23334 / :3333) is optional and uses <em>our</em> templates. Switching paths does not wipe accepted work or the Prime window.</p>
-      <p class="copy">A found block pays the TIDES window in that block’s coinbase (99.5% / 0.5%). Coinbase tag is <code>Lazarus</code> plus the required headline.</p>
+      <p class="copy">A found block pays the TIDES window in that block’s coinbase (100%). Coinbase tag is <code>Lazarus</code>.</p>
       <p class="links">
         <span class="copyable">Explorer: <a id="explorer-url" href="https://mempool.awokenlazarus.xyz/mining" target="_blank" rel="noreferrer">mempool.awokenlazarus.xyz</a><button type="button" class="copy-btn" data-copy="https://mempool.awokenlazarus.xyz" aria-label="Copy explorer URL" title="Copy"></button></span>
         <span class="copyable">Source: <a href="https://github.com/AwokenLazarus/Bitcoin" target="_blank" rel="noreferrer">github.com/AwokenLazarus/Bitcoin</a><button type="button" class="copy-btn" data-copy="https://github.com/AwokenLazarus/Bitcoin" aria-label="Copy GitHub URL" title="Copy"></button></span>

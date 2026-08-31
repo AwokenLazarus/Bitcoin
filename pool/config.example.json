@@ -1,5 +1,5 @@
 {
-  "pool_fee_percent": 0.5,
+  "pool_fee_percent": 0,
   "stratum_host": "stratum.example.com",
   "stratum_port": 23334,
   "stratum_gpu_port": 3333,

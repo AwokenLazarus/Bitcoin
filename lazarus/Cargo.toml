@@ -1,0 +1,26 @@
+[workspace]
+resolver = "2"
+members = ["protocol", "prime", "gateway"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+publish = false
+
+[workspace.dependencies]
+blake2 = "0.10"
+clap = { version = "4", features = ["derive"] }
+crypto_box = { version = "0.9", features = ["seal", "salsa20"] }
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+env_logger = "0.11"
+hex = "0.4"
+log = "0.4"
+minreq = { version = "2", features = ["https-rustls"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "1"
+toml = "0.8"
+base64 = "0.22"
+rand = "0.8"
+sha2 = "0.10"

@@ -1,0 +1,18 @@
+# Lazarus Prime — copy to Umbrel chmod 600. Do not commit live payout or cookie.
+listen = "0.0.0.0:28915"
+stats-listen = "127.0.0.1:28916"
+advertise-address = "stratum.awokenlazarus.xyz:28915"
+data-dir = "/home/umbrel/blake2b/lazarus-prime"
+motd = "Lazarus"
+min-diff = 1
+payout-address = "<your address>"
+coinbase-tag = "Lazarus"
+prime-id = 1
+window = 8
+min-payout = 546
+fee-bps = 0
+activation-height = 961640
+headline = "Lazarus"
+rpc = "http://127.0.0.1:9332"
+rpc-cookie = "/home/umbrel/umbrel/app-data/bitcoin-knots/data/bitcoin/.cookie"
+poll = 0.5

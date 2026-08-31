@@ -18,11 +18,11 @@
   },
   "mining": {
     "pool_address": "<redacted>",
-    "coinbase_tag_primary": "Lazarus / 8-30 NYPost Deride And Conquer",
+    "coinbase_tag_primary": "Lazarus",
     "coinbase_tag_secondary": "Proverbs 11:1",
     "pow_algorithm": "auto",
     "allow_hasher_time_rolling": false,
-    "pool_fee_percent": 0.5
+    "pool_fee_percent": 0
   },
   "logger": {
     "log_to_console": true,

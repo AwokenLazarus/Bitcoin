@@ -9,3 +9,6 @@ miner.log
 *secrets*
 config.json
 datum-admin.env
+
+# Rust build
+lazarus/target/

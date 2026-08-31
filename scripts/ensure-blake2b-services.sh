@@ -6,14 +6,14 @@ fi
 if ! pgrep -f 'http.server 8765' >/dev/null; then
   nohup /home/umbrel/blake2b/bin/serve-pools.sh >> /home/umbrel/blake2b/pools-http.log 2>&1 &
 fi
-if ! pgrep -f '/home/umbrel/blake2b/prefix/bin/ratum-prime' >/dev/null; then
-  nohup /home/umbrel/blake2b/bin/start-ratum-prime.sh >> /home/umbrel/blake2b/logs/ratum-prime.log 2>&1 &
+if ! pgrep -f '/home/umbrel/blake2b/prefix/bin/lazarus-prime' >/dev/null; then
+  nohup /home/umbrel/blake2b/bin/start-lazarus-prime.sh >> /home/umbrel/blake2b/logs/lazarus-prime.log 2>&1 &
 fi
-if ! pgrep -f 'datum_gateway -c /home/umbrel/blake2b/etc/datum_gateway_config.json' >/dev/null; then
-  nohup /home/umbrel/blake2b/bin/datum-gateway.sh >> /home/umbrel/blake2b/logs/datum.console 2>&1 &
+if ! pgrep -f 'lazarus-gateway --config /home/umbrel/blake2b/etc/lazarus-asic.json' >/dev/null; then
+  nohup /home/umbrel/blake2b/bin/start-lazarus-gateway.sh /home/umbrel/blake2b/etc/lazarus-asic.json >> /home/umbrel/blake2b/logs/lazarus-asic.log 2>&1 &
 fi
-if ! pgrep -f 'datum_gateway -c /home/umbrel/blake2b/etc/datum_gateway_gpu.json' >/dev/null; then
-  nohup /home/umbrel/blake2b/bin/datum-gateway-gpu.sh >> /home/umbrel/blake2b/logs/datum-gpu.console 2>&1 &
+if ! pgrep -f 'lazarus-gateway --config /home/umbrel/blake2b/etc/lazarus-gpu.json' >/dev/null; then
+  nohup /home/umbrel/blake2b/bin/start-lazarus-gateway.sh /home/umbrel/blake2b/etc/lazarus-gpu.json >> /home/umbrel/blake2b/logs/lazarus-gpu.log 2>&1 &
 fi
 if ! pgrep -f '/home/umbrel/blake2b/lazarus-pool/server.py' >/dev/null; then
   nohup python3 /home/umbrel/blake2b/lazarus-pool/server.py >> /home/umbrel/blake2b/logs/pool-ui.log 2>&1 &

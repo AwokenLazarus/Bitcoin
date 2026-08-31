@@ -20,7 +20,7 @@ DB = ROOT / "pool.sqlite"
 STATIC = ROOT / "static"
 CONF = json.loads((ROOT / "config.json").read_text())
 
-POOL_FEE = float(CONF.get("pool_fee_percent", 0.5))
+POOL_FEE = float(CONF.get("pool_fee_percent", 0))
 STRATUM_HOST = CONF.get("stratum_host", "27.69.0.25")
 STRATUM_PORT = int(CONF.get("stratum_port", 23334))
 STRATUM_TCP_HOST = CONF.get("stratum_tcp_host", "127.0.0.1")
@@ -803,6 +803,54 @@ def credit_round_work(address, diff_acc):
         )
 
 
+
+def value_output_count(vouts):
+    n = 0
+    for v in vouts or []:
+        if float(v.get("value") or 0) > 0:
+            n += 1
+    return n
+
+
+def restore_unsplit_effort():
+    """If a Lazarus block paid only the pool address, put that round's work back."""
+    db(
+        "CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)",
+        write=True,
+    )
+    if db("SELECT value FROM meta WHERE key='unsplit_restored'", one=True):
+        return
+    fb = db("SELECT height, hash FROM found_blocks ORDER BY height DESC", one=True)
+    if not fb or not fb["hash"]:
+        return
+    blk = rpc("getblock", [fb["hash"], 2]) or {}
+    tx0 = (blk.get("tx") or [None])[0] or {}
+    if value_output_count(tx0.get("vout")) >= 2:
+        db("INSERT OR REPLACE INTO meta(key,value) VALUES('unsplit_restored',?)", ("skip",), write=True)
+        return
+    rnd = db("SELECT id FROM rounds WHERE height=?", (fb["height"],), one=True)
+    if not rnd:
+        return
+    rid = int(rnd["id"])
+    rows = db("SELECT address, work FROM round_payouts WHERE round_id=?", (rid,)) or []
+    ensure_open_round()
+    restored = 0
+    for r in rows:
+        addr, work = r["address"], float(r["work"] or 0)
+        if not addr or work <= 0:
+            continue
+        existing = db("SELECT work FROM round_work WHERE address=?", (addr,), one=True)
+        if existing:
+            db("UPDATE round_work SET work=work+? WHERE address=?", (work, addr), write=True)
+        else:
+            db("INSERT INTO round_work(address,work,last_diff_acc) VALUES(?,?,0)", (addr, work), write=True)
+        restored += 1
+    db("UPDATE rounds SET status='unsplit' WHERE id=?", (rid,), write=True)
+    db("UPDATE round_payouts SET status='carried' WHERE round_id=?", (rid,), write=True)
+    db("INSERT OR REPLACE INTO meta(key,value) VALUES('unsplit_restored',?)", (str(fb["height"]),), write=True)
+    print("restored_unsplit", fb["height"], "identities", restored, flush=True)
+
+
 def close_round_for_block(height, blockhash, reward, fee_btc, miner_btc):
     ensure_open_round()
     already = db("SELECT id FROM rounds WHERE height=?", (height,), one=True)
@@ -891,8 +939,11 @@ def scan_found_blocks():
             (height, h, blk.get("time"), reward, finder, fee_btc, miner_btc, text[:200]),
             write=True,
         )
-        if not existed:
+        split = value_output_count(vouts) >= 2
+        if not existed and split:
             close_round_for_block(height, h, reward, fee_btc, miner_btc)
+        elif not split:
+            print("unsplit_template", height, "keeping_round_work", flush=True)
     if last_ok >= start:
         db("INSERT OR REPLACE INTO meta(key,value) VALUES('scan_height',?)", (str(last_ok),), write=True)
 
@@ -908,6 +959,7 @@ def loop():
         except Exception as e:
             print("scrape", e, flush=True)
         try:
+            restore_unsplit_effort()
             scan_found_blocks()
             mature_rounds()
         except Exception as e:
@@ -1049,7 +1101,11 @@ def pool_payload():
         "luck_percent": luck,
         "subsidy_btc": SUBSIDY,
         "finder_payout_btc": SUBSIDY * (1 - POOL_FEE / 100.0),
-        "payout": f"Ocean-style coinbase: {100-POOL_FEE:g}% split by accepted work this round, paid in the found block; {POOL_FEE:g}% pool fee",
+        "payout": (
+            "Ocean-style coinbase: 100% split by accepted work this round, paid in the found block; no pool fee"
+            if POOL_FEE == 0
+            else f"Ocean-style coinbase: {100-POOL_FEE:g}% split by accepted work this round, paid in the found block; {POOL_FEE:g}% pool fee"
+        ),
         "payout_scheme": "PROP",
         "datum": {
             "pool_host": CONF.get("datum_prime_host", STRATUM_HOST),
