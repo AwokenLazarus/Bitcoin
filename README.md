@@ -17,6 +17,7 @@ This is the working tree from a homelab Umbrel node after the SHA-256d → BLAKE
 | `miner/` | OpenCL BLAKE2b GPU miner |
 | `patches/` | DATUM PROP / coinbaser wiring notes |
 | `docs/blake2b-mining-pool-playbook.md` | Operator playbook (no personal secrets) |
+| `vendor/ratum/` | DATUM Prime + gateway source (iohzrd/ratum 0.1.3, commit e828545) |
 
 
 ## Knots on Umbrel (live node)
@@ -37,7 +38,9 @@ cp config.example.json config.json
 python3 server.py
 ```
 
-Stratum for ASICs is DATUM Gateway (`scripts/datum-gateway.sh`) on port 23334. GPUs use a second gateway (`scripts/datum-gateway-gpu.sh`) on port 3333 (HTTP `:7153`). Remote operators who run their own gateway point it at DATUM Prime (`scripts/start-ratum-prime.sh`) on port 28915. The pool UI scrapes both gateways (`:7152` and `:7153`), Prime stats on localhost `:28916`, and Knots RPC via cookie.
+DATUM path (OCEAN model): the user runs Knots + a DATUM gateway and points the gateway at Prime on port 28915. Prime only tracks shares and sets the coinbase split; the user's node builds the template. Public stratum on 23334 / 3333 is optional and uses our gateways.
+
+The Prime we run is [`vendor/ratum`](vendor/ratum) (`ratum-prime` 0.1.3, same commit as the live binary). The pool UI scrapes both gateways (`:7152` and `:7153`), Prime stats on localhost `:28916`, and Knots RPC via cookie.
 
 ## Do not commit
 

@@ -36,9 +36,10 @@
   });
 
   const pathLabel = (via) => {
-    if (via === "gateway") return "DATUM gateway";
+    if (via === "prime") return "Prime window";
+    if (via === "gateway") return "Prime window";
     if (via === "gpu") return "GPU :3333";
-    if (via === "both") return "stratum + gateway";
+    if (via === "both") return "stratum + Prime";
     return "stratum";
   };
 
@@ -208,12 +209,12 @@
       .join("");
     const status = !m.online
       ? "offline"
-      : m.via === "gateway"
-        ? "online via DATUM gateway"
+      : m.via === "prime" || m.via === "gateway"
+        ? "in Prime window"
         : m.via === "gpu"
           ? "online on GPU :3333"
         : m.via === "both"
-          ? "online (stratum + gateway)"
+          ? "online (stratum + Prime)"
           : "online";
     $("miner").innerHTML = `
       <div class="panel miner-card">
@@ -234,7 +235,7 @@
         </dl>
         <div>
           <p class="kicker" style="margin-bottom:0.45rem">Workers</p>
-          <p class="note">Path is public stratum, GPU :3333, or your DATUM gateway. Accepted work stays with the address.</p>
+          <p class="note">Stratum / GPU is our public gateway. Prime window is share credit on Prime (not proof you are connected with your own gateway).</p>
           <div class="scroll"><table><thead><tr><th>Worker</th><th>Path</th><th>Hashrate</th><th>Session</th><th>Accepted</th><th>Window</th><th>Rejects</th><th>Last</th></tr></thead><tbody>${workers || '<tr><td colspan="8">Offline</td></tr>'}</tbody></table></div>
         </div>
         <div>

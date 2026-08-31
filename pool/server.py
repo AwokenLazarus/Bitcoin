@@ -409,9 +409,9 @@ def attach_share_fields(rec):
     rec["window_work"] = int(info.get("window_work") or 0)
     rec["window_percent"] = float(info.get("window_percent") or 0)
     rec["window_sats"] = int(info.get("window_sats") or 0)
-    rec["via"] = rec.get("via") or ("stratum" if rec.get("ua") != "DATUM gateway" else "gateway")
+    rec["via"] = rec.get("via") or ("prime" if rec.get("ua") in ("DATUM gateway", "Prime window") else "stratum")
     phr = float(info.get("hr_ghs") or 0)
-    if phr > 1e-6 and (rec.get("via") == "gateway" or rec.get("ua") == "DATUM gateway"):
+    if phr > 1e-6 and (rec.get("via") in ("gateway", "prime") or rec.get("ua") in ("DATUM gateway", "Prime window")):
         if not rec.get("hr_ghs") or float(rec.get("hr_ghs") or 0) < 1e-6:
             rec["hr_ghs"] = phr
         if info.get("last_share_s") is not None and not rec.get("last_share_s"):
@@ -432,8 +432,9 @@ def merge_prime_online(miners):
             m["window_percent"] = float(info.get("window_percent") or 0)
             m["window_sats"] = int(info.get("window_sats") or 0)
         if addr in by:
-            if m.get("ua") == "DATUM gateway":
-                m["via"] = "gateway"
+            if m.get("ua") in ("DATUM gateway", "Prime window") or m.get("via") in ("gateway", "prime"):
+                if m.get("via") not in ("stratum", "gpu"):
+                    m["via"] = "prime"
             elif m.get("via") == "gpu":
                 m["via"] = "gpu"
             elif (m.get("ua") or "").startswith("lazarus-web") or m.get("via") == "stratum":
@@ -445,9 +446,10 @@ def merge_prime_online(miners):
     for addr, info in by.items():
         if addr in have:
             continue
+        last_s = float(info.get("last_share_s") or 0)
         rec = {
             "address": addr,
-            "worker": "gateway",
+            "worker": "window",
             "user": addr,
             "host": "",
             "hr_ghs": float(info.get("hr_ghs") or 0),
@@ -458,16 +460,17 @@ def merge_prime_online(miners):
             "shares_lifetime": 0,
             "diff_rej": 0,
             "shares_rej": 0,
-            "last_share_s": float(info.get("last_share_s") or 0),
-            "ua": "DATUM gateway",
-            "online": True,
-            "via": "gateway",
+            "last_share_s": last_s,
+            "ua": "Prime window",
+            "online": bool(last_s and last_s < 180),
+            "via": "prime",
             "window_work": int(info.get("window_work") or 0),
             "window_percent": float(info.get("window_percent") or 0),
             "window_sats": int(info.get("window_sats") or 0),
         }
         attach_share_fields(rec)
-        extras.append(rec)
+        if rec.get("online"):
+            extras.append(rec)
     return miners + extras
 
 
@@ -1032,7 +1035,7 @@ def pool_payload():
         "shares_accepted": pool_share_totals()[0] or (state.get("shares_acc") or 0),
         "shares_session": state.get("shares_acc") or 0,
         "shares_rejected": pool_share_totals()[1] or (state.get("shares_rej") or 0),
-        "shares_note": "Accepted is cumulative for an address and does not drop if you reconnect or switch from public stratum to your own DATUM gateway. Session is only this public-stratum connection. The payout window is Prime work for that same address — that is what a found block pays.",
+        "shares_note": "Accepted stays with the address if you switch from public stratum to your own gateway. Session is public-stratum only. The payout window is Prime share credit — that is what a found block pays. Prime window in the miner list is credit, not a live gateway session.",
         "window_shares": (state.get("prime_meta") or {}).get("shares") or 0,
         "window_work": (state.get("prime_meta") or {}).get("work") or 0,
         "height": node.get("height"),
@@ -1093,25 +1096,25 @@ def miner_payload(address):
     ttf_s = (600.0 / share) if share else None
     known = bool(stored or recs)
     life_a, life_r, sess_stored = address_share_totals(address) if address else (0, 0, 0)
-    sess_live = sum(int(m.get("shares_session") or 0) for m in recs if (m.get("via") or "stratum") != "gateway") if recs else 0
+    sess_live = sum(int(m.get("shares_session") or 0) for m in recs if (m.get("via") or "stratum") not in ("gateway", "prime")) if recs else 0
     pinfo = prime_info_for(address) if address else {}
     if pinfo.get("window_percent"):
         round_share = float(pinfo["window_percent"]) / 100.0
     vias = {m.get("via") for m in recs if m.get("via")}
-    if ("stratum" in vias or "gpu" in vias) and "gateway" in vias:
+    if ("stratum" in vias or "gpu" in vias) and ("gateway" in vias or "prime" in vias):
         via = "both"
-    elif "gateway" in vias and "stratum" not in vias and "gpu" not in vias:
-        via = "gateway"
+    elif ("gateway" in vias or "prime" in vias) and "stratum" not in vias and "gpu" not in vias:
+        via = "prime"
     elif "gpu" in vias and "stratum" not in vias:
         via = "gpu"
     elif recs:
         via = "stratum" if "stratum" in vias else (next(iter(vias)) if vias else "stratum")
     elif pinfo.get("window_work"):
-        via = "gateway"
+        via = "prime"
         recs = [{
-            "address": address, "worker": "gateway", "hr_ghs": float(pinfo.get("hr_ghs") or 0), "shares_acc": life_a,
+            "address": address, "worker": "window", "hr_ghs": float(pinfo.get("hr_ghs") or 0), "shares_acc": life_a,
             "shares_session": 0, "shares_lifetime": life_a, "shares_rej": life_r,
-            "vdiff": 0, "last_share_s": float(pinfo.get("last_share_s") or 0), "ua": "DATUM gateway", "via": "gateway",
+            "vdiff": 0, "diff_acc": int(pinfo.get("window_work") or 0), "last_share_s": float(pinfo.get("last_share_s") or 0), "ua": "Prime window", "via": "prime",
             "window_work": pinfo.get("window_work") or 0, "window_percent": pinfo.get("window_percent") or 0,
         }]
     else:
@@ -1349,7 +1352,7 @@ class Handler(BaseHTTPRequestHandler):
                 info = prime_info_for(d.get("address") or "")
                 d["window_work"] = int(info.get("window_work") or 0)
                 d["window_percent"] = float(info.get("window_percent") or 0)
-                d["via"] = "gateway" if (d.get("address") in (state.get("prime") or {}) and not any(o.get("address")==d.get("address") and o.get("via") in ("stratum","gpu") for o in online)) else d.get("via")
+                d["via"] = "prime" if (d.get("address") in (state.get("prime") or {}) and not any(o.get("address")==d.get("address") and o.get("via") in ("stratum","gpu") for o in online)) else d.get("via")
                 seen_out.append(d)
             self.send_json({"online": online, "seen": seen_out})
             return

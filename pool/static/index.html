@@ -8,7 +8,7 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;1,400&family=Newsreader:ital,opsz,wght@0,6..72,500;1,6..72,400;1,6..72,500&display=swap">
-<link rel="stylesheet" href="/static/pool.css?v=layout1">
+<link rel="stylesheet" href="/static/pool.css?v=datum3">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' fill='%231c1914'/%3E%3Cpath d='M8 24V8h6.2c4.4 0 7.2 2.5 7.2 6.4 0 3.8-2.8 6.3-7.2 6.3H11v3.3H8zm3-6.1h2.8c2.4 0 3.8-1.3 3.8-3.5S16.2 11 13.8 11H11v6.9z' fill='%23d4b45a'/%3E%3C/svg%3E">
 </head>
 <body>
@@ -80,16 +80,16 @@
         <dt>Algo</dt><dd>BLAKE2b — Sia-style header, not SHA-256d</dd>
         <dt>Payout</dt><dd>99.5% by accepted work this round, in the coinbase; 0.5% fee</dd>
       </dl>
-      <p class="note callout">GPUs and PyBLOCK use <strong>:3333</strong> (starts at difficulty 1). ASICs stay on <strong>:23334</strong>. Same user and password. If :23334 assigned a difficulty you cannot meet, reconnect to :3333 — waiting will not help; accepted work on the address is kept.</p>
+      <p class="note callout">This is <strong>public stratum</strong> — our gateway, our templates. GPUs/PyBLOCK use <strong>:3333</strong>; ASICs use <strong>:23334</strong>. DATUM is different: run your own gateway and point it at Prime below. Do not point <code>datum_gateway</code> at these ports.</p>
     </section>
   </div>
 
   <section class="panel" id="datum">
     <div class="section-head">
-      <h2>DATUM gateway</h2>
-      <p>Your templates. Our coinbase split.</p>
+      <h2>DATUM (Prime)</h2>
+      <p>You build the block. We only split the coinbase.</p>
     </div>
-    <p class="copy">Point <strong>your</strong> <code>datum_gateway</code> here. Your Knots node builds the block; ASICs talk to your gateway; the gateway talks to Lazarus Prime. A block found by anyone on the pool pays the share window in that block’s coinbase, minus 0.5%.</p>
+    <p class="copy">OCEAN model: miner → <strong>your</strong> <code>datum_gateway</code> + Knots → Lazarus Prime. Prime tracks shares and sets payouts. It does not send a template. Point the gateway at this host/port — not at our stratum, not at another gateway. ASICs hash to <em>your</em> <code>:23334</code>. If you find the block, it is your txs plus our coinbase split.</p>
     <dl class="facts tight">
       <dt>Host</dt>
       <dd class="copyable"><span class="mono" id="datum-host">stratum.awokenlazarus.xyz</span><button type="button" class="copy-btn" data-copy-from="datum-host" aria-label="Copy DATUM host" title="Copy"></button></dd>
@@ -181,8 +181,8 @@
       <h2>How it works</h2>
     </div>
     <div class="panel compact">
-      <p class="copy">Your payout address is the record. Switching from public stratum to your own DATUM gateway, or from :23334 to :3333, does not wipe accepted work or the Prime payout window. The session number on public stratum can reset; that is not a lost share.</p>
-      <p class="copy">Remote operators point their DATUM gateway at Lazarus Prime and keep their own templates. ASICs use :23334. GPUs use :3333. A found block pays miners in the generation transaction. Coinbase tag is <code>Lazarus</code> plus the required headline.</p>
+      <p class="copy">DATUM path: miner → your gateway + your node → Prime (<code>stratum.awokenlazarus.xyz:28915</code>). Public stratum (:23334 / :3333) is optional and uses <em>our</em> templates. Switching paths does not wipe accepted work or the Prime window.</p>
+      <p class="copy">A found block pays the TIDES window in that block’s coinbase (99.5% / 0.5%). Coinbase tag is <code>Lazarus</code> plus the required headline.</p>
       <p class="links">
         <span class="copyable">Explorer: <a id="explorer-url" href="https://mempool.awokenlazarus.xyz/mining" target="_blank" rel="noreferrer">mempool.awokenlazarus.xyz</a><button type="button" class="copy-btn" data-copy="https://mempool.awokenlazarus.xyz" aria-label="Copy explorer URL" title="Copy"></button></span>
         <span class="copyable">Source: <a href="https://github.com/AwokenLazarus/Bitcoin" target="_blank" rel="noreferrer">github.com/AwokenLazarus/Bitcoin</a><button type="button" class="copy-btn" data-copy="https://github.com/AwokenLazarus/Bitcoin" aria-label="Copy GitHub URL" title="Copy"></button></span>
@@ -191,7 +191,7 @@
   </section>
 </main>
 
-<script src="/static/pool.js?v=layout1"></script>
+<script src="/static/pool.js?v=datum3"></script>
 <script src="/static/blake2b.js?v=copy2"></script>
 <script src="/static/miner.js?v=copy2"></script>
 </body>
