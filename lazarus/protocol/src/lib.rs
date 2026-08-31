@@ -1,7 +1,16 @@
-//! Lazarus DATUM protocol — original implementation from OCEAN `datum_gateway` C.
+//! Lazarus DATUM protocol — an original Rust implementation of the DATUM wire format.
 //!
-//! Wire format recovered from `datum_protocol.c` / `.h` (MIT, Bitcoin Ocean, LLC).
-//! This crate is not a rebrand of third-party Rust pool software.
+//! The protocol is OCEAN's. The wire format here is recovered from `datum_protocol.c` /
+//! `.h` (MIT, Bitcoin Ocean, LLC).
+//!
+//! The first Rust reading of that protocol for the BLAKE2b Knots chain — and the Prime this
+//! box originally ran — is Ratum by iohzrd, <https://github.com/iohzrd/ratum> (0.1.3,
+//! `e828545`). This tree grew out of a vendored copy of it, and these modules still follow
+//! the shape it established: `handshake`, `channel`, `nacl` and `header` against its
+//! `core/src/datum/` framing and handshake; `mining` against its message subtypes;
+//! `coinbaser` against its coinbaser v2 encoding; `pow` against its version 2 header,
+//! target and nonce handling. Written from the C protocol and this chain's consensus rules
+//! rather than copied, but the debt is real and worth naming.
 
 pub mod address;
 pub mod cbtx;

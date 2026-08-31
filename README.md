@@ -103,4 +103,41 @@ Cookie files, DATUM admin env, SMTP tokens, wallet addresses, or live `config.js
 
 ## Credits
 
-DATUM — the Prime/gateway split and the encrypted pool protocol — is [Bitcoin Ocean](https://github.com/OCEAN-xyz/datum_gateway) / Jason Hughes. The first Prime process on this box was [iohzrd/ratum](https://github.com/iohzrd/ratum). `lazarus/` is our own Prime, gateway, and protocol; we kept the model, not the name or the tree.
+### DATUM — Bitcoin Ocean / Jason Hughes
+
+The DATUM model this pool is built on — the Prime/gateway split, where the miner's own node
+builds the block template and the pool only tracks shares and dictates the coinbase — is
+[Bitcoin Ocean](https://github.com/OCEAN-xyz/datum_gateway)'s, by Jason Hughes. The wire
+format in [`lazarus/protocol`](lazarus/protocol) is recovered from OCEAN's
+`datum_protocol.c` / `.h` (MIT).
+
+### Ratum — iohzrd
+
+[**Ratum**](https://github.com/iohzrd/ratum) by [iohzrd](https://github.com/iohzrd) is the
+first Rust DATUM pool for the [Bitcoin Knots BLAKE2b hardfork
+chain](https://github.com/bitcoinknots/bitcoin/pull/359), and it is what made this pool
+possible on the timescale it happened. Ratum Prime was the Prime this node ran in
+production, vendored at `0.1.3` (`e828545`), before `lazarus/` existed. iohzrd also wrote
+the [DATUM Gateway fork](https://github.com/iohzrd/datum_gateway) that BLAKE2b miners
+actually point at us.
+
+This tree is a reimplementation, not a rebrand — but it grew directly out of that vendored
+copy, and git still records `lazarus/Cargo.lock` and `lazarus/prime/Cargo.toml` as renames
+of Ratum's files. Concretely, what we took:
+
+| Ours | Follows Ratum's |
+|------|-----------------|
+| `protocol/src/{handshake,channel,nacl,header}.rs` | `core/src/datum/{handshake,framing}.rs` — NaCl-sealed handshake, obfuscated frame headers |
+| `protocol/src/mining.rs` | `core/src/datum/messages.rs` — message subtypes and share encoding |
+| `protocol/src/coinbaser.rs` | coinbaser v2 encoding |
+| `protocol/src/pow.rs` | `core/src/{header,target,nonce}.rs` — the version 2 header, the two-pass BLAKE2b hash, target handling |
+| `prime/` — ledger, TIDES window, coinbaser | `prime/` — the shape of a Prime that keeps a share window and sets the split |
+| the `#[ignore]`d tests that grind a real share | Ratum's release-mode `--ignored` proof-of-work tests |
+
+Where we diverged: payouts split the coinbase across the whole TIDES window natively, the
+gateway publishes only split templates, and share verification is enforced pool-side
+(see [Share validation invariants](#share-validation-invariants)). The bugs documented
+there were ours, found in our own code.
+
+Ratum carries no license file. It is credited here as the work it is; if you intend to
+reuse it, ask iohzrd first.
