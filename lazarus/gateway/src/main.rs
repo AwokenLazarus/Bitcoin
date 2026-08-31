@@ -174,6 +174,10 @@ struct Shared {
     /// Submissions naming a job we no longer hold. Should stay near zero; a rising
     /// count means the history is too short or job ids are not unique.
     job_miss: AtomicU64,
+    /// Unix seconds when we last published a template. A gateway that cannot reach the
+    /// node still looks busy from the outside, because shares keep flowing against the
+    /// stale job, so the age is surfaced in the audit and warned about in the log.
+    last_pub_unix: AtomicU64,
 }
 
 /// Shares allowed to wait for Prime. Roughly a few seconds of a fast miner.
@@ -187,13 +191,29 @@ const JOB_HISTORY: usize = 96;
 /// Republishing every couple of seconds churned the job history faster than miners
 /// could answer it, and restarted their work for no gain.
 const JOB_REFRESH: Duration = Duration::from_secs(20);
+/// Template age that means something is wrong rather than merely quiet.
+const STALE_TEMPLATE_SECS: u64 = 90;
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
 fn cookie_auth(p: &PathBuf) -> Option<String> {
     let raw = std::fs::read_to_string(p).ok()?;
     Some(format!("Basic {}", base64::Engine::encode(&base64::engine::general_purpose::STANDARD, raw.trim().as_bytes())))
 }
+/// How long to wait on a node RPC before giving up and retrying.
+///
+/// Without this the call blocks forever if the node stops answering, which freezes the
+/// template loop: the gateway keeps serving the last job it built, miners keep hashing it,
+/// and every share is spent on a template the chain has already moved past. Observed in
+/// production with the height, coinbase value and transaction count all frozen while
+/// shares kept arriving. Failing fast and retrying is always better than hanging.
+const RPC_TIMEOUT_SECS: u64 = 10;
 fn rpc(url: &str, auth: &str, method: &str, params: Value) -> Option<Value> {
     let body = json!({"jsonrpc":"1.0","id":"g","method":method,"params":params});
-    let r = minreq::post(url).with_header("Authorization", auth).with_header("Content-Type", "application/json").with_body(body.to_string()).send().ok()?;
+    let r = minreq::post(url).with_timeout(RPC_TIMEOUT_SECS).with_header("Authorization", auth).with_header("Content-Type", "application/json").with_body(body.to_string()).send().ok()?;
     let v: Value = serde_json::from_str(r.as_str().ok()?).ok()?;
     v.get("result").cloned()
 }
@@ -677,6 +697,7 @@ fn audit_json(st: &Shared) -> String {
         "prime_queue": st.prime_depth.load(Ordering::Relaxed),
         "prime_dropped": st.prime_dropped.load(Ordering::Relaxed),
         "job_miss": st.job_miss.load(Ordering::Relaxed),
+        "template_age_s": unix_now().saturating_sub(st.last_pub_unix.load(Ordering::Relaxed)),
     }).to_string()
 }
 fn maybe_submit_block(st: &Shared, j: &Job, hdr: &HeaderV2) {
@@ -779,6 +800,7 @@ fn gbt_loop(st: Arc<Shared>) {
                             }
                             *st.job.lock().unwrap() = Some(j);
                             last_pub = Instant::now();
+                            st.last_pub_unix.store(unix_now(), Ordering::Relaxed);
                             broadcast(&st, &line, &jid_str);
                         }
                     } else {
@@ -786,6 +808,13 @@ fn gbt_loop(st: Arc<Shared>) {
                     }
                 }
             }
+        }
+        let age = unix_now().saturating_sub(st.last_pub_unix.load(Ordering::Relaxed));
+        if st.last_pub_unix.load(Ordering::Relaxed) > 0 && age > STALE_TEMPLATE_SECS {
+            log::warn!(
+                "template is {}s old; node rpc may be unreachable. miners are hashing a stale job",
+                age
+            );
         }
         let mut due = st.gbt_due.lock().unwrap();
         let (_g, _) = st.gbt_kick.wait_timeout(due, Duration::from_secs(2)).unwrap_or_else(|e| e.into_inner());
@@ -815,7 +844,7 @@ fn main() {
         job_seq: AtomicU64::new(0), pow_ok: AtomicU64::new(0), pow_bad: AtomicU64::new(0),
         verify: verify_mode(cfg.verify_shares.as_deref()),
         prime_depth: AtomicU64::new(0), prime_dropped: AtomicU64::new(0),
-        job_miss: AtomicU64::new(0),
+        job_miss: AtomicU64::new(0), last_pub_unix: AtomicU64::new(0),
     });
     { let s = st.clone(); thread::spawn(move || prime_loop(s, rx, urx)); }
     { let s = st.clone(); thread::spawn(move || api_loop(s)); }
