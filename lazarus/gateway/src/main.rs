@@ -172,9 +172,15 @@ struct Shared {
 
 /// Shares allowed to wait for Prime. Roughly a few seconds of a fast miner.
 const PRIME_QUEUE_CAP: u64 = 20_000;
-/// Jobs kept for submission lookup. Jobs publish about once a second and miners answer
-/// within a couple, so this is generous; each entry holds the block's transactions.
-const JOB_HISTORY: usize = 24;
+/// Jobs kept for submission lookup. A share naming a job we no longer hold cannot be
+/// rebuilt, so it has to be turned away; the history therefore has to outlive the
+/// slowest miner's round trip, across block boundaries. Each entry carries the block's
+/// transactions, so this is also the memory bound: roughly 300 KB apiece.
+const JOB_HISTORY: usize = 96;
+/// How stale a template may get before it is rebuilt to pick up new transactions.
+/// Republishing every couple of seconds churned the job history faster than miners
+/// could answer it, and restarted their work for no gain.
+const JOB_REFRESH: Duration = Duration::from_secs(20);
 fn cookie_auth(p: &PathBuf) -> Option<String> {
     let raw = std::fs::read_to_string(p).ok()?;
     Some(format!("Basic {}", base64::Engine::encode(&base64::engine::general_purpose::STANDARD, raw.trim().as_bytes())))
@@ -285,9 +291,12 @@ fn build_split_job(tpl: &Value, tag: &str, extra1: &[u8; 4], cb: CoinbaserV2, jo
     hdr.merkle_root = pow::merkle_root_sha256d(&cbleg, &merkle);
     hdr.extranonce = pow::header_extranonce(extra1);
     Some(Job {
-        // Must be unique: two jobs built in the same second would otherwise share an id
-        // and a submission could not be matched to the template it was mined against.
-        id: format!("{seq:08x}"), prev_notify: hex::encode(pow::prevblock_hidden(&prev)),
+        // Must be unique, including across restarts. Two jobs sharing an id cannot be
+        // told apart at submission time, and a counter alone restarts at zero: a miner
+        // still holding a pre-restart id would then be matched to an unrelated template.
+        // The high half is a per-process salt from extranonce1, the low half the counter.
+        id: format!("{:04x}{:04x}", u16::from_le_bytes([extra1[0], extra1[1]]), seq & 0xffff),
+        prev_notify: hex::encode(pow::prevblock_hidden(&prev)),
         ntime: hex::encode([0u8; 8]), nbits: bits, value, height,
         branches: pow::merkle_branches_for_coinbase(&merkle), coinb1: cbleg, job_id,
         txn_count: txs.len() as u32 + 1, outputs: cb.outputs.len(), tx_hexes, cb, witness_commit: wit,
@@ -448,7 +457,13 @@ fn handle_miner(mut sock: TcpStream, st: Arc<Shared>) {
                     hist.iter().rev().find(|j| j.id == want).cloned()
                 };
                 let Some(j) = job else {
-                    st.job_miss.fetch_add(1, Ordering::Relaxed);
+                    let n = st.job_miss.fetch_add(1, Ordering::Relaxed);
+                    if n < 30 || n % 200 == 0 {
+                        let hist = st.jobs.lock().unwrap();
+                        let oldest = hist.front().map(|q| q.id.as_str()).unwrap_or("-");
+                        let newest = hist.back().map(|q| q.id.as_str()).unwrap_or("-");
+                        log::warn!("stale job want={} held={} range={}..{}", want, hist.len(), oldest, newest);
+                    }
                     send_line(&mut sock, &json!({"id": mid, "result": false, "error": json!([21, "StaleJob", null])}));
                     continue;
                 };
@@ -691,12 +706,15 @@ fn gbt_loop(st: Arc<Shared>) {
     let Some(auth) = cookie_auth(&st.cfg.rpc_cookie) else { log::error!("missing rpc cookie"); return; };
     let tag = st.cfg.coinbase_tag.clone().unwrap_or_else(|| "Lazarus".into());
     let mut last_hash = String::new();
+    let mut last_pub = Instant::now()
+        .checked_sub(JOB_REFRESH)
+        .unwrap_or_else(Instant::now);
     loop {
         let hash = rpc(&st.cfg.rpc, &auth, "getbestblockhash", json!([])).and_then(|v| v.as_str().map(|s| s.to_string())).unwrap_or_default();
         let new_tip = !hash.is_empty() && hash != last_hash;
         if new_tip { last_hash = hash.clone(); }
         let kicked = { let mut d = st.gbt_due.lock().unwrap(); let v = *d; *d = false; v };
-        if new_tip || kicked || true {
+        if new_tip || kicked || last_pub.elapsed() >= JOB_REFRESH {
             if let Some(tpl) = rpc(&st.cfg.rpc, &auth, "getblocktemplate", json!([{"rules": ["segwit", "blake2b"]}])) {
                 let value = tpl.get("coinbasevalue").and_then(|x| x.as_u64()).unwrap_or(0);
                 let height = tpl.get("height").and_then(|x| x.as_u64()).unwrap_or(0);
@@ -717,11 +735,17 @@ fn gbt_loop(st: Arc<Shared>) {
                             {
                                 let mut hist = st.jobs.lock().unwrap();
                                 hist.push_back(j.clone());
+                                // Kept regardless of height. A share against a job from
+                                // the previous height is still work the miner did, and
+                                // dropping the job means we cannot rebuild it and have to
+                                // turn the share away. Only block submission cares about
+                                // height, and a stale block is refused by the node anyway.
                                 while hist.len() > JOB_HISTORY {
                                     hist.pop_front();
                                 }
                             }
                             *st.job.lock().unwrap() = Some(j);
+                            last_pub = Instant::now();
                             broadcast(&st, &line);
                         }
                     } else {
