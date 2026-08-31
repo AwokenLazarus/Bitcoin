@@ -4,7 +4,7 @@ mod rpc;
 
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
@@ -28,6 +28,7 @@ struct Shared {
     clients: AtomicUsize,
     coinbaser_id: Mutex<u8>,
     persist_every: AtomicUsize,
+    tip_gen: AtomicU64,
 }
 
 impl Shared {
@@ -47,7 +48,7 @@ fn read_exact(s: &mut TcpStream, n: usize) -> std::io::Result<Vec<u8>> {
 
 fn handle(mut sock: TcpStream, st: Arc<Shared>) {
     let _ = sock.set_nodelay(true);
-    let _ = sock.set_read_timeout(Some(Duration::from_secs(120)));
+    let _ = sock.set_read_timeout(Some(Duration::from_millis(800)));
     let peer = sock.peer_addr().ok();
     log::info!("gateway connected from {:?}", peer);
     st.clients.fetch_add(1, Ordering::Relaxed);
@@ -86,9 +87,20 @@ fn handle(mut sock: TcpStream, st: Arc<Shared>) {
         sock.write_all(&pkt).map_err(|e| e.to_string())?;
         log::info!("config sent to {:?}", peer);
 
+        let mut last_gen = st.tip_gen.load(Ordering::Relaxed);
         loop {
+            let gen = st.tip_gen.load(Ordering::Relaxed);
+            if gen != last_gen {
+                last_gen = gen;
+                let pkt = mining::wrap_mining(&mut ch, &mining::encode_blocknotify(), None);
+                if sock.write_all(&pkt).is_err() { break; }
+                log::info!("blocknotify sent to {:?}", peer);
+            }
             let raw = match read_exact(&mut sock, 4) {
                 Ok(b) => b,
+                Err(e) if e.kind() == std::io::ErrorKind::TimedOut || e.kind() == std::io::ErrorKind::WouldBlock => {
+                    continue;
+                }
                 Err(_) => break,
             };
             let peek = Header::decode_obfuscated(raw.clone().try_into().unwrap(), ch.recv_hdr);
@@ -296,6 +308,7 @@ fn rpc_loop(st: Arc<Shared>) {
             last_hash = t.hash.clone();
             *st.tip.lock().unwrap() = t;
             if new_block {
+                st.tip_gen.fetch_add(1, Ordering::Relaxed);
                 log::info!("new tip {}", last_hash);
                 if let Some(info) = rpc::coinbase_info(&st.cfg.rpc, &auth, &last_hash, &st.cfg.coinbase_tag) {
                     if info.is_ours && info.value_outputs >= 2 {
@@ -351,6 +364,7 @@ fn main() {
         clients: AtomicUsize::new(0),
         coinbaser_id: Mutex::new(1),
         persist_every: AtomicUsize::new(0),
+        tip_gen: AtomicU64::new(0),
     });
     {
         let s = st.clone();

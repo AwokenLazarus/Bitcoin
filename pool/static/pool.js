@@ -136,11 +136,45 @@
       "</tbody>";
   }
 
+  function measured(hist, key, bucketSec) {
+    const sums = new Map();
+    for (const item of hist || []) {
+      const ts = Number(item.ts);
+      const v = Number(item[key]);
+      if (!Number.isFinite(ts) || !Number.isFinite(v) || v <= 0) continue;
+      const b = Math.floor(ts / bucketSec) * bucketSec;
+      const rec = sums.get(b) || { sum: 0, n: 0 };
+      rec.sum += v;
+      rec.n += 1;
+      sums.set(b, rec);
+    }
+    return [...sums.keys()].sort((a, b) => a - b).map((ts) => {
+      const rec = sums.get(ts);
+      return { ts, [key]: rec.sum / rec.n };
+    });
+  }
+
+  function segments(series, maxGap) {
+    const out = [];
+    let cur = [];
+    for (const item of series) {
+      if (cur.length && item.ts - cur[cur.length - 1].ts > maxGap) {
+        if (cur.length) out.push(cur);
+        cur = [];
+      }
+      cur.push(item);
+    }
+    if (cur.length) out.push(cur);
+    return out;
+  }
+
   function draw(c, hist, key) {
+    if (!c) return;
+    try { c.dataset.last = JSON.stringify(hist || []); } catch (e) {}
     const ctx = c.getContext("2d");
     const dpr = Math.max(1, window.devicePixelRatio || 1);
     const cssW = c.clientWidth || c.width;
-    const cssH = c.clientHeight || 120;
+    const cssH = c.clientHeight || 148;
     if (c.width !== Math.round(cssW * dpr) || c.height !== Math.round(cssH * dpr)) {
       c.width = Math.round(cssW * dpr);
       c.height = Math.round(cssH * dpr);
@@ -148,13 +182,16 @@
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.clearRect(0, 0, cssW, cssH);
     if (!hist || hist.length < 2) return;
-    const xs = hist.map((h) => h.ts);
-    const ys = hist.map((h) => h[key] || 0);
+    const span = hist[hist.length - 1].ts - hist[0].ts;
+    const bucket = span > 12 * 3600 ? 120 : 60;
+    const series = measured(hist, key, bucket);
+    if (series.length < 2) return;
+    const ys = series.map((h) => h[key]);
     const minY = 0;
     const maxY = Math.max(...ys, 0.01);
-    const minX = xs[0];
-    const maxX = xs[xs.length - 1] || minX + 1;
-    const pad = { l: 6, r: 6, t: 22, b: 8 };
+    const minX = series[0].ts;
+    const maxX = series[series.length - 1].ts || minX + 1;
+    const pad = { l: 6, r: 52, t: 22, b: 18 };
     const w = cssW - pad.l - pad.r;
     const h = cssH - pad.t - pad.b;
     const pt = (item) => {
@@ -162,29 +199,69 @@
       const y = pad.t + h - ((item[key] || 0) - minY) / (maxY - minY) * h;
       return [x, y];
     };
-    ctx.beginPath();
-    hist.forEach((item, i) => {
-      const [x, y] = pt(item);
-      i ? ctx.lineTo(x, y) : ctx.moveTo(x, y);
-    });
-    const last = pt(hist[hist.length - 1]);
-    ctx.lineTo(last[0], pad.t + h);
-    ctx.lineTo(pad.l, pad.t + h);
-    ctx.closePath();
+    ctx.save();
+    ctx.strokeStyle = "rgba(212,180,90,0.16)";
+    ctx.lineWidth = 1;
+    ctx.setLineDash([2, 3]);
+    for (let i = 1; i <= 3; i++) {
+      const y = pad.t + (h * i) / 4;
+      ctx.beginPath();
+      ctx.moveTo(pad.l, y);
+      ctx.lineTo(pad.l + w, y);
+      ctx.stroke();
+    }
+    ctx.setLineDash([]);
+    ctx.restore();
     const fill = ctx.createLinearGradient(0, pad.t, 0, pad.t + h);
     fill.addColorStop(0, "rgba(212,180,90,0.28)");
     fill.addColorStop(1, "rgba(212,180,90,0)");
-    ctx.fillStyle = fill;
-    ctx.fill();
-    ctx.beginPath();
-    hist.forEach((item, i) => {
-      const [x, y] = pt(item);
-      i ? ctx.lineTo(x, y) : ctx.moveTo(x, y);
+    const segs = segments(series, bucket * 3);
+    segs.forEach((seg) => {
+      if (!seg.length) return;
+      if (seg.length === 1) {
+        const [x, y] = pt(seg[0]);
+        ctx.fillStyle = "#d4b45a";
+        ctx.beginPath();
+        ctx.arc(x, y, 2, 0, Math.PI * 2);
+        ctx.fill();
+        return;
+      }
+      ctx.beginPath();
+      seg.forEach((item, i) => {
+        const [x, y] = pt(item);
+        i ? ctx.lineTo(x, y) : ctx.moveTo(x, y);
+      });
+      const last = pt(seg[seg.length - 1]);
+      const first = pt(seg[0]);
+      ctx.lineTo(last[0], pad.t + h);
+      ctx.lineTo(first[0], pad.t + h);
+      ctx.closePath();
+      ctx.fillStyle = fill;
+      ctx.fill();
+      ctx.beginPath();
+      seg.forEach((item, i) => {
+        const [x, y] = pt(item);
+        i ? ctx.lineTo(x, y) : ctx.moveTo(x, y);
+      });
+      ctx.strokeStyle = "#d4b45a";
+      ctx.lineWidth = 1.75;
+      ctx.lineJoin = "round";
+      ctx.lineCap = "round";
+      ctx.stroke();
     });
-    ctx.strokeStyle = "#d4b45a";
-    ctx.lineWidth = 1.4;
-    ctx.lineJoin = "round";
-    ctx.stroke();
+    ctx.fillStyle = "#8a7d62";
+    ctx.font = "10px IBM Plex Mono, ui-monospace, monospace";
+    ctx.textAlign = "right";
+    ctx.textBaseline = "top";
+    ctx.fillText(fmtHr(maxY), cssW - 4, 6);
+    ctx.textAlign = "left";
+    ctx.textBaseline = "bottom";
+    const t0 = new Date(minX * 1000);
+    const t1 = new Date(maxX * 1000);
+    const fmtT = (d) => d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+    ctx.fillText(fmtT(t0), pad.l, cssH - 2);
+    ctx.textAlign = "right";
+    ctx.fillText(fmtT(t1), pad.l + w, cssH - 2);
   }
 
   async function showMiner(addr) {

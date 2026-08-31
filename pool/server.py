@@ -707,6 +707,23 @@ def _scrape_datum_clients(url, via, stratum_port):
     return miners
 
 
+
+def recent_best_hr(address, fallback=0, window_s=3 * 86400):
+    """Peak hashrate from recent samples only — never a lifetime max from a bad scrape."""
+    if not address:
+        return float(fallback or 0)
+    row = db(
+        "SELECT MAX(hr_ghs) AS hr FROM samples WHERE address=? AND ts > ? AND worker != 'gateway' AND hr_ghs < ?",
+        (address, int(time.time()) - window_s, 20000),
+        one=True,
+    )
+    sample = float(row["hr"]) if row and row["hr"] is not None else 0.0
+    cur = float(fallback or 0)
+    if cur >= 20000:
+        cur = 0.0
+    return max(sample, cur)
+
+
 def scrape():
     pool_hr = acc = rej = 0
     miners = []
@@ -730,16 +747,17 @@ def scrape():
             write=True,
         )
         prev = db("SELECT * FROM miners WHERE address=?", (rec["address"],), one=True)
+        best = recent_best_hr(rec["address"], rec["hr_ghs"])
         if prev:
             db(
-                "UPDATE miners SET last_ts=?, best_hr_ghs=MAX(best_hr_ghs,?), diff_acc=? WHERE address=?",
-                (ts, rec["hr_ghs"], rec["diff_acc"], rec["address"]),
+                "UPDATE miners SET last_ts=?, best_hr_ghs=?, diff_acc=? WHERE address=?",
+                (ts, best, rec["diff_acc"], rec["address"]),
                 write=True,
             )
         else:
             db(
                 "INSERT INTO miners(address,first_ts,last_ts,best_hr_ghs,shares_acc,shares_rej,diff_acc,shares_lifetime,shares_session,shares_rej_lifetime) VALUES(?,?,?,?,?,?,?,?,?,?)",
-                (rec["address"], ts, ts, rec["hr_ghs"], rec["shares_acc"], rec["shares_rej"], rec["diff_acc"], rec["shares_acc"], rec["shares_acc"], rec["shares_rej"]),
+                (rec["address"], ts, ts, best, rec["shares_acc"], rec["shares_rej"], rec["diff_acc"], rec["shares_acc"], rec["shares_acc"], rec["shares_rej"]),
                 write=True,
             )
         life, sess = credit_session_shares(rec["address"], rec["worker"], rec["shares_acc"], rec["shares_rej"])
@@ -750,29 +768,10 @@ def scrape():
     db("DELETE FROM pool_samples WHERE ts < ?", (ts - 7 * 86400,), write=True)
     prime_by, prime_meta = fetch_prime_window()
     persist_prime_miners(prime_by, ts)
-    stratum_addrs = {m.get("address") for m in miners}
-    gw_hr = 0.0
-    gw_n = 0
-    for addr, info in prime_by.items():
-        if addr in stratum_addrs:
-            continue
-        hr = float(info.get("hr_ghs") or 0)
-        gw_hr += hr
-        gw_n += 1
-        db(
-            "INSERT INTO samples(ts,address,worker,hr_ghs,vdiff,shares_acc,shares_rej,diff_acc,last_share_s) VALUES(?,?,?,?,?,?,?,?,?)",
-            (ts, addr, "gateway", hr, 0, 0, 0, int(info.get("window_work") or 0), float(info.get("last_share_s") or 0)),
-            write=True,
-        )
-        db(
-            "UPDATE miners SET last_ts=?, best_hr_ghs=MAX(best_hr_ghs,?) WHERE address=?",
-            (ts, hr, addr),
-            write=True,
-        )
-    live_hr = (sum(m["hr_ghs"] for m in miners) + gw_hr) or pool_hr
+    live_hr = sum(m["hr_ghs"] for m in miners) or pool_hr
     db(
         "INSERT OR REPLACE INTO pool_samples(ts,hr_ghs,miners,shares_acc,shares_rej) VALUES(?,?,?,?,?)",
-        (ts, live_hr, len(miners) + gw_n, acc, rej),
+        (ts, live_hr, len(miners), acc, rej),
         write=True,
     )
     return {"pool_hr_ghs": live_hr, "shares_acc": acc, "shares_rej": rej, "miners": miners, "ts": ts, "prime": prime_by, "prime_meta": prime_meta}
@@ -1193,7 +1192,7 @@ def miner_payload(address):
         "diff_acc": recs[0]["diff_acc"] if recs else (stored["diff_acc"] if stored else 0),
         "first_seen": stored["first_ts"] if stored else None,
         "last_seen": stored["last_ts"] if stored else None,
-        "best_hr_ghs": stored["best_hr_ghs"] if stored else hr,
+        "best_hr_ghs": recent_best_hr(address, hr),
         "pool_contribution": contrib,
         "est_btc_day": est,
         "est_btc_week": est * 7,

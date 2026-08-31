@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
@@ -12,7 +12,7 @@ use clap::Parser;
 use lazarus_protocol::coinbaser::{parse_coinbaser_v2, CoinbaserOutput, CoinbaserV2};
 use lazarus_protocol::handshake;
 use lazarus_protocol::keys::{generate_pool_keys, generate_session};
-use lazarus_protocol::mining::{self, CoinbaserRequest, PowSubmit};
+use lazarus_protocol::mining::{self, CoinbaserRequest, PowSubmit, SUB_BLOCKNOTIFY};
 use lazarus_protocol::pow::{self, HeaderV2};
 use lazarus_protocol::{identity_of, identity_script, Header};
 use serde::Deserialize;
@@ -38,6 +38,34 @@ struct GwCfg {
 struct Miner {
     host: String, user: String, ua: String, vdiff: u64,
     acc: u64, acc_n: u64, rej: u64, rej_n: u64, last: Instant,
+    /// (when, work) for a rolling hashrate window. Lifetime acc stays in `acc`.
+    recent: VecDeque<(Instant, u64)>,
+}
+const HR_WINDOW: Duration = Duration::from_secs(60);
+fn miner_hs(m: &Miner) -> f64 {
+    let now = Instant::now();
+    let cutoff = now.checked_sub(HR_WINDOW).unwrap_or(now);
+    let mut work = 0u64;
+    let mut first: Option<Instant> = None;
+    for (ts, w) in &m.recent {
+        if *ts >= cutoff {
+            if first.is_none() { first = Some(*ts); }
+            work = work.saturating_add(*w);
+        }
+    }
+    let dt = first.map(|t| now.duration_since(t).as_secs_f64()).unwrap_or(0.0).max(5.0);
+    (work as f64) * ((1u64 << 32) as f64) / dt
+}
+fn record_share(m: &mut Miner, work: u64) {
+    let now = Instant::now();
+    m.acc = m.acc.saturating_add(work);
+    m.acc_n += 1;
+    m.last = now;
+    m.recent.push_back((now, work));
+    let cutoff = now.checked_sub(HR_WINDOW).unwrap_or(now);
+    while m.recent.front().map(|(t, _)| *t < cutoff).unwrap_or(false) {
+        m.recent.pop_front();
+    }
 }
 
 #[derive(Clone)]
@@ -59,8 +87,14 @@ struct Shared {
     prime_tx: Mutex<Option<std::sync::mpsc::Sender<Vec<u8>>>>,
     last_cb: Mutex<Option<(u64, CoinbaserV2)>>,
     cb_cv: Condvar,
+    gbt_kick: Condvar,
+    gbt_due: Mutex<bool>,
+    prime_urgent: Mutex<Option<std::sync::mpsc::Sender<Vec<u8>>>>,
     miner_socks: Mutex<HashMap<u64, TcpStream>>,
     published_outputs: AtomicUsize,
+    published_height: AtomicU64,
+    last_share_hdr: Mutex<Option<HeaderV2>>,
+    last_share_job: Mutex<Option<String>>,
 }
 fn cookie_auth(p: &PathBuf) -> Option<String> {
     let raw = std::fs::read_to_string(p).ok()?;
@@ -152,11 +186,18 @@ fn broadcast(st: &Shared, line: &str) {
 fn send_prime(st: &Shared, body: Vec<u8>) {
     if let Some(tx) = st.prime_tx.lock().unwrap().as_ref() { let _ = tx.send(body); }
 }
+fn send_prime_urgent(st: &Shared, body: Vec<u8>) {
+    if let Some(tx) = st.prime_urgent.lock().unwrap().as_ref() { let _ = tx.send(body); }
+}
+fn kick_gbt(st: &Shared) {
+    *st.gbt_due.lock().unwrap() = true;
+    st.gbt_kick.notify_all();
+}
 fn wait_coinbaser(st: &Shared, value: u64, deadline: Instant) -> Option<CoinbaserV2> {
     let mut g = st.last_cb.lock().unwrap();
     loop {
         if let Some((v, cb)) = g.as_ref() {
-            if *v == value && cb.outputs.len() >= 2 { return Some(cb.clone()); }
+            if cb.outputs.len() >= 2 && *v == value { return Some(cb.clone()); }
         }
         let now = Instant::now();
         if now >= deadline { return None; }
@@ -164,6 +205,16 @@ fn wait_coinbaser(st: &Shared, value: u64, deadline: Instant) -> Option<Coinbase
         g = gg;
         if w.timed_out() { return None; }
     }
+}
+/// Prefer a fresh Prime split for this template value; otherwise scale the last good split.
+fn split_for_value(st: &Shared, value: u64, wait: Duration) -> Option<CoinbaserV2> {
+    if let Some(cb) = wait_coinbaser(st, value, Instant::now() + wait) {
+        return Some(cb);
+    }
+    let g = st.last_cb.lock().unwrap();
+    let (_, cb) = g.as_ref()?;
+    if cb.outputs.len() < 2 { return None; }
+    Some(cb.scale_to(value))
 }
 fn build_split_job(tpl: &Value, tag: &str, extra1: &[u8; 4], cb: CoinbaserV2) -> Option<Job> {
     let prev = hex_rev(tpl.get("previousblockhash")?.as_str()?)?;
@@ -232,18 +283,27 @@ fn connect_prime(cfg: &GwCfg) -> Option<(TcpStream, lazarus_protocol::ChannelKey
     }
     Some((sock, ch, sess))
 }
-fn prime_loop(st: Arc<Shared>, rx: mpsc::Receiver<Vec<u8>>) {
+fn prime_loop(st: Arc<Shared>, rx: mpsc::Receiver<Vec<u8>>, urgent: mpsc::Receiver<Vec<u8>>) {
     loop {
         let Some((mut sock, mut ch, _sess)) = connect_prime(&st.cfg) else {
             log::warn!("Prime connect failed; retry"); thread::sleep(Duration::from_secs(2)); continue;
         };
         let _ = sock.set_read_timeout(Some(Duration::from_millis(250)));
         loop {
-            match rx.recv_timeout(Duration::from_millis(50)) {
-                Ok(body) => { let pkt = mining::wrap_mining(&mut ch, &body, None); if sock.write_all(&pkt).is_err() { break; } }
+            let mut outgoing: Vec<Vec<u8>> = Vec::new();
+            while let Ok(body) = urgent.try_recv() { outgoing.push(body); }
+            match rx.recv_timeout(Duration::from_millis(20)) {
+                Ok(body) => outgoing.push(body),
                 Err(RecvTimeoutError::Disconnected) => return,
                 Err(RecvTimeoutError::Timeout) => {}
             }
+            while let Ok(body) = rx.try_recv() { outgoing.push(body); }
+            let mut dead = false;
+            for body in outgoing {
+                let pkt = mining::wrap_mining(&mut ch, &body, None);
+                if sock.write_all(&pkt).is_err() { dead = true; break; }
+            }
+            if dead { break; }
             let mut hdr = [0u8; 4];
             match sock.read_exact(&mut hdr) {
                 Ok(()) => {
@@ -261,6 +321,9 @@ fn prime_loop(st: Arc<Shared>, rx: mpsc::Receiver<Vec<u8>>) {
                                 st.cb_cv.notify_all();
                             }
                         }
+                    } else if plain.first() == Some(&SUB_BLOCKNOTIFY) {
+                        log::info!("Prime blocknotify");
+                        kick_gbt(&st);
                     }
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::TimedOut || e.kind() == std::io::ErrorKind::WouldBlock => {}
@@ -284,7 +347,7 @@ fn handle_miner(mut sock: TcpStream, st: Arc<Shared>) {
     let rdr = BufReader::new(rdr_sock);
     let mut user = String::new(); let mut ua = String::new();
     let vmin = st.cfg.vardiff_min.max(1);
-    st.miners.lock().unwrap().insert(id, Miner { host, user: String::new(), ua: String::new(), vdiff: vmin, acc: 0, acc_n: 0, rej: 0, rej_n: 0, last: Instant::now() });
+    st.miners.lock().unwrap().insert(id, Miner { host, user: String::new(), ua: String::new(), vdiff: vmin, acc: 0, acc_n: 0, rej: 0, rej_n: 0, last: Instant::now(), recent: VecDeque::new() });
     for line in rdr.lines() {
         let Ok(line) = line else { break };
         let Ok(msg) = serde_json::from_str::<Value>(&line) else { continue };
@@ -327,10 +390,12 @@ fn handle_miner(mut sock: TcpStream, st: Arc<Shared>) {
                 hdr.extranonce[4..12].copy_from_slice(&p);
                 let pot = vmin.max(1).ilog2() as u8;
                 let hash = hdr.pow_hash_le();
+                *st.last_share_hdr.lock().unwrap() = Some(hdr.clone());
+                *st.last_share_job.lock().unwrap() = Some(j.id.clone());
                 // Accept on a published split job. Local header reconstruct is used only
                 // to attempt submitblock when it meets nBits; intminer share format is Sia-style.
                 st.acc.fetch_add(1, Ordering::Relaxed);
-                if let Some(m) = st.miners.lock().unwrap().get_mut(&id) { m.acc += vmin; m.acc_n += 1; m.last = Instant::now(); }
+                if let Some(m) = st.miners.lock().unwrap().get_mut(&id) { record_share(m, vmin); }
                 let mut en = Vec::from(st.extra1); en.extend_from_slice(&en2); en.resize(12, 0);
                 let submit = PowSubmit {
                     job_id: 0, coinbase_id: j.cb.id, is_block: false, subsidy_only: false, quickdiff: false,
@@ -363,14 +428,56 @@ fn handle_miner(mut sock: TcpStream, st: Arc<Shared>) {
     st.miners.lock().unwrap().remove(&id);
     st.miner_socks.lock().unwrap().remove(&id);
 }
-fn maybe_submit_block(st: &Shared, j: &Job, hdr: &HeaderV2) {
-    let Some(auth) = cookie_auth(&st.cfg.rpc_cookie) else { return };
+fn assemble_block(st: &Shared, j: &Job, hdr: &HeaderV2) -> Vec<u8> {
     let mut extra = st.extra1.to_vec(); extra.extend_from_slice(&[0u8; 8]);
     let cbw = coinbase_witness(j.height, &j.tag, &extra, &j.cb, j.witness_commit.as_deref());
     let mut blk = header_v2_bytes(hdr).to_vec();
     blk.extend_from_slice(&compact(1 + j.tx_hexes.len() as u64));
     blk.extend_from_slice(&cbw);
     for tx in &j.tx_hexes { blk.extend_from_slice(tx); }
+    blk
+}
+fn audit_json(st: &Shared) -> String {
+    let job = st.job.lock().unwrap().clone();
+    let Some(j) = job else { return json!({"error":"no job"}).to_string(); };
+    let blk = assemble_block(st, &j, &j.header);
+    let outs: Vec<Value> = j.cb.outputs.iter().map(|o| json!({
+        "sats": o.sats,
+        "script": hex::encode(&o.script),
+    })).collect();
+    let share = {
+        let hid = st.last_share_job.lock().unwrap().clone();
+        let hdr = st.last_share_hdr.lock().unwrap().clone();
+        match (hid, hdr) {
+            (Some(id), Some(h)) if id == j.id => {
+                let sblk = assemble_block(st, &j, &h);
+                Some(json!({
+                    "job_id": id,
+                    "nonce": h.nonce,
+                    "nonce2": h.nonce2,
+                    "block_hex": hex::encode(&sblk),
+                    "block_bytes": sblk.len(),
+                }))
+            }
+            _ => None,
+        }
+    };
+    json!({
+        "height": j.height,
+        "value": j.value,
+        "output_sum": j.cb.outputs.iter().map(|o| o.sats).sum::<u64>(),
+        "outputs": j.outputs,
+        "tx_count": j.txn_count,
+        "block_bytes": blk.len(),
+        "witness_commit": j.witness_commit.as_ref().map(|w| hex::encode(w)),
+        "coinbase_outputs": outs,
+        "block_hex": hex::encode(&blk),
+        "share": share,
+    }).to_string()
+}
+fn maybe_submit_block(st: &Shared, j: &Job, hdr: &HeaderV2) {
+    let Some(auth) = cookie_auth(&st.cfg.rpc_cookie) else { return };
+    let blk = assemble_block(st, j, hdr);
     log::info!("submitblock height={} outputs={} bytes={}", j.height, j.outputs, blk.len());
     let body = json!({"jsonrpc":"1.0","id":"sb","method":"submitblock","params":[hex::encode(&blk)]});
     match minreq::post(&st.cfg.rpc).with_header("Authorization", &auth).with_header("Content-Type", "application/json").with_body(body.to_string()).send() {
@@ -398,51 +505,69 @@ fn api_loop(st: Arc<Shared>) {
         let mut buf = [0u8; 512]; let n = s.read(&mut buf).unwrap_or(0);
         let req = String::from_utf8_lossy(&buf[..n]);
         let path = req.split_whitespace().nth(1).unwrap_or("/");
-        let body = if path.starts_with("/clients") { clients_html(&st) } else { home_html(&st) };
-        let _ = write!(s, "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+        let (ctype, body) = if path.starts_with("/audit") {
+            ("application/json", audit_json(&st))
+        } else if path.starts_with("/clients") {
+            ("text/html", clients_html(&st))
+        } else {
+            ("text/html", home_html(&st))
+        };
+        let _ = write!(s, "HTTP/1.1 200 OK\r\nContent-Type: {ctype}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
     }
 }
 fn home_html(st: &Shared) -> String {
     let acc = st.acc.load(Ordering::Relaxed); let rej = st.rej.load(Ordering::Relaxed);
-    let outs = st.published_outputs.load(Ordering::Relaxed);
-    let hr: f64 = st.miners.lock().unwrap().values().map(|m| {
-        let dt = m.last.elapsed().as_secs_f64().max(1.0);
-        (m.acc as f64) * (1u64 << 32) as f64 / dt.max(30.0)
-    }).sum();
-    format!("<html><body>Estimated Hashrate: {}<br>Local Shares Accepted: {}<br>Local Shares Rejected: {}<br>Coinbase outputs: {}</body></html>", parse_hr_label(hr), acc, rej, outs)
+    let outs = st.published_outputs.load(Ordering::Relaxed); let ph = st.published_height.load(Ordering::Relaxed);
+    let hr: f64 = st.miners.lock().unwrap().values().map(miner_hs).sum();
+    format!("<html><body>Estimated Hashrate: {}<br>Local Shares Accepted: {}<br>Local Shares Rejected: {}<br>Coinbase outputs: {}<br>Published height: {}</body></html>", parse_hr_label(hr), acc, rej, outs, ph)
 }
 fn clients_html(st: &Shared) -> String {
     let mut rows = String::from("<TABLE><TR><TD>#</TD><TD>Host</TD><TD>Auth Username</TD><TD></TD><TD>Last</TD><TD>VDiff</TD><TD>A</TD><TD>R</TD><TD>HR</TD><TD></TD><TD>UA</TD></TR>");
     for (i, m) in st.miners.lock().unwrap().values().enumerate() {
         rows.push_str(&format!("<TR><TD>{}</TD><TD>{}</TD><TD>{}</TD><TD></TD><TD>{:.1} s</TD><TD>{}</TD><TD>{} ({})</TD><TD>{} ({})</TD><TD>{}</TD><TD></TD><TD>{}</TD></TR>",
             i, html_esc(&m.host), html_esc(&m.user), m.last.elapsed().as_secs_f64(), m.vdiff, m.acc, m.acc_n, m.rej, m.rej_n,
-            parse_hr_label((m.acc as f64) * (1u64 << 32) as f64 / 30.0), html_esc(&m.ua)));
+            parse_hr_label(miner_hs(m)), html_esc(&m.ua)));
     }
     rows.push_str("</TABLE>"); format!("<html><body>{rows}</body></html>")
 }
 fn gbt_loop(st: Arc<Shared>) {
     let Some(auth) = cookie_auth(&st.cfg.rpc_cookie) else { log::error!("missing rpc cookie"); return; };
     let tag = st.cfg.coinbase_tag.clone().unwrap_or_else(|| "Lazarus".into());
+    let mut last_hash = String::new();
     loop {
-        if let Some(tpl) = rpc(&st.cfg.rpc, &auth, "getblocktemplate", json!([{"rules": ["segwit", "blake2b"]}])) {
-            let value = tpl.get("coinbasevalue").and_then(|x| x.as_u64()).unwrap_or(0);
-            let prev = hex_rev(tpl.get("previousblockhash").and_then(|x| x.as_str()).unwrap_or("")).unwrap_or([0u8; 32]);
-            if value > 0 {
-                send_prime(&st, CoinbaserRequest { value, prevhash: prev }.encode());
-                if let Some(cb) = wait_coinbaser(&st, value, Instant::now() + Duration::from_secs(3)) {
-                    if let Some(j) = build_split_job(&tpl, &tag, &st.extra1, cb) {
-                        log::info!("published job height={} txs~{} outputs={}", j.height, j.txn_count, j.outputs);
-                        st.published_outputs.store(j.outputs, Ordering::Relaxed);
-                        let line = notify_line(&j);
-                        *st.job.lock().unwrap() = Some(j);
-                        broadcast(&st, &line);
+        let hash = rpc(&st.cfg.rpc, &auth, "getbestblockhash", json!([])).and_then(|v| v.as_str().map(|s| s.to_string())).unwrap_or_default();
+        let new_tip = !hash.is_empty() && hash != last_hash;
+        if new_tip { last_hash = hash.clone(); }
+        let kicked = { let mut d = st.gbt_due.lock().unwrap(); let v = *d; *d = false; v };
+        if new_tip || kicked || true {
+            if let Some(tpl) = rpc(&st.cfg.rpc, &auth, "getblocktemplate", json!([{"rules": ["segwit", "blake2b"]}])) {
+                let value = tpl.get("coinbasevalue").and_then(|x| x.as_u64()).unwrap_or(0);
+                let height = tpl.get("height").and_then(|x| x.as_u64()).unwrap_or(0);
+                let prev = hex_rev(tpl.get("previousblockhash").and_then(|x| x.as_str()).unwrap_or("")).unwrap_or([0u8; 32]);
+                if value > 0 {
+                    send_prime_urgent(&st, CoinbaserRequest { value, prevhash: prev }.encode());
+                    let first = st.last_cb.lock().unwrap().is_none();
+                    let wait = if first || new_tip { Duration::from_millis(1500) } else { Duration::from_millis(250) };
+                    if let Some(cb) = split_for_value(&st, value, wait) {
+                        let scaled = cb.value_sum() != value;
+                        if let Some(j) = build_split_job(&tpl, &tag, &st.extra1, cb) {
+                            log::info!("published job height={} txs~{} outputs={} value={}{}", j.height, j.txn_count, j.outputs, value, if scaled { " (scaled)" } else { "" });
+                            st.published_outputs.store(j.outputs, Ordering::Relaxed);
+                            st.published_height.store(height, Ordering::Relaxed);
+                            let line = notify_line(&j);
+                            *st.job.lock().unwrap() = Some(j);
+                            broadcast(&st, &line);
+                        }
+                    } else {
+                        log::warn!("no split coinbaser for value={}; not publishing unsplit job", value);
                     }
-                } else {
-                    log::warn!("no split coinbaser for value={}; not publishing unsplit job", value);
                 }
             }
         }
-        thread::sleep(Duration::from_secs(8));
+        let mut due = st.gbt_due.lock().unwrap();
+        let (_g, _) = st.gbt_kick.wait_timeout(due, Duration::from_secs(2)).unwrap_or_else(|e| e.into_inner());
+        due = _g;
+        drop(due);
     }
 }
 fn main() {
@@ -453,13 +578,18 @@ fn main() {
     let extra1: [u8; 4] = rand::random();
     log::info!("lazarus-gateway profile={} stratum={} api={} vardiff_min={}", cfg.profile.as_deref().unwrap_or("asic"), cfg.stratum_listen, cfg.api_listen, cfg.vardiff_min);
     let (tx, rx) = mpsc::channel();
+    let (utx, urx) = mpsc::channel();
     let st = Arc::new(Shared {
         cfg: cfg.clone(), job: Mutex::new(None), miners: Mutex::new(HashMap::new()),
         next_id: AtomicU64::new(1), acc: AtomicU64::new(0), rej: AtomicU64::new(0), extra1,
         prime_tx: Mutex::new(Some(tx)), last_cb: Mutex::new(None), cb_cv: Condvar::new(),
+        gbt_kick: Condvar::new(), gbt_due: Mutex::new(true),
+        prime_urgent: Mutex::new(Some(utx)),
         miner_socks: Mutex::new(HashMap::new()), published_outputs: AtomicUsize::new(0),
+        published_height: AtomicU64::new(0),
+        last_share_hdr: Mutex::new(None), last_share_job: Mutex::new(None),
     });
-    { let s = st.clone(); thread::spawn(move || prime_loop(s, rx)); }
+    { let s = st.clone(); thread::spawn(move || prime_loop(s, rx, urx)); }
     { let s = st.clone(); thread::spawn(move || api_loop(s)); }
     { let s = st.clone(); thread::spawn(move || gbt_loop(s)); }
     let lis = TcpListener::bind(&st.cfg.stratum_listen).expect("stratum bind");

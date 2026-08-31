@@ -217,16 +217,39 @@ impl HeaderV2 {
     }
 }
 
-/// SHA256d merkle root from coinbase tx + branches (Bitcoin).
-pub fn merkle_root_sha256d(coinbase_tx: &[u8], branches: &[[u8; 32]]) -> [u8; 32] {
-    let mut h = sha256(&sha256(coinbase_tx));
-    for b in branches {
-        let mut cat = [0u8; 64];
-        cat[..32].copy_from_slice(&h);
-        cat[32..].copy_from_slice(b);
-        h = sha256(&sha256(&cat));
+/// SHA256d of a serialized tx (Bitcoin txid, internal byte order).
+pub fn sha256d(data: &[u8]) -> [u8; 32] {
+    sha256(&sha256(data))
+}
+
+/// Bitcoin merkle root over txids (internal order). Odd levels duplicate the last hash.
+pub fn merkle_root_from_txids(txids: &[[u8; 32]]) -> [u8; 32] {
+    if txids.is_empty() {
+        return [0u8; 32];
     }
-    h
+    let mut level: Vec<[u8; 32]> = txids.to_vec();
+    while level.len() > 1 {
+        if level.len() % 2 == 1 {
+            level.push(*level.last().unwrap());
+        }
+        let mut next = Vec::with_capacity(level.len() / 2);
+        for pair in level.chunks(2) {
+            let mut cat = [0u8; 64];
+            cat[..32].copy_from_slice(&pair[0]);
+            cat[32..].copy_from_slice(&pair[1]);
+            next.push(sha256d(&cat));
+        }
+        level = next;
+    }
+    level[0]
+}
+
+/// SHA256d merkle root from coinbase serialization + other txids (internal order).
+pub fn merkle_root_sha256d(coinbase_tx: &[u8], txids: &[[u8; 32]]) -> [u8; 32] {
+    let mut ids = Vec::with_capacity(txids.len() + 1);
+    ids.push(sha256d(coinbase_tx));
+    ids.extend_from_slice(txids);
+    merkle_root_from_txids(&ids)
 }
 
 #[cfg(test)]
@@ -238,6 +261,30 @@ mod tests {
         assert!(t.iter().any(|&b| b != 0));
         let z = [0u8; 32];
         assert!(meets_target(&z, &t));
+    }
+    #[test]
+    fn merkle_one_tx_is_txid() {
+        let a = [1u8; 32];
+        assert_eq!(merkle_root_from_txids(&[a]), a);
+    }
+    #[test]
+    fn merkle_two_and_three() {
+        let a = [1u8; 32];
+        let b = [2u8; 32];
+        let c = [3u8; 32];
+        let mut ab = [0u8; 64];
+        ab[..32].copy_from_slice(&a);
+        ab[32..].copy_from_slice(&b);
+        let two = sha256d(&ab);
+        assert_eq!(merkle_root_from_txids(&[a, b]), two);
+        let mut cc = [0u8; 64];
+        cc[..32].copy_from_slice(&c);
+        cc[32..].copy_from_slice(&c);
+        let c2 = sha256d(&cc);
+        let mut top = [0u8; 64];
+        top[..32].copy_from_slice(&two);
+        top[32..].copy_from_slice(&c2);
+        assert_eq!(merkle_root_from_txids(&[a, b, c]), sha256d(&top));
     }
     #[test]
     fn regtest_bits_is_easy() {
