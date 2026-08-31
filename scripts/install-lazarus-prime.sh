@@ -32,6 +32,7 @@ headline = "Lazarus"
 rpc = "http://127.0.0.1:9332"
 rpc-cookie = "$COOKIE"
 poll = 0.5
+verify-shares = "${VERIFY:-log}"
 EOF
 chmod 600 "$CONF"
 echo "wrote $CONF (payout address omitted from this log)"

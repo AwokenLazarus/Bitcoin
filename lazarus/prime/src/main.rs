@@ -2,6 +2,7 @@ mod config;
 mod ledger;
 mod rpc;
 
+use std::collections::{HashMap, HashSet};
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -12,12 +13,47 @@ use std::time::Duration;
 use lazarus_protocol::handshake::{self, HELLO_XOR};
 use lazarus_protocol::header::Header;
 use lazarus_protocol::keys::{load_or_create_pool_keys, PoolKeys};
+use lazarus_protocol::coinbaser::CoinbaserV2;
 use lazarus_protocol::mining::{self, CoinbaserRequest, PowSubmit};
+use lazarus_protocol::verify::{self, ShareContext};
 use lazarus_protocol::{identity_of, identity_script};
 
 use crate::config::Config;
 use crate::ledger::Ledger;
 use crate::rpc::ChainTip;
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum VerifyMode {
+    Off,
+    Log,
+    Enforce,
+}
+
+fn verify_mode(s: &str) -> VerifyMode {
+    match s {
+        "off" => VerifyMode::Off,
+        "enforce" => VerifyMode::Enforce,
+        _ => VerifyMode::Log,
+    }
+}
+
+/// Identity of a submission: repeat keys are the same work claimed twice.
+fn share_key(s: &PowSubmit) -> [u8; 16] {
+    let mut d = Vec::with_capacity(64);
+    d.push(s.job_id);
+    d.push(s.coinbase_id);
+    d.extend_from_slice(&s.nonce.to_le_bytes());
+    d.extend_from_slice(&s.ntime.to_le_bytes());
+    d.extend_from_slice(&s.extranonce);
+    if let Some(b) = &s.blake2b {
+        d.extend_from_slice(&b.sia_nonce);
+        d.extend_from_slice(&b.sia_ntime);
+    }
+    let h = lazarus_protocol::pow::sha256d(&d);
+    let mut k = [0u8; 16];
+    k.copy_from_slice(&h[..16]);
+    k
+}
 
 struct Shared {
     cfg: Config,
@@ -27,13 +63,23 @@ struct Shared {
     tip: Mutex<ChainTip>,
     clients: AtomicUsize,
     coinbaser_id: Mutex<u8>,
-    persist_every: AtomicUsize,
     tip_gen: AtomicU64,
+    /// Splits we handed out, by coinbaser id, so a share's coinbase can be checked
+    /// against what we asked for. Ids wrap at 255, which bounds this map.
+    issued: Mutex<HashMap<u8, CoinbaserV2>>,
+    verify: VerifyMode,
+    verified: AtomicU64,
+    rejected: AtomicU64,
+    dupes: AtomicU64,
+    fail_counts: Mutex<HashMap<&'static str, u64>>,
 }
 
 impl Shared {
     fn ledger_path(&self) -> std::path::PathBuf {
         self.cfg.data_dir.join("ledger.json")
+    }
+    fn bump_fail(&self, name: &'static str) {
+        *self.fail_counts.lock().unwrap().entry(name).or_insert(0) += 1;
     }
     fn save_ledger(&self) {
         self.ledger.lock().unwrap().save(&self.ledger_path());
@@ -87,6 +133,9 @@ fn handle(mut sock: TcpStream, st: Arc<Shared>) {
         sock.write_all(&pkt).map_err(|e| e.to_string())?;
         log::info!("config sent to {:?}", peer);
 
+        let mut sess_jobs: HashMap<u8, mining::JobSection> = HashMap::new();
+        let mut sess_cbs: HashMap<u8, mining::CoinbaseSection> = HashMap::new();
+        let mut sess_seen: HashSet<[u8; 16]> = HashSet::new();
         let mut last_gen = st.tip_gen.load(Ordering::Relaxed);
         loop {
             let gen = st.tip_gen.load(Ordering::Relaxed);
@@ -127,18 +176,19 @@ fn handle(mut sock: TcpStream, st: Arc<Shared>) {
                         }
                         let cid = *id;
                         drop(id);
-                        let (blob, nout) = {
+                        let cb = {
                             let led = st.ledger.lock().unwrap();
-                            let cb = led.coinbaser(
+                            led.coinbaser(
                                 req.value,
                                 st.cfg.fee_bps,
                                 st.cfg.min_payout,
                                 &st.pool_script,
                                 cid,
-                            );
-                            let n = cb.outputs.len();
-                            (cb.encode(), n)
+                            )
                         };
+                        let nout = cb.outputs.len();
+                        let blob = cb.encode();
+                        st.issued.lock().unwrap().insert(cid, cb);
                         let body = mining::encode_coinbaser_resp(req.value, &blob);
                         let pkt = mining::wrap_mining(&mut ch, &body, None);
                         sock.write_all(&pkt).map_err(|e| e.to_string())?;
@@ -147,27 +197,108 @@ fn handle(mut sock: TcpStream, st: Arc<Shared>) {
                 }
                 mining::SUB_SHARE => {
                     let (ok, reason, nonce, pot, job) = match PowSubmit::decode(&plain) {
-                        None => (false, mining::REJECT_OTHER, 0, 0, 0),
-                        Some(s) => {
+                        None => {
+                            st.bump_fail("Undecodable");
+                            (false, mining::REJECT_OTHER, 0, 0, 0)
+                        }
+                        Some(mut s) => {
+                            // Gateways send the job and coinbase sections with every share.
+                            // Cache them per connection so a peer that sends them once, or
+                            // reuses a job across shares, still verifies.
+                            if let Some(j) = &s.job {
+                                sess_jobs.insert(s.job_id, j.clone());
+                            }
+                            if let Some(c) = &s.coinbase {
+                                sess_cbs.insert(c.coinbase_id, c.clone());
+                            }
+                            if s.job.is_none() {
+                                s.job = sess_jobs.get(&s.job_id).cloned();
+                            }
+                            if s.coinbase.is_none() {
+                                s.coinbase = sess_cbs.get(&s.coinbase_id).cloned();
+                            }
                             let ident = identity_of(&s.username);
                             if identity_script(&ident).is_none() {
-                                log::info!("share reject BadUsername");
+                                st.bump_fail("BadUsername");
                                 (false, mining::REJECT_BAD_USERNAME, s.nonce, s.target_byte, s.job_id)
                             } else {
-                                let work = s.difficulty().max(st.cfg.min_diff);
-                                {
-                                    let mut led = st.ledger.lock().unwrap();
-                                    led.credit(ident, work, s.nonce, s.job_id);
-                                    let tip = st.tip.lock().unwrap();
-                                    let target = (tip.difficulty.max(0.0) * st.cfg.window_multiple as f64) as u64;
-                                    led.trim(target.max(1));
-                                    let n = st.persist_every.fetch_add(1, Ordering::Relaxed) + 1;
-                                    if n % 25 == 0 {
-                                        led.save(&st.ledger_path());
+                                let key = share_key(&s);
+                                if !sess_seen.insert(key) {
+                                    st.dupes.fetch_add(1, Ordering::Relaxed);
+                                    (false, mining::REJECT_DUPLICATE, s.nonce, s.target_byte, s.job_id)
+                                } else {
+                                    if sess_seen.len() > 200_000 {
+                                        sess_seen.clear();
+                                    }
+                                    // Read the tip before touching the ledger: stats takes the
+                                    // same two locks in the opposite order.
+                                    let (tip_height, window_target) = {
+                                        let tip = st.tip.lock().unwrap();
+                                        (
+                                            tip.height,
+                                            (tip.difficulty.max(0.0) * st.cfg.window_multiple as f64) as u64,
+                                        )
+                                    };
+                                    let verdict = if st.verify == VerifyMode::Off {
+                                        None
+                                    } else {
+                                        let issued =
+                                            st.issued.lock().unwrap().get(&s.coinbase_id).cloned();
+                                        Some(verify::verify_share(
+                                            &s,
+                                            &ShareContext {
+                                                issued: issued.as_ref(),
+                                                tip_height,
+                                                now: Ledger::now(),
+                                                min_diff: st.cfg.min_diff,
+                                            },
+                                        ))
+                                    };
+                                    match &verdict {
+                                        Some(Ok(v)) => {
+                                            st.verified.fetch_add(1, Ordering::Relaxed);
+                                            if v.is_block_candidate {
+                                                log::warn!(
+                                                    "share meets the network target: height={} miner={}; a block should follow",
+                                                    v.height,
+                                                    ident
+                                                );
+                                            }
+                                        }
+                                        Some(Err(code)) => {
+                                            st.bump_fail(verify::reject_name(*code));
+                                            let n = st.rejected.fetch_add(1, Ordering::Relaxed);
+                                            if n < 20 || n % 500 == 0 {
+                                                log::warn!(
+                                                    "share failed verification: {} job={} cb={} pot={} miner={}",
+                                                    verify::reject_name(*code),
+                                                    s.job_id,
+                                                    s.coinbase_id,
+                                                    s.target_byte,
+                                                    ident
+                                                );
+                                            }
+                                        }
+                                        None => {}
+                                    }
+                                    let refused = match &verdict {
+                                        Some(Err(code)) if st.verify == VerifyMode::Enforce => Some(*code),
+                                        _ => None,
+                                    };
+                                    if let Some(code) = refused {
+                                        (false, code, s.nonce, s.target_byte, s.job_id)
+                                    } else {
+                                        let work = match &verdict {
+                                            Some(Ok(v)) => v.work,
+                                            _ => s.difficulty().max(st.cfg.min_diff),
+                                        };
+                                        let mut led = st.ledger.lock().unwrap();
+                                        led.credit(ident, work, key);
+                                        led.trim(window_target.max(1));
+                                        led.save_if_due(&st.ledger_path(), Duration::from_secs(30));
+                                        (true, 0, s.nonce, s.target_byte, s.job_id)
                                     }
                                 }
-                                log::info!("share accepted job={} pot={} nonce={:08x}", s.job_id, s.target_byte, s.nonce);
-                                (true, 0, s.nonce, s.target_byte, s.job_id)
                             }
                         }
                     };
@@ -217,51 +348,43 @@ fn stats_json(st: &Shared) -> String {
     let by = led.by_identity();
     let win = led.window_work();
     let target = (tip.difficulty.max(0.0) * st.cfg.window_multiple as f64) as u64;
-    let miners: Vec<serde_json::Value> = {
-        let blob = led.coinbaser(
-            6_2500_0000,
-            st.cfg.fee_bps,
-            st.cfg.min_payout,
-            &st.pool_script,
-            1,
-        );
-        let pay: std::collections::HashMap<String, u64> = {
-            // payout_sats shown from a nominal 6.25 BTC split so the UI has numbers;
-            // actual coinbaser uses the job's subsidy.
-            let _ = &blob;
-            std::collections::HashMap::new()
-        };
-        let _ = pay;
-        by.iter()
-            .map(|(ident, work)| {
-                let pct = if win == 0 { 0.0 } else { 100.0 * *work as f64 / win as f64 };
-                let payable = identity_script(ident).is_some();
-                serde_json::json!({
-                    "identity": ident,
-                    "work": work,
-                    "share_percent": pct,
-                    "payout_sats": 0,
-                    "payable": payable,
-                })
-            })
-            .collect()
-    };
-    // Fill payout_sats from a 6.25 BTC example split (UI only).
-    let split = led.coinbaser(
+    // payout_sats is a preview: what each identity would take from a nominal 6.25 BTC
+    // block at the current window. The live coinbaser uses the template's own subsidy.
+    let preview = led.coinbaser(
         625_000_000,
         st.cfg.fee_bps,
         st.cfg.min_payout,
         &st.pool_script,
         1,
     );
+    let mut preview_sats: HashMap<Vec<u8>, u64> = HashMap::new();
+    for o in &preview.outputs {
+        *preview_sats.entry(o.script.clone()).or_insert(0) += o.sats;
+    }
+    let miners: Vec<serde_json::Value> = by
+        .iter()
+        .map(|(ident, work)| {
+            let pct = if win == 0 { 0.0 } else { 100.0 * *work as f64 / win as f64 };
+            let script = identity_script(ident);
+            let payout = script
+                .as_ref()
+                .and_then(|s| preview_sats.get(s))
+                .copied()
+                .unwrap_or(0);
+            serde_json::json!({
+                "identity": ident,
+                "work": work,
+                "share_percent": pct,
+                "payout_sats": payout,
+                "payable": script.is_some(),
+            })
+        })
+        .collect();
     let shares = led.shares;
     let carry_n = led.carry_len();
-    let cb_outs = split.outputs.len();
+    let rows = led.credits_len();
+    let cb_outs = preview.outputs.len();
     drop(led);
-    let mut sats: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
-    // identities aren't on outputs; UI uses payout_sats from window miners — leave 0 if we can't map.
-    let _ = split;
-    let _ = sats;
 
     serde_json::json!({
         "pool": {
@@ -290,6 +413,14 @@ fn stats_json(st: &Shared) -> String {
             "miners": miners,
             "carry_identities": carry_n,
             "coinbaser_outputs": cb_outs,
+            "ledger_rows": rows,
+        },
+        "verify": {
+            "mode": format!("{:?}", st.verify),
+            "verified": st.verified.load(Ordering::Relaxed),
+            "failed": st.rejected.load(Ordering::Relaxed),
+            "duplicates": st.dupes.load(Ordering::Relaxed),
+            "reasons": st.fail_counts.lock().unwrap().clone(),
         },
         "clients": st.clients.load(Ordering::Relaxed),
     })
@@ -339,11 +470,12 @@ fn main() {
         std::process::exit(1);
     });
     log::info!(
-        "lazarus-prime listen={} advertise={} fee_bps={} tag={} pubkey={}…",
+        "lazarus-prime listen={} advertise={} fee_bps={} tag={} verify={} pubkey={}…",
         cfg.listen,
         cfg.advertise,
         cfg.fee_bps,
         cfg.coinbase_tag,
+        cfg.verify_shares,
         &keys.pubkey_hex()[..16]
     );
     let mut ledger = Ledger::load(&cfg.data_dir.join("ledger.json"));
@@ -363,8 +495,13 @@ fn main() {
         tip: Mutex::new(ChainTip::default()),
         clients: AtomicUsize::new(0),
         coinbaser_id: Mutex::new(1),
-        persist_every: AtomicUsize::new(0),
         tip_gen: AtomicU64::new(0),
+        issued: Mutex::new(HashMap::new()),
+        verify: verify_mode(&cfg.verify_shares),
+        verified: AtomicU64::new(0),
+        rejected: AtomicU64::new(0),
+        dupes: AtomicU64::new(0),
+        fail_counts: Mutex::new(HashMap::new()),
     });
     {
         let s = st.clone();

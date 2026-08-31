@@ -40,6 +40,8 @@ struct FileCfg {
     #[serde(rename = "rpc-cookie")]
     rpc_cookie: Option<String>,
     poll: Option<f64>,
+    #[serde(rename = "verify-shares")]
+    verify_shares: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -62,6 +64,9 @@ pub struct Config {
     pub rpc: String,
     pub rpc_cookie: PathBuf,
     pub poll_secs: f64,
+    /// off | log | enforce. `log` counts failures without refusing work, so a new
+    /// check can be measured against live miners before it starts rejecting them.
+    pub verify_shares: String,
 }
 
 impl Config {
@@ -95,6 +100,7 @@ impl Config {
                 "/home/umbrel/umbrel/app-data/bitcoin-knots/data/bitcoin/.cookie".into()
             })),
             poll_secs: f.poll.unwrap_or(0.5),
+            verify_shares: f.verify_shares.unwrap_or_else(|| "log".into()),
         }
     }
 

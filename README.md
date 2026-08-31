@@ -42,6 +42,65 @@ DATUM path (OCEAN model): the user runs Knots + a DATUM gateway and points the g
 
 The Prime we run is [`lazarus/prime`](lazarus/prime) (`lazarus-prime`). Public stratum is [`lazarus/gateway`](lazarus/gateway) (ASIC `:23334`, GPU/CPU `:3333`). Remote operators point their own `datum_gateway` at `stratum.awokenlazarus.xyz:28915`. The pool UI scrapes both gateways (`:7152` and `:7153`), Prime stats on localhost `:28916`, and Knots RPC via cookie. There is no pool fee; a found block pays the TIDES window 100% in the coinbase. Coinbase tag is `Lazarus`.
 
+## Share validation invariants
+
+Four rules decide whether a share we accept is real and whether a block we assemble is
+actually solved. Each one failed silently in production: the pool looked healthy, miners
+were paid, and every block we could have submitted would have been rejected. They are
+pinned by tests in [`lazarus/protocol/src/pow.rs`](lazarus/protocol/src/pow.rs) and
+[`lazarus/protocol/src/verify.rs`](lazarus/protocol/src/verify.rs).
+
+1. **Hashes and targets are big-endian.** `pow_hash` returns the blake2b digest with the
+   most significant byte first, which is the order a block id is printed in.
+   `bits_to_target` and `target_for_pot` produce targets in that same order, so
+   `meets_target` is a plain byte comparison. Mixing the two conventions compares the wrong
+   end of the number: difficulty checks then pass or fail at random, and a real solve is
+   never recognised. `mainnet_headers_hash_to_their_block_id` re-hashes real headers this
+   node accepted and requires our function to reproduce their block ids exactly.
+
+2. **`hash1` must equal the miner's merkle leaf.** A Sia-style miner builds its merkle-root
+   field by hashing the coinbase as a merkle *leaf*, prefixed with a `0x00` tag byte:
+   `blake2b(0x00 || coinb1 || extranonce1 || extranonce2)`. Our `coinb1` is
+   `000000 || h2 || 00000000`, so that preimage is
+   `4 zero bytes || h2 || 4 zero bytes || en1 || en2`. Consensus reads bytes 36..52 of the
+   same preimage as the header extranonce, so it is the 4-byte pad followed by the miner's
+   nonces — never `en1` at offset 0. `pow::header_extranonce` is the single place this
+   layout is expressed; every real mainnet block's header extranonce begins with four zero
+   bytes for the same reason.
+
+3. **The miner's 8-byte ntime is nonce space.** It lands in the 80-byte ASIC pass as
+   `time_offset || nonce3`. We publish it as zero, but a miner may roll it, and those bytes
+   are hashed. With `FLAG_USE_TIME_OFFSET` clear they do not affect the block timestamp, so
+   they must be reproduced verbatim rather than assumed zero.
+
+4. **Rebuild against the job the miner was given.** Templates republish about once a second,
+   so a submission has to be matched to its own job by the id it names. Reaching for the
+   current job instead rebuilds a stale share against the wrong template: it fails its own
+   target, and a genuine solve is assembled into a block nobody solved.
+
+The header extranonce is independent of the coinbase scriptSig — verified against real
+mainnet blocks — which is what lets each stratum session hold its own extranonce1 without
+rebuilding the coinbase.
+
+## Share accounting
+
+Difficulty is per session and a power of two. Every miner sitting at the pool floor is not
+free: one 1 TH/s rig at difficulty 1 submits over 200 shares a second, which swamps Prime
+and buys no extra accuracy. Vardiff aims for roughly one share per miner every few seconds.
+
+A share is credited for the work it *proves*, capped at the difficulty its session was
+assigned. A share already in flight when its target is raised is therefore paid for what it
+did instead of being discarded, and the rule cannot be gamed, because credit is proportional
+to the work shown either way. Only a share that fails difficulty 1 outright is rejected.
+
+Each session also gets its own extranonce1. Sharing one across the gateway makes identical
+rigs walk identical `(extranonce2, nonce)` pairs, so they submit the same shares and
+deduplication keeps whichever arrived first — quietly moving credit between miners.
+
 ## Do not commit
 
 Cookie files, DATUM admin env, SMTP tokens, wallet addresses, or live `config.json`.
+
+## Credits
+
+DATUM — the Prime/gateway split and the encrypted pool protocol — is [Bitcoin Ocean](https://github.com/OCEAN-xyz/datum_gateway) / Jason Hughes. The first Prime process on this box was [iohzrd/ratum](https://github.com/iohzrd/ratum). `lazarus/` is our own Prime, gateway, and protocol; we kept the model, not the name or the tree.

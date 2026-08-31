@@ -9,7 +9,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use clap::Parser;
-use lazarus_protocol::coinbaser::{parse_coinbaser_v2, CoinbaserOutput, CoinbaserV2};
+use lazarus_protocol::cbtx;
+use lazarus_protocol::coinbaser::{parse_coinbaser_v2, CoinbaserV2};
 use lazarus_protocol::handshake;
 use lazarus_protocol::keys::{generate_pool_keys, generate_session};
 use lazarus_protocol::mining::{self, CoinbaserRequest, PowSubmit, SUB_BLOCKNOTIFY};
@@ -33,15 +34,63 @@ struct GwCfg {
     prime_port: u16,
     pool_pubkey: String,
     coinbase_tag: Option<String>,
+    /// off | log | enforce: whether a share that misses its vardiff target is rejected
+    /// or only counted.
+    verify_shares: Option<String>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum VerifyMode {
+    Off,
+    Log,
+    Enforce,
+}
+
+fn verify_mode(s: Option<&str>) -> VerifyMode {
+    match s.unwrap_or("log") {
+        "off" => VerifyMode::Off,
+        "enforce" => VerifyMode::Enforce,
+        _ => VerifyMode::Log,
+    }
 }
 
 struct Miner {
     host: String, user: String, ua: String, vdiff: u64,
     acc: u64, acc_n: u64, rej: u64, rej_n: u64, last: Instant,
+    /// The difficulty in force before the last retarget, honoured for a grace window so
+    /// a share already in flight is not rejected for meeting the target it was given.
+    vdiff_prev: u64,
+    vdiff_prev_until: Instant,
+    last_retarget: Instant,
     /// (when, work) for a rolling hashrate window. Lifetime acc stays in `acc`.
     recent: VecDeque<(Instant, u64)>,
 }
 const HR_WINDOW: Duration = Duration::from_secs(60);
+/// Aim for roughly one share per miner every few seconds. Left at difficulty 1 a single
+/// 1 TH/s rig submits over 200 shares a second, which no pool can account for and which
+/// buys nothing: the same hashrate is measured just as well from far fewer shares.
+const VARDIFF_TARGET_SECS: f64 = 4.0;
+const VARDIFF_INTERVAL: Duration = Duration::from_secs(20);
+const VARDIFF_GRACE: Duration = Duration::from_secs(30);
+/// Difficulty is a power of two because a share target is issued as an exponent.
+/// The largest power-of-two difficulty this hash actually satisfies, capped at the one the
+/// miner was assigned. Returns None if the hash does not even clear difficulty 1.
+///
+/// Crediting achieved work instead of assigned work means a share already in flight when
+/// its target is raised gets paid for what it proved rather than discarded for missing a
+/// target it was never given. It cannot be gamed: credit is proportional to the work
+/// shown either way, so ignoring set_difficulty earns a miner nothing extra.
+fn achieved_pot(hash: &[u8; 32], cap: u8) -> Option<u8> {
+    (0..=cap).rev().find(|&p| pow::meets_target(hash, &pow::target_for_pot(p)))
+}
+fn vardiff_for(hs: f64, floor: u64) -> u64 {
+    if !hs.is_finite() || hs <= 0.0 {
+        return floor;
+    }
+    let ideal = hs * VARDIFF_TARGET_SECS / 4_294_967_296.0;
+    let pot = ideal.max(1.0).log2().round().clamp(0.0, 40.0) as u32;
+    (1u64 << pot).max(floor)
+}
 fn miner_hs(m: &Miner) -> f64 {
     let now = Instant::now();
     let cutoff = now.checked_sub(HR_WINDOW).unwrap_or(now);
@@ -71,7 +120,12 @@ fn record_share(m: &mut Miner, work: u64) {
 #[derive(Clone)]
 struct Job {
     id: String, header: HeaderV2, prev_notify: String, ntime: String,
-    nbits: [u8; 4], value: u64, height: u32, merkle: Vec<[u8; 32]>,
+    nbits: [u8; 4], value: u64, height: u32,
+    /// Sibling path for the coinbase, so Prime can recheck the merkle root.
+    branches: Vec<[u8; 32]>,
+    /// Legacy coinbase bytes, sent with every share so Prime can audit the split.
+    coinb1: Vec<u8>,
+    job_id: u8,
     txn_count: u32, outputs: usize, tx_hexes: Vec<Vec<u8>>,
     cb: CoinbaserV2, witness_commit: Option<Vec<u8>>, tag: String,
 }
@@ -79,6 +133,9 @@ struct Job {
 struct Shared {
     cfg: GwCfg,
     job: Mutex<Option<Job>>,
+    /// Recently published jobs, newest last. A miner submits against the job it was
+    /// handed, which is often no longer the current one.
+    jobs: Mutex<VecDeque<Job>>,
     miners: Mutex<HashMap<u64, Miner>>,
     next_id: AtomicU64,
     acc: AtomicU64,
@@ -95,7 +152,29 @@ struct Shared {
     published_height: AtomicU64,
     last_share_hdr: Mutex<Option<HeaderV2>>,
     last_share_job: Mutex<Option<String>>,
+    job_seq: AtomicU64,
+    /// Shares whose rebuilt header met the vardiff target, and those that did not.
+    pow_ok: AtomicU64,
+    pow_bad: AtomicU64,
+    /// Valid shares that landed under the difficulty in force, normally because their
+    /// target was raised while they were in flight. Credited for what they proved.
+    underdiff: AtomicU64,
+    verify: VerifyMode,
+    /// Shares queued for Prime but not yet written, and shares dropped because the
+    /// queue was full. Unbounded queueing here once grew to gigabytes of RSS when
+    /// Prime could not keep up.
+    prime_depth: AtomicU64,
+    prime_dropped: AtomicU64,
+    /// Submissions naming a job we no longer hold. Should stay near zero; a rising
+    /// count means the history is too short or job ids are not unique.
+    job_miss: AtomicU64,
 }
+
+/// Shares allowed to wait for Prime. Roughly a few seconds of a fast miner.
+const PRIME_QUEUE_CAP: u64 = 20_000;
+/// Jobs kept for submission lookup. Jobs publish about once a second and miners answer
+/// within a couple, so this is generous; each entry holds the block's transactions.
+const JOB_HISTORY: usize = 24;
 fn cookie_auth(p: &PathBuf) -> Option<String> {
     let raw = std::fs::read_to_string(p).ok()?;
     Some(format!("Basic {}", base64::Engine::encode(&base64::engine::general_purpose::STANDARD, raw.trim().as_bytes())))
@@ -113,63 +192,7 @@ fn bits_le(h: &str) -> Option<[u8; 4]> {
     let v = hex::decode(h).ok()?; if v.len() != 4 { return None; }
     let mut a = [0u8; 4]; a.copy_from_slice(&v); a.reverse(); Some(a)
 }
-fn compact(n: u64) -> Vec<u8> {
-    if n < 0xfd { vec![n as u8] } else if n <= 0xffff {
-        let mut v = vec![0xfd]; v.extend_from_slice(&(n as u16).to_le_bytes()); v
-    } else {
-        let mut v = vec![0xfe]; v.extend_from_slice(&(n as u32).to_le_bytes()); v
-    }
-}
-fn scriptsig(height: u32, tag: &str, extra: &[u8]) -> Vec<u8> {
-    let mut s = Vec::new();
-    if height < 0x100 { s.push(1); s.push(height as u8); }
-    else if height < 0x10000 { s.push(2); s.extend_from_slice(&(height as u16).to_le_bytes()); }
-    else { s.push(3); s.extend_from_slice(&height.to_le_bytes()[..3]); }
-    s.push(tag.len() as u8); s.extend_from_slice(tag.as_bytes()); s.extend_from_slice(extra); s
-}
-fn push_outs(t: &mut Vec<u8>, cb: &CoinbaserV2, wit: Option<&[u8]>) {
-    let mut outs = cb.outputs.clone();
-    if let Some(w) = wit { outs.push(CoinbaserOutput { sats: 0, script: w.to_vec() }); }
-    t.extend_from_slice(&compact(outs.len() as u64));
-    for o in &outs {
-        t.extend_from_slice(&o.sats.to_le_bytes());
-        t.extend_from_slice(&compact(o.script.len() as u64));
-        t.extend_from_slice(&o.script);
-    }
-}
-fn coinbase_legacy(height: u32, tag: &str, extra: &[u8], cb: &CoinbaserV2, wit: Option<&[u8]>) -> Vec<u8> {
-    let ss = scriptsig(height, tag, extra);
-    let mut t = Vec::new();
-    t.extend_from_slice(&1u32.to_le_bytes()); t.push(1);
-    t.extend_from_slice(&[0u8; 32]); t.extend_from_slice(&0xffffffffu32.to_le_bytes());
-    t.extend_from_slice(&compact(ss.len() as u64)); t.extend_from_slice(&ss);
-    t.extend_from_slice(&0xffffffffu32.to_le_bytes());
-    push_outs(&mut t, cb, wit); t.extend_from_slice(&0u32.to_le_bytes()); t
-}
-fn coinbase_witness(height: u32, tag: &str, extra: &[u8], cb: &CoinbaserV2, wit: Option<&[u8]>) -> Vec<u8> {
-    let ss = scriptsig(height, tag, extra);
-    let mut t = Vec::new();
-    t.extend_from_slice(&1u32.to_le_bytes()); t.push(0); t.push(1); t.push(1);
-    t.extend_from_slice(&[0u8; 32]); t.extend_from_slice(&0xffffffffu32.to_le_bytes());
-    t.extend_from_slice(&compact(ss.len() as u64)); t.extend_from_slice(&ss);
-    t.extend_from_slice(&0xffffffffu32.to_le_bytes());
-    push_outs(&mut t, cb, wit);
-    // BIP141: witness comes before locktime
-    t.push(1); t.push(32); t.extend_from_slice(&[0u8; 32]);
-    t.extend_from_slice(&0u32.to_le_bytes()); t
-}
-fn header_v2_bytes(h: &HeaderV2) -> [u8; 164] {
-    let mut b = [0u8; 164];
-    b[0..4].copy_from_slice(&(h.version as u32 | pow::V2_FLAG).to_le_bytes());
-    b[4..36].copy_from_slice(&h.prev_block); b[36..68].copy_from_slice(&h.merkle_root);
-    b[68..72].copy_from_slice(&h.time_on_wire().to_le_bytes());
-    b[72..76].copy_from_slice(&h.bits.to_le_bytes()); b[76..80].copy_from_slice(&h.nonce.to_le_bytes());
-    b[80..84].copy_from_slice(&h.nonce2.to_le_bytes()); b[84..88].copy_from_slice(&h.nonce3.to_le_bytes());
-    b[88..104].copy_from_slice(&h.extranonce); b[104..108].copy_from_slice(&h.time_offset.to_le_bytes());
-    b[108..110].copy_from_slice(&h.txcount.to_le_bytes()); b[110] = h.flags; b[111] = h.xor_key_mask_clear_bits;
-    b[112..128].copy_from_slice(&h.xor_key); b[128..132].copy_from_slice(&h.height.to_le_bytes());
-    b[132..164].copy_from_slice(&h.mm_rhs); b
-}
+/// The 52-byte blake2b preimage (`hash1`) under a candidate field layout, then the ASIC
 fn notify_line(j: &Job) -> String {
     let h2 = &j.header.coinb1_sia()[3..35];
     format!("{}\n", json!({"id":null,"method":"mining.notify","params":[
@@ -184,7 +207,24 @@ fn broadcast(st: &Shared, line: &str) {
     for d in dead { socks.remove(&d); }
 }
 fn send_prime(st: &Shared, body: Vec<u8>) {
-    if let Some(tx) = st.prime_tx.lock().unwrap().as_ref() { let _ = tx.send(body); }
+    if st.prime_depth.load(Ordering::Relaxed) >= PRIME_QUEUE_CAP {
+        let n = st.prime_dropped.fetch_add(1, Ordering::Relaxed);
+        if n % 10_000 == 0 {
+            log::warn!("Prime queue full; dropped {} shares so far", n + 1);
+        }
+        return;
+    }
+    if let Some(tx) = st.prime_tx.lock().unwrap().as_ref() {
+        if tx.send(body).is_ok() {
+            st.prime_depth.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+}
+/// Depth is a gate on share delivery, so it must never wrap below zero.
+fn release_prime_slots(st: &Shared, n: u64) {
+    let _ = st.prime_depth.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
+        Some(v.saturating_sub(n))
+    });
 }
 fn send_prime_urgent(st: &Shared, body: Vec<u8>) {
     if let Some(tx) = st.prime_urgent.lock().unwrap().as_ref() { let _ = tx.send(body); }
@@ -216,7 +256,7 @@ fn split_for_value(st: &Shared, value: u64, wait: Duration) -> Option<CoinbaserV
     if cb.outputs.len() < 2 { return None; }
     Some(cb.scale_to(value))
 }
-fn build_split_job(tpl: &Value, tag: &str, extra1: &[u8; 4], cb: CoinbaserV2) -> Option<Job> {
+fn build_split_job(tpl: &Value, tag: &str, extra1: &[u8; 4], cb: CoinbaserV2, job_id: u8, seq: u64) -> Option<Job> {
     let prev = hex_rev(tpl.get("previousblockhash")?.as_str()?)?;
     let bits = bits_le(tpl.get("bits")?.as_str()?)?;
     let height = tpl.get("height")?.as_u64()? as u32;
@@ -237,16 +277,19 @@ fn build_split_job(tpl: &Value, tag: &str, extra1: &[u8; 4], cb: CoinbaserV2) ->
     }
     let wit = tpl.get("default_witness_commitment").and_then(|x| x.as_str()).and_then(|h| hex::decode(h).ok());
     let mut extra = extra1.to_vec(); extra.extend_from_slice(&[0u8; 8]);
-    let cbleg = coinbase_legacy(height, tag, &extra, &cb, wit.as_deref());
+    let cbleg = cbtx::coinbase_legacy(height, tag, &extra, &cb, wit.as_deref());
     let mut hdr = HeaderV2::default();
     hdr.version = version; hdr.prev_block = prev; hdr.time = curtime;
     hdr.bits = u32::from_le_bytes(bits); hdr.height = height as i32;
     hdr.txcount = (txs.len() + 1) as u16;
     hdr.merkle_root = pow::merkle_root_sha256d(&cbleg, &merkle);
-    hdr.extranonce[..4].copy_from_slice(extra1);
+    hdr.extranonce = pow::header_extranonce(extra1);
     Some(Job {
-        id: format!("{:08x}", curtime ^ height), prev_notify: hex::encode(pow::prevblock_hidden(&prev)),
-        ntime: hex::encode([0u8; 8]), nbits: bits, value, height, merkle,
+        // Must be unique: two jobs built in the same second would otherwise share an id
+        // and a submission could not be matched to the template it was mined against.
+        id: format!("{seq:08x}"), prev_notify: hex::encode(pow::prevblock_hidden(&prev)),
+        ntime: hex::encode([0u8; 8]), nbits: bits, value, height,
+        branches: pow::merkle_branches_for_coinbase(&merkle), coinb1: cbleg, job_id,
         txn_count: txs.len() as u32 + 1, outputs: cb.outputs.len(), tx_hexes, cb, witness_commit: wit,
         tag: tag.to_string(), header: hdr,
     })
@@ -289,20 +332,31 @@ fn prime_loop(st: Arc<Shared>, rx: mpsc::Receiver<Vec<u8>>, urgent: mpsc::Receiv
             log::warn!("Prime connect failed; retry"); thread::sleep(Duration::from_secs(2)); continue;
         };
         let _ = sock.set_read_timeout(Some(Duration::from_millis(250)));
+        // Without this a slow Prime back-pressures the socket and the gateway blocks in
+        // write_all forever, so the share queue fills and every new share is dropped.
+        // On timeout the framing is no longer trustworthy, so we drop the connection and
+        // reconnect with a fresh session rather than resume mid-frame.
+        let _ = sock.set_write_timeout(Some(Duration::from_secs(5)));
+        st.prime_depth.store(0, Ordering::Relaxed);
         loop {
-            let mut outgoing: Vec<Vec<u8>> = Vec::new();
-            while let Ok(body) = urgent.try_recv() { outgoing.push(body); }
+            // (body, counted): only the share queue holds slots
+            let mut outgoing: Vec<(Vec<u8>, bool)> = Vec::new();
+            while let Ok(body) = urgent.try_recv() { outgoing.push((body, false)); }
             match rx.recv_timeout(Duration::from_millis(20)) {
-                Ok(body) => outgoing.push(body),
+                Ok(body) => outgoing.push((body, true)),
                 Err(RecvTimeoutError::Disconnected) => return,
                 Err(RecvTimeoutError::Timeout) => {}
             }
-            while let Ok(body) = rx.try_recv() { outgoing.push(body); }
+            while let Ok(body) = rx.try_recv() { outgoing.push((body, true)); }
             let mut dead = false;
-            for body in outgoing {
+            let mut released = 0u64;
+            for (body, counted) in outgoing {
                 let pkt = mining::wrap_mining(&mut ch, &body, None);
-                if sock.write_all(&pkt).is_err() { dead = true; break; }
+                let sent = sock.write_all(&pkt).is_ok();
+                if counted { released += 1; }
+                if !sent { dead = true; break; }
             }
+            release_prime_slots(&st, released);
             if dead { break; }
             let mut hdr = [0u8; 4];
             match sock.read_exact(&mut hdr) {
@@ -342,12 +396,24 @@ fn parse_hr_label(hs: f64) -> String {
 }
 fn handle_miner(mut sock: TcpStream, st: Arc<Shared>) {
     let host = sock.peer_addr().map(|a| a.to_string()).unwrap_or_default();
+    let host_label = host.clone();
     let id = st.next_id.fetch_add(1, Ordering::Relaxed);
     let Some(rdr_sock) = sock.try_clone().ok() else { return };
     let rdr = BufReader::new(rdr_sock);
     let mut user = String::new(); let mut ua = String::new();
     let vmin = st.cfg.vardiff_min.max(1);
-    st.miners.lock().unwrap().insert(id, Miner { host, user: String::new(), ua: String::new(), vdiff: vmin, acc: 0, acc_n: 0, rej: 0, rej_n: 0, last: Instant::now(), recent: VecDeque::new() });
+    // Every session gets its own extranonce1. Sharing one across the gateway makes
+    // identical rigs walk identical (extranonce2, nonce) pairs, so they submit the same
+    // shares and the dedupe keeps only whichever arrived first, quietly moving credit
+    // from one miner to another.
+    let sess_en1 = (u32::from_le_bytes(st.extra1) ^ (id as u32)).to_le_bytes();
+    let now = Instant::now();
+    st.miners.lock().unwrap().insert(id, Miner { host, user: String::new(), ua: String::new(), vdiff: vmin, acc: 0, acc_n: 0, rej: 0, rej_n: 0, last: now, vdiff_prev: vmin, vdiff_prev_until: now,
+        // Let the first retarget happen within a few seconds. Everyone starts at the
+        // pool floor, so a gateway restart briefly puts the whole farm back on
+        // difficulty 1 until vardiff catches up.
+        last_retarget: now.checked_sub(VARDIFF_INTERVAL - Duration::from_secs(4)).unwrap_or(now),
+        recent: VecDeque::new() });
     for line in rdr.lines() {
         let Ok(line) = line else { break };
         let Ok(msg) = serde_json::from_str::<Value>(&line) else { continue };
@@ -357,8 +423,9 @@ fn handle_miner(mut sock: TcpStream, st: Arc<Shared>) {
             "mining.subscribe" => {
                 if let Some(u) = msg.get("params").and_then(|p| p.as_array()).and_then(|a| a.first()).and_then(|x| x.as_str()) { ua = u.to_string(); }
                 if let Ok(c) = sock.try_clone() { st.miner_socks.lock().unwrap().insert(id, c); }
-                send_line(&mut sock, &json!({"id": mid, "result": [[["mining.notify", "lz"]], hex::encode(st.extra1), 8], "error": null}));
-                send_line(&mut sock, &json!({"id": null, "method": "mining.set_difficulty", "params": [vmin]}));
+                send_line(&mut sock, &json!({"id": mid, "result": [[["mining.notify", "lz"]], hex::encode(sess_en1), 8], "error": null}));
+                let d0 = st.miners.lock().unwrap().get(&id).map(|m| m.vdiff).unwrap_or(vmin);
+                send_line(&mut sock, &json!({"id": null, "method": "mining.set_difficulty", "params": [d0]}));
                 if let Some(j) = st.job.lock().unwrap().as_ref() {
                     if j.outputs >= 2 { let _ = write!(sock, "{}", notify_line(j)); }
                 }
@@ -371,8 +438,20 @@ fn handle_miner(mut sock: TcpStream, st: Arc<Shared>) {
             }
             "mining.submit" => {
                 let params = msg.get("params").and_then(|p| p.as_array()).cloned().unwrap_or_default();
-                let job = st.job.lock().unwrap().clone();
-                let Some(j) = job else { send_line(&mut sock, &json!({"id": mid, "result": false, "error": json!([21, "NoJob", null])})); continue; };
+                // Rebuild against the job the miner actually hashed. Jobs republish about
+                // once a second, so reaching for the current job instead rebuilds a stale
+                // share against the wrong template: it fails its own target, and a real
+                // solve would be assembled into a block nobody solved.
+                let want = params.get(1).and_then(|x| x.as_str()).unwrap_or("").to_string();
+                let job = {
+                    let hist = st.jobs.lock().unwrap();
+                    hist.iter().rev().find(|j| j.id == want).cloned()
+                };
+                let Some(j) = job else {
+                    st.job_miss.fetch_add(1, Ordering::Relaxed);
+                    send_line(&mut sock, &json!({"id": mid, "result": false, "error": json!([21, "StaleJob", null])}));
+                    continue;
+                };
                 if j.outputs < 2 || params.len() < 5 {
                     send_line(&mut sock, &json!({"id": mid, "result": false, "error": json!([21, "UnsplitJob", null])})); continue;
                 }
@@ -385,36 +464,107 @@ fn handle_miner(mut sock: TcpStream, st: Arc<Shared>) {
                 let mut hdr = j.header.clone();
                 hdr.nonce = u32::from_le_bytes(sia_n[0..4].try_into().unwrap_or([0; 4]));
                 hdr.nonce2 = u32::from_le_bytes(sia_n.get(4..8).and_then(|s| s.try_into().ok()).unwrap_or([0; 4]));
-                hdr.extranonce[..4].copy_from_slice(&st.extra1);
-                let mut p = [0u8; 8]; for (i, b) in en2.iter().take(8).enumerate() { p[i] = *b; }
-                hdr.extranonce[4..12].copy_from_slice(&p);
-                let pot = vmin.max(1).ilog2() as u8;
-                let hash = hdr.pow_hash_le();
+                let mut en12 = Vec::from(sess_en1);
+                en12.extend(en2.iter().take(8).copied());
+                en12.resize(12, 0);
+                hdr.extranonce = pow::header_extranonce(&en12);
+                // The ASIC rolls an 8-byte ntime inside the 80-byte pass. We publish it as
+                // zero, but a miner is free to roll it, and those bytes are hashed.
+                hdr.time_offset = u32::from_le_bytes(sia_t[0..4].try_into().unwrap_or([0; 4]));
+                hdr.nonce3 = u32::from_le_bytes(sia_t[4..8].try_into().unwrap_or([0; 4]));
+                // Credit and check the share at the difficulty this miner was handed, not
+                // the pool floor. During the grace window after a raise, the easier of the
+                // two targets applies so nothing in flight is lost.
+                let accept_diff = {
+                    let g = st.miners.lock().unwrap();
+                    match g.get(&id) {
+                        Some(m) if Instant::now() < m.vdiff_prev_until => m.vdiff.min(m.vdiff_prev),
+                        Some(m) => m.vdiff,
+                        None => vmin,
+                    }
+                };
+                let assigned_pot = accept_diff.max(1).ilog2() as u8;
+                let hash = hdr.pow_hash();
                 *st.last_share_hdr.lock().unwrap() = Some(hdr.clone());
                 *st.last_share_job.lock().unwrap() = Some(j.id.clone());
-                // Accept on a published split job. Local header reconstruct is used only
-                // to attempt submitblock when it meets nBits; intminer share format is Sia-style.
+                // The rebuilt header is the one we would submit as a block, so a share that
+                // misses the difficulty we handed out means our assembly disagrees with the
+                // miner and a real solve would be thrown away. Measure it on every share.
+                let achieved = achieved_pot(&hash, assigned_pot);
+                let share_ok = achieved.is_some();
+                let pot = achieved.unwrap_or(0);
+                let credit = 1u64 << pot;
+                if share_ok {
+                    st.pow_ok.fetch_add(1, Ordering::Relaxed);
+                    if pot < assigned_pot {
+                        st.underdiff.fetch_add(1, Ordering::Relaxed);
+                    }
+                } else {
+                    let n = st.pow_bad.fetch_add(1, Ordering::Relaxed);
+                    if n < 20 || n % 500 == 0 {
+                        log::warn!(
+                            "share below difficulty 1 assigned_pot={} job={} nonce={:08x} nonce2={:08x} en2={} hash={:02x}{:02x}{:02x}{:02x}",
+                            assigned_pot, j.id, hdr.nonce, hdr.nonce2, hex::encode(&en2),
+                            hash[0], hash[1], hash[2], hash[3]
+                        );
+                    }
+                }
+                if !share_ok && st.verify == VerifyMode::Enforce {
+                    st.rej.fetch_add(1, Ordering::Relaxed);
+                    if let Some(m) = st.miners.lock().unwrap().get_mut(&id) {
+                        m.rej = m.rej.saturating_add(credit);
+                        m.rej_n += 1;
+                    }
+                    send_line(&mut sock, &json!({"id": mid, "result": false, "error": json!([23, "LowDifficultyShare", null])}));
+                    continue;
+                }
                 st.acc.fetch_add(1, Ordering::Relaxed);
-                if let Some(m) = st.miners.lock().unwrap().get_mut(&id) { record_share(m, vmin); }
-                let mut en = Vec::from(st.extra1); en.extend_from_slice(&en2); en.resize(12, 0);
+                let mut retarget = None;
+                if let Some(m) = st.miners.lock().unwrap().get_mut(&id) {
+                    record_share(m, credit);
+                    if m.last_retarget.elapsed() >= VARDIFF_INTERVAL {
+                        m.last_retarget = Instant::now();
+                        let want = vardiff_for(miner_hs(m), vmin);
+                        if want != m.vdiff {
+                            m.vdiff_prev = m.vdiff;
+                            m.vdiff_prev_until = Instant::now() + VARDIFF_GRACE;
+                            m.vdiff = want;
+                            retarget = Some(want);
+                        }
+                    }
+                }
+                if let Some(d) = retarget {
+                    log::info!("vardiff user={} host={} -> {}", user, host_label, d);
+                    send_line(&mut sock, &json!({"id": null, "method": "mining.set_difficulty", "params": [d]}));
+                    if let Some(j) = st.job.lock().unwrap().as_ref() {
+                        if j.outputs >= 2 {
+                            let _ = write!(sock, "{}", notify_line(j));
+                        }
+                    }
+                }
+                let en = en12.clone();
                 let submit = PowSubmit {
-                    job_id: 0, coinbase_id: j.cb.id, is_block: false, subsidy_only: false, quickdiff: false,
+                    job_id: j.job_id, coinbase_id: j.cb.id, is_block: false, subsidy_only: false, quickdiff: false,
                     target_byte: pot, ntime: j.header.time, nonce: hdr.nonce, version: j.header.version as u32,
                     extranonce: en, username: user.clone(), use_time_offset: false,
                     job: Some(mining::JobSection {
                         prev_hash: j.header.prev_block, target_byte_index: 0, nbits: j.nbits,
                         coinbaser_id: j.cb.id, height: j.height, coinbase_value: j.value,
                         txn_count: j.txn_count, txn_total_weight: 0, txn_total_size: 0, txn_total_sigops: 0,
-                        merkle_branches: j.merkle.iter().take(16).cloned().collect(),
+                        merkle_branches: j.branches.clone(),
                     }),
-                    coinbase: None,
+                    coinbase: Some(mining::CoinbaseSection {
+                        coinbase_id: j.cb.id,
+                        coinb1: j.coinb1.clone(),
+                        coinb2: Vec::new(),
+                    }),
                     blake2b: Some(mining::Blake2bSection { sia_ntime: sia_t, sia_nonce: sia_n, time_on_wire: j.header.time }),
                 };
                 send_prime(&st, submit.encode());
                 if let Some(tgt) = pow::bits_to_target(j.header.bits) {
                     let hit = pow::meets_target(&hash, &tgt);
                     if hit {
-                        log::info!("share meets nbits height={} hash_hi={:02x}{:02x}{:02x}{:02x}", j.height, hash[31], hash[30], hash[29], hash[28]);
+                        log::info!("share meets nbits height={} hash_hi={:02x}{:02x}{:02x}{:02x}", j.height, hash[0], hash[1], hash[2], hash[3]);
                         maybe_submit_block(&st, &j, &hdr);
                     }
                 } else {
@@ -430,9 +580,9 @@ fn handle_miner(mut sock: TcpStream, st: Arc<Shared>) {
 }
 fn assemble_block(st: &Shared, j: &Job, hdr: &HeaderV2) -> Vec<u8> {
     let mut extra = st.extra1.to_vec(); extra.extend_from_slice(&[0u8; 8]);
-    let cbw = coinbase_witness(j.height, &j.tag, &extra, &j.cb, j.witness_commit.as_deref());
-    let mut blk = header_v2_bytes(hdr).to_vec();
-    blk.extend_from_slice(&compact(1 + j.tx_hexes.len() as u64));
+    let cbw = cbtx::coinbase_witness(j.height, &j.tag, &extra, &j.cb, j.witness_commit.as_deref());
+    let mut blk = hdr.serialize().to_vec();
+    blk.extend_from_slice(&cbtx::compact(1 + j.tx_hexes.len() as u64));
     blk.extend_from_slice(&cbw);
     for tx in &j.tx_hexes { blk.extend_from_slice(tx); }
     blk
@@ -473,6 +623,13 @@ fn audit_json(st: &Shared) -> String {
         "coinbase_outputs": outs,
         "block_hex": hex::encode(&blk),
         "share": share,
+        "share_pow_ok": st.pow_ok.load(Ordering::Relaxed),
+        "share_pow_bad": st.pow_bad.load(Ordering::Relaxed),
+        "verify_mode": format!("{:?}", st.verify),
+        "prime_queue": st.prime_depth.load(Ordering::Relaxed),
+        "prime_dropped": st.prime_dropped.load(Ordering::Relaxed),
+        "job_miss": st.job_miss.load(Ordering::Relaxed),
+        "share_underdiff": st.underdiff.load(Ordering::Relaxed),
     }).to_string()
 }
 fn maybe_submit_block(st: &Shared, j: &Job, hdr: &HeaderV2) {
@@ -519,7 +676,7 @@ fn home_html(st: &Shared) -> String {
     let acc = st.acc.load(Ordering::Relaxed); let rej = st.rej.load(Ordering::Relaxed);
     let outs = st.published_outputs.load(Ordering::Relaxed); let ph = st.published_height.load(Ordering::Relaxed);
     let hr: f64 = st.miners.lock().unwrap().values().map(miner_hs).sum();
-    format!("<html><body>Estimated Hashrate: {}<br>Local Shares Accepted: {}<br>Local Shares Rejected: {}<br>Coinbase outputs: {}<br>Published height: {}</body></html>", parse_hr_label(hr), acc, rej, outs, ph)
+    format!("<html><body>Estimated Hashrate: {}<br>Local Shares Accepted: {}<br>Local Shares Rejected: {}<br>Coinbase outputs: {}<br>Published height: {}<br>Share PoW verified: {} / missed: {} (mode {:?})<br>Prime queue: {} (dropped {})</body></html>", parse_hr_label(hr), acc, rej, outs, ph, st.pow_ok.load(Ordering::Relaxed), st.pow_bad.load(Ordering::Relaxed), st.verify, st.prime_depth.load(Ordering::Relaxed), st.prime_dropped.load(Ordering::Relaxed))
 }
 fn clients_html(st: &Shared) -> String {
     let mut rows = String::from("<TABLE><TR><TD>#</TD><TD>Host</TD><TD>Auth Username</TD><TD></TD><TD>Last</TD><TD>VDiff</TD><TD>A</TD><TD>R</TD><TD>HR</TD><TD></TD><TD>UA</TD></TR>");
@@ -550,11 +707,20 @@ fn gbt_loop(st: Arc<Shared>) {
                     let wait = if first || new_tip { Duration::from_millis(1500) } else { Duration::from_millis(250) };
                     if let Some(cb) = split_for_value(&st, value, wait) {
                         let scaled = cb.value_sum() != value;
-                        if let Some(j) = build_split_job(&tpl, &tag, &st.extra1, cb) {
+                        let seq = st.job_seq.fetch_add(1, Ordering::Relaxed);
+                        let jid = (seq % 255) as u8 + 1;
+                        if let Some(j) = build_split_job(&tpl, &tag, &st.extra1, cb, jid, seq) {
                             log::info!("published job height={} txs~{} outputs={} value={}{}", j.height, j.txn_count, j.outputs, value, if scaled { " (scaled)" } else { "" });
                             st.published_outputs.store(j.outputs, Ordering::Relaxed);
                             st.published_height.store(height, Ordering::Relaxed);
                             let line = notify_line(&j);
+                            {
+                                let mut hist = st.jobs.lock().unwrap();
+                                hist.push_back(j.clone());
+                                while hist.len() > JOB_HISTORY {
+                                    hist.pop_front();
+                                }
+                            }
                             *st.job.lock().unwrap() = Some(j);
                             broadcast(&st, &line);
                         }
@@ -576,11 +742,12 @@ fn main() {
     let raw = std::fs::read_to_string(&cli.config).expect("config");
     let cfg: GwCfg = serde_json::from_str(&raw).expect("json config");
     let extra1: [u8; 4] = rand::random();
-    log::info!("lazarus-gateway profile={} stratum={} api={} vardiff_min={}", cfg.profile.as_deref().unwrap_or("asic"), cfg.stratum_listen, cfg.api_listen, cfg.vardiff_min);
+    log::info!("lazarus-gateway profile={} stratum={} api={} vardiff_min={} verify={:?}", cfg.profile.as_deref().unwrap_or("asic"), cfg.stratum_listen, cfg.api_listen, cfg.vardiff_min, verify_mode(cfg.verify_shares.as_deref()));
     let (tx, rx) = mpsc::channel();
     let (utx, urx) = mpsc::channel();
     let st = Arc::new(Shared {
-        cfg: cfg.clone(), job: Mutex::new(None), miners: Mutex::new(HashMap::new()),
+        cfg: cfg.clone(), job: Mutex::new(None), jobs: Mutex::new(VecDeque::new()),
+        miners: Mutex::new(HashMap::new()),
         next_id: AtomicU64::new(1), acc: AtomicU64::new(0), rej: AtomicU64::new(0), extra1,
         prime_tx: Mutex::new(Some(tx)), last_cb: Mutex::new(None), cb_cv: Condvar::new(),
         gbt_kick: Condvar::new(), gbt_due: Mutex::new(true),
@@ -588,6 +755,10 @@ fn main() {
         miner_socks: Mutex::new(HashMap::new()), published_outputs: AtomicUsize::new(0),
         published_height: AtomicU64::new(0),
         last_share_hdr: Mutex::new(None), last_share_job: Mutex::new(None),
+        job_seq: AtomicU64::new(0), pow_ok: AtomicU64::new(0), pow_bad: AtomicU64::new(0),
+        verify: verify_mode(cfg.verify_shares.as_deref()),
+        prime_depth: AtomicU64::new(0), prime_dropped: AtomicU64::new(0),
+        job_miss: AtomicU64::new(0), underdiff: AtomicU64::new(0),
     });
     { let s = st.clone(); thread::spawn(move || prime_loop(s, rx, urx)); }
     { let s = st.clone(); thread::spawn(move || api_loop(s)); }

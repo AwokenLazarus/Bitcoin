@@ -70,17 +70,12 @@ fn decode(b: &[u8]) -> Result<PoolKeys, KeyError> {
     Ok(k)
 }
 
-/// Load a 320-hex-char key file. If `path` is missing, try sibling `ratum-prime.key`
-/// (same 160-byte layout) so a Prime cutover keeps the advertised pool pubkey.
+/// Load a 320-hex-char key file, or create one at `path`.
 pub fn load_or_create_pool_keys(path: &Path) -> Result<PoolKeys, KeyError> {
     if path.exists() {
         return load_key_file(path);
     }
     if let Some(dir) = path.parent() {
-        let legacy = dir.join("ratum-prime.key");
-        if legacy.exists() {
-            return load_key_file(&legacy);
-        }
         fs::create_dir_all(dir)?;
     }
     let k = generate_pool_keys();

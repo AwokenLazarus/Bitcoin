@@ -16,3 +16,6 @@ headline = "Lazarus"
 rpc = "http://127.0.0.1:9332"
 rpc-cookie = "/home/umbrel/umbrel/app-data/bitcoin-knots/data/bitcoin/.cookie"
 poll = 0.5
+# off | log | enforce. Start on log after a protocol change: failures are counted
+# but work is still credited, so a new check can be measured before it rejects.
+verify-shares = "log"
