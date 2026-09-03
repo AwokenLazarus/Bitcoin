@@ -12,3 +12,4 @@ datum-admin.env
 
 # Rust build
 lazarus/target/
+prime/target/

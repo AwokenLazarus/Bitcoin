@@ -1,0 +1,29 @@
+[package]
+name = "primed"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Lazarus DATUM Prime daemon: accepts DATUM gateways, dictates the TIDES coinbase split, verifies BLAKE2b shares"
+
+[[bin]]
+name = "primed"
+path = "src/main.rs"
+
+[dependencies]
+datum-wire = { path = "../wire" }
+tides = { path = "../tides" }
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true
+clap.workspace = true
+log.workspace = true
+env_logger.workspace = true
+hex.workspace = true
+bech32.workspace = true
+bs58.workspace = true
+thiserror.workspace = true
+rand_core.workspace = true
+sha2.workspace = true

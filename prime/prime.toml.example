@@ -1,0 +1,55 @@
+# Lazarus DATUM Prime (primed). Copy to prime.toml, chmod 600.
+# Do not commit a live payout address or cookie path.
+#
+# Every key the previous lazarus-prime accepted is still accepted here, so an
+# existing lazarus-prime.toml starts unchanged. Keys it has no use for
+# (activation-height, verify-shares, require-split-gateway) are reported once
+# at startup and otherwise ignored.
+
+# DATUM listener gateways connect to.
+listen = "0.0.0.0:28915"
+# HTTP: /stats.json (pool UI), /ledger.json (legacy credits view), /healthz.
+stats-listen = "127.0.0.1:28916"
+# Only reported in stats.
+advertise-address = "stratum.awokenlazarus.xyz:28915"
+# Key, ledger, block log, and mirrored stats.json / ledger.json.
+data-dir = "/home/umbrel/blake2b/lazarus-prime"
+# key-file = "/home/umbrel/blake2b/lazarus-prime/prime.key"   # default: <data-dir>/prime.key
+motd = "Lazarus"
+headline = "Lazarus"
+
+# Pool's own address: receives the fee and any remainder the split cannot place.
+# Gateways are told to pay this script; it is also their `mining.pool_address`.
+payout-address = "<your address>"
+coinbase-tag = "Lazarus"
+# Nonzero; identifies this Prime to gateways.
+prime-id = 1
+# mainnet | testnet | signet | regtest. Decides which miner addresses are payable.
+network = "mainnet"
+
+# TIDES window in multiples of network difficulty (work, not time).
+window = 8
+# Floor on the window target in difficulty-1 shares; only matters where network
+# difficulty is tiny (regtest). 0 disables.
+window-min-work = 0
+# Dust floor for split outputs, sats.
+min-payout = 546
+# Pool fee in basis points (50 = 0.5%).
+fee-bps = 50
+# Smallest share difficulty accepted; power of two. Also the vardiff floor sent to gateways.
+min-diff = 1
+# Sats of slack per issued output when checking a coinbase against the split.
+split-tolerance = 2
+# Shares one height behind the tip are accepted for this many seconds after the tip moved.
+stale-grace-secs = 30
+
+# Knots JSON-RPC. Cookie wins if both cookie and user/password are set.
+rpc = "http://127.0.0.1:9332"
+rpc-cookie = "/home/umbrel/umbrel/app-data/bitcoin-knots/data/bitcoin/.cookie"
+# rpc-user = ""
+# rpc-password = ""
+# Tip poll interval, seconds.
+poll = 0.5
+
+# Import a lazarus-prime ledger.json into the window once, if the window is empty.
+# import-ledger = "/home/umbrel/blake2b/lazarus-prime/ledger.json"

@@ -17,7 +17,8 @@ This is the working tree from a homelab Umbrel node after the SHA-256d → BLAKE
 | `miner/` | OpenCL BLAKE2b GPU miner |
 | `patches/` | DATUM PROP / coinbaser wiring notes |
 | `docs/blake2b-mining-pool-playbook.md` | Operator playbook (no personal secrets) |
-| `lazarus/` | First-party DATUM Prime, stratum gateway, and protocol (Rust) |
+| `prime/` | **The DATUM Prime we run** (`primed`, Rust, MIT): accepts any stock `datum_gateway`, verifies BLAKE2b shares, dictates the TIDES coinbase split |
+| `lazarus/` | Earlier Prime, stratum gateway, and protocol crates. Derived from Ratum (AGPL-3.0) — see Credits; superseded by `prime/` |
 
 
 ## Knots on Umbrel (live node)
@@ -40,7 +41,9 @@ python3 server.py
 
 DATUM path (OCEAN model): the user runs Knots + a DATUM gateway and points the gateway at Prime on port 28915. Prime only tracks shares and sets the coinbase split; the user's node builds the template. Public stratum on 23334 / 3333 is optional and uses our gateways.
 
-The Prime we run is [`lazarus/prime`](lazarus/prime) (`lazarus-prime`). Public stratum is [`lazarus/gateway`](lazarus/gateway) (ASIC `:23334`, GPU/CPU `:3333`). Remote operators point their own `datum_gateway` at `stratum.awokenlazarus.xyz:28915`. The pool UI scrapes both gateways (`:7152` and `:7153`), Prime stats on localhost `:28916`, and Knots RPC via cookie. There is no pool fee; a found block pays the TIDES window 100% in the coinbase. Coinbase tag is `Lazarus`.
+The Prime we run is [`prime/`](prime/) (`primed`; see its [README](prime/README.md)). Remote operators run **any stock DATUM gateway** — [CONVOY](https://github.com/CONVOYMining/datum_gateway), [FlyTheElephant1](https://github.com/FlyTheElephant1/datum_gateway) or [iohzrd](https://github.com/iohzrd/datum_gateway) BLAKE2b forks, unpatched — and point it at `stratum.awokenlazarus.xyz:28915` with our pubkey (`primed pubkey`). Their node builds the template; Prime answers every coinbaser request with the current TIDES split, verifies each share by rebuilding the BLAKE2b header, and rejects any coinbase that pays outside the split it issued. A stock gateway's empty coinbase (the moment before its first coinbaser reply arrives) is accepted as pool-only work; a block found on it is recorded as owed to the window. The pool UI scrapes Prime stats on localhost `:28916` and Knots RPC via cookie. The pool takes 0.5%; a found block pays the rest of the TIDES window in the coinbase. Coinbase tag is `Lazarus`.
+
+Install: `scripts/build-primed.sh` builds and installs `prefix/bin/primed`; `scripts/start-lazarus-prime.sh` runs it against the existing `lazarus-prime.toml` (every old key still loads). Public stratum for miners without a gateway is still [`lazarus/gateway`](lazarus/gateway) (ASIC `:23334`, GPU/CPU `:3333`), which connects to Prime like any other gateway.
 
 ## Share validation invariants
 
@@ -157,5 +160,21 @@ gateway publishes only split templates, and share verification is enforced pool-
 (see [Share validation invariants](#share-validation-invariants)). The bugs documented
 there were ours, found in our own code.
 
-Ratum carries no license file. It is credited here as the work it is; if you intend to
-reuse it, ask iohzrd first.
+**License.** Ratum is licensed under the [GNU AGPL-3.0](https://github.com/iohzrd/ratum/blob/master/LICENSE).
+Because `lazarus/` grew out of a vendored copy of Ratum, it is a derivative work and the
+AGPL's terms apply to it regardless of the `MIT` string in its `Cargo.toml` files; treat
+`lazarus/` as AGPL-3.0 and do not relicense or redistribute it under MIT. (Earlier revisions
+of this README said Ratum carried no license file; that was wrong.)
+
+`prime/` exists to end that dependency. It is a from-scratch Prime written without reference
+to Ratum's source, under MIT, with the protocol recovered solely from the MIT-licensed
+`datum_gateway` C trees. Nothing in `prime/` is derived from `lazarus/` or Ratum.
+
+### DATUM Gateway forks — CONVOY, FlyTheElephant1, iohzrd
+
+[CONVOY's `datum_gateway`](https://github.com/CONVOYMining/datum_gateway) (MIT, Bitcoin Ocean
+LLC / Jason Hughes / contributors) is the client `prime/` was written against, together with
+the BLAKE2b forks by [FlyTheElephant1](https://github.com/FlyTheElephant1/datum_gateway) and
+[iohzrd](https://github.com/iohzrd/datum_gateway). Their `datum_protocol.c`, `datum_coinbaser.c`
+and `datum_header_v2.h` are the specification for the wire format, the coinbaser v2 encoding,
+and the BLAKE2b header-v2 share layout; `prime/LICENSE` carries the attribution.

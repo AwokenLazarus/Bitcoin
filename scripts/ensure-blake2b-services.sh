@@ -6,7 +6,7 @@ fi
 if ! pgrep -f 'http.server 8765' >/dev/null; then
   nohup /home/umbrel/blake2b/bin/serve-pools.sh >> /home/umbrel/blake2b/pools-http.log 2>&1 &
 fi
-if ! pgrep -f '/home/umbrel/blake2b/prefix/bin/lazarus-prime' >/dev/null; then
+if ! pgrep -f '/home/umbrel/blake2b/prefix/bin/primed' >/dev/null; then
   nohup /home/umbrel/blake2b/bin/start-lazarus-prime.sh >> /home/umbrel/blake2b/logs/lazarus-prime.log 2>&1 &
 fi
 if ! pgrep -f 'lazarus-gateway --config /home/umbrel/blake2b/etc/lazarus-asic.json' >/dev/null; then

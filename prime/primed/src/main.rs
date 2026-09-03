@@ -1,0 +1,313 @@
+//! `primed` — the Lazarus DATUM Prime.
+//!
+//! Accepts stock DATUM gateways, tells them the TIDES coinbase split for every template
+//! they build, verifies the BLAKE2b work they send back, credits the window, and relays
+//! found blocks to the node.
+
+mod address;
+mod config;
+mod node;
+mod rpc;
+mod session;
+mod state;
+mod stats;
+
+use std::path::PathBuf;
+use std::sync::atomic::AtomicU64;
+use std::sync::{Arc, Mutex};
+use std::time::Instant;
+
+use clap::{Parser, Subcommand};
+use datum_wire::crypto::Identity;
+use tides::{BlockLog, Ledger, SplitParams};
+use tokio::net::TcpListener;
+use tokio::sync::{broadcast, watch};
+
+use crate::address::Network;
+use crate::config::Config;
+use crate::state::{now, Shared, Totals};
+
+#[derive(Parser)]
+#[command(name = "primed", version, about = "Lazarus DATUM Prime: pool side of the DATUM protocol with TIDES payouts")]
+struct Cli {
+    /// Path to prime.toml
+    #[arg(short, long, default_value = "prime.toml")]
+    config: PathBuf,
+    #[command(subcommand)]
+    cmd: Option<Cmd>,
+}
+
+#[derive(Subcommand)]
+enum Cmd {
+    /// Run the Prime (default).
+    Run,
+    /// Print the pool public key gateways should be configured with.
+    Pubkey,
+    /// Validate the config and exit.
+    Check,
+    /// Import credits from a legacy ledger.json into the window.
+    ImportLedger { path: PathBuf },
+    /// Print the current window as JSON.
+    Window,
+}
+
+fn main() {
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).format_timestamp_secs().init();
+    let cli = Cli::parse();
+    let cfg = match Config::load(&cli.config) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("config: {e}");
+            std::process::exit(2);
+        }
+    };
+    for note in cfg.legacy_notes() {
+        log::warn!("config: {note}");
+    }
+    let code = match cli.cmd.unwrap_or(Cmd::Run) {
+        Cmd::Check => {
+            println!(
+                "ok: listen={} stats={} payout={} fee={}bps window={}x",
+                cfg.listen, cfg.stats_listen, cfg.payout_address, cfg.fee_bps, cfg.window
+            );
+            0
+        }
+        Cmd::Pubkey => match load_or_create_key(&cfg) {
+            Ok(k) => {
+                println!("{}", k.public_hex());
+                0
+            }
+            Err(e) => {
+                eprintln!("{e}");
+                1
+            }
+        },
+        Cmd::ImportLedger { path } => match Ledger::open(&cfg.data_dir).and_then(|mut l| {
+            let n = l.import_json_credits(&path)?;
+            l.sync()?;
+            Ok((n, l.window.total_work(), l.window.len()))
+        }) {
+            Ok((n, work, rows)) => {
+                println!("imported {n} credits; window now {rows} rows, {work} work");
+                0
+            }
+            Err(e) => {
+                eprintln!("import failed: {e}");
+                1
+            }
+        },
+        Cmd::Window => match Ledger::open(&cfg.data_dir) {
+            Ok(l) => {
+                let miners = l.window.miners();
+                println!("{}", serde_json::to_string_pretty(&serde_json::json!({
+                    "work": l.window.total_work(), "target_work": l.window.target_work(), "rows": l.window.len(), "miners": miners,
+                })).unwrap());
+                0
+            }
+            Err(e) => {
+                eprintln!("{e}");
+                1
+            }
+        },
+        Cmd::Run => run(cfg),
+    };
+    std::process::exit(code);
+}
+
+fn load_or_create_key(cfg: &Config) -> Result<Identity, String> {
+    let path = cfg.key_file();
+    match std::fs::read_to_string(path) {
+        Ok(s) => {
+            let bytes = hex::decode(s.trim()).map_err(|e| format!("{}: {e}", path.display()))?;
+            let arr: [u8; 64] = bytes.try_into().map_err(|_| format!("{}: expected 64 bytes", path.display()))?;
+            Ok(Identity::from_secret_bytes(&arr))
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            std::fs::create_dir_all(&cfg.data_dir).map_err(|e| e.to_string())?;
+            let id = Identity::generate();
+            write_secret(path, hex::encode(id.secret_bytes()).as_bytes())
+                .map_err(|e| format!("{}: {e}", path.display()))?;
+            log::info!("generated new pool key at {} — pubkey {}", path.display(), id.public_hex());
+            Ok(id)
+        }
+        Err(e) => Err(format!("{}: {e}", path.display())),
+    }
+}
+
+#[cfg(unix)]
+fn write_secret(path: &std::path::Path, data: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut f = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(path)?;
+    f.write_all(data)?;
+    f.write_all(b"\n")
+}
+
+#[cfg(not(unix))]
+fn write_secret(path: &std::path::Path, data: &[u8]) -> std::io::Result<()> {
+    std::fs::write(path, data)
+}
+
+fn run(cfg: Config) -> i32 {
+    let network = match Network::parse(&cfg.network) {
+        Some(n) => n,
+        None => {
+            eprintln!("unknown network {:?}", cfg.network);
+            return 2;
+        }
+    };
+    let pool_script = match address::to_script(&cfg.payout_address, network) {
+        Some(s) => s,
+        None => {
+            eprintln!("payout-address {:?} is not a valid {} address", cfg.payout_address, cfg.network);
+            return 2;
+        }
+    };
+    let pool = match load_or_create_key(&cfg) {
+        Ok(k) => k,
+        Err(e) => {
+            eprintln!("{e}");
+            return 2;
+        }
+    };
+    let rpc = match rpc::Rpc::new(
+        &cfg.rpc,
+        cfg.rpc_cookie.as_deref(),
+        cfg.rpc_user.as_deref(),
+        cfg.rpc_password.as_deref(),
+    ) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("rpc: {e}");
+            return 2;
+        }
+    };
+    let mut ledger = match Ledger::open(&cfg.data_dir) {
+        Ok(l) => l,
+        Err(e) => {
+            eprintln!("ledger: {e}");
+            return 1;
+        }
+    };
+    if let Some(p) = &cfg.import_ledger {
+        if ledger.window.is_empty() && p.exists() {
+            match ledger.import_json_credits(p) {
+                Ok(n) => log::info!("imported {n} credits from {}", p.display()),
+                Err(e) => log::warn!("legacy import from {} failed: {e}", p.display()),
+            }
+        }
+    }
+    log::info!(
+        "ledger: {} rows, {} work (target {}), {} identities, lifetime {} shares",
+        ledger.window.len(),
+        ledger.window.total_work(),
+        ledger.window.target_work(),
+        ledger.window.identities().len(),
+        ledger.window.lifetime_shares
+    );
+    let block_log = BlockLog::open(&cfg.data_dir);
+    let blocks = block_log.read_all().unwrap_or_default();
+
+    let (tip_tx, tip) = watch::channel(None);
+    let (notify, _) = broadcast::channel(64);
+    let shared = Arc::new(Shared {
+        split_params: SplitParams {
+            fee_bps: cfg.fee_bps,
+            min_payout: cfg.min_payout,
+            max_outputs: 512,
+            output_budget_bytes: 14_000,
+        },
+        pool_script,
+        pool,
+        network,
+        ledger: Mutex::new(ledger),
+        blocks: Mutex::new(blocks),
+        block_log,
+        clients: Mutex::new(Default::default()),
+        tip_tx,
+        tip,
+        notify,
+        rpc,
+        totals: Totals::default(),
+        started: Instant::now(),
+        started_ts: now(),
+        next_client_id: AtomicU64::new(1),
+        cfg,
+    });
+    log::info!("pool pubkey {}", shared.pool.public_hex());
+    log::info!(
+        "payout {} fee {}bps window {}x min-diff {}",
+        shared.cfg.payout_address,
+        shared.cfg.fee_bps,
+        shared.cfg.window,
+        shared.cfg.min_diff
+    );
+
+    let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build().expect("tokio runtime");
+    rt.block_on(async move {
+        let listener = match TcpListener::bind(shared.cfg.listen).await {
+            Ok(l) => l,
+            Err(e) => {
+                log::error!("listen {} failed: {e}", shared.cfg.listen);
+                return 1;
+            }
+        };
+        log::info!("DATUM listening on {}", shared.cfg.listen);
+        tokio::spawn(node::run(shared.clone()));
+        tokio::spawn(stats::serve(shared.clone()));
+        tokio::spawn(stats::housekeeping(shared.clone()));
+
+        let accept = {
+            let shared = shared.clone();
+            async move {
+                loop {
+                    match listener.accept().await {
+                        Ok((stream, remote)) => {
+                            let shared = shared.clone();
+                            tokio::spawn(async move {
+                                match session::run(shared.clone(), stream, remote).await {
+                                    Ok(()) => log::info!("{remote} closed"),
+                                    Err(session::SessionError::Io(e)) => log::info!("{remote} disconnected: {e}"),
+                                    Err(session::SessionError::Idle) => log::info!("{remote} idle, dropped"),
+                                    Err(e) => {
+                                        shared.totals.add(&shared.totals.handshake_failures, 1);
+                                        log::warn!("{remote} dropped: {e}");
+                                    }
+                                }
+                            });
+                        }
+                        Err(e) => {
+                            log::warn!("accept: {e}");
+                            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                        }
+                    }
+                }
+            }
+        };
+        tokio::select! {
+            _ = accept => {}
+            _ = shutdown_signal() => {}
+        }
+        log::info!("shutting down; syncing ledger");
+        if let Err(e) = shared.ledger.lock().unwrap().sync() {
+            log::error!("final ledger sync failed: {e}");
+        }
+        0
+    })
+}
+
+async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        let mut term =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).expect("sigterm handler");
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {}
+            _ = term.recv() => {}
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+    }
+}
