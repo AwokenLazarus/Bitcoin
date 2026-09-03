@@ -8,7 +8,7 @@ This is the working tree from a homelab Umbrel node after the SHA-256d → BLAKE
 
 | Path | What |
 |------|------|
-| `pool/` | Public pool dashboard, Ocean-style coinbaser, browser miner, Electrum cutover, block-notify mail |
+| `pool/` | Public pool dashboard (reads `primed` stats: window, coinbase preview, gateways, blocks), Electrum cutover, block-notify mail |
 | `pool/config.example.json` | Copy to `config.json` and fill in |
 | `node/` | Live Umbrel Knots path (rc4 prefix, `blake2b.conf`, app `bitcoin.conf`, pre-start hook) |
 | `node/umbrel/` | App `bitcoin.conf`, compose bind snippet, `hooks/pre-start` |
@@ -39,7 +39,9 @@ cp config.example.json config.json
 python3 server.py
 ```
 
-DATUM path (OCEAN model): the user runs Knots + a DATUM gateway and points the gateway at Prime on port 28915. Prime only tracks shares and sets the coinbase split; the user's node builds the template. Public stratum on 23334 / 3333 is optional and uses our gateways.
+DATUM path (OCEAN model): the user runs Knots + a DATUM gateway and points the gateway at Prime on port 28915. Prime only tracks shares and sets the coinbase split; the user's node builds the template. Public stratum on 23334 is optional and uses our gateway (itself a DATUM client of the same Prime).
+
+The dashboard is a thin view over `primed`'s `stats.json` (`datum_prime_stats` in `config.json`) plus Knots RPC and the stratum gateway's client API. Endpoints: `/api/pool` (status, TIDES window, `prime` block with uptime, totals, connected gateways, block records), `/api/coinbaser` (the exact split Prime dictates for the next block, pool output last), `/api/gateways`, `/api/miners`, `/api/miner/<address>`, `/api/payouts` (found blocks with each coinbase output, kind and status), `/api/blocks`.
 
 The Prime we run is [`prime/`](prime/) (`primed`; see its [README](prime/README.md)). Remote operators run **any stock DATUM gateway** — [CONVOY](https://github.com/CONVOYMining/datum_gateway), [FlyTheElephant1](https://github.com/FlyTheElephant1/datum_gateway) or [iohzrd](https://github.com/iohzrd/datum_gateway) BLAKE2b forks, unpatched — and point it at `stratum.awokenlazarus.xyz:28915` with our pubkey (`primed pubkey`). Their node builds the template; Prime answers every coinbaser request with the current TIDES split, verifies each share by rebuilding the BLAKE2b header, and rejects any coinbase that pays outside the split it issued. A stock gateway's empty coinbase (the moment before its first coinbaser reply arrives) is accepted as pool-only work; a block found on it is recorded as owed to the window. The pool UI scrapes Prime stats on localhost `:28916` and Knots RPC via cookie. The pool takes 0.5%; a found block pays the rest of the TIDES window in the coinbase. Coinbase tag is `Lazarus`.
 

@@ -1,5 +1,6 @@
 (() => {
   const $ = (id) => document.getElementById(id);
+
   async function copyValue(text) {
     if (!text) return false;
     try {
@@ -35,13 +36,41 @@
     }, 1400);
   });
 
+  // ---------------------------------------------------------------- tabs
+  const tabs = [...document.querySelectorAll('[data-tabs] [role="tab"]')];
+  function selectTab(id) {
+    if (!tabs.length) return;
+    const want = tabs.some((t) => t.id === id) ? id : tabs[0].id;
+    for (const t of tabs) {
+      const on = t.id === want;
+      t.setAttribute("aria-selected", on ? "true" : "false");
+      t.tabIndex = on ? 0 : -1;
+      const pane = $(t.getAttribute("aria-controls"));
+      if (pane) pane.hidden = !on;
+    }
+  }
+  tabs.forEach((t, i) => {
+    t.addEventListener("click", () => selectTab(t.id));
+    t.addEventListener("keydown", (e) => {
+      const map = { ArrowRight: i + 1, ArrowLeft: i - 1, Home: 0, End: tabs.length - 1 };
+      if (!(e.key in map)) return;
+      e.preventDefault();
+      const next = tabs[(map[e.key] + tabs.length) % tabs.length];
+      selectTab(next.id);
+      next.focus();
+    });
+  });
+  if (tabs.length) selectTab(tabs[0].id);
+
+  // ------------------------------------------------------------ formatting
+  const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
   const pathLabel = (via) => {
-    if (via === "prime") return "Prime window";
-    if (via === "gateway") return "Prime window";
-    if (via === "gpu") return "GPU :3333";
-    if (via === "both") return "stratum + Prime";
-    return "stratum";
+    if (via === "prime" || via === "gateway") return "own gateway";
+    if (via === "both") return "stratum + gateway";
+    return "public stratum";
   };
+  const isPrimePath = (via) => via === "prime" || via === "gateway";
+  const sessCell = (via, n) => (isPrimePath(via) ? "\u2014" : num(n ?? 0));
 
   const fmtHr = (ghs) => {
     if (ghs == null || Number.isNaN(ghs)) return "—";
@@ -58,114 +87,326 @@
 
   const num = (n) => (n == null || Number.isNaN(Number(n)) ? "—" : Number(n).toLocaleString());
   const short = (a) => (a && a.length > 20 ? a.slice(0, 10) + "\u2026" + a.slice(-8) : a || "\u2014");
+  const pct = (n, d = 1) => (Number.isFinite(Number(n)) ? Number(n).toFixed(d) + "%" : "\u2014");
   const ago = (ts) => {
     if (!ts) return "\u2014";
     const s = Math.max(0, Date.now() / 1000 - ts);
+    return agoS(s);
+  };
+  const agoS = (s) => {
+    if (s == null || !Number.isFinite(Number(s))) return "\u2014";
+    s = Number(s);
     if (s < 90) return Math.round(s) + "s ago";
     if (s < 3600) return Math.round(s / 60) + "m ago";
     if (s < 86400) return (s / 3600).toFixed(1) + "h ago";
     return (s / 86400).toFixed(1) + "d ago";
   };
   const dur = (s) => {
-    if (s == null) return "\u2014";
+    if (s == null || !Number.isFinite(Number(s))) return "\u2014";
+    s = Number(s);
+    if (s < 90) return Math.round(s) + " s";
     if (s < 3600) return (s / 60).toFixed(0) + " min";
     if (s < 86400) return (s / 3600).toFixed(1) + " hours";
     if (s < 86400 * 60) return (s / 86400).toFixed(1) + " days";
     return (s / 86400 / 365).toFixed(1) + " years";
   };
-  const btc = (n) => (n == null || Number.isNaN(n) ? "\u2014" : Math.abs(n) >= 0.01 ? n.toFixed(4) : n.toExponential(2));
+  const btc = (n) => {
+    if (n == null || Number.isNaN(Number(n))) return "\u2014";
+    const x = Number(n);
+    if (Math.abs(x) < 1e-12) return "0";
+    if (Math.abs(x) >= 0.01) return x.toFixed(4);
+    return x.toExponential(2);
+  };
+  const sats = (n) => (n == null || Number.isNaN(Number(n)) ? "\u2014" : (Number(n) / 1e8).toFixed(8).replace(/0+$/, "").replace(/\.$/, ".0"));
+  const expPct = (n) => {
+    const x = Number(n);
+    if (!Number.isFinite(x) || Math.abs(x) < 1e-12) return "0";
+    if (Math.abs(x) >= 0.01) return x.toFixed(2);
+    return x.toExponential(2);
+  };
+  const when = (ts) => (ts ? new Date(ts * 1000).toLocaleString([], { dateStyle: "medium", timeStyle: "short" }) : "");
   const j = async (url) => {
     const r = await fetch(url);
     if (!r.ok) throw new Error(url + " " + r.status);
     return r.json();
   };
+  const kindPill = (kind) => {
+    const k = String(kind || "").toLowerCase();
+    const label = k === "split" ? "split" : k === "partial" ? "partial split" : k === "pool-only" ? "pool only" : k || "\u2014";
+    const cls = k === "split" ? "ok" : k === "partial" ? "warn" : k === "pool-only" ? "warn" : "";
+    return k ? `<span class="pill ${cls}">${esc(label)}</span>` : "\u2014";
+  };
+  const statusPill = (status) => {
+    const s = String(status || "").toLowerCase();
+    const cls = s === "in chain" || s === "paid" || s === "submitted" ? "ok" : s === "orphaned" || s === "rejected" ? "bad" : s === "immature" || s === "pending" ? "warn" : "";
+    return s ? `<span class="pill ${cls}">${esc(s)}</span>` : "\u2014";
+  };
 
+  // ------------------------------------------------------------------ pool
   function stats(p) {
+    const pr = p.prime || {};
+    const tot = pr.totals || {};
     const net = p.network_hr_hs ? (p.network_hr_hs / 1e15).toFixed(2) + " PH/s" : "\u2014";
     const luck = p.luck_percent == null ? "\u2014" : p.luck_percent.toFixed(0) + "%";
+    const nblocks = Number(p.window_multiple) || 8;
+    const fill = Number(p.window_fill_percent);
+    const fillTxt = Number.isFinite(fill) ? fill.toFixed(0) + "%" : "\u2014";
+    const inWindow = Number((pr.window || {}).identities) || 0;
+    const rejPct = tot.shares_accepted + tot.shares_rejected > 0 ? (100 * tot.shares_rejected / (tot.shares_accepted + tot.shares_rejected)).toFixed(2) + "% rejected" : "no rejects";
+    const gws = Number(pr.gateways_online) || 0;
+    const remote = Number(pr.gateways_remote) || 0;
     const cells = [
-      ["Hashrate", fmtHr(p.pool_hr_ghs), (p.miners_online || 0) + " worker" + (p.miners_online === 1 ? "" : "s")],
-      ["Miners", String(p.miners_seen ?? "\u2014"), (p.miners_online || 0) + " online"],
-      ["Accepted", num(p.shares_accepted), "kept if you switch path"],
-      ["Window", num(p.window_shares), "Prime work this round"],
-      ["Est. / day", btc(p.est_btc_day), "vs the whole network"],
-      ["To block", dur(p.ttf_seconds), ((p.pool_share || 0) * 100).toExponential(2) + "% of net"],
+      ["Hashrate", fmtHr(p.pool_hr_ghs), (p.miners_online || 0) + " worker" + (p.miners_online === 1 ? "" : "s") + " online"],
+      ["Miners", String(inWindow || p.miners_online || 0), inWindow ? "holding work in the window · " + (p.miners_seen ?? "\u2014") + " ever" : (p.miners_seen ?? "\u2014") + " ever"],
+      ["Shares", num(tot.shares_accepted), pr.reachable ? "verified by Prime since start · " + rejPct : "Prime unreachable"],
+      ["Window", fillTxt + " full", nblocks + " network-blocks of work"],
+      ["Gateways", String(gws), gws ? (remote ? remote + " remote + our stratum" : "our public stratum") + " · Prime up " + dur(pr.uptime_s) : "none connected"],
+      ["To block", dur(p.ttf_seconds), expPct((p.pool_share || 0) * 100) + "% of the network"],
       ["Found", String(p.blocks_found ?? 0), p.luck_percent == null ? "luck pending" : luck + " luck"],
       ["Network", net, "tip " + (p.height || "\u2014") + " · diff " + (p.difficulty ? Number(p.difficulty).toExponential(3) : "\u2014")],
     ];
     $("stats").innerHTML = cells
       .map(([k, v, s]) => `<div><dt>${k}</dt><dd>${v}<small>${s}</small></dd></div>`)
       .join("");
+
     $("stratum").textContent = p.stratum;
-    const sg = $("stratum-gpu");
-    if (sg) sg.textContent = p.stratum_gpu || ("stratum+tcp://" + (p.host || "stratum.awokenlazarus.xyz") + ":" + (p.port_gpu || 3333));
+
+    const d = p.datum || {};
+    const host = d.pool_host || "stratum.awokenlazarus.xyz";
+    const port = d.pool_port || 28915;
+    const pubkey = d.pool_pubkey || pr.pubkey || "";
     const gw = $("gateway-config");
     if (gw) {
-      const d = p.datum || {};
-      const cfg = { datum: {
-        pool_host: d.pool_host || "stratum.awokenlazarus.xyz",
-        pool_port: d.pool_port || 28915,
-        pool_pubkey: d.pool_pubkey || "29120606bbbfdeb0dcb259d13ed1fba9e6ff198ff6a0152cffb7608dc1c266bd17532393738aee7edf9aa0c9ec93b835256971f186da878f77fb3ed273dff30a",
+      gw.textContent = JSON.stringify({ datum: {
+        pool_host: host,
+        pool_port: port,
+        pool_pubkey: pubkey || "<primed pubkey>",
         pool_pass_workers: true,
         pool_pass_full_users: true,
         pooled_mining_only: true,
-      }};
-      gw.textContent = JSON.stringify(cfg, null, 2);
+      }}, null, 2);
     }
-    const dh = $("datum-host");
-    if (dh) dh.textContent = (p.datum && p.datum.pool_host) || "stratum.awokenlazarus.xyz";
-    const dp = $("datum-port");
-    if (dp) dp.textContent = String((p.datum && p.datum.pool_port) || 28915);
-    $("payoutline").textContent = p.payout;
-    const sn = $("shares-note");
-    if (sn) sn.textContent = p.shares_note || "Accepted is tied to your payout address. Switching from public stratum to your own DATUM gateway does not erase it. Session is only the current public-stratum connection.";
+    if ($("datum-host")) $("datum-host").textContent = host;
+    if ($("datum-port")) $("datum-port").textContent = String(port);
+    if ($("datum-pubkey")) $("datum-pubkey").textContent = pubkey || "\u2014";
+
     if ($("live-hr")) $("live-hr").textContent = fmtHr(p.pool_hr_ghs);
     if ($("live-tip")) $("live-tip").textContent = p.height || "\u2014";
+    if ($("live-window")) $("live-window").textContent = fillTxt;
+    if ($("live-gateways")) $("live-gateways").textContent = String(gws);
+    const off = $("prime-offline");
+    if (off) off.hidden = !!pr.reachable;
+    const live = $("live-chip");
+    if (live) live.classList.toggle("stale", !pr.reachable);
+
+    const meter = $("window-meter");
+    const bar = $("window-fill");
+    if (meter && bar) {
+      const w = Math.max(0, Math.min(100, Number.isFinite(fill) ? fill : 0));
+      bar.style.width = w + "%";
+      meter.setAttribute("aria-valuenow", String(Math.round(w)));
+    }
+    if ($("window-size")) $("window-size").textContent = nblocks + " net blocks";
+    if ($("window-filled")) $("window-filled").textContent = fillTxt;
+    if ($("window-filled-inline")) $("window-filled-inline").textContent = fillTxt;
+    if ($("window-miners")) $("window-miners").textContent = inWindow ? String(inWindow) : "\u2014";
+    if ($("window-shares")) $("window-shares").textContent = num((pr.window || {}).shares ?? p.window_shares);
+    if ($("window-explain")) {
+      $("window-explain").textContent =
+        "TIDES keeps a rolling window of " + nblocks +
+        " network-blocks of accepted work. A found block splits the reward by who holds that window — not by who has the highest hashrate right now. Plug in a 19 TH/s box and your window % starts near zero; it climbs as your shares accumulate and older miners’ work ages out. The bar is how full the pool’s window is of that " +
+        nblocks + "-block target.";
+    }
+    const build = $("prime-build");
+    if (build) build.textContent = pr.name ? "Prime: " + pr.name + (pr.version ? " " + pr.version : "") + (pr.uptime_s ? " · up " + dur(pr.uptime_s) : "") : "";
     draw($("poolchart"), p.history || [], "hr_ghs");
   }
 
-  function table(el, headers, rows) {
+  // ------------------------------------------------------------- coinbase
+  let coinbaseExpanded = false;
+  const COINBASE_ROWS = 8;
+  function coinbase(cb) {
+    const el = $("coinbase");
     if (!el) return;
+    const miners = (cb.miners || []).filter((o) => o.to !== "pool");
+    const pool = (cb.miners || []).find((o) => o.to === "pool");
+    const value = Number(cb.value) || 0;
+    const shown = coinbaseExpanded ? miners : miners.slice(0, COINBASE_ROWS);
+    const rows = shown.map((o, i) =>
+      `<tr><td class="num faint">${i + 1}</td><td><a href="#${esc(o.address)}">${short(o.address)}</a></td><td class="num">${pct(o.share_percent)}</td><td class="num">${sats(o.sats)}</td><td class="num faint">${value ? pct(100 * o.sats / value, 2) : "\u2014"}</td></tr>`
+    );
+    if (!coinbaseExpanded && miners.length > COINBASE_ROWS) {
+      const rest = miners.slice(COINBASE_ROWS);
+      const restSats = rest.reduce((a, o) => a + Number(o.sats || 0), 0);
+      rows.push(`<tr class="faint"><td class="num"></td><td>${rest.length} more miner output${rest.length === 1 ? "" : "s"}</td><td class="num">${pct(rest.reduce((a, o) => a + Number(o.share_percent || 0), 0))}</td><td class="num">${sats(restSats)}</td><td class="num">${value ? pct(100 * restSats / value, 2) : "\u2014"}</td></tr>`);
+    }
+    if (pool) {
+      rows.push(`<tr class="pool-row"><td class="num faint">${miners.length + 1}</td><td>pool <span class="faint">fee${cb.unplaced_sats > 1000 ? " + unplaced" : ""}</span> · <a href="#${esc(pool.address)}">${short(pool.address)}</a></td><td class="num">\u2014</td><td class="num">${sats(pool.sats)}</td><td class="num faint">${value ? pct(100 * pool.sats / value, 2) : "\u2014"}</td></tr>`);
+    }
+    el.innerHTML =
+      '<thead><tr><th class="num">#</th><th>Output</th><th class="num">Window</th><th class="num">BTC</th><th class="num">Of block</th></tr></thead><tbody>' +
+      (rows.length ? rows.join("") : '<tr><td colspan="5" class="empty">Prime has not issued a split yet</td></tr>') +
+      "</tbody>";
+    const sum = $("coinbase-summary");
+    if (sum) sum.textContent = cb.outputs ? `${cb.outputs} outputs · ${btc(value / 1e8)} BTC at the base subsidy · ${sats(cb.miner_sats)} to ${cb.miner_outputs} miner${cb.miner_outputs === 1 ? "" : "s"} · ${sats(cb.pool_sats)} to the pool (${pct(cb.fee_percent, 1)} fee)` : "\u2014";
+    const more = $("coinbase-more");
+    if (more) {
+      more.hidden = miners.length <= COINBASE_ROWS;
+      more.textContent = coinbaseExpanded ? "Show fewer" : `Show all ${miners.length} miner outputs`;
+      more.onclick = () => { coinbaseExpanded = !coinbaseExpanded; coinbase(cb); };
+    }
+    const unpaid = cb.unpaid || [];
+    const line = $("coinbase-more-line");
+    if (line) {
+      const old = line.querySelector(".unpaid-note");
+      if (old) old.remove();
+      if (unpaid.length) {
+        const s = document.createElement("span");
+        s.className = "unpaid-note faint";
+        s.textContent = ` ${unpaid.length} address${unpaid.length === 1 ? "" : "es"} in the window earn${unpaid.length === 1 ? "s" : ""} less than the minimum output right now; that share stays with the pool until it clears.`;
+        line.appendChild(s);
+      }
+    }
+  }
+
+  // ------------------------------------------------------------- gateways
+  function gateways(pr) {
+    const el = $("gwtable");
+    if (!el) return;
+    const rows = (pr.gateways || []).map((g) => {
+      const who = g.own ? `<span class="pill brass">Lazarus public stratum</span>` : `<span class="mono">${esc(g.gateway || "")}</span>`;
+      const client = `${esc(g.user_agent || "\u2014")} <span class="faint">· ${esc(g.generation || "")}</span>`;
+      const rej = g.rejected ? `${num(g.rejected)} <span class="faint">· ${esc(g.last_reject || "")}</span>` : "0";
+      const ident = g.own ? "\u2014" : (g.identity ? `<a href="#${esc(g.identity)}">${short(g.identity)}</a>` : "\u2014");
+      return [
+        who,
+        client,
+        ident,
+        dur(g.connected_s),
+        num(g.accepted),
+        rej,
+        num(g.work),
+        g.last_share_s == null ? "\u2014" : agoS(g.last_share_s),
+        String(g.block_candidates || 0),
+      ];
+    });
+    table(el, ["Gateway", "Client", "Pays to", "Connected", "Accepted", "Rejected", "Work", "Last share", "Blocks"], rows, [null, null, null, "num", "num", "num", "num", "num", "num"], "No gateway connected");
+    const note = $("gateway-note");
+    if (note) {
+      const t = pr.totals || {};
+      note.textContent = pr.reachable
+        ? `Since Prime started ${dur(pr.uptime_s)} ago: ${num(t.connections)} connection${t.connections === 1 ? "" : "s"}, ${num(t.coinbasers)} coinbase splits issued, ${num(t.shares_accepted)} shares verified, ${num(t.block_candidates)} block candidate${t.block_candidates === 1 ? "" : "s"}. “Rejected” right after a Prime restart is a gateway still on the previous instance’s split — it clears with its next template.`
+        : "Prime is unreachable; this is the last list it published.";
+    }
+  }
+
+  // `align` is an optional array of "num" markers, one per column, so numeric
+  // columns line up on the right with tabular figures.
+  function table(el, headers, rows, align, empty) {
+    if (!el) return;
+    const cls = (i) => (align && align[i] === "num" ? ' class="num"' : "");
     el.innerHTML =
       "<thead><tr>" +
-      headers.map((h) => "<th>" + h + "</th>").join("") +
+      headers.map((h, i) => "<th" + cls(i) + ">" + h + "</th>").join("") +
       "</tr></thead><tbody>" +
       (rows.length
-        ? rows.map((r) => "<tr>" + r.map((c) => "<td>" + c + "</td>").join("") + "</tr>").join("")
-        : '<tr><td colspan="' + headers.length + '">None yet</td></tr>') +
+        ? rows.map((r) => "<tr>" + r.map((c, i) => "<td" + cls(i) + ">" + c + "</td>").join("") + "</tr>").join("")
+        : '<tr><td colspan="' + headers.length + '" class="empty">' + (empty || "None yet") + "</td></tr>") +
       "</tbody>";
   }
 
-  function measured(hist, key, bucketSec) {
-    const sums = new Map();
+  // ---------------------------------------------------------------- blocks
+  function foundBlocks(pays, p) {
+    const el = $("found");
+    if (!el) return;
+    const byHeight = new Map();
+    for (const r of pays.payouts || []) {
+      const key = r.hash || String(r.height);
+      const b = byHeight.get(key) || { height: r.height, hash: r.hash, ts: r.ts, outputs: [], miner_btc: 0, pool_btc: 0, status: r.status, kind: r.kind, block_status: r.block_status, owed_sats: r.owed_sats, found_by: r.found_by, reward: r.reward_btc };
+      const isPool = r.to === "pool";
+      b.outputs.push({ address: r.finder, btc: Number(r.miner_btc) || 0, share: r.share, pool: isPool });
+      if (isPool) b.pool_btc += Number(r.miner_btc) || 0;
+      else b.miner_btc += Number(r.miner_btc) || 0;
+      byHeight.set(key, b);
+    }
+    const chainHashes = new Set([...byHeight.values()].map((b) => b.hash));
+    // Candidates Prime saw that the chain scan has not confirmed (pending, orphaned).
+    for (const pb of pays.prime_blocks || []) {
+      if (!pb.hash || chainHashes.has(pb.hash)) continue;
+      if (pb.status === "in chain") continue;
+      byHeight.set(pb.hash, { height: pb.height, hash: pb.hash, ts: pb.ts, outputs: (pb.split || []).map((o) => ({ address: o.address, btc: o.sats / 1e8 })), miner_btc: (pb.split || []).reduce((a, o) => a + o.sats, 0) / 1e8, pool_btc: (pb.pool_sats || 0) / 1e8, status: pb.status, kind: pb.kind, block_status: pb.status, owed_sats: pb.owed_sats, found_by: pb.finder, reward: pb.coinbase_value / 1e8, prime_only: true });
+    }
+    const blocks = [...byHeight.values()].sort((a, b) => (b.height || 0) - (a.height || 0));
+    const headers = ["Height", "Hash", "Coinbase", "Outputs", "Miners paid", "Pool", "Status", "Found by", "Time"];
+    const rows = blocks.map((b, i) => {
+      const poolBtc = b.pool_btc || (b.reward ? Math.max(0, b.reward - b.miner_btc) : null);
+      const kind = b.kind || (b.outputs.length > 1 ? "split" : b.outputs.length === 1 ? "" : "");
+      const st = b.prime_only ? b.block_status : (b.status === "unsplit" ? "pool only" : b.status);
+      const outs = b.outputs.slice().sort((x, y) => y.btc - x.btc);
+      const detail = outs.map((o) => `<tr><td></td><td colspan="2"><a href="#${esc(o.address)}">${esc(o.address)}</a>${o.pool ? ' <span class="pill brass">pool</span>' : ""}</td><td class="num">${btc(o.btc)}</td><td class="num faint">${b.reward ? pct(100 * o.btc / b.reward, 2) : ""}</td><td colspan="4"></td></tr>`).join("");
+      const owed = b.owed_sats ? `<div class="faint">owed to window ${sats(b.owed_sats)}</div>` : "";
+      return `<tr class="block-row" data-i="${i}" tabindex="0" aria-expanded="false">
+        <td class="num"><span class="disclose"></span>${b.height ?? "\u2014"}</td>
+        <td>${b.hash ? `<a href="${esc(p.explorer)}/block/${esc(b.hash)}" target="_blank" rel="noreferrer">${short(b.hash)}</a>` : "\u2014"}</td>
+        <td>${kindPill(kind)}${owed}</td>
+        <td class="num">${b.outputs.length}</td>
+        <td class="num">${btc(b.miner_btc)}</td>
+        <td class="num">${poolBtc == null ? "\u2014" : btc(poolBtc)}</td>
+        <td>${statusPill(st)}</td>
+        <td>${b.found_by ? `<a href="#${esc(b.found_by)}">${short(b.found_by)}</a>` : "\u2014"}</td>
+        <td>${when(b.ts)}</td>
+      </tr>
+      <tr class="block-detail" hidden><td colspan="9"><table class="inner"><thead><tr><th></th><th colspan="2">Coinbase output</th><th class="num">BTC</th><th class="num">Of block</th><th colspan="4"></th></tr></thead><tbody>${detail || '<tr><td colspan="9" class="empty">No outputs recorded</td></tr>'}</tbody></table></td></tr>`;
+    });
+    el.innerHTML =
+      "<thead><tr>" + headers.map((h, i) => `<th${[0, 3, 4, 5].includes(i) ? ' class="num"' : ""}>${h}</th>`).join("") + "</tr></thead><tbody>" +
+      (rows.length ? rows.join("") : '<tr><td colspan="9" class="empty">No blocks found yet</td></tr>') +
+      "</tbody>";
+    el.querySelectorAll(".block-row").forEach((tr) => {
+      const toggle = () => {
+        const det = tr.nextElementSibling;
+        const open = det && det.hidden;
+        if (det) det.hidden = !open;
+        tr.setAttribute("aria-expanded", open ? "true" : "false");
+      };
+      tr.addEventListener("click", (e) => { if (!e.target.closest("a")) toggle(); });
+      tr.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); toggle(); } });
+    });
+  }
+
+  function continuous(hist, key, bucketSec) {
+    const raw = [];
     for (const item of hist || []) {
       const ts = Number(item.ts);
       const v = Number(item[key]);
       if (!Number.isFinite(ts) || !Number.isFinite(v) || v <= 0) continue;
-      const b = Math.floor(ts / bucketSec) * bucketSec;
+      raw.push({ ts, v });
+    }
+    raw.sort((a, b) => a.ts - b.ts);
+    if (!raw.length) return [];
+    const sorted = raw.map((p) => p.v).sort((a, b) => a - b);
+    const typical = sorted[Math.floor(sorted.length * 0.85)] || sorted[sorted.length - 1];
+    const floor = typical > 0 ? typical * 0.03 : 0;
+    const src = raw.filter((p) => p.v >= floor);
+    const use = src.length >= 2 ? src : raw;
+    const start = Math.floor(use[0].ts / bucketSec) * bucketSec;
+    const end = Math.floor(use[use.length - 1].ts / bucketSec) * bucketSec;
+    const sums = new Map();
+    for (const p of use) {
+      const b = Math.floor(p.ts / bucketSec) * bucketSec;
       const rec = sums.get(b) || { sum: 0, n: 0 };
-      rec.sum += v;
+      rec.sum += p.v;
       rec.n += 1;
       sums.set(b, rec);
     }
-    return [...sums.keys()].sort((a, b) => a - b).map((ts) => {
-      const rec = sums.get(ts);
-      return { ts, [key]: rec.sum / rec.n };
-    });
-  }
-
-  function segments(series, maxGap) {
-    const out = [];
-    let cur = [];
-    for (const item of series) {
-      if (cur.length && item.ts - cur[cur.length - 1].ts > maxGap) {
-        if (cur.length) out.push(cur);
-        cur = [];
-      }
-      cur.push(item);
+    const series = [];
+    let last = use[0].v;
+    for (let t = start; t <= end; t += bucketSec) {
+      const rec = sums.get(t);
+      if (rec) last = rec.sum / rec.n;
+      series.push({ ts: t, [key]: last });
     }
-    if (cur.length) out.push(cur);
-    return out;
+    return series;
   }
 
   function draw(c, hist, key) {
@@ -184,7 +425,7 @@
     if (!hist || hist.length < 2) return;
     const span = hist[hist.length - 1].ts - hist[0].ts;
     const bucket = span > 12 * 3600 ? 120 : 60;
-    const series = measured(hist, key, bucket);
+    const series = continuous(hist, key, bucket);
     if (series.length < 2) return;
     const ys = series.map((h) => h[key]);
     const minY = 0;
@@ -215,40 +456,28 @@
     const fill = ctx.createLinearGradient(0, pad.t, 0, pad.t + h);
     fill.addColorStop(0, "rgba(212,180,90,0.28)");
     fill.addColorStop(1, "rgba(212,180,90,0)");
-    const segs = segments(series, bucket * 3);
-    segs.forEach((seg) => {
-      if (!seg.length) return;
-      if (seg.length === 1) {
-        const [x, y] = pt(seg[0]);
-        ctx.fillStyle = "#d4b45a";
-        ctx.beginPath();
-        ctx.arc(x, y, 2, 0, Math.PI * 2);
-        ctx.fill();
-        return;
-      }
-      ctx.beginPath();
-      seg.forEach((item, i) => {
-        const [x, y] = pt(item);
-        i ? ctx.lineTo(x, y) : ctx.moveTo(x, y);
-      });
-      const last = pt(seg[seg.length - 1]);
-      const first = pt(seg[0]);
-      ctx.lineTo(last[0], pad.t + h);
-      ctx.lineTo(first[0], pad.t + h);
-      ctx.closePath();
-      ctx.fillStyle = fill;
-      ctx.fill();
-      ctx.beginPath();
-      seg.forEach((item, i) => {
-        const [x, y] = pt(item);
-        i ? ctx.lineTo(x, y) : ctx.moveTo(x, y);
-      });
-      ctx.strokeStyle = "#d4b45a";
-      ctx.lineWidth = 1.75;
-      ctx.lineJoin = "round";
-      ctx.lineCap = "round";
-      ctx.stroke();
+    ctx.beginPath();
+    series.forEach((item, i) => {
+      const [x, y] = pt(item);
+      i ? ctx.lineTo(x, y) : ctx.moveTo(x, y);
     });
+    const last = pt(series[series.length - 1]);
+    const first = pt(series[0]);
+    ctx.lineTo(last[0], pad.t + h);
+    ctx.lineTo(first[0], pad.t + h);
+    ctx.closePath();
+    ctx.fillStyle = fill;
+    ctx.fill();
+    ctx.beginPath();
+    series.forEach((item, i) => {
+      const [x, y] = pt(item);
+      i ? ctx.lineTo(x, y) : ctx.moveTo(x, y);
+    });
+    ctx.strokeStyle = "#d4b45a";
+    ctx.lineWidth = 1.75;
+    ctx.lineJoin = "round";
+    ctx.lineCap = "round";
+    ctx.stroke();
     ctx.fillStyle = "#8a7d62";
     ctx.font = "10px IBM Plex Mono, ui-monospace, monospace";
     ctx.textAlign = "right";
@@ -264,133 +493,158 @@
     ctx.fillText(fmtT(t1), pad.l + w, cssH - 2);
   }
 
+  const showChart = (on) => {
+    const w = $("chart-wrap");
+    if (w) w.hidden = !on;
+  };
+
+  // ----------------------------------------------------------------- miner
   async function showMiner(addr) {
     if (!addr) {
       $("miner").innerHTML = "";
+      showChart(false);
       draw($("chart"), [], "hr_ghs");
       return;
     }
     const m = await j("/api/miner/" + encodeURIComponent(addr));
     if (!m.known) {
-      $("miner").innerHTML = '<p class="note">No stats for that address yet. Connect a miner first.</p>';
+      $("miner").innerHTML = '<p class="note callout">No stats for that address yet. Connect a miner first.</p>';
+      showChart(false);
       return;
     }
     const workers = (m.workers || [])
       .map(
         (w) =>
-          `<tr><td>${w.worker || "\u2014"}</td><td>${pathLabel(w.via)}</td><td>${fmtHr(w.hr_ghs)}</td><td>${num(w.shares_session ?? 0)}</td><td>${num(w.shares_lifetime ?? w.shares_acc)}</td><td>${w.window_percent != null ? Number(w.window_percent).toFixed(1) + "%" : "\u2014"}</td><td>${num(w.shares_rej)}</td><td>${w.last_share_s ? w.last_share_s.toFixed(0) + "s" : "\u2014"}</td></tr>`
+          `<tr><td>${esc(w.worker || "\u2014")}</td><td>${pathLabel(w.via)}</td><td class="num">${fmtHr(w.hr_ghs)}</td><td class="num">${sessCell(w.via, w.shares_session)}</td><td class="num">${num(w.shares_lifetime ?? w.shares_acc ?? w.window_work)}</td><td class="num">${w.window_percent != null ? pct(w.window_percent) : "\u2014"}</td><td class="num">${num(w.shares_rej)}</td><td class="num">${Number.isFinite(Number(w.last_share_s)) ? Number(w.last_share_s).toFixed(0) + "s" : "\u2014"}</td></tr>`
       )
       .join("");
+    const payStatus = (b) => {
+      const s = String(b.status || "").toLowerCase();
+      const rs = String(b.round_status || "").toLowerCase();
+      if (s === "immature") return "immature";
+      if (s === "carried" || rs === "unsplit") return "carried";
+      if (s === "paid" || s === "unpaid") return "paid";
+      return s || rs || "—";
+    };
     const pays = (m.blocks_found || [])
-      .map((b) => `<tr><td>${b.height}</td><td>${btc(b.miner_btc)}</td><td>${b.ts ? new Date(b.ts * 1000).toLocaleString() : ""}</td></tr>`)
+      .map((b) => `<tr><td class="num">${b.height}</td><td class="num">${btc(b.miner_btc)}</td><td>${statusPill(payStatus(b))}</td><td>${when(b.ts)}</td></tr>`)
       .join("");
     const status = !m.online
       ? "offline"
-      : m.via === "prime" || m.via === "gateway"
-        ? "in Prime window"
-        : m.via === "gpu"
-          ? "online on GPU :3333"
+      : isPrimePath(m.via)
+        ? "online · own gateway"
         : m.via === "both"
-          ? "online (stratum + Prime)"
-          : "online";
+          ? "online · stratum + gateway"
+          : "online · public stratum";
+    const wp = (m.round_share || 0) * 100;
+    const hp = Number(m.hashrate_pool_percent) || 0;
+    const nblocks = Number(m.window_multiple) || 8;
+    let windowNote;
+    if (m.online && hp > 1 && wp < hp * 0.5) {
+      windowNote = `<p class="note callout">Your hashrate is ${hp.toFixed(1)}% of the pool right now, but you hold ${wp.toFixed(1)}% of the ${nblocks}-block payout window. New hash ramps in as work accumulates and older work ages out — that gap is expected, not a missing payout.</p>`;
+    } else {
+      windowNote = `<p class="note callout">Next-block pay is the window % (${wp.toFixed(1)}%), not hashrate. The window is ${nblocks} network-blocks of accepted work (TIDES). A newly connected high-hashrate miner does not take a matching slice of the next block.</p>`;
+    }
     $("miner").innerHTML = `
       <div class="panel miner-card">
         <div class="addr-line">
-          <span class="copyable"><span class="mono">${m.address}</span><button type="button" class="copy-btn" data-copy="${m.address}" aria-label="Copy address" title="Copy"></button></span>
-          <span class="${m.online ? "ok" : "bad"}">${status}</span>
+          <span class="copyable"><span class="mono">${esc(m.address)}</span><button type="button" class="copy-btn" data-copy="${esc(m.address)}" aria-label="Copy address" title="Copy"></button></span>
+          <span class="status-pill ${m.online ? "ok" : "bad"}">${status}</span>
         </div>
+        ${windowNote}
         <dl class="ticker">
-          <div><dt>Hashrate</dt><dd>${fmtHr(m.hr_ghs || 0)}<small>best ${fmtHr(m.best_hr_ghs || 0)}</small></dd></div>
-          <div><dt>Accepted</dt><dd>${num(m.shares_lifetime ?? m.shares_acc)}<small>same address keeps this if you switch paths</small></dd></div>
-          <div><dt>This session</dt><dd>${num(m.shares_session ?? 0)}<small>public stratum only · resets on reconnect</small></dd></div>
-          <div><dt>Payout window</dt><dd>${((m.round_share || 0) * 100).toFixed(1)}%<small>${num(m.window_work)} work on Prime</small></dd></div>
-          <div><dt>Est. / day</dt><dd>${btc(m.est_btc_day)}<small>${btc(m.est_btc_week)} / week</small></dd></div>
-          <div><dt>If we find one</dt><dd>${btc(m.block_payout_btc)}<small>from current window</small></dd></div>
-          <div><dt>Immature</dt><dd>${btc(m.immature_btc)}</dd></div>
-          <div><dt>Unpaid</dt><dd>${btc(m.unpaid_btc)}<small>mature</small></dd></div>
-          <div><dt>Paid</dt><dd>${btc(m.paid_btc)}</dd></div>
+          <div><dt>Hashrate</dt><dd>${fmtHr(m.hr_ghs || 0)}<small>best ${fmtHr(m.best_hr_ghs || 0)} · ${hp.toFixed(1)}% of pool now</small></dd></div>
+          <div><dt>Accepted</dt><dd>${num(m.shares_lifetime ?? m.shares_acc)}<small>stays with this address on either path</small></dd></div>
+          <div><dt>This session</dt><dd>${sessCell(m.via, m.shares_session)}<small>${isPrimePath(m.via) ? "own gateway · Prime credits the window directly" : "public stratum only · resets on reconnect"}</small></dd></div>
+          <div><dt>Payout window</dt><dd>${wp.toFixed(1)}%<small>${num(m.window_work)} work · what the next block pays</small></dd></div>
+          <div><dt>Est. / day</dt><dd>${btc(m.est_btc_day)}<small>if the window already matched this hashrate</small></dd></div>
+          <div><dt>Next block</dt><dd>${btc(m.block_payout_btc)}<small>your output in the coinbase Prime dictates now</small></dd></div>
+          <div><dt>Immature</dt><dd>${btc(m.immature_btc)}<small>in a coinbase, under 100 confs</small></dd></div>
+          <div><dt>Paid</dt><dd>${btc(m.paid_btc)}<small>in a coinbase, 100+ confs</small></dd></div>
         </dl>
         <div>
-          <p class="kicker" style="margin-bottom:0.45rem">Workers</p>
-          <p class="note">Stratum / GPU is our public gateway. Prime window is share credit on Prime (not proof you are connected with your own gateway).</p>
-          <div class="scroll"><table><thead><tr><th>Worker</th><th>Path</th><th>Hashrate</th><th>Session</th><th>Accepted</th><th>Window</th><th>Rejects</th><th>Last</th></tr></thead><tbody>${workers || '<tr><td colspan="8">Offline</td></tr>'}</tbody></table></div>
+          <p class="kicker table-label">Workers</p>
+          <p class="note">“Public stratum” is our gateway; “own gateway” is share credit arriving through a DATUM gateway you run.</p>
+          <div class="scroll"><table><thead><tr><th>Worker</th><th>Path</th><th class="num">Hashrate</th><th class="num">Session</th><th class="num">Accepted</th><th class="num">Window %</th><th class="num">Rejects</th><th class="num">Last</th></tr></thead><tbody>${workers || '<tr><td colspan="8" class="empty">Offline</td></tr>'}</tbody></table></div>
         </div>
         <div>
-          <p class="kicker" style="margin-bottom:0.45rem">Your payouts</p>
-          <div class="scroll"><table><thead><tr><th>Height</th><th>Paid</th><th>Time</th></tr></thead><tbody>${pays || '<tr><td colspan="3">No blocks found yet</td></tr>'}</tbody></table></div>
+          <p class="kicker table-label">Your payouts</p>
+          <div class="scroll"><table><thead><tr><th class="num">Height</th><th class="num">Amount</th><th>Status</th><th>Time</th></tr></thead><tbody>${pays || '<tr><td colspan="4" class="empty">No blocks found yet</td></tr>'}</tbody></table></div>
         </div>
       </div>`;
+    showChart(true);
     draw($("chart"), m.history || [], "hr_ghs");
   }
 
+  // --------------------------------------------------------------- refresh
   async function refresh() {
-    const [p, miners, blocks, pays] = await Promise.all([
+    const [p, miners, blocks, pays, cb] = await Promise.all([
       j("/api/pool"),
       j("/api/miners"),
       j("/api/blocks"),
       j("/api/payouts"),
+      j("/api/coinbaser").catch(() => ({})),
     ]);
     stats(p);
+    coinbase(cb || {});
+    gateways(p.prime || {});
     table(
       $("online"),
-      ["Address", "Worker", "Path", "Hashrate", "Session", "Accepted", "Window", "Last share"],
-      (miners.online || []).map((m) => [
-        `<a href="#${m.address}">${short(m.address)}</a>`,
-        m.worker || "\u2014",
+      ["Address", "Worker", "Path", "Hashrate", "Session", "Accepted", "Window %", "Last share"],
+      (miners.online || []).filter((m) => m.address).map((m, i, arr) => [
+        `<a href="#${esc(m.address)}">${short(m.address)}</a>`,
+        esc(m.worker || "\u2014"),
         pathLabel(m.via),
-        fmtHr(m.hr_ghs),
-        num(m.shares_session ?? 0),
-        num(m.shares_lifetime ?? m.shares_acc),
-        m.window_percent != null ? Number(m.window_percent).toFixed(1) + "%" : "\u2014",
-        m.last_share_s ? m.last_share_s.toFixed(0) + "s" : "\u2014",
-      ])
+        fmtHr((arr.findIndex((x) => x.address === m.address) === i) ? (m.credited_hr_ghs || m.hr_ghs) : m.hr_ghs),
+        sessCell(m.via, m.shares_session),
+        num(m.shares_lifetime ?? m.shares_acc ?? m.window_work),
+        (arr.findIndex((x) => x.address === m.address) === i) && m.window_percent != null ? pct(m.window_percent) : "\u2014",
+        Number.isFinite(Number(m.last_share_s)) ? Number(m.last_share_s).toFixed(0) + "s" : "\u2014",
+      ]),
+      [null, null, null, "num", "num", "num", "num", "num"]
     );
     table(
       $("seen"),
-      ["Address", "Best HR", "Accepted", "Window", "Last seen"],
-      (miners.seen || []).map((m) => [
-        `<a href="#${m.address}">${short(m.address)}</a>`,
-        fmtHr(m.best_hr_ghs),
-        num(m.shares_lifetime ?? m.shares_acc),
-        m.window_percent != null ? Number(m.window_percent).toFixed(1) + "%" : "\u2014",
+      ["Address", "Hashrate", "Accepted", "Window %", "Last seen"],
+      (miners.seen || []).filter((m) => m.address).map((m) => [
+        `<a href="#${esc(m.address)}">${short(m.address)}</a>`,
+        fmtHr(m.hr_ghs || 0),
+        num(m.shares_lifetime ?? m.shares_acc ?? m.window_work),
+        m.window_percent != null ? pct(m.window_percent) : "\u2014",
         ago(m.last_ts),
-      ])
+      ]),
+      [null, "num", "num", "num", "num"]
     );
-    const found = (pays.payouts || []).map((b) => [
-      b.height ?? "\u2014",
-      b.hash ? `<a href="${p.explorer}/block/${b.hash}" target="_blank" rel="noreferrer">${short(b.hash)}</a>` : "\u2014",
-      b.finder ? `<a href="#${b.finder}">${short(b.finder)}</a>` : "\u2014",
-      btc(b.miner_btc),
-      btc(b.pool_fee_btc),
-      b.ts ? new Date(b.ts * 1000).toLocaleString() : "",
-    ]);
-    table($("found"), ["Height", "Hash", "Finder", "Miner paid", "Pool fee", "Time"], found);
-    if ($("paytable")) table($("paytable"), ["Height", "Hash", "Finder", "Miner paid", "Pool fee", "Time"], found);
+    foundBlocks(pays, p);
     table(
       $("blocktable"),
       ["Height", "Miner tag", "Time", "Txs", ""],
       (blocks.blocks || []).slice(0, 16).map((b) => [
         b.height,
-        b.pool || "Unknown",
-        b.timestamp ? new Date(b.timestamp * 1000).toLocaleString() : "",
+        esc(b.pool || "Unknown"),
+        when(b.timestamp),
         b.tx_count || "",
-        b.explorer ? `<a href="${b.explorer}" target="_blank" rel="noreferrer">explorer</a>` : "",
-      ])
+        b.explorer ? `<a href="${esc(b.explorer)}" target="_blank" rel="noreferrer">explorer</a>` : "",
+      ]),
+      ["num", null, null, "num", null]
     );
   }
 
-  function syncMineBtn() {
-    const btn = $("bm-btn");
-    if (!btn) return;
-    const on = /stop/i.test(btn.textContent || "");
-    if (on) btn.setAttribute("data-on", "");
-    else btn.removeAttribute("data-on");
-  }
+  // Section anchors never trigger an address lookup. "mine" and "datum" are
+  // retired anchors kept so old bookmarks still land somewhere sensible.
+  const SECTIONS = new Set([
+    "", "top", "status", "window", "connect", "dashboard", "miners", "gateways",
+    "blocks", "payouts", "how", "datum", "mine",
+  ]);
 
-  const sectionRe = /^(mine|connect|datum|dashboard|miners|blocks|payouts|how)$/;
   function fromHash() {
     const a = location.hash.slice(1);
-    if (a && !sectionRe.test(a)) {
+    if (a === "datum") {
+      selectTab("tab-datum");
+      $("connect")?.scrollIntoView();
+      return;
+    }
+    if (a && !SECTIONS.has(a)) {
       $("lookup").value = a;
       showMiner(a);
     }
@@ -406,13 +660,14 @@
   });
   window.addEventListener("hashchange", fromHash);
   fromHash();
-  refresh();
-  setInterval(refresh, 10000);
-  setInterval(syncMineBtn, 400);
+  refresh().catch((e) => console.error(e));
+  setInterval(() => refresh().catch((e) => console.error(e)), 10000);
   window.addEventListener("resize", () => {
-    const p = document.querySelector("#poolchart");
-    if (p && p.dataset.last) {
-      try { draw(p, JSON.parse(p.dataset.last), "hr_ghs"); } catch (e) {}
+    for (const id of ["poolchart", "chart"]) {
+      const c = $(id);
+      if (c && c.dataset.last) {
+        try { draw(c, JSON.parse(c.dataset.last), "hr_ghs"); } catch (e) {}
+      }
     }
   });
 })();

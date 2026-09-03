@@ -2,33 +2,29 @@
 """Lazarus public mining-pool dashboard. Scrapes DATUM + Knots; no admin UI exposed."""
 from __future__ import annotations
 
-import base64
-import hashlib
 import json
+import os
 import re
-import socket
 import sqlite3
 import subprocess
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from collections import defaultdict, deque
 from urllib.parse import parse_qs, unquote, urlparse
 
 ROOT = Path(__file__).resolve().parent
-DB = ROOT / "pool.sqlite"
+DB = Path(os.environ.get("POOL_DB") or (ROOT / "pool.sqlite"))
 STATIC = ROOT / "static"
 CONF = json.loads((ROOT / "config.json").read_text())
+NO_WRITE = os.environ.get("POOL_UI_NO_WRITE") == "1"
 
 POOL_FEE = float(CONF.get("pool_fee_percent", 0))
 STRATUM_HOST = CONF.get("stratum_host", "27.69.0.25")
 STRATUM_PORT = int(CONF.get("stratum_port", 23334))
-STRATUM_TCP_HOST = CONF.get("stratum_tcp_host", "127.0.0.1")
-STRATUM_TCP_PORT = int(CONF.get("stratum_tcp_port", STRATUM_PORT))
-STRATUM_GPU_PORT = int(CONF.get("stratum_gpu_port", 3333))
 DATUM_URL = CONF.get("datum_url", "http://127.0.0.1:7152")
-DATUM_GPU_URL = CONF.get("datum_gpu_url", "http://127.0.0.1:7153")
-DATUM_CLIENT_URLS = [(DATUM_URL, "stratum", STRATUM_PORT), (DATUM_GPU_URL, "gpu", STRATUM_GPU_PORT)]
+DATUM_CLIENT_URLS = [(DATUM_URL, "stratum", STRATUM_PORT)]
 MEMPOOL_API = CONF.get("mempool_api", "http://10.21.21.27:8999")
 COOKIE = Path(CONF.get("cookie_file", "/home/umbrel/umbrel/app-data/bitcoin-knots/data/bitcoin/.cookie"))
 AUTH_FILE = Path(CONF.get("datum_auth_file", "/home/umbrel/blake2b/secrets/datum-admin.env"))
@@ -37,28 +33,39 @@ COINBASE_TAG = CONF.get("coinbase_tag", "Lazarus")
 SUBSIDY = 3.125
 
 PRIME_STATS = CONF.get("datum_prime_stats", "http://127.0.0.1:28916/stats.json")
-_prime_pubkey_cache = {"v": "", "ts": 0}
+
+# primed's stats.json, fetched at most every few seconds and kept as the last good copy.
+# Everything the UI says about the Prime -- window, per-miner hashrate, gateways, blocks,
+# owed, uptime, pubkey -- reads from this one document.
+_prime_doc_cache = {"doc": {}, "ts": 0.0, "ok_ts": 0.0}
+
+
+def prime_doc(max_age=4.0):
+    now = time.time()
+    if now - _prime_doc_cache["ts"] < max_age:
+        return _prime_doc_cache["doc"]
+    _prime_doc_cache["ts"] = now
+    raw = curl(PRIME_STATS, timeout=3)
+    try:
+        doc = json.loads(raw) if raw else {}
+    except Exception:
+        doc = {}
+    if isinstance(doc, dict) and doc.get("window") is not None:
+        _prime_doc_cache["doc"] = doc
+        _prime_doc_cache["ok_ts"] = now
+    return _prime_doc_cache["doc"]
+
+
+def prime_reachable(stale_after=30.0):
+    prime_doc()
+    return bool(_prime_doc_cache["doc"]) and (time.time() - _prime_doc_cache["ok_ts"]) < stale_after
 
 
 def _datum_prime_pubkey():
-    now = time.time()
-    if _prime_pubkey_cache["v"] and now - _prime_pubkey_cache["ts"] < 30:
-        return _prime_pubkey_cache["v"]
-    raw = curl(PRIME_STATS, timeout=3)
-    try:
-        pk = (json.loads(raw).get("pool") or {}).get("pubkey") or ""
-    except Exception:
-        pk = ""
-    if pk:
-        _prime_pubkey_cache["v"] = pk
-        _prime_pubkey_cache["ts"] = now
-    return pk or _prime_pubkey_cache["v"]
+    return ((prime_doc().get("pool") or {}).get("pubkey")) or ""
 
 
 lock = threading.Lock()
-browser_stats = {}  # (address, worker) -> {hs, ts}
-BROWSER_STAT_TTL = 45
-BROWSER_HS_MAX = 5e8
 
 
 def datum_user_pass():
@@ -236,12 +243,10 @@ def pool_share_totals():
 
 
 def fetch_prime_window():
-    raw = curl(PRIME_STATS, timeout=3)
-    try:
-        data = json.loads(raw) if raw else {}
-    except Exception:
-        return {}, {"shares": 0, "work": 0, "target_work": 0}
+    """Per-identity view of the TIDES window plus the Prime-wide figures, from primed's stats."""
+    data = prime_doc()
     win = data.get("window") or {}
+    pool = data.get("pool") or {}
     by = {}
     for m in win.get("miners") or []:
         ident = (m.get("identity") or "").strip()
@@ -256,86 +261,208 @@ def fetch_prime_window():
             "window_percent": float(m.get("share_percent") or 0),
             "window_sats": int(m.get("payout_sats") or 0),
             "payable": bool(m.get("payable")),
+            "credits": int(m.get("credits") or 0),
+            # primed measures these itself from the credit stream; no need to estimate.
+            "hr_ghs": float(m.get("hashrate_ghs") or 0),
+            "last_share_s": float(m["last_share_s"]) if m.get("last_share_s") is not None else None,
         }
     meta = {
         "shares": int(win.get("shares") or 0),
         "work": 0,
         "target_work": 0,
+        "window_multiple": 8,
+        # window.identities in stats.json is the interned identity table (all-time); the
+        # miners list is who holds work in the window right now.
+        "identities": len(by),
+        "identities_lifetime": int(win.get("identities") or len(by)),
+        "fill_percent": float(win.get("fill_percent") or 0),
+        "sample_value": int(win.get("sample_value") or 0),
+        "sample_fee_sats": int(win.get("sample_fee_sats") or 0),
+        "sample_pool_sats": int(win.get("sample_pool_sats") or 0),
+        "hashrate_ghs": float((data.get("hashrate") or {}).get("pool_ghs") or 0),
+        "hashrate_window_s": int((data.get("hashrate") or {}).get("window_s") or 0),
+        "uptime_s": int(data.get("uptime_s") or 0),
+        "started_ts": int(data.get("started_ts") or 0),
+        "build": data.get("build") or {},
+        "pool": pool,
+        "node": data.get("node") or {},
+        "totals": data.get("totals") or {},
+        "clients": data.get("clients") or [],
+        "blocks": data.get("blocks") or [],
+        "owed_sats": int(data.get("owed") or 0),
+        "reachable": prime_reachable(),
     }
     try:
         meta["work"] = int(float(win.get("work") or 0))
         meta["target_work"] = int(float(win.get("target_work") or 0))
     except (TypeError, ValueError):
         pass
+    try:
+        meta["window_multiple"] = int(pool.get("window_multiple") or 8)
+    except (TypeError, ValueError):
+        meta["window_multiple"] = 8
     return by, meta
+
+
+def tides_window_snapshot():
+    """Live TIDES window: N × network difficulty of accepted work, not today's hashrate."""
+    meta = state.get("prime_meta") or {}
+    work = float(meta.get("work") or 0)
+    target = float(meta.get("target_work") or 0)
+    try:
+        multiple = int(meta.get("window_multiple") or 8)
+    except (TypeError, ValueError):
+        multiple = 8
+    fill = (100.0 * work / target) if target > 0 else 0.0
+    return {
+        "window_multiple": multiple,
+        "window_work": int(work),
+        "window_target_work": int(target),
+        "window_fill_percent": fill,
+        "window_shares": int(meta.get("shares") or 0),
+    }
 
 
 # One unit of Prime window work is one difficulty-1 share (2**32 hashes).
 _PRIME_HASHES_PER_WORK = float(1 << 32)
-_PRIME_HR_CAP_GHS = 200000.0
-_prime_uptime_cache = {"ts": 0, "uptime": 0}
+_PRIME_HR_CAP_GHS = 2000000.0
 
 
-def _prime_uptime_s():
+# Displayed hashrate uses a monotonic credit counter, not raw window_work.
+# Once the TIDES window is full, Prime trims old rows: window_work can sit flat
+# or fall between polls even while the miner is still submitting at full speed.
+# We only ever *add* on positive deltas; a trim just updates last_work.
+_HR_AVG_S = 300
+_hr_hist = defaultdict(deque)
+_hr_last_work = {}
+
+_GW_HR_AVG_S = 300
+_gw_diff_hist = defaultdict(deque)
+_gw_last_diff = {}
+
+
+def _rolling_credit_hr(hist, last_map, addr, value, ts, avg_s):
+    prev = last_map.get(addr)
+    total = hist[addr][-1][1] if hist[addr] else 0.0
+    last_inc = ts
+    if prev is None:
+        last_map[addr] = value
+    else:
+        if value > prev:
+            total += value - prev
+            last_inc = ts
+        last_map[addr] = value
+    q = hist[addr]
+    q.append((float(ts), float(total)))
+    cutoff = ts - avg_s
+    while len(q) > 1 and q[0][0] < cutoff:
+        q.popleft()
+    if len(q) < 2:
+        est = 0.0
+    else:
+        dc = q[-1][1] - q[0][1]
+        dt = max(1.0, q[-1][0] - q[0][0])
+        if dt < 15 or dc < 0.5:
+            est = 0.0
+        else:
+            est = dc * _PRIME_HASHES_PER_WORK / dt / 1e9
+            if est > _PRIME_HR_CAP_GHS:
+                est = _PRIME_HR_CAP_GHS
+    last_share_s = float(max(0.0, ts - last_inc))
+    return est, last_share_s
+
+
+# --- Authoritative per-identity hashrate, straight from Prime's credited work. ---
+# Prime's ledger records each credited share in 60s buckets of difficulty-1 work. Delivered
+# hashrate is simply that work over a rolling wall-clock window times 2**32. This is the payout
+# source of truth, is stateless, and (unlike window_work deltas or gateway diff sums) does not
+# under-count busy or reconnecting miners. Cached briefly so a request storm does not reparse.
+LEDGER_PATH = Path(CONF.get("ledger_path", "/home/umbrel/blake2b/lazarus-prime/ledger.json"))
+LEDGER_HR_WINDOW_S = int(CONF.get("ledger_hr_window_s", 600))
+_ledger_hr_cache = {"ts": 0.0, "by_addr": {}, "pool_ghs": 0.0, "age": {}}
+
+
+def _ledger_hashrate(window_s=None):
+    """(by_addr_ghs, pool_ghs): delivered hashrate per identity and for the pool.
+
+    primed measures these from its credit stream and reports them in stats.json
+    (``window.miners[].hashrate_ghs``, ``hashrate.pool_ghs``); that is the source. The
+    old Prime's ``ledger.json`` walk is kept only as a fallback while stats are unreachable.
+    """
     now = time.time()
-    if now - _prime_uptime_cache["ts"] < 15 and _prime_uptime_cache["uptime"]:
-        return _prime_uptime_cache["uptime"]
+    if now - _ledger_hr_cache["ts"] < 5 and _ledger_hr_cache["by_addr"]:
+        return _ledger_hr_cache["by_addr"], _ledger_hr_cache["pool_ghs"]
+    doc = prime_doc()
+    win = doc.get("window") or {}
+    if win.get("miners") is not None and prime_reachable():
+        by, age = {}, {}
+        for m in win.get("miners") or []:
+            ident = (m.get("identity") or "").strip()
+            if not ident:
+                continue
+            by[ident] = min(float(m.get("hashrate_ghs") or 0), _PRIME_HR_CAP_GHS)
+            if m.get("last_share_s") is not None:
+                age[ident] = float(m["last_share_s"])
+        pool = float((doc.get("hashrate") or {}).get("pool_ghs") or sum(by.values()))
+        _ledger_hr_cache.update({"ts": now, "by_addr": by, "pool_ghs": pool, "age": age})
+        return by, pool
+    window_s = int(window_s or LEDGER_HR_WINDOW_S)
     try:
-        out = subprocess.check_output(
-            ["ps", "-o", "etimes=", "-C", "primed,lazarus-prime"],
-            stderr=subprocess.DEVNULL,
-            text=True,
-        ).split()
-        up = int(out[0]) if out else 0
+        with open(LEDGER_PATH) as f:
+            credits = json.load(f).get("credits", [])
     except Exception:
-        up = 0
-    if up:
-        _prime_uptime_cache.update({"ts": now, "uptime": up})
-    return up
+        return _ledger_hr_cache["by_addr"], _ledger_hr_cache["pool_ghs"]
+    by, age, pool = {}, {}, 0.0
+    if credits:
+        newest = max(c["ts"] for c in credits)
+        cut = newest - window_s
+        work, last = {}, {}
+        for c in credits:
+            ident = c["identity"]
+            if c["ts"] > cut:
+                work[ident] = work.get(ident, 0) + c["work"]
+            if c["ts"] > last.get(ident, 0):
+                last[ident] = c["ts"]
+        for ident, w in work.items():
+            ghs = min(w * _PRIME_HASHES_PER_WORK / float(window_s) / 1e9, _PRIME_HR_CAP_GHS)
+            by[ident] = ghs
+            pool += ghs
+        for ident, ts_last in last.items():
+            age[ident] = float(max(0, newest - ts_last))
+    _ledger_hr_cache.update({"ts": now, "by_addr": by, "pool_ghs": pool, "age": age})
+    return by, pool
 
 
-def _prime_window_avg_ghs(work):
-    if work <= 0:
-        return 0.0
-    age = _prime_uptime_s() or 0
-    age = max(120, age)  # never treat a brand-new Prime as a 60s spike
-    raw = work * _PRIME_HASHES_PER_WORK / age / 1e9
-    if raw > _PRIME_HR_CAP_GHS:
-        return 0.0
-    return raw
+def _ledger_last_share_s(addr):
+    _ledger_hashrate()
+    return _ledger_hr_cache["age"].get(addr)
 
 
 def _prime_hr_from_work(addr, work, ts):
-    row = db(
-        "SELECT work_seen, work_seen_ts, hr_ghs_est FROM prime_miners WHERE address=?",
-        (addr,),
-        one=True,
-    )
-    prev_w = float(row["work_seen"] or 0) if row else 0.0
-    prev_t = int(row["work_seen_ts"] or 0) if row and row["work_seen_ts"] else 0
-    prev_hr = float(row["hr_ghs_est"] or 0) if row else 0.0
-    if prev_hr < 1e-6:
-        prev_hr = 0.0
-    seen_w, seen_t = prev_w, prev_t
-    increased = False
-    inst = 0.0
-    if not prev_t:
-        seen_w, seen_t = work, ts
-    elif work + 0.5 < prev_w:
-        seen_w, seen_t = work, ts
-    elif work > prev_w + 0.5:
-        dt = max(1, ts - prev_t)
-        raw = (work - prev_w) * _PRIME_HASHES_PER_WORK / dt / 1e9
-        if 0 < raw <= _PRIME_HR_CAP_GHS:
-            inst = (0.4 * raw + 0.6 * prev_hr) if prev_hr > 1e-6 else raw
-        increased = True
-        seen_w, seen_t = work, ts
-    window_avg = _prime_window_avg_ghs(work)
-    # Instant rate when they are still landing work; otherwise the window average
-    # so a miner who already banked this round is not shown as 0 H/s.
-    est = inst if inst > 1e-6 else window_avg
-    last_share_s = 0.0 if increased or not prev_t else float(max(0, ts - prev_t))
-    return est, last_share_s, seen_w, seen_t
+    by, _pool = _ledger_hashrate()
+    est = float(by.get(addr) or 0.0)
+    last = _ledger_last_share_s(addr)
+    last_share_s = last if last is not None else 0.0
+    return est, last_share_s, work, ts
+
+
+def _gateway_hr_from_diff(addr, diff_total, ts):
+    return _rolling_credit_hr(_gw_diff_hist, _gw_last_diff, addr, diff_total, ts, _GW_HR_AVG_S)[0]
+
+
+def _update_gateway_hr(miners, ts):
+    by = defaultdict(int)
+    for m in miners or []:
+        if (m.get("via") or "") != "stratum":
+            continue
+        addr = m.get("address") or ""
+        if addr:
+            by[addr] += int(m.get("diff_acc") or 0)
+    rates = {}
+    for addr, diff in by.items():
+        rates[addr] = _gateway_hr_from_diff(addr, diff, ts)
+    state["gateway_hr"] = rates
+    return rates
 
 
 def persist_prime_miners(by, ts):
@@ -367,6 +494,16 @@ def persist_prime_miners(by, ts):
                 (addr, ts, ts, 0, 0, 0, info.get("window_work") or 0, 0, 0, 0),
                 write=True,
             )
+    live_ids = set(by)
+    for row in db("SELECT address FROM prime_miners") or []:
+        addr = row["address"]
+        if addr in live_ids:
+            continue
+        db(
+            "UPDATE prime_miners SET share_percent=0, hr_ghs_est=0 WHERE address=?",
+            (addr,),
+            write=True,
+        )
 
 
 def prime_info_for(address):
@@ -380,20 +517,45 @@ def prime_info_for(address):
                 seen = int(row["work_seen_ts"] or 0) if row["work_seen_ts"] else 0
                 out.setdefault("last_share_s", float(max(0, int(time.time()) - seen)) if seen else 0.0)
         return out
-    row = db("SELECT work, share_percent, peak_work, last_ts, hr_ghs_est, work_seen_ts FROM prime_miners WHERE address=?", (address,), one=True)
+    # Not in the live TIDES window — leftover sqlite work/percent is yesterday's credit,
+    # not what a block found now would pay. Do not show it as current attribution.
+    row = db("SELECT peak_work, last_ts, hr_ghs_est, work_seen_ts FROM prime_miners WHERE address=?", (address,), one=True)
     if not row:
         return {}
     seen = int(row["work_seen_ts"] or 0) if row["work_seen_ts"] else 0
+    age = (int(time.time()) - seen) if seen else 10**9
+    hr = float(row["hr_ghs_est"] or 0)
+    if age >= 600:
+        hr = 0.0
+    elif hr > 1e-6:
+        hr = hr * max(0.0, 1.0 - age / 600.0)
     return {
-        "window_work": int(row["work"] or 0),
-        "window_percent": float(row["share_percent"] or 0),
+        "window_work": 0,
+        "window_percent": 0.0,
         "window_sats": 0,
-        "payable": True,
+        "payable": False,
         "window_peak": int(row["peak_work"] or 0),
         "window_last_ts": int(row["last_ts"] or 0),
-        "hr_ghs": float(row["hr_ghs_est"] or 0),
-        "last_share_s": float(max(0, int(time.time()) - seen)) if seen else 0.0,
+        "hr_ghs": hr,
+        "last_share_s": float(age) if seen else 0.0,
     }
+
+
+def _share_age_s(value, *, missing=1e9):
+    """Seconds since last share. 0 means just now — do not treat it as missing."""
+    if value is None:
+        return missing
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return missing
+
+
+def _prime_is_live(info, window_s=180):
+    info = info or {}
+    hr = float(info.get("hr_ghs") or 0)
+    age = _share_age_s(info.get("last_share_s"), missing=0.0 if hr > 1e-6 else 1e9)
+    return hr > 1e-6 and age < window_s
 
 
 def attach_share_fields(rec):
@@ -410,12 +572,24 @@ def attach_share_fields(rec):
     rec["window_percent"] = float(info.get("window_percent") or 0)
     rec["window_sats"] = int(info.get("window_sats") or 0)
     rec["via"] = rec.get("via") or ("prime" if rec.get("ua") in ("DATUM gateway", "Prime window") else "stratum")
-    phr = float(info.get("hr_ghs") or 0)
-    if phr > 1e-6 and (rec.get("via") in ("gateway", "prime") or rec.get("ua") in ("DATUM gateway", "Prime window")):
-        if not rec.get("hr_ghs") or float(rec.get("hr_ghs") or 0) < 1e-6:
-            rec["hr_ghs"] = phr
-        if info.get("last_share_s") is not None and not rec.get("last_share_s"):
-            rec["last_share_s"] = float(info.get("last_share_s") or 0)
+    _led_by, _ = _ledger_hashrate()
+    phr = float(_led_by.get(addr) or 0.0) or float(info.get("hr_ghs") or 0)
+    gwh = float((state.get("gateway_hr") or {}).get(addr) or 0)
+    rec["credited_hr_ghs"] = phr
+    rec["gateway_hr_ghs"] = gwh
+    rec["firmware_hr_ghs"] = float(rec.get("hr_ghs") or 0)
+    if rec.get("via") in ("gateway", "prime") or rec.get("ua") in ("DATUM gateway", "Prime window"):
+        ww = int(info.get("window_work") or rec.get("window_work") or 0)
+        if ww and int(rec.get("shares_lifetime") or 0) < ww:
+            rec["shares_lifetime"] = ww
+            rec["shares_acc"] = ww
+    display = phr if phr > 1e-6 else (gwh if gwh > 1e-6 else rec["firmware_hr_ghs"])
+    if display > 1e-6:
+        rec["hr_ghs"] = display
+        if gwh > 1e-6 and rec.get("last_share_s") is not None:
+            pass
+        elif info.get("last_share_s") is not None:
+            rec["last_share_s"] = _share_age_s(info.get("last_share_s"), missing=0.0)
     return rec
 
 
@@ -433,11 +607,9 @@ def merge_prime_online(miners):
             m["window_sats"] = int(info.get("window_sats") or 0)
         if addr in by:
             if m.get("ua") in ("DATUM gateway", "Prime window") or m.get("via") in ("gateway", "prime"):
-                if m.get("via") not in ("stratum", "gpu"):
+                if m.get("via") != "stratum":
                     m["via"] = "prime"
-            elif m.get("via") == "gpu":
-                m["via"] = "gpu"
-            elif (m.get("ua") or "").startswith("lazarus-web") or m.get("via") == "stratum":
+            elif m.get("via") == "stratum":
                 m["via"] = "stratum"
             elif m.get("host") or (m.get("ua") and m.get("ua") != "DATUM gateway"):
                 m["via"] = "stratum"
@@ -446,7 +618,8 @@ def merge_prime_online(miners):
     for addr, info in by.items():
         if addr in have:
             continue
-        last_s = float(info.get("last_share_s") or 0)
+        last_s = _share_age_s(info.get("last_share_s"), missing=0.0)
+        ww = int(info.get("window_work") or 0)
         rec = {
             "address": addr,
             "worker": "window",
@@ -454,21 +627,22 @@ def merge_prime_online(miners):
             "host": "",
             "hr_ghs": float(info.get("hr_ghs") or 0),
             "vdiff": 0,
-            "diff_acc": int(info.get("window_work") or 0),
-            "shares_acc": 0,
+            "diff_acc": ww,
+            "shares_acc": ww,
             "shares_session": 0,
-            "shares_lifetime": 0,
+            "shares_lifetime": ww,
             "diff_rej": 0,
             "shares_rej": 0,
             "last_share_s": last_s,
             "ua": "Prime window",
-            "online": bool(last_s and last_s < 180),
+            "online": _prime_is_live(info),
             "via": "prime",
-            "window_work": int(info.get("window_work") or 0),
+            "window_work": ww,
             "window_percent": float(info.get("window_percent") or 0),
             "window_sats": int(info.get("window_sats") or 0),
         }
         attach_share_fields(rec)
+        rec["online"] = rec.get("online") or _prime_is_live(rec)
         if rec.get("online"):
             extras.append(rec)
     return miners + extras
@@ -485,6 +659,8 @@ def ensure_open_round():
 
 
 def db(q, args=(), one=False, write=False):
+    if write and NO_WRITE:
+        return None
     with lock:
         cur = db_conn.execute(q, args)
         if write:
@@ -494,7 +670,7 @@ def db(q, args=(), one=False, write=False):
         return rows[0] if one and rows else (rows if not one else None)
 
 
-def curl(url, digest=False, timeout=8):
+def curl(url, digest=False, timeout=3):
     cmd = ["curl", "-sS", "--max-time", str(timeout)]
     if digest:
         u, p = datum_user_pass()
@@ -544,84 +720,8 @@ def split_user(u):
     return addr, worker
 
 
-def prune_browser_stats(now=None):
-    now = time.time() if now is None else now
-    dead = [k for k, v in browser_stats.items() if now - v["ts"] > BROWSER_STAT_TTL]
-    for k in dead:
-        browser_stats.pop(k, None)
-
-
-def lookup_browser_hs(address, worker):
-    now = time.time()
-    prune_browser_stats(now)
-    st = browser_stats.get((address, worker or ""))
-    if st and now - st["ts"] <= BROWSER_STAT_TTL:
-        return float(st["hs"])
-    return None
-
-
-def record_browser_stat(user, hs):
-    addr, worker = split_user(user)
-    if not addr or not re.match(r"^(bc1|[13])[a-zA-HJ-NP-Z0-9]{20,90}$", addr):
-        return False
-    if worker and not re.match(r"^[A-Za-z0-9._-]{0,32}$", worker):
-        return False
-    try:
-        hs = float(hs)
-    except (TypeError, ValueError):
-        return False
-    if hs < 0 or hs > BROWSER_HS_MAX:
-        return False
-    with lock:
-        browser_stats[(addr, worker)] = {"hs": hs, "ts": time.time()}
-    return True
-
-
-def apply_browser_hr(miners):
-    for m in miners or []:
-        reported = lookup_browser_hs(m.get("address"), m.get("worker"))
-        ua = m.get("ua") or ""
-        worker = m.get("worker") or ""
-        if reported is not None and (
-            ua.startswith("lazarus-web") or worker.startswith("web") or worker == "browser"
-        ):
-            m["hr_ghs"] = reported / 1e9
-    return miners
-
-
 def online_miners():
-    miners = apply_browser_hr(list(state.get("miners") or []))
-    have = {(m.get("address"), m.get("worker") or "") for m in miners}
-    now = time.time()
-    prune_browser_stats(now)
-    extras = []
-    with lock:
-        items = list(browser_stats.items())
-    for (addr, worker), st in items:
-        if now - st["ts"] > BROWSER_STAT_TTL:
-            continue
-        if (addr, worker) in have:
-            continue
-        extras.append(
-            {
-                "address": addr,
-                "worker": worker,
-                "user": f"{addr}.{worker}" if worker else addr,
-                "host": "",
-                "hr_ghs": float(st["hs"]) / 1e9,
-                "vdiff": 0,
-                "diff_acc": 0,
-                "shares_acc": 0,
-                "shares_session": 0,
-                "shares_lifetime": 0,
-                "diff_rej": 0,
-                "shares_rej": 0,
-                "last_share_s": 0,
-                "ua": "lazarus-web/0.1",
-                "online": True,
-            }
-        )
-    return merge_prime_online(miners + extras)
+    return merge_prime_online(list(state.get("miners") or []))
 
 
 def ascii_from_hex(hx):
@@ -681,9 +781,6 @@ def _scrape_datum_clients(url, via, stratum_port):
         if lm:
             last_s = float(lm.group(1))
         hr_ghs = parse_hr(hr_s)
-        reported = lookup_browser_hs(addr, worker)
-        if reported is not None and (ua.startswith("lazarus-web") or worker.startswith("web") or worker == "browser"):
-            hr_ghs = reported / 1e9
         rec = {
             "address": addr,
             "worker": worker,
@@ -707,39 +804,26 @@ def _scrape_datum_clients(url, via, stratum_port):
     return miners
 
 
-
-def recent_best_hr(address, fallback=0, window_s=3 * 86400):
-    """Peak hashrate from recent samples only — never a lifetime max from a bad scrape."""
-    if not address:
-        return float(fallback or 0)
-    row = db(
-        "SELECT MAX(hr_ghs) AS hr FROM samples WHERE address=? AND ts > ? AND worker != 'gateway' AND hr_ghs < ?",
-        (address, int(time.time()) - window_s, 20000),
-        one=True,
-    )
-    sample = float(row["hr"]) if row and row["hr"] is not None else 0.0
-    cur = float(fallback or 0)
-    if cur >= 20000:
-        cur = 0.0
-    return max(sample, cur)
-
-
 def scrape():
     pool_hr = acc = rej = 0
     miners = []
     seen = set()
     for url, via, port in DATUM_CLIENT_URLS:
-        phr, a, r = _scrape_datum_home(url)
-        pool_hr += phr
-        acc += a
-        rej += r
-        for rec in _scrape_datum_clients(url, via, port):
-            key = (rec.get("address"), rec.get("worker"), rec.get("via"))
-            if key in seen:
-                continue
-            seen.add(key)
-            miners.append(rec)
+        try:
+            phr, a, r = _scrape_datum_home(url)
+            pool_hr += phr
+            acc += a
+            rej += r
+            for rec in _scrape_datum_clients(url, via, port):
+                key = (rec.get("address"), rec.get("worker"), rec.get("via"), rec.get("host"))
+                if key in seen:
+                    continue
+                seen.add(key)
+                miners.append(rec)
+        except Exception as e:
+            print("scrape", url, e, flush=True)
     ts = int(time.time())
+    gateway_hr = _update_gateway_hr(miners, ts)
     for rec in miners:
         db(
             "INSERT INTO samples(ts,address,worker,hr_ghs,vdiff,shares_acc,shares_rej,diff_acc,last_share_s) VALUES(?,?,?,?,?,?,?,?,?)",
@@ -747,17 +831,16 @@ def scrape():
             write=True,
         )
         prev = db("SELECT * FROM miners WHERE address=?", (rec["address"],), one=True)
-        best = recent_best_hr(rec["address"], rec["hr_ghs"])
         if prev:
             db(
-                "UPDATE miners SET last_ts=?, best_hr_ghs=?, diff_acc=? WHERE address=?",
-                (ts, best, rec["diff_acc"], rec["address"]),
+                "UPDATE miners SET last_ts=?, best_hr_ghs=MAX(best_hr_ghs,?), diff_acc=? WHERE address=?",
+                (ts, rec["hr_ghs"], rec["diff_acc"], rec["address"]),
                 write=True,
             )
         else:
             db(
                 "INSERT INTO miners(address,first_ts,last_ts,best_hr_ghs,shares_acc,shares_rej,diff_acc,shares_lifetime,shares_session,shares_rej_lifetime) VALUES(?,?,?,?,?,?,?,?,?,?)",
-                (rec["address"], ts, ts, best, rec["shares_acc"], rec["shares_rej"], rec["diff_acc"], rec["shares_acc"], rec["shares_acc"], rec["shares_rej"]),
+                (rec["address"], ts, ts, rec["hr_ghs"], rec["shares_acc"], rec["shares_rej"], rec["diff_acc"], rec["shares_acc"], rec["shares_acc"], rec["shares_rej"]),
                 write=True,
             )
         life, sess = credit_session_shares(rec["address"], rec["worker"], rec["shares_acc"], rec["shares_rej"])
@@ -768,14 +851,39 @@ def scrape():
     db("DELETE FROM pool_samples WHERE ts < ?", (ts - 7 * 86400,), write=True)
     prime_by, prime_meta = fetch_prime_window()
     persist_prime_miners(prime_by, ts)
-    live_hr = sum(m["hr_ghs"] for m in miners) or pool_hr
-    db(
-        "INSERT OR REPLACE INTO pool_samples(ts,hr_ghs,miners,shares_acc,shares_rej) VALUES(?,?,?,?,?)",
-        (ts, live_hr, len(miners), acc, rej),
-        write=True,
-    )
-    return {"pool_hr_ghs": live_hr, "shares_acc": acc, "shares_rej": rej, "miners": miners, "ts": ts, "prime": prime_by, "prime_meta": prime_meta}
-
+    stratum_addrs = {m.get("address") for m in miners}
+    gw_hr = 0.0
+    gw_n = 0
+    for addr, info in prime_by.items():
+        if addr in stratum_addrs:
+            continue
+        hr = float(info.get("hr_ghs") or 0)
+        gw_hr += hr
+        gw_n += 1
+        db(
+            "INSERT INTO samples(ts,address,worker,hr_ghs,vdiff,shares_acc,shares_rej,diff_acc,last_share_s) VALUES(?,?,?,?,?,?,?,?,?)",
+            (ts, addr, "gateway", hr, 0, 0, 0, int(info.get("window_work") or 0), float(info.get("last_share_s") or 0)),
+            write=True,
+        )
+        db(
+            "UPDATE miners SET last_ts=?, best_hr_ghs=MAX(best_hr_ghs,?) WHERE address=?",
+            (ts, hr, addr),
+            write=True,
+        )
+    state["prime"] = prime_by
+    state["prime_meta"] = prime_meta
+    merged = merge_prime_online(list(miners))
+    _lby, _lpool = _ledger_hashrate()
+    from_clients = sum(float(m.get("hr_ghs") or 0) for m in merged)
+    live_hr = _lpool if _lpool > 1e-9 else (from_clients or pool_hr)
+    n_miners = len(merged)
+    if live_hr > 0:
+        db(
+            "INSERT OR REPLACE INTO pool_samples(ts,hr_ghs,miners,shares_acc,shares_rej) VALUES(?,?,?,?,?)",
+            (ts, live_hr, n_miners, acc, rej),
+            write=True,
+        )
+    return {"pool_hr_ghs": live_hr, "shares_acc": acc, "shares_rej": rej, "miners": miners, "ts": ts, "prime": prime_by, "prime_meta": prime_meta, "gateway_hr": gateway_hr}
 
 
 def credit_round_work(address, diff_acc):
@@ -802,13 +910,55 @@ def credit_round_work(address, diff_acc):
         )
 
 
-
 def value_output_count(vouts):
     n = 0
     for v in vouts or []:
         if float(v.get("value") or 0) > 0:
             n += 1
     return n
+
+
+def vout_address(v):
+    spk = (v or {}).get("scriptPubKey") or {}
+    return spk.get("address") or ((spk.get("addresses") or [None])[0])
+
+
+def splits_from_vouts(vouts):
+    by = {}
+    for v in vouts or []:
+        amt = float(v.get("value") or 0)
+        addr = vout_address(v)
+        if not addr or amt <= 0:
+            continue
+        by[addr] = by.get(addr, 0.0) + amt
+    return by
+
+
+# TIDES coinbase splits by block hash. None = RPC miss (do not cache).
+_cb_split_cache = {}
+
+
+def coinbase_splits(blockhash):
+    """Address -> BTC actually paid in that block's coinbase."""
+    if not blockhash:
+        return None
+    if blockhash in _cb_split_cache:
+        return _cb_split_cache[blockhash]
+    blk = rpc("getblock", [blockhash, 2])
+    if not blk:
+        return None
+    tx0 = (blk.get("tx") or [None])[0] or {}
+    by = splits_from_vouts(tx0.get("vout"))
+    _cb_split_cache[blockhash] = by
+    return by
+
+
+def payout_status_for_height(height, tip):
+    if not height or not tip:
+        return "paid"
+    if int(tip) < int(height) + 100:
+        return "immature"
+    return "paid"
 
 
 def restore_unsplit_effort():
@@ -850,7 +1000,7 @@ def restore_unsplit_effort():
     print("restored_unsplit", fb["height"], "identities", restored, flush=True)
 
 
-def close_round_for_block(height, blockhash, reward, fee_btc, miner_btc):
+def close_round_for_block(height, blockhash, reward, fee_btc, miner_btc, vouts=None):
     ensure_open_round()
     already = db("SELECT id FROM rounds WHERE height=?", (height,), one=True)
     if already:
@@ -859,12 +1009,26 @@ def close_round_for_block(height, blockhash, reward, fee_btc, miner_btc):
     rid = int(openr["id"])
     rows = db("SELECT address, work FROM round_work WHERE work > 0")
     total = sum(float(r["work"]) for r in rows) if rows else 0.0
+    work_by = {r["address"]: float(r["work"]) for r in (rows or [])}
     db(
         "UPDATE rounds SET closed_ts=?, height=?, hash=?, reward_btc=?, fee_btc=?, miner_btc=?, total_work=?, status='immature' WHERE id=?",
         (int(time.time()), height, blockhash, reward, fee_btc, miner_btc, total, rid),
         write=True,
     )
-    if total > 0:
+    # Pay what the coinbase actually paid (TIDES). sqlite round_work is only a UI estimate.
+    paid = splits_from_vouts(vouts) if vouts is not None else None
+    if paid is None:
+        paid = coinbase_splits(blockhash) or {}
+    if paid:
+        reward_split = sum(paid.values()) or 1.0
+        for addr, amt in paid.items():
+            share = amt / reward_split
+            db(
+                "INSERT OR REPLACE INTO round_payouts(round_id,address,work,share,amount_btc,status) VALUES(?,?,?,?,?,?)",
+                (rid, addr, work_by.get(addr, 0.0), share, amt, "immature"),
+                write=True,
+            )
+    elif total > 0:
         for r in rows:
             share = float(r["work"]) / total
             amt = miner_btc * share
@@ -883,8 +1047,9 @@ def mature_rounds():
     for r in rows or []:
         if r["height"] and int(tip) >= int(r["height"]) + 100:
             db("UPDATE rounds SET status='payable' WHERE id=?", (r["id"],), write=True)
+            # Coinbase payout: already in that block. After 100 confs it is paid, not a balance we owe.
             db(
-                "UPDATE round_payouts SET status='unpaid' WHERE round_id=? AND status='immature'",
+                "UPDATE round_payouts SET status='paid' WHERE round_id=? AND status='immature'",
                 (r["id"],),
                 write=True,
             )
@@ -940,7 +1105,7 @@ def scan_found_blocks():
         )
         split = value_output_count(vouts) >= 2
         if not existed and split:
-            close_round_for_block(height, h, reward, fee_btc, miner_btc)
+            close_round_for_block(height, h, reward, fee_btc, miner_btc, vouts)
         elif not split:
             print("unsplit_template", height, "keeping_round_work", flush=True)
     if last_ok >= start:
@@ -953,6 +1118,7 @@ state = {"pool_hr_ghs": 0, "shares_acc": 0, "shares_rej": 0, "miners": [], "ts":
 def loop():
     global state
     while True:
+        t0 = time.time()
         try:
             state = scrape()
         except Exception as e:
@@ -963,7 +1129,7 @@ def loop():
             mature_rounds()
         except Exception as e:
             print("scan", e, flush=True)
-        time.sleep(10)
+        time.sleep(max(0.5, 10 - (time.time() - t0)))
 
 
 def node_info():
@@ -976,52 +1142,6 @@ def node_info():
         "chain": bi.get("chain"),
     }
 
-
-
-def addr_script(addr):
-    info = rpc("validateaddress", [addr]) or {}
-    spk = info.get("scriptPubKey")
-    if not spk:
-        return b""
-    try:
-        return bytes.fromhex(spk)
-    except Exception:
-        return b""
-
-
-def coinbaser_blob(value_sats):
-    """DATUM v2 coinbaser: miner outputs only. Remainder (fee + dust) stays for the pool address."""
-    value_sats = int(value_sats)
-    if value_sats <= 0:
-        return bytes([1]), []
-    fee_bp = int(round(POOL_FEE * 100))
-    rest = (value_sats * (10000 - fee_bp)) // 10000
-    rows = db("SELECT address, work FROM round_work WHERE work > 0")
-    merged = {}
-    for r in rows or []:
-        merged[r["address"]] = merged.get(r["address"], 0.0) + float(r["work"])
-    total = sum(merged.values())
-    outs = []
-    used = 0
-    if total > 0 and rest > 0:
-        for addr, w in sorted(merged.items(), key=lambda x: -x[1]):
-            amt = int(rest * w / total)
-            if amt < 546 or used + amt > rest:
-                continue
-            script = addr_script(addr)
-            if not script or not (2 <= len(script) <= 64):
-                continue
-            outs.append({"address": addr, "sats": amt, "script": script.hex()})
-            used += amt
-            if len(outs) >= 512:
-                break
-    blob = bytearray([1])
-    for o in outs:
-        script = bytes.fromhex(o["script"])
-        blob += int(o["sats"]).to_bytes(8, "little")
-        blob += bytes([len(script)])
-        blob += script
-    return bytes(blob), outs
 
 def mempool_blocks():
     try:
@@ -1057,11 +1177,180 @@ def luck_and_ttf(pool_hr_ghs, net_hs, first_ts):
     return share, ttf_s, nfound, expected, luck
 
 
+OWN_GATEWAY_UA_PREFIX = "lazarus-gateway/"
+
+
+def _gateway_row(c):
+    ua = str(c.get("user_agent") or "")
+    return {
+        "id": c.get("id"),
+        "gateway": c.get("gateway"),
+        "user_agent": ua,
+        "generation": c.get("generation"),
+        # The pool's own public stratum connects to Prime like anyone else's gateway.
+        "own": ua.startswith(OWN_GATEWAY_UA_PREFIX),
+        "identity": c.get("identity") or "",
+        "connected_s": int(c.get("connected_s") or 0),
+        "accepted": int(c.get("accepted") or 0),
+        "rejected": int(c.get("rejected") or 0),
+        "last_reject": c.get("last_reject") or "",
+        "last_share_s": c.get("last_share_s"),
+        "work": int(c.get("work") or 0),
+        "coinbasers": int(c.get("coinbasers") or 0),
+        "block_candidates": int(c.get("block_candidates") or 0),
+    }
+
+
+def _block_row(b):
+    """One Prime block record for the UI: what the coinbase did and where the block stands."""
+    split = b.get("split") or []
+    submit = str(b.get("submit") or "pending")
+    if b.get("settled") is True:
+        status = "orphaned" if submit.startswith("orphan") else "in chain"
+    elif submit in ("accepted", "duplicate"):
+        status = "submitted"
+    elif submit.startswith("rejected"):
+        status = "rejected"
+    else:
+        status = "pending"
+    return {
+        "height": b.get("height"),
+        "hash": b.get("hash"),
+        "ts": b.get("ts"),
+        "kind": b.get("kind") or "",
+        "submit": submit,
+        "status": status,
+        "finder": b.get("finder") or "",
+        "gateway": b.get("gateway") or "",
+        "coinbase_value": int(b.get("coinbase_value") or 0),
+        "pool_sats": int(b.get("pool_sats") or 0),
+        "owed_sats": int(b.get("owed_sats") or 0),
+        "outputs": len(split),
+        "split": [{"address": a, "sats": int(s)} for a, s in split if a],
+    }
+
+
+def prime_summary():
+    """The Prime as the UI shows it: identity, health, gateways, window, blocks, owed."""
+    _by, meta = fetch_prime_window()
+    pool = meta.get("pool") or {}
+    totals = meta.get("totals") or {}
+    clients = [_gateway_row(c) for c in meta.get("clients") or []]
+    clients.sort(key=lambda g: (g["own"], -g["work"]))
+    blocks = [_block_row(b) for b in meta.get("blocks") or []]
+    blocks.sort(key=lambda b: -(b["height"] or 0))
+    try:
+        fee_bps = int(pool.get("fee_bps") or round(POOL_FEE * 100))
+    except (TypeError, ValueError):
+        fee_bps = int(round(POOL_FEE * 100))
+    return {
+        "reachable": bool(meta.get("reachable")),
+        "name": (meta.get("build") or {}).get("name") or "primed",
+        "version": (meta.get("build") or {}).get("version") or "",
+        "uptime_s": meta.get("uptime_s") or 0,
+        "started_ts": meta.get("started_ts") or 0,
+        "pubkey": pool.get("pubkey") or "",
+        "prime_id": pool.get("prime_id"),
+        "tag": pool.get("tag") or COINBASE_TAG,
+        "address": pool.get("address") or "",
+        "fee_bps": fee_bps,
+        "min_payout_sats": int(pool.get("min_payout") or 0),
+        "advertise": pool.get("advertise") or "",
+        "hashrate_ghs": meta.get("hashrate_ghs") or 0,
+        "hashrate_window_s": meta.get("hashrate_window_s") or 0,
+        "node": meta.get("node") or {},
+        "window": {
+            "multiple": meta.get("window_multiple") or 8,
+            "work": meta.get("work") or 0,
+            "target_work": meta.get("target_work") or 0,
+            "fill_percent": meta.get("fill_percent") or 0,
+            "identities": meta.get("identities") or 0,
+            "identities_lifetime": meta.get("identities_lifetime") or 0,
+            "shares": meta.get("shares") or 0,
+            "sample_value": meta.get("sample_value") or 0,
+            "sample_fee_sats": meta.get("sample_fee_sats") or 0,
+            "sample_pool_sats": meta.get("sample_pool_sats") or 0,
+        },
+        "totals": {
+            "shares_accepted": int(totals.get("shares_accepted") or 0),
+            "shares_rejected": int(totals.get("shares_rejected") or 0),
+            "work_accepted": int(totals.get("work_accepted") or 0),
+            "lifetime_shares": int(totals.get("lifetime_shares") or 0),
+            "lifetime_work": int(totals.get("lifetime_work") or 0),
+            "connections": int(totals.get("connections") or 0),
+            "handshake_failures": int(totals.get("handshake_failures") or 0),
+            "coinbasers": int(totals.get("coinbasers") or 0),
+            "block_candidates": int(totals.get("block_candidates") or 0),
+            "blocks_submitted": int(totals.get("blocks_submitted") or 0),
+        },
+        "owed_sats": meta.get("owed_sats") or 0,
+        "gateways": clients,
+        "gateways_online": len(clients),
+        "gateways_remote": sum(1 for g in clients if not g["own"]),
+        "blocks": blocks,
+    }
+
+
+def prime_coinbaser_preview():
+    """The coinbase Prime would dictate for the next block: the TIDES split at the
+    current reward, every miner output in issue order, the pool's fee/remainder last.
+    Straight from primed's own split (``window.miners[].payout_sats``), not recomputed."""
+    by, meta = fetch_prime_window()
+    value = int(meta.get("sample_value") or 0)
+    miners = []
+    for addr, info in by.items():
+        sats = int(info.get("window_sats") or 0)
+        if sats > 0 and info.get("payable"):
+            miners.append({"address": addr, "sats": sats, "share_percent": float(info.get("window_percent") or 0), "work": int(info.get("window_work") or 0)})
+    miners.sort(key=lambda m: -m["sats"])
+    miner_sats = sum(m["sats"] for m in miners)
+    unpaid = [
+        {"address": addr, "work": int(info.get("window_work") or 0), "share_percent": float(info.get("window_percent") or 0), "reason": "below min payout" if info.get("payable") else "address not payable"}
+        for addr, info in by.items()
+        if int(info.get("window_sats") or 0) <= 0 and int(info.get("window_work") or 0) > 0
+    ]
+    pool_sats = int(meta.get("sample_pool_sats") or max(0, value - miner_sats))
+    fee_sats = int(meta.get("sample_fee_sats") or 0)
+    pool_addr = (meta.get("pool") or {}).get("address") or ""
+    outputs = [dict(m, to="miner") for m in miners]
+    if pool_sats > 0:
+        outputs.append({"address": pool_addr, "sats": pool_sats, "to": "pool"})
+    return {
+        "scheme": "TIDES",
+        "value": value,
+        "outputs": len(outputs),
+        "miner_outputs": len(miners),
+        "miner_sats": miner_sats,
+        "pool_sats": pool_sats,
+        "fee_sats": fee_sats,
+        "fee_percent": (meta.get("pool") or {}).get("fee_bps", int(round(POOL_FEE * 100))) / 100.0,
+        "unplaced_sats": max(0, pool_sats - fee_sats),
+        "pool_address": pool_addr,
+        "window_multiple": meta.get("window_multiple") or 8,
+        "window_fill_percent": meta.get("fill_percent") or 0,
+        "miners": outputs,
+        "unpaid": unpaid,
+    }
+
+
 def pool_payload():
     node = node_info()
     miners = online_miners()
-    online = len(miners)
-    pool_hr = sum(m["hr_ghs"] for m in miners) or state.get("pool_hr_ghs") or 0
+    seen_addr = set()
+    pool_hr = 0.0
+    for m in miners:
+        a = m.get("address") or ""
+        if a in seen_addr:
+            continue
+        seen_addr.add(a)
+        credited = float(m.get("credited_hr_ghs") or 0)
+        pool_hr += credited if credited > 1e-6 else float(m.get("hr_ghs") or 0)
+    _lby, _lpool = _ledger_hashrate()
+    if _lpool > 1e-9:
+        pool_hr = _lpool
+    elif pool_hr < 1e-9:
+        pool_hr = state.get("pool_hr_ghs") or 0
+    online = len(seen_addr)
     net = float(node.get("networkhashps") or 0)
     first = db("SELECT MIN(first_ts) AS t FROM miners", one=True)
     first_ts = first["t"] if first and first["t"] else state.get("ts")
@@ -1069,16 +1358,27 @@ def pool_payload():
     est_btc_day = share * 144 * SUBSIDY * (1 - POOL_FEE / 100.0)
     known = db("SELECT COUNT(*) AS n FROM miners", one=True)
     hist = db("SELECT ts, hr_ghs, miners FROM pool_samples WHERE ts > ? ORDER BY ts", (int(time.time()) - 86400,))
+    win = tides_window_snapshot()
+    prime = prime_summary()
+    nblocks = int(win["window_multiple"] or 8)
+    fill = win["window_fill_percent"]
+    payout = (
+        f"A found block pays the TIDES window in its coinbase (100%, no fee): "
+        f"{nblocks} network-blocks of accepted work, currently {fill:.0f}% full. "
+        f"Hashrate is not your cut — a new rig starts near 0% and ramps as its work enters and older work ages out."
+        if POOL_FEE == 0
+        else f"A found block pays the TIDES window in its coinbase ({100-POOL_FEE:g}% to miners, {POOL_FEE:g}% fee): "
+        f"{nblocks} network-blocks of accepted work, currently {fill:.0f}% full. "
+        f"Hashrate is not your cut — a new rig starts near 0% and ramps as its work enters and older work ages out."
+    )
     return {
         "name": "Lazarus",
         "tagline": "Proverbs 11:1",
         "fee_percent": POOL_FEE,
         "stratum": f"stratum+tcp://{STRATUM_HOST}:{STRATUM_PORT}",
         "stratum_asic": f"stratum+tcp://{STRATUM_HOST}:{STRATUM_PORT}",
-        "stratum_gpu": f"stratum+tcp://{STRATUM_HOST}:{STRATUM_GPU_PORT}",
         "host": STRATUM_HOST,
         "port": STRATUM_PORT,
-        "port_gpu": STRATUM_GPU_PORT,
         "pool_hr_ghs": pool_hr,
         "miners_online": online,
         "workers_online": online,
@@ -1086,9 +1386,12 @@ def pool_payload():
         "shares_accepted": pool_share_totals()[0] or (state.get("shares_acc") or 0),
         "shares_session": state.get("shares_acc") or 0,
         "shares_rejected": pool_share_totals()[1] or (state.get("shares_rej") or 0),
-        "shares_note": "Accepted stays with the address if you switch from public stratum to your own gateway. Session is public-stratum only. The payout window is Prime share credit — that is what a found block pays. Prime window in the miner list is credit, not a live gateway session.",
-        "window_shares": (state.get("prime_meta") or {}).get("shares") or 0,
-        "window_work": (state.get("prime_meta") or {}).get("work") or 0,
+        "shares_note": "Accepted stays with your address whether you mine on the public stratum or through your own DATUM gateway. Window % is what the next block pays, not today's hashrate.",
+        "window_shares": win["window_shares"],
+        "window_work": win["window_work"],
+        "window_target_work": win["window_target_work"],
+        "window_fill_percent": fill,
+        "window_multiple": nblocks,
         "height": node.get("height"),
         "difficulty": node.get("difficulty"),
         "network_hr_hs": net,
@@ -1100,12 +1403,8 @@ def pool_payload():
         "luck_percent": luck,
         "subsidy_btc": SUBSIDY,
         "finder_payout_btc": SUBSIDY * (1 - POOL_FEE / 100.0),
-        "payout": (
-            "Ocean-style coinbase: 100% split by accepted work this round, paid in the found block; no pool fee"
-            if POOL_FEE == 0
-            else f"Ocean-style coinbase: {100-POOL_FEE:g}% split by accepted work this round, paid in the found block; {POOL_FEE:g}% pool fee"
-        ),
-        "payout_scheme": "PROP",
+        "payout": payout,
+        "payout_scheme": "TIDES",
         "datum": {
             "pool_host": CONF.get("datum_prime_host", STRATUM_HOST),
             "pool_port": int(CONF.get("datum_prime_port", 28915)),
@@ -1114,11 +1413,52 @@ def pool_payload():
             "pool_pass_full_users": True,
             "pooled_mining_only": True,
         },
+        "prime": prime,
         "payouts_onchain": True,
         "explorer": EXPLORER,
         "updated": state.get("ts") or int(time.time()),
         "history": [{"ts": r["ts"], "hr_ghs": r["hr_ghs"], "miners": r["miners"]} for r in hist],
     }
+
+
+def rollup_online_by_address(online):
+    """One row per address on the miners list; detail page keeps all sessions."""
+    order = []
+    by = {}
+    for m in online or []:
+        addr = m.get("address") or ""
+        if not addr:
+            continue
+        if addr not in by:
+            by[addr] = dict(m)
+            by[addr]["sessions"] = 1
+            order.append(addr)
+            continue
+        cur = by[addr]
+        cur["sessions"] = int(cur.get("sessions") or 1) + 1
+        cur["diff_acc"] = int(cur.get("diff_acc") or 0) + int(m.get("diff_acc") or 0)
+        cur["shares_acc"] = int(cur.get("shares_acc") or 0) + int(m.get("shares_acc") or 0)
+        cur["shares_session"] = int(cur.get("shares_session") or 0) + int(m.get("shares_session") or 0)
+        cur["shares_lifetime"] = int(cur.get("shares_lifetime") or 0) + int(m.get("shares_lifetime") or 0)
+        cur["firmware_hr_ghs"] = float(cur.get("firmware_hr_ghs") or 0) + float(m.get("firmware_hr_ghs") or m.get("hr_ghs") or 0)
+        gwh = float((state.get("gateway_hr") or {}).get(addr) or 0)
+        phr = float(cur.get("credited_hr_ghs") or 0)
+        cur["hr_ghs"] = phr if phr > 1e-6 else (gwh if gwh > 1e-6 else cur["firmware_hr_ghs"])
+        cur["credited_hr_ghs"] = phr
+        cur["gateway_hr_ghs"] = gwh
+        # 0 means "just now" and must survive the merge; only None is missing.
+        merged_age = min(_share_age_s(cur.get("last_share_s")), _share_age_s(m.get("last_share_s")))
+        if merged_age < 1e9:
+            cur["last_share_s"] = merged_age
+        if (m.get("host") or "") and (cur.get("host") or "") != (m.get("host") or ""):
+            cur["host"] = f"{cur.get('host') or ''}+{m.get('host')}"[:120]
+    out = []
+    for addr in order:
+        rec = by[addr]
+        if int(rec.get("sessions") or 1) > 1 and not rec.get("worker"):
+            rec["worker"] = f"{rec['sessions']} sessions"
+        out.append(rec)
+    return out
 
 
 def miner_payload(address):
@@ -1128,21 +1468,82 @@ def miner_payload(address):
         (address, int(time.time()) - 86400),
     )
     stored = db("SELECT * FROM miners WHERE address=?", (address,), one=True)
-    hr = sum(m["hr_ghs"] for m in recs)
+    pinfo = prime_info_for(address) if address else {}
+    _led_by, _ = _ledger_hashrate()
+    credited = float(_led_by.get(address) or 0.0) or float(pinfo.get("hr_ghs") or 0)
+    gwh = float((state.get("gateway_hr") or {}).get(address) or 0)
+    firmware = sum(float(m.get("firmware_hr_ghs") or m.get("hr_ghs") or 0) for m in recs)
+    # Prefer gateway accepted-diff rate (all stratum sessions); Prime window_work
+    # under-counts once the TIDES window is full and trim lands in the same poll.
+    hr = credited if credited > 1e-6 else (gwh if gwh > 1e-6 else firmware)
     node = node_info()
     net_ghs = (float(node.get("networkhashps") or 0)) / 1e9
     share = (hr / net_ghs) if net_ghs else 0
     est = share * 144 * SUBSIDY * (1 - POOL_FEE / 100.0)
-    pool_hr = sum(m["hr_ghs"] for m in online_miners()) or 1e-9
+    pool_hr = 0.0
+    _seen = set()
+    for m in online_miners():
+        a = m.get("address") or ""
+        if a in _seen:
+            continue
+        _seen.add(a)
+        g = float((state.get("gateway_hr") or {}).get(a) or 0)
+        c = float(m.get("credited_hr_ghs") or 0)
+        pool_hr += c if c > 1e-6 else (g if g > 1e-6 else float(m.get("hr_ghs") or 0))
+    pool_hr = pool_hr or 1e-9
     contrib = hr / pool_hr if pool_hr else 0
-    payouts = db(
-        "SELECT r.height, r.hash, r.closed_ts AS ts, p.amount_btc AS miner_btc, p.share, p.work, p.status, r.status AS round_status "
-        "FROM round_payouts p JOIN rounds r ON r.id=p.round_id WHERE p.address=? ORDER BY r.height DESC LIMIT 50",
-        (address,),
-    )
-    earned = db("SELECT COALESCE(SUM(amount_btc),0) AS s FROM round_payouts WHERE address=? AND status='paid'", (address,), one=True)
-    unpaid = db("SELECT COALESCE(SUM(amount_btc),0) AS s FROM round_payouts WHERE address=? AND status='unpaid'", (address,), one=True)
-    immature = db("SELECT COALESCE(SUM(amount_btc),0) AS s FROM round_payouts WHERE address=? AND status='immature'", (address,), one=True)
+    tip = rpc("getblockcount") or 0
+    fb_rows = db("SELECT height, hash, ts FROM found_blocks ORDER BY height DESC LIMIT 50") or []
+    payouts = []
+    paid_btc = 0.0
+    immature_btc = 0.0
+    used_chain = False
+    for fb in fb_rows:
+        splits = coinbase_splits(fb["hash"])
+        if splits is None:
+            used_chain = False
+            payouts = None
+            break
+        used_chain = True
+        amt = float(splits.get(address) or 0)
+        if amt <= 0:
+            continue
+        reward_split = sum(splits.values()) or 1.0
+        st = payout_status_for_height(fb["height"], tip)
+        payouts.append(
+            {
+                "height": fb["height"],
+                "hash": fb["hash"],
+                "ts": fb["ts"],
+                "miner_btc": amt,
+                "share": amt / reward_split,
+                "work": 0,
+                "status": st,
+                "round_status": st,
+            }
+        )
+        if st == "immature":
+            immature_btc += amt
+        else:
+            paid_btc += amt
+    if not used_chain:
+        payouts = db(
+            "SELECT r.height, r.hash, r.closed_ts AS ts, p.amount_btc AS miner_btc, p.share, p.work, p.status, r.status AS round_status "
+            "FROM round_payouts p JOIN rounds r ON r.id=p.round_id WHERE p.address=? ORDER BY r.height DESC LIMIT 50",
+            (address,),
+        )
+        earned = db(
+            "SELECT COALESCE(SUM(amount_btc),0) AS s FROM round_payouts WHERE address=? AND status IN ('paid','unpaid')",
+            (address,),
+            one=True,
+        )
+        immature = db(
+            "SELECT COALESCE(SUM(amount_btc),0) AS s FROM round_payouts WHERE address=? AND status='immature'",
+            (address,),
+            one=True,
+        )
+        paid_btc = float(earned["s"]) if earned else 0
+        immature_btc = float(immature["s"]) if immature else 0
     rw = db("SELECT work FROM round_work WHERE address=?", (address,), one=True)
     tw = db("SELECT COALESCE(SUM(work),0) AS s FROM round_work", one=True)
     my_work = float(rw["work"]) if rw else 0.0
@@ -1152,33 +1553,46 @@ def miner_payload(address):
     known = bool(stored or recs)
     life_a, life_r, sess_stored = address_share_totals(address) if address else (0, 0, 0)
     sess_live = sum(int(m.get("shares_session") or 0) for m in recs if (m.get("via") or "stratum") not in ("gateway", "prime")) if recs else 0
-    pinfo = prime_info_for(address) if address else {}
     if pinfo.get("window_percent"):
         round_share = float(pinfo["window_percent"]) / 100.0
     vias = {m.get("via") for m in recs if m.get("via")}
-    if ("stratum" in vias or "gpu" in vias) and ("gateway" in vias or "prime" in vias):
+    if "stratum" in vias and ("gateway" in vias or "prime" in vias):
         via = "both"
-    elif ("gateway" in vias or "prime" in vias) and "stratum" not in vias and "gpu" not in vias:
+    elif ("gateway" in vias or "prime" in vias) and "stratum" not in vias:
         via = "prime"
-    elif "gpu" in vias and "stratum" not in vias:
-        via = "gpu"
     elif recs:
         via = "stratum" if "stratum" in vias else (next(iter(vias)) if vias else "stratum")
     elif pinfo.get("window_work"):
         via = "prime"
         recs = [{
-            "address": address, "worker": "window", "hr_ghs": float(pinfo.get("hr_ghs") or 0), "shares_acc": life_a,
-            "shares_session": 0, "shares_lifetime": life_a, "shares_rej": life_r,
-            "vdiff": 0, "diff_acc": int(pinfo.get("window_work") or 0), "last_share_s": float(pinfo.get("last_share_s") or 0), "ua": "Prime window", "via": "prime",
+            "address": address, "worker": "window", "hr_ghs": float(pinfo.get("hr_ghs") or 0),
+            "shares_acc": life_a or int(pinfo.get("window_work") or 0),
+            "shares_session": 0, "shares_lifetime": life_a or int(pinfo.get("window_work") or 0),
+            "shares_rej": life_r,
+            "vdiff": 0, "diff_acc": int(pinfo.get("window_work") or 0),
+            "last_share_s": _share_age_s(pinfo.get("last_share_s"), missing=0.0),
+            "ua": "Prime window", "via": "prime",
             "window_work": pinfo.get("window_work") or 0, "window_percent": pinfo.get("window_percent") or 0,
         }]
     else:
         via = ""
     known = bool(stored or recs or pinfo.get("window_work") or life_a)
+    last_s = min((_share_age_s(m.get("last_share_s")) for m in recs), default=1e9)
+    if pinfo.get("last_share_s") is not None:
+        last_s = min(last_s, _share_age_s(pinfo.get("last_share_s"), missing=0.0))
+    is_online = (credited > 1e-6 and last_s < 180) or any(
+        float(m.get("hr_ghs") or 0) > 1e-6 and _share_age_s(m.get("last_share_s"), missing=0.0) < 180
+        for m in recs
+        if (m.get("via") or "") in ("stratum", "both", "prime", "gateway")
+    )
+    best = float(stored["best_hr_ghs"] if stored and stored["best_hr_ghs"] is not None else (hr or 0))
+    if best >= _PRIME_HR_CAP_GHS:
+        best = hr
+    win = tides_window_snapshot()
     return {
         "address": address if known else "",
         "known": known,
-        "online": bool(recs) or bool(pinfo.get("window_work")),
+        "online": bool(is_online),
         "workers": recs,
         "hr_ghs": hr,
         "shares_acc": life_a or int(pinfo.get("window_work") or 0),
@@ -1189,153 +1603,28 @@ def miner_payload(address):
         "window_work": int(pinfo.get("window_work") or 0),
         "window_percent": float(pinfo.get("window_percent") or 0),
         "window_sats": int(pinfo.get("window_sats") or 0),
-        "diff_acc": recs[0]["diff_acc"] if recs else (stored["diff_acc"] if stored else 0),
+        "diff_acc": (recs[0].get("diff_acc", 0) if recs else 0) or (stored["diff_acc"] if stored and "diff_acc" in stored.keys() else 0),
         "first_seen": stored["first_ts"] if stored else None,
         "last_seen": stored["last_ts"] if stored else None,
-        "best_hr_ghs": recent_best_hr(address, hr),
+        "best_hr_ghs": best if stored or recs else hr,
         "pool_contribution": contrib,
+        "hashrate_pool_percent": contrib * 100.0,
         "est_btc_day": est,
         "est_btc_week": est * 7,
         "ttf_seconds": ttf_s,
-        "block_payout_btc": SUBSIDY * (1 - POOL_FEE / 100.0) * (round_share or contrib),
-        "paid_btc": float(earned["s"]) if earned else 0,
-        "unpaid_btc": float(unpaid["s"]) if unpaid else 0,
-        "immature_btc": float(immature["s"]) if immature else 0,
+        "block_payout_btc": SUBSIDY * (1 - POOL_FEE / 100.0) * round_share,
+        "paid_btc": paid_btc,
+        "unpaid_btc": 0.0,
+        "immature_btc": immature_btc,
         "round_work": my_work,
         "round_share": round_share,
-        "blocks_found": [dict(r) for r in payouts],
+        "window_multiple": win["window_multiple"],
+        "window_fill_percent": win["window_fill_percent"],
+        "blocks_found": [dict(r) for r in (payouts or [])],
         "fee_percent": POOL_FEE,
         "history": [{"ts": r["ts"], "hr_ghs": r["hr"]} for r in hist],
     }
 
-
-
-WS_MAGIC = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
-
-
-def _recvall(sock, n):
-    buf = b""
-    while len(buf) < n:
-        chunk = sock.recv(n - len(buf))
-        if not chunk:
-            return b""
-        buf += chunk
-    return buf
-
-
-def ws_accept_key(key: str) -> str:
-    return base64.b64encode(hashlib.sha1((key + WS_MAGIC).encode()).digest()).decode()
-
-
-def ws_recv_frame(sock):
-    hdr = _recvall(sock, 2)
-    if not hdr:
-        return None, None
-    b0, b1 = hdr[0], hdr[1]
-    opcode = b0 & 0x0F
-    masked = bool(b1 & 0x80)
-    length = b1 & 0x7F
-    if length == 126:
-        ext = _recvall(sock, 2)
-        if not ext:
-            return None, None
-        length = int.from_bytes(ext, "big")
-    elif length == 127:
-        ext = _recvall(sock, 8)
-        if not ext:
-            return None, None
-        length = int.from_bytes(ext, "big")
-    mask = _recvall(sock, 4) if masked else b""
-    payload = _recvall(sock, length) if length else b""
-    if masked and payload:
-        payload = bytes(payload[i] ^ mask[i % 4] for i in range(len(payload)))
-    return opcode, payload
-
-
-def ws_send_frame(sock, opcode, payload: bytes):
-    header = bytearray([0x80 | opcode])
-    n = len(payload)
-    if n < 126:
-        header.append(n)
-    elif n < 65536:
-        header.append(126)
-        header.extend(n.to_bytes(2, "big"))
-    else:
-        header.append(127)
-        header.extend(n.to_bytes(8, "big"))
-    sock.sendall(bytes(header) + payload)
-
-
-def bridge_stratum(client_sock):
-    up = socket.create_connection((STRATUM_TCP_HOST, STRATUM_TCP_PORT), 10)
-    up.settimeout(60)
-    client_sock.settimeout(60)
-    dead = threading.Event()
-
-    def client_to_up():
-        try:
-            while not dead.is_set():
-                try:
-                    opcode, payload = ws_recv_frame(client_sock)
-                except TimeoutError:
-                    continue
-                if opcode is None:
-                    break
-                if opcode == 8:
-                    break
-                if opcode == 9:
-                    try:
-                        ws_send_frame(client_sock, 10, payload or b"")
-                    except Exception:
-                        break
-                    continue
-                if opcode in (1, 2) and payload:
-                    if not payload.endswith(b"\n"):
-                        payload += b"\n"
-                    up.sendall(payload)
-        except Exception:
-            pass
-        dead.set()
-        try:
-            up.shutdown(socket.SHUT_RDWR)
-        except Exception:
-            pass
-
-    def up_to_client():
-        buf = b""
-        try:
-            while not dead.is_set():
-                try:
-                    chunk = up.recv(16384)
-                except TimeoutError:
-                    continue
-                if not chunk:
-                    break
-                buf += chunk
-                while b"\n" in buf:
-                    line, buf = buf.split(b"\n", 1)
-                    if line:
-                        try:
-                            ws_send_frame(client_sock, 1, line + b"\n")
-                        except Exception:
-                            dead.set()
-                            return
-        except Exception:
-            pass
-        dead.set()
-        try:
-            client_sock.shutdown(socket.SHUT_RDWR)
-        except Exception:
-            pass
-
-    t = threading.Thread(target=up_to_client, daemon=True)
-    t.start()
-    client_to_up()
-    t.join(2)
-    try:
-        up.close()
-    except Exception:
-        pass
 
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
@@ -1361,31 +1650,7 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def do_POST(self):
-        u = urlparse(self.path)
-        if u.path != "/api/browser-stat":
-            self.send_json({"error": "not found"}, 404)
-            return
-        try:
-            n = int(self.headers.get("Content-Length") or 0)
-        except ValueError:
-            n = 0
-        if n <= 0 or n > 4096:
-            self.send_json({"error": "bad length"}, 400)
-            return
-        try:
-            body = json.loads(self.rfile.read(n).decode("utf-8", "replace") or "{}")
-        except Exception:
-            self.send_json({"error": "bad json"}, 400)
-            return
-        user = (body.get("user") or "").strip()
-        if not user:
-            addr = (body.get("address") or "").strip()
-            worker = (body.get("worker") or "").strip()
-            user = f"{addr}.{worker}" if worker else addr
-        if not record_browser_stat(user, body.get("hs")):
-            self.send_json({"error": "bad stat"}, 400)
-            return
-        self.send_json({"ok": True})
+        self.send_json({"error": "not found"}, 404)
 
     def do_GET(self):
         u = urlparse(self.path)
@@ -1400,16 +1665,22 @@ class Handler(BaseHTTPRequestHandler):
             for r in seen or []:
                 d = dict(r)
                 life_a, life_r, sess = address_share_totals(d.get("address") or "")
-                d["shares_lifetime"] = life_a or int(d.get("shares_lifetime") or d.get("shares_acc") or 0)
+                info = prime_info_for(d.get("address") or "")
+                d["shares_lifetime"] = life_a or int(info.get("window_work") or d.get("shares_lifetime") or d.get("shares_acc") or 0)
                 d["shares_session"] = int(sess or d.get("shares_session") or 0)
                 d["shares_acc"] = d["shares_lifetime"]
                 d["shares_rej"] = life_r or int(d.get("shares_rej") or 0)
-                info = prime_info_for(d.get("address") or "")
                 d["window_work"] = int(info.get("window_work") or 0)
                 d["window_percent"] = float(info.get("window_percent") or 0)
-                d["via"] = "prime" if (d.get("address") in (state.get("prime") or {}) and not any(o.get("address")==d.get("address") and o.get("via") in ("stratum","gpu") for o in online)) else d.get("via")
+                d["via"] = "prime" if (d.get("address") in (state.get("prime") or {}) and not any(o.get("address")==d.get("address") and o.get("via") == "stratum" for o in online)) else d.get("via")
+                try:
+                    if float(d.get("best_hr_ghs") or 0) > _PRIME_HR_CAP_GHS:
+                        d["best_hr_ghs"] = _PRIME_HR_CAP_GHS
+                except (TypeError, ValueError):
+                    pass
+                d["hr_ghs"] = float(info.get("hr_ghs") or 0)
                 seen_out.append(d)
-            self.send_json({"online": online, "seen": seen_out})
+            self.send_json({"online": rollup_online_by_address(online), "seen": seen_out})
             return
         if path.startswith("/api/miner/"):
             addr = path.split("/api/miner/", 1)[1].strip("/")
@@ -1419,64 +1690,97 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json({"blocks": mempool_blocks()})
             return
         if path == "/api/coinbaser":
-            qs = parse_qs(u.query)
-            val = 0
-            try:
-                val = int((qs.get("value") or ["0"])[0])
-            except Exception:
-                val = 0
-            if val <= 0:
-                val = 312500000
-            blob, outs = coinbaser_blob(val)
-            miner_sats = sum(o["sats"] for o in outs)
-            self.send_json({
-                "hex": blob.hex(),
-                "outputs": len(outs),
-                "value": val,
-                "miner_sats": miner_sats,
-                "fee_sats": max(0, val - miner_sats),
-                "fee_percent": POOL_FEE,
-                "scheme": "PROP",
-                "miners": [{"address": o["address"], "sats": o["sats"]} for o in outs],
-            })
+            self.send_json(prime_coinbaser_preview())
+            return
+        if path == "/api/gateways":
+            pr = prime_summary()
+            self.send_json({"reachable": pr["reachable"], "gateways": pr["gateways"], "totals": pr["totals"]})
             return
         if path == "/api/payouts":
-            rows = db(
-                "SELECT r.id, r.height, r.hash, r.closed_ts AS ts, r.reward_btc, r.fee_btc, r.miner_btc, r.total_work, r.status, "
-                "p.address AS finder, p.amount_btc AS miner_paid, p.share, p.work "
-                "FROM rounds r LEFT JOIN round_payouts p ON p.round_id=r.id "
-                "WHERE r.status!='open' ORDER BY r.height DESC LIMIT 200"
+            tip = rpc("getblockcount") or 0
+            fbs = db("SELECT height, hash, ts, reward_btc FROM found_blocks ORDER BY height DESC LIMIT 20") or []
+            payouts = []
+            chain_ok = True
+            for fb in fbs:
+                splits = coinbase_splits(fb["hash"])
+                if splits is None:
+                    chain_ok = False
+                    break
+                reward = float(fb["reward_btc"] or 0) or sum(splits.values()) or 1.0
+                nval = len(splits)
+                st = payout_status_for_height(fb["height"], tip)
+                if nval < 2:
+                    st = "unsplit"
+                for addr, amt in sorted(splits.items(), key=lambda kv: -kv[1]):
+                    payouts.append(
+                        {
+                            "height": fb["height"],
+                            "hash": fb["hash"],
+                            "ts": fb["ts"],
+                            "finder": addr,
+                            "miner_btc": amt,
+                            "pool_fee_btc": 0.0,
+                            "share": (amt / reward) if reward else 0,
+                            "status": st,
+                            "reward_btc": reward,
+                        }
+                    )
+            if not chain_ok:
+                rows = db(
+                    "SELECT r.id, r.height, r.hash, r.closed_ts AS ts, r.reward_btc, r.fee_btc, r.miner_btc, r.total_work, r.status, "
+                    "p.address AS finder, p.amount_btc AS miner_paid, p.share, p.work "
+                    "FROM rounds r LEFT JOIN round_payouts p ON p.round_id=r.id "
+                    "WHERE r.status!='open' ORDER BY r.height DESC LIMIT 200"
+                )
+                payouts = [
+                    {
+                        "height": r["height"],
+                        "hash": r["hash"],
+                        "ts": r["ts"],
+                        "finder": r["finder"],
+                        "miner_btc": r["miner_paid"],
+                        "pool_fee_btc": r["fee_btc"],
+                        "share": r["share"],
+                        "status": r["status"],
+                        "reward_btc": r["reward_btc"],
+                    }
+                    for r in rows
+                ]
+            pr = prime_summary()
+            prime_blocks = {b["hash"]: b for b in pr["blocks"] if b.get("hash")}
+            pool_addr = pr.get("address") or ""
+            for row in payouts:
+                # The pool's own output (fee + whatever the split could not place) is not a
+                # miner payout, even though the pool address also appears in the window.
+                row["to"] = "pool" if pool_addr and row.get("finder") == pool_addr else "miner"
+                pb = prime_blocks.get(row.get("hash"))
+                row["kind"] = pb["kind"] if pb else ""
+                row["block_status"] = pb["status"] if pb else ""
+                row["owed_sats"] = pb["owed_sats"] if pb else 0
+                row["gateway"] = pb["gateway"] if pb else ""
+                row["found_by"] = pb["finder"] if pb else ""
+            prime_by = state.get("prime") or {}
+            current = sorted(
+                (
+                    {
+                        "address": addr,
+                        "work": inf.get("window_work") or 0,
+                        "share": (float(inf.get("window_percent") or 0) / 100.0),
+                    }
+                    for addr, inf in prime_by.items()
+                ),
+                key=lambda r: -int(r["work"] or 0),
             )
-            current = db("SELECT address, work FROM round_work ORDER BY work DESC")
-            tw = sum(float(r["work"]) for r in current) if current else 0.0
             self.send_json(
                 {
-                    "scheme": "PROP",
+                    "scheme": "TIDES",
                     "fee_percent": POOL_FEE,
                     "maturity_blocks": 100,
-                    "current_round": [
-                        {"address": r["address"], "work": r["work"], "share": (float(r["work"]) / tw) if tw else 0}
-                        for r in (current or [])
-                    ],
-                    "payouts": [
-                        {
-                            "height": r["height"],
-                            "hash": r["hash"],
-                            "ts": r["ts"],
-                            "finder": r["finder"],
-                            "miner_btc": r["miner_paid"],
-                            "pool_fee_btc": r["fee_btc"],
-                            "share": r["share"],
-                            "status": r["status"],
-                            "reward_btc": r["reward_btc"],
-                        }
-                        for r in rows
-                    ],
+                    "current_round": current,
+                    "payouts": payouts,
+                    "prime_blocks": list(prime_blocks.values()),
                 }
             )
-            return
-        if path in ("/mine", "/stratum"):
-            self.handle_stratum_ws()
             return
         if path in ("/", "/index.html"):
             self.send_file(STATIC / "index.html", "text/html; charset=utf-8")
@@ -1494,31 +1798,14 @@ class Handler(BaseHTTPRequestHandler):
                 return
         self.send_json({"error": "not found"}, 404)
 
-    def handle_stratum_ws(self):
-        key = self.headers.get("Sec-WebSocket-Key")
-        if not key:
-            self.send_json({"error": "websocket required"}, 400)
-            return
-        accept = ws_accept_key(key)
-        self.send_response(101, "Switching Protocols")
-        self.send_header("Upgrade", "websocket")
-        self.send_header("Connection", "Upgrade")
-        self.send_header("Sec-WebSocket-Accept", accept)
-        self.end_headers()
-        self.wfile.flush()
-        self.close_connection = True
-        try:
-            bridge_stratum(self.connection)
-        except Exception as e:
-            print("ws-bridge", e, flush=True)
-
 
 def main():
-    ensure_open_round()
-    init_share_accounting()
+    if not NO_WRITE:
+        ensure_open_round()
+        init_share_accounting()
     threading.Thread(target=loop, daemon=True).start()
     host = CONF.get("listen_host", "0.0.0.0")
-    port = int(CONF.get("listen_port", 8888))
+    port = int(os.environ.get("POOL_LISTEN_PORT") or CONF.get("listen_port", 8888))
     print(f"lazarus-pool http://{host}:{port}", flush=True)
     ThreadingHTTPServer((host, port), Handler).serve_forever()
 
