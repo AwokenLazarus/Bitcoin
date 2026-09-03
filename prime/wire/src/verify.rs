@@ -140,19 +140,36 @@ pub fn classify_coinbase(cb: &Coinbase, pool_script: &[u8], issued: Option<&[Out
         return CoinbaseKind::Foreign;
     }
     if let Some(iss) = issued {
+        // The pool's own output, if the list names one, takes whatever is left and is never
+        // "short"; only miner outputs are held to their amounts.
+        let miners: Vec<&Output> = iss.iter().filter(|i| i.script != pool_script).collect();
+        // A gateway whose template is worth less than the value the split was computed
+        // for may scale every output down by the same ratio (lazarus-gateway does; a
+        // stock gateway drops outputs that no longer fit instead). Both keep the split
+        // proportional, so the amount owed per output is the issued amount scaled by
+        // actual/issued value, never more than issued.
+        let issued_value: u64 = iss.iter().map(|i| i.sats).sum();
+        let actual_value: u64 = cb.outputs.iter().map(|o| o.value).sum();
+        let owed = |sats: u64| -> u64 {
+            if issued_value == 0 || actual_value >= issued_value {
+                sats
+            } else {
+                (u128::from(sats) * u128::from(actual_value) / u128::from(issued_value)) as u64
+            }
+        };
         let mut present = 0u16;
         let mut shorted = false;
-        for i in iss {
+        for i in &miners {
             let paid = cb.paid_to(&i.script);
             if paid > 0 {
                 present += 1;
-                if paid + tolerance < i.sats {
+                if paid + tolerance < owed(i.sats) {
                     shorted = true;
                 }
             }
         }
         if !shorted {
-            if usize::from(present) == iss.len() && (pool_paid || !iss.is_empty()) {
+            if usize::from(present) == miners.len() && (pool_paid || !miners.is_empty()) {
                 return CoinbaseKind::Split;
             }
             if present > 0 {
@@ -452,6 +469,7 @@ pub mod fixtures {
 mod tests {
     use super::fixtures::*;
     use super::*;
+    use crate::coinbase::TxOut;
 
     fn policy<'a>(issued: &'a [Output], pool: &'a [u8]) -> Policy<'a> {
         Policy { pool_script: pool, issued: Some(issued), tolerance: 2, now: NOW, min_pot: 0 }
@@ -601,6 +619,61 @@ mod tests {
         let mut s = share(0, 4, 1, &outs, &txids(3), 1, [0; 8], [0; 8]);
         grind(&mut slot, &mut s);
         assert_eq!(check(&mut slot, &s, &policy(&iss, &pool)).unwrap().coinbase_kind, CoinbaseKind::Split);
+    }
+
+    /// Prime's list is complete — the pool's own output comes last — and a gateway whose
+    /// template is worth less than the value the split was computed for may scale the whole
+    /// list down proportionally (lazarus-gateway) or drop the pool output (stock). Either
+    /// verifies; a miner output scaled below its share does not.
+    #[test]
+    fn complete_list_and_proportional_scaling() {
+        let pool = pool_script();
+        let mut iss = split();
+        let miners_paid: u64 = iss.iter().map(|o| o.sats).sum();
+        iss.push(Output { sats: VALUE - miners_paid, script: pool.clone() });
+        assert_eq!(iss.iter().map(|o| o.sats).sum::<u64>(), VALUE);
+
+        // exact template value: paid verbatim
+        let outs: Vec<TxOut> = iss.iter().map(|o| TxOut { value: o.sats, script: o.script.clone() }).collect();
+        let mut slot = JobSlot::default();
+        let mut s = share(0, 4, 1, &outs, &txids(3), 1, [0; 8], [0; 8]);
+        grind(&mut slot, &mut s);
+        let v = check(&mut slot, &s, &policy(&iss, &pool)).unwrap();
+        assert_eq!(v.coinbase_kind, CoinbaseKind::Split);
+        assert_eq!(v.paid_to_pool, VALUE - miners_paid);
+
+        // template worth 1% less: every output scaled by the same ratio (lazarus-gateway)
+        let smaller = VALUE - VALUE / 100;
+        let mut scaled: Vec<TxOut> = iss
+            .iter()
+            .map(|o| TxOut {
+                value: (u128::from(o.sats) * u128::from(smaller) / u128::from(VALUE)) as u64,
+                script: o.script.clone(),
+            })
+            .collect();
+        let paid: u64 = scaled.iter().map(|o| o.value).sum();
+        scaled.last_mut().unwrap().value += smaller - paid;
+        let mut slot = JobSlot::default();
+        let mut s = share(0, 4, 1, &scaled, &txids(3), 1, [0; 8], [0; 8]);
+        grind(&mut slot, &mut s);
+        assert_eq!(check(&mut slot, &s, &policy(&iss, &pool)).unwrap().coinbase_kind, CoinbaseKind::Split);
+
+        // template worth a little less: stock gateway keeps the miner outputs whole, our
+        // pool output no longer fits, and its own leftover output replaces it
+        let stock = gateway_outputs(&iss[..3], &pool, VALUE - 1_000_000);
+        let mut slot = JobSlot::default();
+        let mut s = share(0, 4, 1, &stock, &txids(3), 1, [0; 8], [0; 8]);
+        grind(&mut slot, &mut s);
+        assert_eq!(check(&mut slot, &s, &policy(&iss, &pool)).unwrap().coinbase_kind, CoinbaseKind::Split);
+
+        // scaling one miner output harder than the ratio is still a short payment
+        let mut cheat = scaled.clone();
+        cheat[0].value -= 1_000;
+        cheat[3].value += 1_000;
+        let mut slot = JobSlot::default();
+        let mut s = share(0, 4, 1, &cheat, &txids(3), 1, [0; 8], [0; 8]);
+        grind(&mut slot, &mut s);
+        assert_eq!(check(&mut slot, &s, &policy(&iss, &pool)), Err(mining::REJECT_BAD_COINBASE_OUTPUTS));
     }
 
     #[test]

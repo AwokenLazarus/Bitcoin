@@ -144,7 +144,10 @@ impl Config {
             return Err("coinbase-tag is too long (32 bytes max)".into());
         }
         if c.key_file.is_none() {
-            c.key_file = Some(c.data_dir.join("prime.key"));
+            // A data dir left by lazarus-prime keeps its identity: same key file, same pubkey.
+            let ours = c.data_dir.join("prime.key");
+            let legacy = c.data_dir.join("lazarus-prime.key");
+            c.key_file = Some(if !ours.exists() && legacy.exists() { legacy } else { ours });
         }
         Ok(c)
     }
@@ -205,15 +208,20 @@ require-split-gateway = true
         let dir = std::env::temp_dir().join(format!("primed-cfg-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let p = dir.join("prime.toml");
-        std::fs::write(&p, LEGACY).unwrap();
+        let text = LEGACY.replace("/home/umbrel/blake2b/lazarus-prime", dir.to_str().unwrap());
+        std::fs::write(&p, &text).unwrap();
         let c = Config::load(&p).unwrap();
-        std::fs::remove_dir_all(&dir).unwrap();
         assert_eq!(c.listen.port(), 28915);
         assert_eq!(c.fee_bps, 50);
         assert_eq!(c.window, 8);
-        assert_eq!(c.key_file(), Path::new("/home/umbrel/blake2b/lazarus-prime/prime.key"));
+        assert_eq!(c.key_file(), dir.join("prime.key"));
         assert_eq!(c.min_pot(), 0);
         assert_eq!(c.legacy_notes().len(), 3);
+        // a data dir the old Prime left behind keeps its key, hence its pubkey
+        std::fs::write(dir.join("lazarus-prime.key"), "00").unwrap();
+        let c = Config::load(&p).unwrap();
+        assert_eq!(c.key_file(), dir.join("lazarus-prime.key"));
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

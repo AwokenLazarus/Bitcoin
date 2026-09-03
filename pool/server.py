@@ -282,7 +282,7 @@ def _prime_uptime_s():
         return _prime_uptime_cache["uptime"]
     try:
         out = subprocess.check_output(
-            ["ps", "-o", "etimes=", "-C", "lazarus-prime"],
+            ["ps", "-o", "etimes=", "-C", "primed,lazarus-prime"],
             stderr=subprocess.DEVNULL,
             text=True,
         ).split()

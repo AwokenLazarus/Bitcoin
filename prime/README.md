@@ -10,8 +10,9 @@ it does three things:
 
 1. **Dictates the coinbase.** When a gateway asks for a coinbaser, the Prime answers with the
    current TIDES split of the window: one output per miner, proportional to work, after the pool
-   fee. The gateway builds its coinbase from that list, so a block found by anyone's miner pays
-   everyone in the window.
+   fee, then the pool's own output last so the list sums to the requested value. The gateway
+   builds its coinbase from that list, so a block found by anyone's miner pays everyone in the
+   window.
 2. **Verifies every share.** Each share is rebuilt into a full BLAKE2b header v2 from the job
    the gateway described (prevhash, nbits, merkle branches, coinbase halves) and the miner's
    nonce fields, hashed, and checked against the share target — and against the network target,
@@ -53,7 +54,26 @@ Subcommands: `run` (default), `check`, `pubkey`, `window` (dump the window as JS
 `import-ledger <ledger.json>` (seed an empty window from the previous Prime's export).
 Logging is `RUST_LOG` (`info` default; `debug` prints each share decision).
 
-An existing `lazarus-prime.toml` loads unchanged; see `prime.toml.example` for the keys.
+### Taking over from `lazarus-prime`
+
+An existing `lazarus-prime.toml` loads unchanged (`activation-height`, `verify-shares` and
+`require-split-gateway` are accepted and reported as no longer applying). A data dir the old
+Prime left behind keeps its identity: `lazarus-prime.key` (its 160-byte layout) is read when
+there is no `prime.key`, so the pool pubkey every gateway operator pinned stays the same —
+`primed pubkey` prints it to confirm. Its `ledger.json` is the whole window; import it before
+the first `run`:
+
+```bash
+primed -c lazarus-prime.toml import-ledger /path/to/lazarus-prime/ledger.json
+primed -c lazarus-prime.toml run
+```
+
+This is how the Lazarus pool was cut over on 2026-09-03: same key, same config, 9,021 credit
+rows / 570.5 M work / 18 identities imported, `lazarus-gateway` reconnected within a second,
+and its shares verified against the same window. Expect a short burst of
+`bad-coinbase-outputs` rejects right after any Prime restart: a gateway keeps publishing jobs
+built on the coinbaser it got from the previous instance until its next template, and a
+coinbase paying a split this instance never issued is refused by design.
 
 ### Gateway side
 
@@ -70,9 +90,16 @@ In `datum_gateway_config.json`:
 }
 ```
 
-`mining.pool_address` should be the pool's payout address (the Prime pays its remainder
-there). Miners authenticate to the gateway as `<payout address>.<worker>`; the address is the
-identity credited in the window. Nothing else changes for the gateway operator.
+`mining.pool_address` should be the pool's payout address (a stock gateway sends anything
+its template is worth beyond the issued list there). Miners authenticate to the gateway as
+`<payout address>.<worker>`; the address is the identity credited in the window. Nothing else
+changes for the gateway operator.
+
+The pool's own public stratum, `lazarus-gateway` (in `../lazarus/`), is a DATUM client too and
+speaks to this Prime as one; two habits of its are recognised as such. It sends the whole
+legacy coinbase as `coinb1` with an empty `coinb2` (a shape no stock gateway produces), and
+when its template is worth less than the value a split was issued for it scales every output
+down by the same ratio rather than dropping the ones that no longer fit.
 
 ## Protocol
 
@@ -125,20 +152,28 @@ The window holds credits `(ts, identity, work, height)` until its total work rea
 end. A split of value `V` pays `fee = V × fee_bps / 10000` to the pool, then distributes the
 rest to identities proportional to their work in the window, dropping outputs below
 `min-payout` (their share stays with the pool and is reported as unpaid). The output list is
-capped by count and size so the coinbase fits in a gateway's largest coinbase class.
+capped by count and size so the coinbase fits in a gateway's largest coinbase class, with the
+pool's output — fee plus whatever could not be placed — appended last. The list therefore
+sums to the requested value; a stock gateway pays it verbatim and only adds a pool output of
+its own when the template turns out to be worth more, and `lazarus-gateway`, which writes
+exactly the list it is given, pays the fee instead of burning it.
 
 Stock gateways build several coinbase sizes and hand small miners those with room for only
 the first few outputs, or none at all while a coinbaser reply is in flight. The Prime
-classifies every share's coinbase as **Split** (all issued outputs paid), **Partial** (a
-subset, each in full), **PoolOnly** (only the pool's script), or **Foreign** (anything else,
-rejected). A block found on a Partial or PoolOnly coinbase records `owed_sats` — what the
-pool holds on behalf of the window — in `blocks.jsonl`.
+classifies every share's coinbase as **Split** (every issued miner output paid), **Partial**
+(a subset, each in full), **PoolOnly** (only the pool's script), or **Foreign** (anything
+else, rejected). An output is "paid" when it carries at least the issued amount scaled by
+`actual value / issued value` when the template is worth less than the split assumed (never
+more than issued) — this covers both a gateway that scales the list and one that drops
+outputs. The pool's own output is exempt from any minimum; it takes what is left. A block
+found on a Partial or PoolOnly coinbase records `owed_sats` — what the pool holds on behalf of
+the window — in `blocks.jsonl`.
 
 ### On disk (`data-dir`)
 
 | File | What |
 |------|------|
-| `prime.key` | ed25519 seed ‖ x25519 secret, 0600, generated once |
+| `prime.key` | ed25519 seed ‖ x25519 secret, 0600, generated once (`lazarus-prime.key` is read instead when present) |
 | `credits.bin` | append-only 24-byte credit rows; replayed at start, compacted when the window trims |
 | `identities.txt` | interned identity table (one address per line, index = row id) |
 | `window.json` | window target work and lifetime counters |
@@ -158,7 +193,7 @@ hashrate graph; `/healthz` returns `ok`.
 ## Tests
 
 ```bash
-cargo test                       # wire (36), tides (7), primed (6)
+cargo test                       # wire (38), tides (7), primed (6)
 scripts/regtest-e2e.sh convoy    # or fte | iohzrd: real C gateway + real Knots on regtest
 ```
 
@@ -171,7 +206,9 @@ BLAKE2b regtest node, and checks that the handshake, configure, coinbaser, share
 candidates and `submitblock` all happen. All three lineages were run this way while this was
 written; a block found through a stock Convoy gateway paid the two-miner TIDES split on-chain
 exactly as issued (65.6% / 34.4% after the 0.5% fee), and the block the Prime assembled from
-the gateway's transaction reply was byte-identical to the one the gateway submitted.
+the gateway's transaction reply was byte-identical to the one the gateway submitted. With the
+complete list, a Convoy-found block's coinbase carried the miner's 12.4375 and the pool's
+0.0625 (0.5%) once each — no second pool output.
 
 ## Design notes
 

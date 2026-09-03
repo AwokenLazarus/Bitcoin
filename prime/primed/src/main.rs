@@ -119,8 +119,23 @@ fn load_or_create_key(cfg: &Config) -> Result<Identity, String> {
     match std::fs::read_to_string(path) {
         Ok(s) => {
             let bytes = hex::decode(s.trim()).map_err(|e| format!("{}: {e}", path.display()))?;
-            let arr: [u8; 64] = bytes.try_into().map_err(|_| format!("{}: expected 64 bytes", path.display()))?;
-            Ok(Identity::from_secret_bytes(&arr))
+            match bytes.len() {
+                64 => Ok(Identity::from_secret_bytes(&bytes.try_into().unwrap())),
+                // lazarus-prime layout: ed25519 pk (32) | ed25519 sk as libsodium keeps it,
+                // seed‖pk (64) | x25519 pk (32) | x25519 sk (32). Same identity, so gateways
+                // that pinned the old pubkey keep connecting.
+                160 => {
+                    let mut arr = [0u8; 64];
+                    arr[..32].copy_from_slice(&bytes[32..64]);
+                    arr[32..].copy_from_slice(&bytes[128..160]);
+                    let id = Identity::from_secret_bytes(&arr);
+                    if id.sign_pk() != bytes[..32] || id.box_pk() != bytes[96..128] {
+                        return Err(format!("{}: public keys do not match the secret halves", path.display()));
+                    }
+                    Ok(id)
+                }
+                n => Err(format!("{}: expected 64 (primed) or 160 (lazarus-prime) bytes, found {n}", path.display())),
+            }
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             std::fs::create_dir_all(&cfg.data_dir).map_err(|e| e.to_string())?;
@@ -214,8 +229,10 @@ fn run(cfg: Config) -> i32 {
         split_params: SplitParams {
             fee_bps: cfg.fee_bps,
             min_payout: cfg.min_payout,
-            max_outputs: 512,
-            output_budget_bytes: 14_000,
+            // The gateway accepts at most 512 coinbaser entries; one is the pool's own
+            // output appended after the payees. The byte budget leaves room for it too.
+            max_outputs: 511,
+            output_budget_bytes: 14_000 - 9 - 64,
         },
         pool_script,
         pool,

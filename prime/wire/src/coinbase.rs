@@ -55,7 +55,16 @@ impl Coinbase {
 }
 
 /// Put the pieces of a BLAKE2b share's coinbase back together with its target byte.
+///
+/// Stock gateways split the coinbase around a 12-byte extranonce slot in the scriptSig and
+/// name the byte that carries the share's target. `lazarus-gateway` (the pool's own public
+/// stratum) instead sends the whole legacy coinbase as `coinb1`, nothing in `coinb2`, and
+/// `target_byte_index` 0 — a shape a stock gateway can never produce (its slot always has
+/// outputs after it, and byte 0 is the version). That form is taken as is.
 pub fn assemble(coinb1: &[u8], coinb2: &[u8], target_byte_index: usize, target_pot: u8) -> Vec<u8> {
+    if coinb2.is_empty() && target_byte_index == 0 {
+        return coinb1.to_vec();
+    }
     let mut v = Vec::with_capacity(coinb1.len() + EXTRANONCE_SLOT + coinb2.len());
     v.extend_from_slice(coinb1);
     v.resize(coinb1.len() + EXTRANONCE_SLOT, 0);
@@ -201,6 +210,23 @@ pub fn build(height: u32, tag: &[u8], outputs: &[TxOut], lock_time: u32) -> (Vec
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn assemble_handles_both_gateway_shapes() {
+        let outs = vec![TxOut { value: 5, script: vec![0x00, 0x14, 0x11] }];
+        let (full, tidx) = build(7, b"t", &outs, 0);
+        // stock: coinb1 ends with the target byte, the 12-byte slot follows, coinb2 is the rest
+        let c1 = &full[..tidx + 1];
+        let c2 = &full[tidx + 1 + EXTRANONCE_SLOT..];
+        let a = assemble(c1, c2, tidx, 9);
+        assert_eq!(a.len(), full.len());
+        assert_eq!(a[tidx], 9);
+        assert_eq!(&a[tidx + 1..tidx + 1 + EXTRANONCE_SLOT], &[0u8; EXTRANONCE_SLOT]);
+        assert_eq!(&a[tidx + 1 + EXTRANONCE_SLOT..], c2);
+        // lazarus-gateway: the whole coinbase in coinb1, nothing else
+        assert_eq!(assemble(&full, &[], 0, 9), full);
+        assert_eq!(full[0], 1, "version byte untouched");
+    }
 
     #[test]
     fn build_parse_and_split_round_trip() {

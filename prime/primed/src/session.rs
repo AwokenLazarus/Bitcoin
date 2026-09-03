@@ -309,11 +309,17 @@ impl Session {
         };
         let mut outputs: Vec<Output> =
             split.payees.iter().map(|p| Output { sats: p.sats, script: p.script.clone() }).collect();
-        if outputs.is_empty() {
-            // The gateway treats a list shorter than one output as "no coinbaser" and
-            // forgets the id; an empty window still gets a well-formed reply by naming the
-            // pool's own script once (the gateway adds the remainder to the same script).
-            outputs.push(Output { sats: self.shared.cfg.min_payout.max(1), script: self.shared.pool_script.clone() });
+        // The list is complete: the pool's fee and whatever the split could not place go
+        // last, to the pool's own script, so the outputs sum to `value`. A stock gateway
+        // pays the list verbatim and only appends its own pool output for funds left over
+        // (none when the template value matches); lazarus-gateway writes exactly the list,
+        // so without this line the fee would be burned. Last, because the size classes a
+        // stock gateway builds for small miners keep a prefix of the list, and the pool's
+        // remainder is what those may drop.
+        if split.pool_sats > 0 || outputs.is_empty() {
+            // Also guarantees at least one output: a gateway treats a shorter list as "no
+            // coinbaser" and forgets the id.
+            outputs.push(Output { sats: split.pool_sats.max(1), script: self.shared.pool_script.clone() });
         }
         let encoded = coinbaser::encode_v2(id, &outputs);
         self.send_mining(&mining::coinbaser_reply(value, &encoded), false).await?;
