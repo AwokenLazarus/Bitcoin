@@ -92,8 +92,10 @@ In `datum_gateway_config.json`:
 
 `mining.pool_address` should be the pool's payout address (a stock gateway sends anything
 its template is worth beyond the issued list there). Miners authenticate to the gateway as
-`<payout address>.<worker>`; the address is the identity credited in the window. Nothing else
-changes for the gateway operator.
+`<payout address>.<worker>`; the address is the identity credited in the window. The
+identity ends at the first `.` or `~`, so a `~modifier` suffix that a gateway without
+`stratum_username_mod` forwards verbatim still credits the address. Nothing else changes for
+the gateway operator.
 
 The pool's own public stratum, `lazarus-gateway` (in `../lazarus/`), is a DATUM client too and
 speaks to this Prime as one; two habits of its are recognised as such. It sends the whole

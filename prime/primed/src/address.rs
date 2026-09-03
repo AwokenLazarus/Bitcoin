@@ -85,10 +85,14 @@ fn segwit_script(ver: Fe32, prog: &[u8]) -> Vec<u8> {
     s
 }
 
-/// The identity a DATUM username maps to: the part before the first `.` (worker suffix).
+/// The identity a DATUM username maps to: the part before the first `.` (worker suffix)
+/// or `~` (gateway username modifier). A gateway with `stratum_username_mod` resolves
+/// `addr~mod.worker` itself; one without forwards it verbatim, and the pool must not
+/// treat `addr~mod` as an address.
 pub fn identity_of(username: &str) -> &str {
     let u = username.trim();
-    u.split('.').next().unwrap_or(u)
+    let end = u.find(['.', '~']).unwrap_or(u.len());
+    &u[..end]
 }
 
 #[cfg(test)]
@@ -116,5 +120,8 @@ mod tests {
         assert_eq!(identity_of("bc1qabc.rig1"), "bc1qabc");
         assert_eq!(identity_of(" bc1qabc "), "bc1qabc");
         assert_eq!(identity_of("plain"), "plain");
+        assert_eq!(identity_of("bc1qabc~x.rig1"), "bc1qabc");
+        assert_eq!(identity_of("bc1qabc.rig1~x"), "bc1qabc");
+        assert_eq!(identity_of("~x"), "");
     }
 }
