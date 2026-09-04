@@ -129,7 +129,9 @@ Cookie files, DATUM admin env, SMTP tokens, wallet addresses, or live `config.js
 
 ## License
 
-[MIT](LICENSE), except `lazarus/` which remains [AGPL-3.0](https://github.com/iohzrd/ratum/blob/master/LICENSE) as a Ratum derivative (see Credits). `prime/` is MIT and is not derived from Ratum.
+[MIT](LICENSE). The Prime we run (`prime/`) is MIT and is not derived from Ratum.
+`lazarus/` (retired) remains [AGPL-3.0](https://github.com/iohzrd/ratum/blob/master/LICENSE)
+as a Ratum derivative — see Credits.
 
 ## Credits
 
@@ -141,43 +143,49 @@ builds the block template and the pool only tracks shares and dictates the coinb
 format in [`lazarus/protocol`](lazarus/protocol) is recovered from OCEAN's
 `datum_protocol.c` / `.h` (MIT).
 
-### Ratum — iohzrd
+### The Prime we run is not Ratum
 
-[**Ratum**](https://github.com/iohzrd/ratum) by [iohzrd](https://github.com/iohzrd) is the
-first Rust DATUM pool for the [Bitcoin Knots BLAKE2b hardfork
-chain](https://github.com/bitcoinknots/bitcoin/pull/359), and it is what made this pool
-possible on the timescale it happened. Ratum Prime was the Prime this node ran in
-production, vendored at `0.1.3` (`e828545`), before `lazarus/` existed. iohzrd also wrote
-the [DATUM Gateway fork](https://github.com/iohzrd/datum_gateway) that BLAKE2b miners
-actually point at us.
+**[`prime/`](prime/) (`primed`) is the pool server in production.** It is a from-scratch
+implementation. It contains no Ratum or iohzrd pool-side code, was not written from Ratum's
+source, and is not a fork, rename, or relicensing of [Ratum](https://github.com/iohzrd/ratum).
+The wire format, coinbaser v2 encoding, and BLAKE2b header-v2 share layout were recovered
+from the MIT-licensed C `datum_gateway` trees listed below (OCEAN, CONVOY, FlyTheElephant1,
+iohzrd's *gateway* fork). That last one is a client miners run; it is not the pool.
 
-This tree is a reimplementation, not a rebrand — but it grew directly out of that vendored
-copy, and git still records `lazarus/Cargo.lock` and `lazarus/prime/Cargo.toml` as renames
-of Ratum's files. Concretely, what we took:
+### Ratum — iohzrd (history, and `lazarus/` only)
 
-| Ours | Follows Ratum's |
-|------|-----------------|
+[**Ratum**](https://github.com/iohzrd/ratum) by [iohzrd](https://github.com/iohzrd) was the
+first Rust DATUM pool on the [Bitcoin Knots BLAKE2b
+chain](https://github.com/bitcoinknots/bitcoin/pull/359). This node ran Ratum Prime in
+production first (`0.1.3`, `e828545`), then a tree we called `lazarus/` that grew out of
+that vendored copy. **`lazarus/` is retired.** It is not what we run. git still records
+`lazarus/Cargo.lock` and `lazarus/prime/Cargo.toml` as renames of Ratum files — that history
+applies to `lazarus/` only.
+
+What `lazarus/` followed from Ratum (not `prime/`):
+
+| `lazarus/` | Ratum |
+|------------|--------|
 | `protocol/src/{handshake,channel,nacl,header}.rs` | `core/src/datum/{handshake,framing}.rs` — NaCl-sealed handshake, obfuscated frame headers |
 | `protocol/src/mining.rs` | `core/src/datum/messages.rs` — message subtypes and share encoding |
 | `protocol/src/coinbaser.rs` | coinbaser v2 encoding |
-| `protocol/src/pow.rs` | `core/src/{header,target,nonce}.rs` — the version 2 header, the two-pass BLAKE2b hash, target handling |
-| `prime/` — ledger, TIDES window, coinbaser | `prime/` — the shape of a Prime that keeps a share window and sets the split |
-| the `#[ignore]`d tests that grind a real share | Ratum's release-mode `--ignored` proof-of-work tests |
+| `protocol/src/pow.rs` | `core/src/{header,target,nonce}.rs` — version 2 header, two-pass BLAKE2b, targets |
+| ledger / TIDES window / coinbaser shape | Ratum Prime's window-and-split shape |
+| `#[ignore]`d share-grind tests | Ratum's release-mode `--ignored` PoW tests |
 
-Where we diverged: payouts split the coinbase across the whole TIDES window natively, the
-gateway publishes only split templates, and share verification is enforced pool-side
-(see [Share validation invariants](#share-validation-invariants)). The bugs documented
-there were ours, found in our own code.
+Where `lazarus/` already diverged from Ratum: native TIDES coinbase split, split-only
+templates on the gateway, pool-side share verification
+(see [Share validation invariants](#share-validation-invariants); those bugs were ours).
 
-**License.** Ratum is licensed under the [GNU AGPL-3.0](https://github.com/iohzrd/ratum/blob/master/LICENSE).
-Because `lazarus/` grew out of a vendored copy of Ratum, it is a derivative work and the
-AGPL's terms apply to it regardless of the `MIT` string in its `Cargo.toml` files; treat
-`lazarus/` as AGPL-3.0 and do not relicense or redistribute it under MIT. (Earlier revisions
-of this README said Ratum carried no license file; that was wrong.)
+**License of `lazarus/`.** Ratum is [GNU AGPL-3.0](https://github.com/iohzrd/ratum/blob/master/LICENSE).
+`lazarus/` is a derivative work; treat it as AGPL-3.0 regardless of the `MIT` string in its
+`Cargo.toml` files. Do not relicense or redistribute `lazarus/` under MIT. (An earlier
+README said Ratum had no license file; that was wrong.)
 
-`prime/` exists to end that dependency. It is a from-scratch Prime written without reference
-to Ratum's source, under MIT, with the protocol recovered solely from the MIT-licensed
-`datum_gateway` C trees. Nothing in `prime/` is derived from `lazarus/` or Ratum.
+iohzrd also maintains a [DATUM Gateway fork](https://github.com/iohzrd/datum_gateway) that
+some BLAKE2b miners point at us. That is independent MIT client code. `prime/` speaks to it
+the same way it speaks to CONVOY and FlyTheElephant1 — as a stock gateway, not as a source
+tree.
 
 ### DATUM Gateway forks — CONVOY, FlyTheElephant1, iohzrd
 
