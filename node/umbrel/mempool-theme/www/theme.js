@@ -193,12 +193,112 @@
   var POOL = 'https://pool.awokenlazarus.xyz';
   var REPO = 'https://github.com/AwokenLazarus/Bitcoin';
   var POOL_SLUG = 'lazarus';
+  var ELECTRUM = 'electrum.awokenlazarus.xyz:50002';
 
   function el(tag, attrs, html) {
     var e = document.createElement(tag);
     Object.keys(attrs || {}).forEach(function (k) { e.setAttribute(k, attrs[k]); });
     if (html != null) e.innerHTML = html;
     return e;
+  }
+  function esc(s) {
+    return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
+      return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+    });
+  }
+
+  function copyButton(text, label) {
+    var b = el('button', { type: 'button', class: 'lz-copy-btn', 'aria-label': label || 'Copy', title: 'Copy' });
+    b.addEventListener('click', function (ev) {
+      ev.preventDefault();
+      ev.stopPropagation();
+      var done = function () {
+        b.setAttribute('data-copied', '');
+        clearTimeout(b._t);
+        b._t = setTimeout(function () { b.removeAttribute('data-copied'); }, 1400);
+      };
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(text).then(done, function () { fallback(); });
+      } else fallback();
+      function fallback() {
+        var ta = document.createElement('textarea');
+        ta.value = text; ta.setAttribute('readonly', ''); ta.style.position = 'fixed'; ta.style.left = '-9999px';
+        document.body.appendChild(ta); ta.select();
+        try { document.execCommand('copy'); done(); } catch (e) { /* no clipboard */ }
+        ta.remove();
+      }
+    });
+    return b;
+  }
+
+  // Live pool figures for the dashboard card (the pool API allows cross-origin reads).
+  var poolStats = { ts: 0, data: null, pending: false };
+  function fetchPool(cb) {
+    var now = Date.now();
+    if (poolStats.data && now - poolStats.ts < 30000) return cb(poolStats.data);
+    if (poolStats.pending) return;
+    poolStats.pending = true;
+    fetch(POOL + '/api/pool', { mode: 'cors' }).then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (d) { poolStats = { ts: Date.now(), data: d, pending: false }; if (d) cb(d); })
+      .catch(function () { poolStats.pending = false; });
+  }
+  function fmtHr(ghs) {
+    var hs = Number(ghs) * 1e9;
+    if (!isFinite(hs) || hs <= 0) return '—';
+    if (hs >= 1e15) return (hs / 1e15).toFixed(2) + ' PH/s';
+    if (hs >= 1e12) return (hs / 1e12).toFixed(2) + ' TH/s';
+    if (hs >= 1e9) return (hs / 1e9).toFixed(2) + ' GH/s';
+    return (hs / 1e6).toFixed(1) + ' MH/s';
+  }
+  function pct(x) { return isFinite(Number(x)) ? Number(x).toLocaleString(undefined, { maximumFractionDigits: 2 }) + '%' : '—'; }
+
+  // Dashboard card: the Electrum endpoint for wallet users and the pool for miners, in the
+  // same card grid as the stock widgets. Re-inserted on every route change by apply().
+  function dashboard() {
+    var row = document.querySelector('app-dashboard .dashboard-container > .row');
+    if (!row || row.querySelector('.lz-col')) return;
+    var col = el('div', { class: 'col lz-col' });
+    col.innerHTML =
+      '<div class="card lz-card">' +
+        '<div class="card-body">' +
+          '<h5 class="card-title">This chain, end to end</h5>' +
+          '<div class="lz-grid">' +
+            '<section class="lz-block" aria-label="Connect your wallet">' +
+              '<p class="lz-kicker">Wallets</p>' +
+              '<p class="lz-head">Connect your wallet to our Electrum server</p>' +
+              '<p class="lz-endpoint"><code>' + esc(ELECTRUM) + '</code></p>' +
+              '<p class="lz-copy">SSL on port 50002, run on the same node this explorer reads from. The chain uses 164-byte BLAKE2b headers, so use a wallet built for it (Electrum protocol 1.8); a stock SHA-256 wallet cannot verify these headers.</p>' +
+            '</section>' +
+            '<section class="lz-block" aria-label="Mine on this chain">' +
+              '<p class="lz-kicker">Miners</p>' +
+              '<p class="lz-head">Mine with Lazarus Pool, paid in the block itself</p>' +
+              '<p class="lz-stats" id="lz-pool-stats"><span class="lz-dot" aria-hidden="true"></span><span class="lz-stats-text">Loading pool status…</span></p>' +
+              '<p class="lz-copy" id="lz-pool-copy">Every block found pays each miner directly in its coinbase by TIDES window share. 0.5% fee through your own DATUM gateway, 5% on the public stratum.</p>' +
+              '<p class="lz-actions">' +
+                '<a class="btn btn-primary btn-sm" href="' + POOL + '" target="_blank" rel="noopener">Open Lazarus Pool ↗</a>' +
+                '<a class="btn btn-secondary btn-sm" href="/mining/pool/' + POOL_SLUG + '">Blocks found by Lazarus</a>' +
+              '</p>' +
+            '</section>' +
+          '</div>' +
+        '</div>' +
+      '</div>';
+    var endpoint = col.querySelector('.lz-endpoint');
+    endpoint.appendChild(copyButton(ELECTRUM, 'Copy Electrum server address'));
+    row.appendChild(col);
+    fetchPool(function (d) {
+      var t = col.querySelector('.lz-stats-text');
+      if (!t || !d) return;
+      var pr = d.prime || {};
+      var fees = d.fees || {};
+      var gws = Number(pr.gateways_online) || 0;
+      var inWindow = Number((pr.window || {}).identities) || 0;
+      t.textContent = fmtHr(d.pool_hr_ghs) + ' · ' + (d.blocks_found || 0) + ' blocks found · ' + inWindow + ' miner' + (inWindow === 1 ? '' : 's') + ' in window · ' + gws + ' gateway' + (gws === 1 ? '' : 's');
+      var c = col.querySelector('#lz-pool-copy');
+      if (c && fees.datum_percent != null && fees.stratum_percent != null) {
+        c.textContent = 'Every block found pays each miner directly in its coinbase by TIDES window share. ' + pct(fees.datum_percent) + ' fee through your own DATUM gateway, ' + pct(fees.stratum_percent) + ' on the public stratum.';
+      }
+      col.querySelector('.lz-dot').classList.add(pr.reachable === false ? 'stale' : 'live');
+    });
   }
 
   function nav() {
@@ -223,8 +323,9 @@
     col.appendChild(el('p', { class: 'category' }, 'Lazarus'));
     var links = [
       [POOL, 'Lazarus Pool'],
+      [POOL + '/#payout', 'What the next block pays'],
       ['/mining/pool/' + POOL_SLUG, 'Blocks found by the pool'],
-      [POOL + '/#connect', 'Point a DATUM gateway at the pool'],
+      [POOL + '/#connect', 'Connect a miner or DATUM gateway'],
       [REPO, 'Source on GitHub']
     ];
     links.forEach(function (l) {
@@ -234,6 +335,14 @@
       p.appendChild(a);
       col.appendChild(p);
     });
+    // Electrum endpoint for wallet users, with a copy button, under its own heading.
+    var wal = el('p', { class: 'category lz-sub-category' }, 'Wallets');
+    col.appendChild(wal);
+    var ep = el('p', { class: 'lz-footer-endpoint' });
+    ep.appendChild(el('code', { title: 'Electrum server, SSL' }, esc(ELECTRUM)));
+    ep.appendChild(copyButton(ELECTRUM, 'Copy Electrum server address'));
+    col.appendChild(ep);
+    col.appendChild(el('p', { class: 'lz-footer-note' }, 'Electrum server, SSL · header-v2 (BLAKE2b) wallets'));
     // In front of "Legal" so the reading order stays Explore, Learn, Tools, Lazarus, Legal.
     var cols = tree.querySelectorAll('.links');
     var legal = cols.length ? cols[cols.length - 1] : null;
@@ -243,7 +352,9 @@
   var scheduled = false;
   function apply() {
     scheduled = false;
-    try { nav(); footer(); } catch (e) { /* never break the explorer */ }
+    try { nav(); } catch (e) { /* never break the explorer */ }
+    try { footer(); } catch (e) { /* never break the explorer */ }
+    try { dashboard(); } catch (e) { /* never break the explorer */ }
   }
   function schedule() {
     if (scheduled) return;

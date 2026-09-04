@@ -58,8 +58,11 @@ the nginx config needs an app restart.
 
 * `theme.css` re-points mempool's CSS variables and Bootstrap classes at the pool's palette (warm
   near-black, brass, off-white; IBM Plex / Newsreader) and fixes the hard-coded block-side colours.
-* `theme.js` adds the **Lazarus Pool** nav item and a footer column (re-inserted on route changes via a
-  `MutationObserver`), and recolours everything the CSS cannot reach: the fee colour ramp used by the
+* `theme.js` adds the **Lazarus Pool** nav item, a footer column (pool links + the Electrum endpoint) and a
+  full-width dashboard card, *This chain, end to end*: the public Electrum server
+  (`electrum.awokenlazarus.xyz:50002`, SSL, header v2 / protocol 1.8) with a copy button, and live pool
+  stats pulled from `pool.awokenlazarus.xyz/api/pool` with links into the pool. All of it is re-inserted on
+  route changes via a `MutationObserver`. It also recolours everything the CSS cannot reach: the fee colour ramp used by the
   mempool blocks, the fee bar and the Goggles WebGL treemap (swapped in place inside webpack's module
   registry before the app boots), the categorical series palette (pool pie), and every colour written to
   the SVG/canvas charts (hue-banded into the palette at `setAttribute` / `fillStyle` time; greys pass

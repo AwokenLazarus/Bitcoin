@@ -165,10 +165,60 @@
     transition: color 140ms var(--ease), border-color 140ms var(--ease);
   }
   .nav a:hover { color: var(--ink); border-bottom-color: var(--brass); }
-  .nav .nav-out { margin-left: auto; color: var(--faint); }
+  .nav .nav-out {
+    display: inline-flex;
+    gap: 1.1rem;
+    margin-left: auto;
+  }
+  .nav .nav-out a { color: var(--faint); }
+  .nav .nav-out a:hover { color: var(--ink); }
+  .ext::after {
+    content: "\2197";
+    margin-left: 0.2em;
+    font-size: 0.8em;
+    color: var(--brass-dim);
+  }
   @media (max-width: 720px) {
     .nav .nav-out { margin-left: 0; }
   }
+
+  /* Footer: same four-column link tree as the Lazarus Mempool footer, so the two sites read
+     as one product. */
+  .site-footer {
+    margin-top: 2rem;
+    border-top: 1px solid var(--line);
+    background: var(--bg-inset);
+  }
+  .footer-grid {
+    display: grid;
+    grid-template-columns: minmax(13rem, 1.2fr) minmax(0, 1fr) minmax(0, 1fr) minmax(0, 1.3fr) minmax(0, 1fr);
+    gap: 1.4rem 1.6rem;
+    padding-block: 2rem 2.4rem;
+  }
+  @media (max-width: 960px) {
+    .footer-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .footer-brand { grid-column: 1 / -1; }
+  }
+  @media (max-width: 520px) {
+    .footer-grid { grid-template-columns: 1fr; }
+  }
+  .footer-brand { display: grid; gap: 0.5rem; align-content: start; max-width: 28rem; }
+  .footer-brand .note { font-size: 0.84rem; }
+  .wordmark.small { font-size: 1.35rem; }
+  .serif { font-family: var(--serif); color: var(--ink); }
+  .footer-col { display: grid; gap: 0.38rem; align-content: start; font-size: 0.84rem; }
+  .footer-col a { color: var(--muted); text-decoration: none; }
+  .footer-col a:hover { color: var(--brass); text-decoration: underline; }
+  .footer-col .note { font-size: 0.76rem; line-height: 1.4; }
+  .category {
+    margin-bottom: 0.25rem;
+    font-size: 0.66rem;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--faint);
+  }
+  .footer-endpoint { font-size: 0.78rem; color: var(--ink); }
+  .footer-endpoint .mono { font-size: 0.74rem; word-break: break-all; }
   .wrap {
     width: min(100% - (var(--space) * 2), var(--measure));
     margin-inline: auto;
@@ -707,6 +757,194 @@
     color: var(--muted);
     font-size: 0.86rem;
   }
+
+  /* Three plain-language promises under the ticker, for people who have never pool-mined. */
+  .pillars {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 0.55rem;
+    margin: 0.75rem 0 0;
+    padding: 0;
+    list-style: none;
+  }
+  @container (max-width: 44rem) {
+    .pillars { grid-template-columns: 1fr; }
+  }
+  .pillars li {
+    padding: 0.7rem 0.85rem 0.75rem;
+    border: 1px solid var(--line);
+    border-top: 2px solid var(--brass-dim);
+    background: var(--bg-raised);
+    color: var(--muted);
+    font-size: 0.86rem;
+    line-height: 1.45;
+  }
+  .pillars b { display: block; margin-bottom: 0.2rem; color: var(--ink); font-weight: 600; }
+
+  /* "If a block is found right now": reward -> miners / pool. */
+  .payout-hero {
+    display: grid;
+    grid-template-columns: minmax(0, 1.1fr) auto minmax(0, 2fr);
+    align-items: stretch;
+    gap: 0.75rem;
+    margin: 0.25rem 0 1rem;
+  }
+  @container (max-width: 44rem) {
+    .payout-hero { grid-template-columns: 1fr; }
+    .payout-arrow { display: none; }
+  }
+  .payout-big {
+    display: grid;
+    align-content: center;
+    gap: 0.2rem;
+    padding: 0.9rem 1rem;
+    border: 1px solid var(--line-strong);
+    background:
+      radial-gradient(120% 90% at 0% 0%, color-mix(in oklch, var(--brass) 16%, transparent), transparent 60%),
+      var(--bg-inset);
+  }
+  .payout-big small, .payout-split .metric small {
+    display: block;
+    font-size: 0.68rem;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--faint);
+  }
+  .payout-big b {
+    font-family: var(--mono);
+    font-size: clamp(1.5rem, 1.1rem + 1.6vw, 2.2rem);
+    font-weight: 500;
+    letter-spacing: -0.03em;
+    font-variant-numeric: tabular-nums;
+    color: var(--brass);
+    line-height: 1.1;
+  }
+  .payout-big .faint, .payout-split .faint { font-size: 0.76rem; line-height: 1.35; }
+  .payout-arrow {
+    display: grid;
+    place-items: center;
+    width: 2rem;
+    color: var(--brass-dim);
+  }
+  .payout-arrow::before { content: "\2192"; font-size: 1.4rem; }
+  .payout-split {
+    display: grid;
+    grid-template-columns: minmax(0, 1.6fr) minmax(0, 1fr);
+    gap: 0.55rem;
+  }
+  @container (max-width: 30rem) {
+    .payout-split { grid-template-columns: 1fr; }
+  }
+  .payout-split .metric { display: grid; align-content: center; gap: 0.15rem; padding: 0.8rem 0.9rem; }
+  .payout-split .metric b { margin-top: 0; font-size: clamp(1.15rem, 1rem + 0.7vw, 1.5rem); }
+  .payout-split .split-miners { border-left: 3px solid var(--good); }
+  .payout-split .split-miners b { color: var(--ink); }
+  .payout-split .split-pool { border-left: 3px solid var(--brass-dim); }
+
+  /* Fee schedule cards ahead of the connect tabs. */
+  .fee-schema {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 0.55rem;
+    margin-bottom: 0.8rem;
+  }
+  @container (max-width: 36rem) {
+    .fee-schema { grid-template-columns: 1fr; }
+  }
+  .fee-card {
+    display: grid;
+    grid-template-columns: 1fr auto;
+    grid-template-areas: "kicker rate" "title rate" "copy copy" "cta cta";
+    gap: 0.1rem 1rem;
+    padding: 0.75rem 0.9rem 0.8rem;
+    border: 1px solid var(--line);
+    background: var(--bg-raised);
+    cursor: pointer;
+    transition: border-color 140ms var(--ease), background 140ms var(--ease);
+  }
+  .fee-card:hover { border-color: var(--line-strong); }
+  .fee-card.reco:hover { border-color: var(--brass); }
+  .fee-cta {
+    grid-area: cta;
+    margin-top: 0.45rem;
+    font-size: 0.76rem;
+    font-weight: 500;
+    color: var(--brass);
+  }
+  .fee-cta::after { content: " \2193"; color: var(--brass-dim); }
+  .fee-card.reco {
+    border-color: color-mix(in oklch, var(--brass) 55%, var(--line));
+    background: color-mix(in oklch, var(--brass) 7%, var(--bg-raised));
+  }
+  .fee-kicker {
+    grid-area: kicker;
+    font-size: 0.66rem;
+    letter-spacing: 0.09em;
+    text-transform: uppercase;
+    color: var(--faint);
+  }
+  .fee-card.reco .fee-kicker { color: var(--brass); }
+  .fee-title { grid-area: title; font-weight: 600; color: var(--ink); }
+  .fee-rate {
+    grid-area: rate;
+    align-self: center;
+    font-family: var(--mono);
+    font-size: 1.7rem;
+    font-weight: 500;
+    letter-spacing: -0.03em;
+    color: var(--muted);
+  }
+  .fee-card.reco .fee-rate { color: var(--brass); }
+  .fee-copy { grid-area: copy; margin-top: 0.3rem; color: var(--muted); font-size: 0.84rem; line-height: 1.45; }
+  .tab-fee {
+    margin-left: 0.35rem;
+    padding: 0.02rem 0.4rem;
+    border: 1px solid var(--line-strong);
+    border-radius: 999px;
+    font-family: var(--mono);
+    font-size: 0.72rem;
+    font-weight: 500;
+    color: var(--muted);
+    vertical-align: 0.1em;
+  }
+  .tab-fee.reco { border-color: var(--brass-dim); color: var(--brass); }
+
+  .table-head {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 1rem;
+    margin: 0.9rem 0 0.35rem;
+  }
+  .table-head:first-of-type { margin-top: 0; }
+  .table-head .table-label { margin: 0; }
+  .table-count { font-family: var(--mono); font-size: 0.74rem; color: var(--faint); }
+  .ticker.slim { margin-bottom: 0.6rem; }
+  /* Gateway rows carry prose-ish cells (client build, state); let those wrap so the table
+     fits the page instead of scrolling sideways. */
+  #gwtable td:nth-child(3) { white-space: normal; min-width: 12rem; }
+  #gwtable td { vertical-align: top; line-height: 1.4; }
+  #gwtable td .faint { font-size: 0.72rem; }
+  .ticker.slim dd { font-size: 1rem; }
+
+  .how-grid {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 0.6rem;
+    counter-reset: how;
+  }
+  @container (max-width: 44rem) {
+    .how-grid { grid-template-columns: 1fr; }
+  }
+  .how-grid h3 {
+    margin-bottom: 0.4rem;
+    font-family: var(--serif);
+    font-size: 1.05rem;
+    font-weight: 500;
+    color: var(--brass);
+  }
+  .how-grid .copy { font-size: 0.88rem; }
+  #how .note { margin-top: 0.7rem; }
 }
 
 @layer utilities {

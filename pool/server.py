@@ -21,6 +21,8 @@ CONF = json.loads((ROOT / "config.json").read_text())
 NO_WRITE = os.environ.get("POOL_UI_NO_WRITE") == "1"
 
 POOL_FEE = float(CONF.get("pool_fee_percent", 0))
+# Public-stratum fee when primed is not answering; primed's stats.json is authoritative.
+STRATUM_FEE = float(CONF.get("stratum_fee_percent", POOL_FEE))
 STRATUM_HOST = CONF.get("stratum_host", "27.69.0.25")
 STRATUM_PORT = int(CONF.get("stratum_port", 23334))
 DATUM_URL = CONF.get("datum_url", "http://127.0.0.1:7152")
@@ -265,8 +267,20 @@ def fetch_prime_window():
             # primed measures these itself from the credit stream; no need to estimate.
             "hr_ghs": float(m.get("hashrate_ghs") or 0),
             "last_share_s": float(m["last_share_s"]) if m.get("last_share_s") is not None else None,
+            # Which fee schedule this identity's work is under: "datum" (own gateway) or
+            # "stratum" (our public gateway). Mixed work is reported by primed as the
+            # path that holds the majority; stratum_work is the public-stratum part.
+            "fee_path": str(m.get("fee_path") or "").lower(),
+            "stratum_work": int(float(m.get("stratum_work") or 0)),
         }
+        if not by[ident]["fee_path"]:
+            by[ident]["fee_path"] = "stratum" if by[ident]["stratum_work"] * 2 > work else "datum"
+    try:
+        stratum_fee_bps = int(pool.get("stratum_fee_bps") or pool.get("fee_bps") or 0)
+    except (TypeError, ValueError):
+        stratum_fee_bps = 0
     meta = {
+        "stratum_fee_bps": stratum_fee_bps,
         "shares": int(win.get("shares") or 0),
         "work": 0,
         "target_work": 0,
@@ -506,6 +520,18 @@ def persist_prime_miners(by, ts):
         )
 
 
+def _fee_percent_for_path(fee_path):
+    """Fee rate (percent) primed applies to work that arrived on `fee_path`."""
+    pool = prime_doc().get("pool") or {}
+    stratum = str(fee_path or "").lower() == "stratum"
+    try:
+        if stratum:
+            return int(pool.get("stratum_fee_bps") or pool.get("fee_bps") or round(STRATUM_FEE * 100)) / 100.0
+        return int(pool.get("fee_bps") or round(POOL_FEE * 100)) / 100.0
+    except (TypeError, ValueError):
+        return STRATUM_FEE if stratum else POOL_FEE
+
+
 def prime_info_for(address):
     live = (state.get("prime") or {}).get(address) if isinstance(state.get("prime"), dict) else None
     if live:
@@ -571,13 +597,17 @@ def attach_share_fields(rec):
     rec["window_work"] = int(info.get("window_work") or 0)
     rec["window_percent"] = float(info.get("window_percent") or 0)
     rec["window_sats"] = int(info.get("window_sats") or 0)
+    rec["fee_path"] = info.get("fee_path") or ""
     rec["via"] = rec.get("via") or ("prime" if rec.get("ua") in ("DATUM gateway", "Prime window") else "stratum")
     _led_by, _ = _ledger_hashrate()
     phr = float(_led_by.get(addr) or 0.0) or float(info.get("hr_ghs") or 0)
     gwh = float((state.get("gateway_hr") or {}).get(addr) or 0)
     rec["credited_hr_ghs"] = phr
     rec["gateway_hr_ghs"] = gwh
-    rec["firmware_hr_ghs"] = float(rec.get("hr_ghs") or 0)
+    # The session's own reported rate. Records are re-attached on every request, and hr_ghs
+    # below becomes the address-level credited rate, so keep the first (true) value.
+    if "firmware_hr_ghs" not in rec:
+        rec["firmware_hr_ghs"] = float(rec.get("hr_ghs") or 0)
     if rec.get("via") in ("gateway", "prime") or rec.get("ua") in ("DATUM gateway", "Prime window"):
         ww = int(info.get("window_work") or rec.get("window_work") or 0)
         if ww and int(rec.get("shares_lifetime") or 0) < ww:
@@ -938,6 +968,35 @@ def splits_from_vouts(vouts):
 _cb_split_cache = {}
 
 
+def pool_output_parts(pool_addr, on_chain_btc, pb, reward_btc=None):
+    """Split a pool-address coinbase output into miner TIDES share vs fee.
+
+    Anyone who mines to the pool wallet (the S11 does) lands in the same
+    script as the 0.5% fee. On-chain those are one output; the issued
+    split still knows the miner share, so the fee is the remainder.
+    """
+    total = float(on_chain_btc or 0)
+    if not pool_addr:
+        return 0.0, total
+    miner_sats = 0
+    for item in (pb or {}).get("split") or []:
+        if isinstance(item, dict):
+            addr, sats = item.get("address"), item.get("sats")
+        elif isinstance(item, (list, tuple)) and len(item) >= 2:
+            addr, sats = item[0], item[1]
+        else:
+            continue
+        if addr == pool_addr:
+            miner_sats += int(sats or 0)
+    if miner_sats:
+        miner_btc = min(miner_sats / 1e8, total)
+        return miner_btc, max(0.0, total - miner_btc)
+    if reward_btc:
+        fee = min(total, float(reward_btc) * (POOL_FEE / 100.0))
+        return max(0.0, total - fee), fee
+    return 0.0, total
+
+
 def coinbase_splits(blockhash):
     """Address -> BTC actually paid in that block's coinbase."""
     if not blockhash:
@@ -1189,6 +1248,7 @@ def _gateway_row(c):
         "generation": c.get("generation"),
         # The pool's own public stratum connects to Prime like anyone else's gateway.
         "own": ua.startswith(OWN_GATEWAY_UA_PREFIX),
+        "fee_path": str(c.get("fee_path") or "").lower(),
         "identity": c.get("identity") or "",
         "connected_s": int(c.get("connected_s") or 0),
         "accepted": int(c.get("accepted") or 0),
@@ -1239,6 +1299,11 @@ def prime_summary():
     clients.sort(key=lambda g: (g["own"], -g["work"]))
     blocks = [_block_row(b) for b in meta.get("blocks") or []]
     blocks.sort(key=lambda b: -(b["height"] or 0))
+    pool_addr = pool.get("address") or ""
+    for b in blocks:
+        miner_to_pool = sum(int(o.get("sats") or 0) for o in b["split"] if o.get("address") == pool_addr)
+        b["miner_to_pool_sats"] = miner_to_pool
+        b["fee_sats"] = max(0, int(b.get("pool_sats") or 0) - miner_to_pool)
     try:
         fee_bps = int(pool.get("fee_bps") or round(POOL_FEE * 100))
     except (TypeError, ValueError):
@@ -1254,6 +1319,7 @@ def prime_summary():
         "tag": pool.get("tag") or COINBASE_TAG,
         "address": pool.get("address") or "",
         "fee_bps": fee_bps,
+        "stratum_fee_bps": int(meta.get("stratum_fee_bps") or fee_bps),
         "min_payout_sats": int(pool.get("min_payout") or 0),
         "advertise": pool.get("advertise") or "",
         "hashrate_ghs": meta.get("hashrate_ghs") or 0,
@@ -1301,7 +1367,15 @@ def prime_coinbaser_preview():
     for addr, info in by.items():
         sats = int(info.get("window_sats") or 0)
         if sats > 0 and info.get("payable"):
-            miners.append({"address": addr, "sats": sats, "share_percent": float(info.get("window_percent") or 0), "work": int(info.get("window_work") or 0)})
+            miners.append({
+                "address": addr,
+                "sats": sats,
+                "share_percent": float(info.get("window_percent") or 0),
+                "work": int(info.get("window_work") or 0),
+                "fee_path": info.get("fee_path") or "",
+                "hr_ghs": float(info.get("hr_ghs") or 0),
+                "last_share_s": info.get("last_share_s"),
+            })
     miners.sort(key=lambda m: -m["sats"])
     miner_sats = sum(m["sats"] for m in miners)
     unpaid = [
@@ -1324,6 +1398,10 @@ def prime_coinbaser_preview():
         "pool_sats": pool_sats,
         "fee_sats": fee_sats,
         "fee_percent": (meta.get("pool") or {}).get("fee_bps", int(round(POOL_FEE * 100))) / 100.0,
+        "stratum_fee_percent": int(meta.get("stratum_fee_bps") or 0) / 100.0,
+        # Effective fee on this split: fee_sats over the block value. Between the DATUM
+        # and stratum rates, weighted by whose work fills the window.
+        "effective_fee_percent": (100.0 * fee_sats / value) if value else 0.0,
         "unplaced_sats": max(0, pool_sats - fee_sats),
         "pool_address": pool_addr,
         "window_multiple": meta.get("window_multiple") or 8,
@@ -1362,12 +1440,16 @@ def pool_payload():
     prime = prime_summary()
     nblocks = int(win["window_multiple"] or 8)
     fill = win["window_fill_percent"]
+    datum_fee = prime["fee_bps"] / 100.0 if prime.get("reachable") else POOL_FEE
+    stratum_fee = prime["stratum_fee_bps"] / 100.0 if prime.get("reachable") else STRATUM_FEE
+    if datum_fee == 0 and stratum_fee == 0:
+        fee_clause = "100%, no fee"
+    elif datum_fee == stratum_fee:
+        fee_clause = f"{100-datum_fee:g}% to miners, {datum_fee:g}% fee"
+    else:
+        fee_clause = f"{datum_fee:g}% fee through your own DATUM gateway, {stratum_fee:g}% on the public stratum"
     payout = (
-        f"A found block pays the TIDES window in its coinbase (100%, no fee): "
-        f"{nblocks} network-blocks of accepted work, currently {fill:.0f}% full. "
-        f"Hashrate is not your cut — a new rig starts near 0% and ramps as its work enters and older work ages out."
-        if POOL_FEE == 0
-        else f"A found block pays the TIDES window in its coinbase ({100-POOL_FEE:g}% to miners, {POOL_FEE:g}% fee): "
+        f"A found block pays the TIDES window in its coinbase ({fee_clause}): "
         f"{nblocks} network-blocks of accepted work, currently {fill:.0f}% full. "
         f"Hashrate is not your cut — a new rig starts near 0% and ramps as its work enters and older work ages out."
     )
@@ -1375,6 +1457,11 @@ def pool_payload():
         "name": "Lazarus",
         "tagline": "Proverbs 11:1",
         "fee_percent": POOL_FEE,
+        "fees": {
+            "datum_percent": datum_fee,
+            "stratum_percent": stratum_fee,
+            "note": "The fee is taken per miner from that miner's window share, by the path the work arrived on. Switching paths keeps the accepted work.",
+        },
         "stratum": f"stratum+tcp://{STRATUM_HOST}:{STRATUM_PORT}",
         "stratum_asic": f"stratum+tcp://{STRATUM_HOST}:{STRATUM_PORT}",
         "host": STRATUM_HOST,
@@ -1509,6 +1596,13 @@ def miner_payload(address):
         if amt <= 0:
             continue
         reward_split = sum(splits.values()) or 1.0
+        # Mining to the pool wallet must not count the 0.5% fee as miner earnings.
+        pool_addr = ((prime_doc().get("pool") or {}).get("address") or "")
+        if pool_addr and address == pool_addr:
+            pb = next((b for b in (prime_doc().get("blocks") or []) if b.get("hash") == fb["hash"]), None)
+            amt, _fee = pool_output_parts(pool_addr, amt, pb, reward_split)
+            if amt <= 0:
+                continue
         st = payout_status_for_height(fb["height"], tip)
         payouts.append(
             {
@@ -1612,7 +1706,11 @@ def miner_payload(address):
         "est_btc_day": est,
         "est_btc_week": est * 7,
         "ttf_seconds": ttf_s,
-        "block_payout_btc": SUBSIDY * (1 - POOL_FEE / 100.0) * round_share,
+        # The exact output primed would put in the next coinbase for this address, when it
+        # has one; otherwise the proportional estimate.
+        "block_payout_btc": (int(pinfo.get("window_sats") or 0) / 1e8) if pinfo.get("window_sats") else SUBSIDY * (1 - POOL_FEE / 100.0) * round_share,
+        "fee_path": pinfo.get("fee_path") or "",
+        "fee_percent_path": _fee_percent_for_path(pinfo.get("fee_path")),
         "paid_btc": paid_btc,
         "unpaid_btc": 0.0,
         "immature_btc": immature_btc,
@@ -1672,6 +1770,8 @@ class Handler(BaseHTTPRequestHandler):
                 d["shares_rej"] = life_r or int(d.get("shares_rej") or 0)
                 d["window_work"] = int(info.get("window_work") or 0)
                 d["window_percent"] = float(info.get("window_percent") or 0)
+                d["window_sats"] = int(info.get("window_sats") or 0)
+                d["fee_path"] = info.get("fee_path") or ""
                 d["via"] = "prime" if (d.get("address") in (state.get("prime") or {}) and not any(o.get("address")==d.get("address") and o.get("via") == "stratum" for o in online)) else d.get("via")
                 try:
                     if float(d.get("best_hr_ghs") or 0) > _PRIME_HR_CAP_GHS:
@@ -1749,16 +1849,38 @@ class Handler(BaseHTTPRequestHandler):
             pr = prime_summary()
             prime_blocks = {b["hash"]: b for b in pr["blocks"] if b.get("hash")}
             pool_addr = pr.get("address") or ""
+            tagged = []
             for row in payouts:
-                # The pool's own output (fee + whatever the split could not place) is not a
-                # miner payout, even though the pool address also appears in the window.
-                row["to"] = "pool" if pool_addr and row.get("finder") == pool_addr else "miner"
                 pb = prime_blocks.get(row.get("hash"))
                 row["kind"] = pb["kind"] if pb else ""
                 row["block_status"] = pb["status"] if pb else ""
                 row["owed_sats"] = pb["owed_sats"] if pb else 0
                 row["gateway"] = pb["gateway"] if pb else ""
                 row["found_by"] = pb["finder"] if pb else ""
+                if pool_addr and row.get("finder") == pool_addr:
+                    miner_btc, fee_btc = pool_output_parts(pool_addr, row.get("miner_btc"), pb, row.get("reward_btc"))
+                    reward = float(row.get("reward_btc") or 0) or 1.0
+                    if miner_btc > 0:
+                        m = dict(row)
+                        m["to"] = "miner"
+                        m["miner_btc"] = miner_btc
+                        m["pool_fee_btc"] = 0.0
+                        m["share"] = miner_btc / reward
+                        tagged.append(m)
+                    if fee_btc > 0:
+                        f = dict(row)
+                        f["to"] = "pool"
+                        f["miner_btc"] = fee_btc
+                        f["pool_fee_btc"] = fee_btc
+                        f["share"] = fee_btc / reward
+                        tagged.append(f)
+                    if miner_btc <= 0 and fee_btc <= 0:
+                        row["to"] = "pool"
+                        tagged.append(row)
+                else:
+                    row["to"] = "miner"
+                    tagged.append(row)
+            payouts = tagged
             prime_by = state.get("prime") or {}
             current = sorted(
                 (

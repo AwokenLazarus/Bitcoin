@@ -27,13 +27,36 @@ if ! pgrep -f 'lazarus-gateway --config /home/umbrel/blake2b/etc/lazarus-asic.js
   nohup /home/umbrel/blake2b/bin/start-lazarus-gateway.sh /home/umbrel/blake2b/etc/lazarus-asic.json >> /home/umbrel/blake2b/logs/lazarus-asic.log 2>&1 &
 fi
 # GPU mining gateway (:3333) retired -- the pool is stratum-only via lazarus-asic.json.
-# :8888 local, :8889 lan-edge, :8890 public NPM
-if ! listening 8888; then
-  nohup python3 /home/umbrel/blake2b/lazarus-pool/server.py >> /home/umbrel/blake2b/logs/pool-ui.log 2>&1 &
-fi
-if ! listening 8889; then
-  nohup env POOL_LISTEN_PORT=8889 python3 /home/umbrel/blake2b/lazarus-pool/server.py >> /home/umbrel/blake2b/logs/pool-ui-8889.log 2>&1 &
-fi
-if ! listening 8890; then
-  nohup env POOL_LISTEN_PORT=8890 python3 /home/umbrel/blake2b/lazarus-pool/server.py >> /home/umbrel/blake2b/logs/pool-ui-8890.log 2>&1 &
-fi
+#
+# Pool UI (pool/server.py): :8888 local, :8889 lan-edge, :8890 public NPM.
+# Static files are read from disk per request, so pool/static/* deploys are live at once;
+# a new server.py needs the processes relaunched. Same trick as electrs above: any instance
+# older than server.py is TERMed here and relaunched below. When this script runs as root
+# (Umbrel app hooks) the instances are started as umbrel via runuser, so later deploys from
+# the umbrel timer can restart them without sudo. Only :8888 writes to pool.sqlite; the
+# other two are read-only mirrors (POOL_UI_NO_WRITE=1) so they never fight over the lock.
+POOL_PY=/home/umbrel/blake2b/lazarus-pool/server.py
+POOL_LOGS=/home/umbrel/blake2b/logs
+py_mtime=$(stat -c %Y "$POOL_PY")
+for pid in $(pgrep -f "^python3 $POOL_PY$" || true); do  # anchored: skip the runuser wrappers
+  started=$(( $(date +%s) - $(ps -o etimes= -p "$pid" | tr -d ' ') ))
+  if (( py_mtime > started )); then
+    if kill -TERM "$pid" 2>/dev/null; then
+      for _ in $(seq 1 20); do kill -0 "$pid" 2>/dev/null || break; sleep 0.5; done
+      echo "pool-ui: stopped pid $pid to pick up new server.py"
+    else
+      echo "pool-ui: pid $pid ($(ps -o user= -p "$pid")) is older than server.py; rerun as root to restart it"
+    fi
+  fi
+done
+pool_ui() { # port logfile [extra env]
+  local port=$1 log=$2; shift 2
+  if [[ $(id -u) -eq 0 ]]; then
+    runuser -u umbrel -- env POOL_LISTEN_PORT="$port" "$@" nohup python3 "$POOL_PY" >> "$log" 2>&1 &
+  else
+    env POOL_LISTEN_PORT="$port" "$@" nohup python3 "$POOL_PY" >> "$log" 2>&1 &
+  fi
+}
+listening 8888 || pool_ui 8888 "$POOL_LOGS/pool-ui.log"
+listening 8889 || pool_ui 8889 "$POOL_LOGS/pool-ui-8889.log" POOL_UI_NO_WRITE=1
+listening 8890 || pool_ui 8890 "$POOL_LOGS/pool-ui-8890.log" POOL_UI_NO_WRITE=1
