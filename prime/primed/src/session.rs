@@ -87,10 +87,16 @@ struct Session {
     seen: Vec<HashSet<Hash>>,
     coinbasers: VecDeque<IssuedCoinbaser>,
     next_coinbaser_id: u8,
-    pending_blocks: HashMap<u8, PendingBlock>,
+    /// Block candidates waiting for the gateway's transaction list, by job id. A job can solve
+    /// more than once (regtest does it every share; on mainnet it is rare but a lost block is
+    /// the worst outcome), and the gateway's reply names only the job, so keep every candidate
+    /// and submit them all from the one transaction set.
+    pending_blocks: HashMap<u8, Vec<PendingBlock>>,
     last_send: Instant,
     last_recv: Instant,
     gateway_hex: String,
+    /// Last time this session warned that the gateway's node is ahead of ours (rate limit).
+    ahead_warned: Option<Instant>,
 }
 
 pub async fn run(shared: Arc<Shared>, mut stream: TcpStream, remote: SocketAddr) -> Result<(), SessionError> {
@@ -162,6 +168,7 @@ pub async fn run(shared: Arc<Shared>, mut stream: TcpStream, remote: SocketAddr)
         pending_blocks: HashMap::new(),
         last_send: Instant::now(),
         last_recv: Instant::now(),
+        ahead_warned: None,
         gateway_hex,
     };
     let r = s.serve().await;
@@ -230,7 +237,10 @@ impl Session {
                         write_frame(&mut self.stream, &h, &[], &mut self.send_keys).await?;
                         self.last_send = Instant::now();
                     }
-                    self.pending_blocks.retain(|_, p| p.at.elapsed() < PENDING_BLOCK_TTL);
+                    self.pending_blocks.retain(|_, v| {
+                        v.retain(|p| p.at.elapsed() < PENDING_BLOCK_TTL);
+                        !v.is_empty()
+                    });
                 }
             }
         }
@@ -389,7 +399,20 @@ impl Session {
             let expected = tip.height + 1;
             let grace = Duration::from_secs(u64::from(self.shared.cfg.stale_grace_secs));
             let stale = height < expected && !(height + 1 == expected && tip.seen_at.elapsed() < grace);
-            if stale || height > expected + 1 {
+            if height > expected + 1 {
+                // The gateway's node is at least two blocks past ours. That is our node lagging
+                // (peers, sync, or an isolated node), not a stale gateway; say so, once a minute,
+                // because every share from every healthy gateway is being refused meanwhile.
+                if self.ahead_warned.map_or(true, |t| t.elapsed() > Duration::from_secs(60)) {
+                    self.ahead_warned = Some(Instant::now());
+                    log::warn!(
+                        "[{}] {} submits work for height {height} but our node's tip is {}: the pool node is behind the gateway's node; check its peers and sync. Rejecting as stale until it catches up.",
+                        self.id, self.gateway_hex, tip.height
+                    );
+                }
+                return self.reject(&s, mining::REJECT_STALE_BLOCK).await;
+            }
+            if stale {
                 return self.reject(&s, mining::REJECT_STALE_BLOCK).await;
             }
         }
@@ -533,7 +556,10 @@ impl Session {
 
         // ask for the transactions so we can submit the block ourselves as a backup
         let job = s.job_id;
-        self.pending_blocks.insert(job, PendingBlock { share: v, submit: s, hash_hex, at: Instant::now() });
+        self.pending_blocks
+            .entry(job)
+            .or_default()
+            .push(PendingBlock { share: v, submit: s, hash_hex, at: Instant::now() });
         self.send_mining(&mining::request_full_block(job), false).await?;
         // every other gateway should refresh its template now
         let _ = self.shared.notify.send(self.id as u32);
@@ -555,15 +581,25 @@ impl Session {
             }
         };
         if status != ValidationStatus::Ok {
-            log::warn!(
-                "[{}] gateway could not supply transactions for block {}: {:?}",
-                self.id,
-                pending.hash_hex,
-                status
-            );
-            self.shared.update_block(&pending.hash_hex, |r| r.submit = "no-transactions".into());
+            for p in &pending {
+                log::warn!(
+                    "[{}] gateway could not supply transactions for block {}: {:?}",
+                    self.id,
+                    p.hash_hex,
+                    status
+                );
+                self.shared.update_block(&p.hash_hex, |r| r.submit = "no-transactions".into());
+            }
             return Ok(());
         }
+        // one transaction set per job; every candidate solved on this job assembles from it
+        for p in pending {
+            self.submit_candidate(p, &txns);
+        }
+        Ok(())
+    }
+
+    fn submit_candidate(&self, pending: PendingBlock, txns: &[Vec<u8>]) {
         let expected = pending.share.commitment.txcount.saturating_sub(1) as usize;
         if txns.len() != expected && txns.len() != pending.share.commitment.txcount as usize {
             log::warn!(
@@ -574,10 +610,10 @@ impl Session {
                 pending.share.commitment.txcount
             );
         }
-        let block = verify::assemble_block(&pending.share, &pending.submit, &txns);
+        let block = verify::assemble_block(&pending.share, &pending.submit, txns);
         let hex_block = hex::encode(&block);
         let shared = self.shared.clone();
-        let hash_hex = pending.hash_hex.clone();
+        let hash_hex = pending.hash_hex;
         let id = self.id;
         tokio::spawn(async move {
             let outcome = match shared.rpc.submitblock(&hex_block).await {
@@ -590,7 +626,6 @@ impl Session {
             shared.totals.add(&shared.totals.blocks_submitted, 1);
             shared.update_block(&hash_hex, |r| r.submit = outcome);
         });
-        Ok(())
     }
 }
 

@@ -1265,10 +1265,18 @@ def _block_row(b):
     """One Prime block record for the UI: what the coinbase did and where the block stands."""
     split = b.get("split") or []
     submit = str(b.get("submit") or "pending")
-    if b.get("settled") is True:
-        status = "orphaned" if submit.startswith("orphan") else "in chain"
+    kind = str(b.get("kind") or "")
+    # primed marks orphans on `kind` ("orphan:split"); `submit` is the node's submitblock verdict.
+    if kind.startswith("orphan"):
+        status = "orphaned"
+    elif b.get("settled") is True:
+        status = "in chain"
     elif submit in ("accepted", "duplicate"):
         status = "submitted"
+    elif submit == "inconclusive":
+        # valid block, but a competing tip: the node accepted it without making it the best chain.
+        # It confirms once a block lands on top of it (a lagging gateway node), or ends up orphaned.
+        status = "pending"
     elif submit.startswith("rejected"):
         status = "rejected"
     else:

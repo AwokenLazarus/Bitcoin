@@ -54,6 +54,11 @@ pub async fn run(shared: Arc<Shared>) {
     }
 }
 
+/// How many blocks past a candidate we keep re-checking one we have called an orphan. A block
+/// found on a gateway whose node lagged the pool node by one is a competing tip until the next
+/// block lands; if that lands on the gateway's branch, the "orphan" is main chain after all.
+const ORPHAN_RECHECK_BLOCKS: u32 = 100;
+
 /// Mark recorded blocks settled once the node has them in the main chain.
 async fn confirm_blocks(shared: &Shared, tip_height: u32) {
     let pending: Vec<(String, u32)> = shared
@@ -62,7 +67,16 @@ async fn confirm_blocks(shared: &Shared, tip_height: u32) {
         .unwrap()
         .iter()
         .rev()
-        .filter(|b| !b.settled && !b.kind.starts_with("orphan") && b.height + 2000 > tip_height)
+        .filter(|b| {
+            if b.settled {
+                return false;
+            }
+            if b.kind.starts_with("orphan") {
+                b.height + ORPHAN_RECHECK_BLOCKS > tip_height
+            } else {
+                b.height + 2000 > tip_height
+            }
+        })
         .take(20)
         .map(|b| (b.hash.clone(), b.height))
         .collect();
@@ -72,20 +86,42 @@ async fn confirm_blocks(shared: &Shared, tip_height: u32) {
                 let conf = h.get("confirmations").and_then(|v| v.as_i64()).unwrap_or(0);
                 if conf > 0 {
                     log::info!("block {hash} at {height} confirmed ({conf})");
-                    shared.update_block(&hash, |r| r.settled = true);
+                    shared.update_block(&hash, |r| {
+                        if let Some(kind) = r.kind.strip_prefix("orphan:") {
+                            log::info!("block {} at {} is back in the main chain", r.hash, r.height);
+                            r.kind = kind.to_string();
+                        }
+                        r.settled = true;
+                    });
                 } else if conf < 0 {
-                    log::warn!("block {hash} at {height} is not in the main chain");
-                    shared.update_block(&hash, |r| r.kind = format!("orphan:{}", r.kind));
+                    mark_orphan(shared, &hash, height, "is not in the main chain");
                 }
             }
             Err(crate::rpc::RpcError::Node { code: -5, .. }) => {
                 // unknown to the node yet; if the chain has moved well past it, it lost
                 if tip_height > height + 6 {
-                    log::warn!("block {hash} at {height} never reached the node");
-                    shared.update_block(&hash, |r| r.kind = format!("orphan:{}", r.kind));
+                    mark_orphan(shared, &hash, height, "never reached the node");
                 }
             }
             Err(e) => log::debug!("getblockheader {hash}: {e}"),
         }
     }
+}
+
+/// Label a recorded block as orphaned, once. Orphans stay unsettled so `confirm_blocks` keeps
+/// re-checking them for a while; this must not stack a prefix per pass.
+fn mark_orphan(shared: &Shared, hash: &str, height: u32, why: &str) {
+    let already = shared
+        .blocks
+        .lock()
+        .unwrap()
+        .iter()
+        .rev()
+        .find(|r| r.hash == hash)
+        .map_or(true, |r| r.kind.starts_with("orphan:"));
+    if already {
+        return;
+    }
+    log::warn!("block {hash} at {height} {why}");
+    shared.update_block(hash, |r| r.kind = format!("orphan:{}", r.kind));
 }

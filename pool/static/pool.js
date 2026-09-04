@@ -177,7 +177,8 @@
     return r.json();
   };
   const kindPill = (kind) => {
-    const k = String(kind || "").toLowerCase();
+    // primed prefixes orphaned records ("orphan:split"); the Status column carries that, this pill says what the coinbase did.
+    const k = String(kind || "").toLowerCase().replace(/^orphan:/, "");
     const label = k === "split" ? "split" : k === "partial" ? "partial split" : k === "pool-only" ? "pool only" : k || "\u2014";
     const cls = k === "split" ? "ok" : k === "partial" ? "warn" : k === "pool-only" ? "warn" : "";
     return k ? `<span class="pill ${cls}">${esc(label)}</span>` : "\u2014";

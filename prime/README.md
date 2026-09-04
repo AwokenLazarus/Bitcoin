@@ -33,7 +33,8 @@ prime/
   tides/              tides: share window, split computation, append-only ledger, block log
   primed/             the daemon: sessions, node poller, stats HTTP, CLI
   prime.toml.example
-  scripts/regtest-e2e.sh   end-to-end test against a real C datum_gateway on regtest
+  scripts/regtest-e2e.sh          end-to-end test against a real C datum_gateway on regtest
+  scripts/regtest-divergence.sh   two-node test: gateway template survives a pool node with a different mempool/tip
 ```
 
 `datum-wire` and `tides` have no async or I/O dependencies beyond `std`; every protocol and
@@ -195,8 +196,9 @@ hashrate graph; `/healthz` returns `ok`.
 ## Tests
 
 ```bash
-cargo test                       # wire (38), tides (7), primed (6)
-scripts/regtest-e2e.sh convoy    # or fte | iohzrd: real C gateway + real Knots on regtest
+cargo test                                  # wire (38), tides (9), primed (6)
+scripts/regtest-e2e.sh convoy               # or fte | iohzrd: real C gateway + real Knots on regtest
+MINER_CMD='...' scripts/regtest-divergence.sh fte   # two nodes with different mempools and tips
 ```
 
 The unit tests pin the frame obfuscation, nonce derivation, hello round trip for both
@@ -211,6 +213,45 @@ exactly as issued (65.6% / 34.4% after the 0.5% fee), and the block the Prime as
 the gateway's transaction reply was byte-identical to the one the gateway submitted. With the
 complete list, a Convoy-found block's coinbase carried the miner's 12.4375 and the pool's
 0.0625 (0.5%) once each — no second pool output.
+
+### Template divergence
+
+The e2e test runs the gateway and the Prime against the same node, so it cannot tell whether
+the block the Prime submits is the gateway's template or something the pool's node would have
+built. `regtest-divergence.sh` separates them: node A is the pool's node (the Prime submits
+there), node B is the gateway's node, a fresh datadir synced from A. It cuts the two apart and
+gives each transactions the other never sees (raw transactions signed by A's wallet but
+broadcast only to B; wallet sends on A), so `getblocktemplate` differs on the two nodes at the
+same height. It then mines through a stock `fte` gateway and asserts, from `getblock` on A:
+
+* the block A accepted contains every B-only transaction and none of A's own — the pool node
+  accepted a block it could not have built, so the Prime reassembled the gateway's template
+  byte-for-byte rather than substituting its node's view;
+* the coinbase carries the gateway's secondary tag (`Lazarus␏divergence-gw`) and the issued
+  split (first block after start is `pool-only`, as the stock gateway publishes an empty
+  coinbaser job until the first reply lands; the owed amount is recorded);
+* the gateway's own node B has the same block, so both sides agree without ever talking.
+
+Then it drifts the tips. With B one block behind A (A mines a block B never hears about), the
+gateway's next solve is a competing block at A's tip height: the Prime accepts the share inside
+`stale-grace-secs`, A answers `inconclusive` (valid, not best), the 30 s confirm pass labels the
+record `orphan:split`, the next solve on B's branch reorgs A, and the label clears
+(`back in the main chain`, record `split`, settled). Finally A and B are reconnected and must
+agree. The whole run takes about a minute on regtest with a GPU miner.
+
+Doing this by hand first surfaced three bugs, all fixed:
+
+* a record labelled `orphan:` was never re-checked, so a competing block that later won the
+  reorg — exactly the lagging-gateway-node case above — stayed an orphan forever, and the pool
+  UI read orphan state from the wrong field (`submit` rather than `kind`);
+* two block candidates solved on the *same job* (regtest does it every share; on mainnet it
+  needs two solves of one job seconds apart) overwrote each other in the pending map, so the
+  gateway's single transaction reply assembled and submitted only the later one. Every
+  candidate for a job is now kept and submitted from the one transaction set;
+* when the gateway's node is two or more blocks *ahead* of the pool's node, every share is
+  rejected as stale (correct: the Prime cannot verify work on a chain its node has not seen, and
+  a stock gateway then reconnects every 30 s for lack of accepts). That is a lagging pool node,
+  not a stale gateway, and it is now logged as such once a minute per session.
 
 ## Design notes
 
@@ -233,7 +274,10 @@ complete list, a Convoy-found block's coinbase carried the miner's 12.4375 and t
   the slot to a new job. Shares one height behind are accepted for `stale-grace-secs` after the
   tip moved, matching template refresh latency.
 * The Prime submits every candidate block to its own node as well as trusting the gateway to.
-  `duplicate` from `submitblock` is the expected outcome and is recorded as such.
+  `duplicate` from `submitblock` is the expected outcome and is recorded as such;
+  `inconclusive` means a valid block that is not (yet) the best tip. Records settle when the
+  node reports positive confirmations; a record called `orphan:` is re-checked for 100 blocks
+  and un-labelled if a reorg brings it back.
 
 ## License
 
