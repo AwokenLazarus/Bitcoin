@@ -28,6 +28,15 @@ struct GwCfg {
     stratum_listen: String,
     api_listen: String,
     vardiff_min: u64,
+    /// First `mining.set_difficulty` for a new session. Defaults to `vardiff_min`.
+    /// ASIC stratum should start high (e.g. 16384) so a 19 TH/s MRR rig is not
+    /// kicked for flooding at difficulty 1 before vardiff can catch up.
+    #[serde(default)]
+    vardiff_start: Option<u64>,
+    /// Hard cap. ASIC default in config is 131072 (~140 TH/s at 4s/share).
+    /// Unset means no extra cap beyond the 2^40 exponent limit.
+    #[serde(default)]
+    vardiff_max: Option<u64>,
     rpc: String,
     rpc_cookie: PathBuf,
     prime_host: String,
@@ -62,6 +71,9 @@ struct Miner {
     vdiff_prev: u64,
     vdiff_prev_until: Instant,
     last_retarget: Instant,
+    /// `acc_n` at the last retarget, so a share flood can raise difficulty
+    /// before `VARDIFF_INTERVAL` elapses.
+    retarget_acc_n: u64,
     /// (job id, difficulty in force when that job was sent to this miner).
     ///
     /// A share has to be judged and paid at the difficulty the miner was working under,
@@ -78,7 +90,16 @@ const HR_WINDOW: Duration = Duration::from_secs(60);
 /// buys nothing: the same hashrate is measured just as well from far fewer shares.
 const VARDIFF_TARGET_SECS: f64 = 4.0;
 const VARDIFF_INTERVAL: Duration = Duration::from_secs(20);
+/// Raise difficulty as soon as this many shares land since the last retarget.
+/// Stops a 19 TH/s unit at a too-low start from flooding (and getting kicked by
+/// MRR) while we wait 20s for the clock.
+const VARDIFF_QUICK_SHARES: u64 = 8;
 const VARDIFF_GRACE: Duration = Duration::from_secs(30);
+/// Estimate hashrate over at least the target share interval. A 50ms burst of
+/// eight shares at the start difficulty is not 200 TH/s.
+const VARDIFF_DT_MIN: f64 = VARDIFF_TARGET_SECS;
+/// Never jump more than 4× (two powers of two) in one retarget.
+const VARDIFF_STEP: u64 = 4;
 /// Job difficulties remembered per session. Matches the gateway job history, so any job a
 /// miner can still name has its difficulty on record.
 const JOB_DIFFS: usize = JOB_HISTORY;
@@ -90,15 +111,34 @@ fn assign_job(m: &mut Miner, job_id: &str) {
     }
 }
 /// Difficulty is a power of two because a share target is issued as an exponent.
-fn vardiff_for(hs: f64, floor: u64) -> u64 {
+fn pow2_clamp(n: u64, floor: u64, cap: u64) -> u64 {
+    let floor = floor.max(1);
+    let cap = cap.max(floor);
+    let n = n.clamp(floor, cap);
+    let pot = n.max(1).ilog2().min(40);
+    (1u64 << pot).clamp(floor, cap)
+}
+fn vardiff_ideal(hs: f64) -> u64 {
     if !hs.is_finite() || hs <= 0.0 {
-        return floor;
+        return 1;
     }
     let ideal = hs * VARDIFF_TARGET_SECS / 4_294_967_296.0;
     let pot = ideal.max(1.0).log2().round().clamp(0.0, 40.0) as u32;
-    (1u64 << pot).max(floor)
+    1u64 << pot
 }
-fn miner_hs(m: &Miner) -> f64 {
+/// Move toward `ideal`, but only 4× per step and stay inside [floor, cap].
+fn step_vardiff(current: u64, ideal: u64, floor: u64, cap: u64) -> u64 {
+    let cur = pow2_clamp(current, floor, cap);
+    let want = pow2_clamp(ideal, floor, cap);
+    if want > cur {
+        pow2_clamp(cur.saturating_mul(VARDIFF_STEP).min(want), floor, cap)
+    } else if want < cur {
+        pow2_clamp((cur / VARDIFF_STEP).max(want).max(1), floor, cap)
+    } else {
+        cur
+    }
+}
+fn miner_hs_window(m: &Miner, dt_floor: f64) -> f64 {
     let now = Instant::now();
     let cutoff = now.checked_sub(HR_WINDOW).unwrap_or(now);
     let mut work = 0u64;
@@ -109,8 +149,18 @@ fn miner_hs(m: &Miner) -> f64 {
             work = work.saturating_add(*w);
         }
     }
-    let dt = first.map(|t| now.duration_since(t).as_secs_f64()).unwrap_or(0.0).max(5.0);
+    let dt = first.map(|t| now.duration_since(t).as_secs_f64()).unwrap_or(0.0).max(dt_floor);
     (work as f64) * ((1u64 << 32) as f64) / dt
+}
+fn miner_hs(m: &Miner) -> f64 {
+    miner_hs_window(m, 5.0)
+}
+fn miner_hs_vardiff(m: &Miner) -> f64 {
+    miner_hs_window(m, VARDIFF_DT_MIN)
+}
+fn should_retarget(m: &Miner) -> bool {
+    m.last_retarget.elapsed() >= VARDIFF_INTERVAL
+        || m.acc_n.saturating_sub(m.retarget_acc_n) >= VARDIFF_QUICK_SHARES
 }
 fn record_share(m: &mut Miner, work: u64) {
     let now = Instant::now();
@@ -344,7 +394,8 @@ fn connect_prime(cfg: &GwCfg) -> Option<(TcpStream, lazarus_protocol::ChannelKey
     if pk.len() != 64 { log::error!("pool_pubkey must be 128 hex chars"); return None; }
     let mut pool_x = [0u8; 32]; pool_x.copy_from_slice(&pk[32..64]);
     let local = generate_pool_keys(); let sess = generate_session();
-    let (hello, _nk, mut ch) = handshake::encode_client_hello(&local, &sess, &pool_x, "lazarus-gateway/0.1").ok()?;
+    let (hello, _nk, mut ch) =
+        handshake::encode_client_hello(&local, &sess, &pool_x, handshake::SPLIT_GATEWAY_UA).ok()?;
     let mut sock = TcpStream::connect((cfg.prime_host.as_str(), cfg.prime_port)).ok()?;
     let _ = sock.set_nodelay(true); sock.write_all(&hello).ok()?;
     let mut hdr = [0u8; 4]; sock.read_exact(&mut hdr).ok()?;
@@ -447,17 +498,19 @@ fn handle_miner(mut sock: TcpStream, st: Arc<Shared>) {
     let rdr = BufReader::new(rdr_sock);
     let mut user = String::new(); let mut ua = String::new();
     let vmin = st.cfg.vardiff_min.max(1);
+    let vmax = st.cfg.vardiff_max.unwrap_or(1u64 << 40).max(vmin);
+    let vstart = pow2_clamp(st.cfg.vardiff_start.unwrap_or(vmin), vmin, vmax);
     // Every session gets its own extranonce1. Sharing one across the gateway makes
     // identical rigs walk identical (extranonce2, nonce) pairs, so they submit the same
     // shares and the dedupe keeps only whichever arrived first, quietly moving credit
     // from one miner to another.
     let sess_en1 = (u32::from_le_bytes(st.extra1) ^ (id as u32)).to_le_bytes();
     let now = Instant::now();
-    st.miners.lock().unwrap().insert(id, Miner { host, user: String::new(), ua: String::new(), vdiff: vmin, acc: 0, acc_n: 0, rej: 0, rej_n: 0, last: now, vdiff_prev: vmin, vdiff_prev_until: now,
-        // Let the first retarget happen within a few seconds. Everyone starts at the
-        // pool floor, so a gateway restart briefly puts the whole farm back on
-        // difficulty 1 until vardiff catches up.
+    st.miners.lock().unwrap().insert(id, Miner { host, user: String::new(), ua: String::new(), vdiff: vstart, acc: 0, acc_n: 0, rej: 0, rej_n: 0, last: now, vdiff_prev: vstart, vdiff_prev_until: now,
+        // First retarget after a handful of shares (quickdiff) or ~4s, not a full
+        // 20s at the start value.
         last_retarget: now.checked_sub(VARDIFF_INTERVAL - Duration::from_secs(4)).unwrap_or(now),
+        retarget_acc_n: 0,
         recent: VecDeque::new(), job_diffs: VecDeque::new() });
     for line in rdr.lines() {
         let Ok(line) = line else { break };
@@ -591,19 +644,20 @@ fn handle_miner(mut sock: TcpStream, st: Arc<Shared>) {
                 let mut retarget = None;
                 if let Some(m) = st.miners.lock().unwrap().get_mut(&id) {
                     record_share(m, credit);
-                    if m.last_retarget.elapsed() >= VARDIFF_INTERVAL {
+                    if should_retarget(m) {
                         m.last_retarget = Instant::now();
-                        let want = vardiff_for(miner_hs(m), vmin);
+                        m.retarget_acc_n = m.acc_n;
+                        let want = step_vardiff(m.vdiff, vardiff_ideal(miner_hs_vardiff(m)), vmin, vmax);
                         if want != m.vdiff {
                             m.vdiff_prev = m.vdiff;
                             m.vdiff_prev_until = Instant::now() + VARDIFF_GRACE;
                             m.vdiff = want;
-                            retarget = Some(want);
+                            retarget = Some((m.vdiff_prev, want));
                         }
                     }
                 }
-                if let Some(d) = retarget {
-                    log::info!("vardiff user={} host={} -> {}", user, host_label, d);
+                if let Some((from, d)) = retarget {
+                    log::info!("vardiff user={} host={} {} -> {}", user, host_label, from, d);
                     // Difficulty only, and deliberately no new job: it takes effect on the
                     // next one, which keeps a job id tied to a single difficulty for this
                     // session. Re-stamping the current job instead makes shares already in
@@ -756,13 +810,25 @@ fn clients_html(st: &Shared) -> String {
     rows.push_str("</TABLE>"); format!("<html><body>{rows}</body></html>")
 }
 fn gbt_loop(st: Arc<Shared>) {
-    let Some(auth) = cookie_auth(&st.cfg.rpc_cookie) else { log::error!("missing rpc cookie"); return; };
     let tag = st.cfg.coinbase_tag.clone().unwrap_or_else(|| "Lazarus".into());
     let mut last_hash = String::new();
     let mut last_pub = Instant::now()
         .checked_sub(JOB_REFRESH)
         .unwrap_or_else(Instant::now);
+    let mut cookie_missing_logged = false;
     loop {
+        // Re-read the cookie every pass. bitcoind writes a fresh one on every restart, and a
+        // gateway holding the old value gets 401s forever while its miners hash a stale job
+        // (observed: 2.5 minutes of stale work across a node upgrade). The file is tiny.
+        let Some(auth) = cookie_auth(&st.cfg.rpc_cookie) else {
+            if !cookie_missing_logged {
+                log::warn!("rpc cookie {} unreadable; node restarting? retrying", st.cfg.rpc_cookie.display());
+                cookie_missing_logged = true;
+            }
+            std::thread::sleep(Duration::from_secs(2));
+            continue;
+        };
+        cookie_missing_logged = false;
         let hash = rpc(&st.cfg.rpc, &auth, "getbestblockhash", json!([])).and_then(|v| v.as_str().map(|s| s.to_string())).unwrap_or_default();
         let new_tip = !hash.is_empty() && hash != last_hash;
         if new_tip { last_hash = hash.clone(); }
@@ -828,7 +894,16 @@ fn main() {
     let raw = std::fs::read_to_string(&cli.config).expect("config");
     let cfg: GwCfg = serde_json::from_str(&raw).expect("json config");
     let extra1: [u8; 4] = rand::random();
-    log::info!("lazarus-gateway profile={} stratum={} api={} vardiff_min={} verify={:?}", cfg.profile.as_deref().unwrap_or("asic"), cfg.stratum_listen, cfg.api_listen, cfg.vardiff_min, verify_mode(cfg.verify_shares.as_deref()));
+    log::info!(
+        "lazarus-gateway profile={} stratum={} api={} vardiff_min={} vardiff_start={} vardiff_max={} verify={:?}",
+        cfg.profile.as_deref().unwrap_or("asic"),
+        cfg.stratum_listen,
+        cfg.api_listen,
+        cfg.vardiff_min,
+        cfg.vardiff_start.unwrap_or(cfg.vardiff_min),
+        cfg.vardiff_max.unwrap_or(1u64 << 40),
+        verify_mode(cfg.verify_shares.as_deref())
+    );
     let (tx, rx) = mpsc::channel();
     let (utx, urx) = mpsc::channel();
     let st = Arc::new(Shared {
@@ -853,5 +928,48 @@ fn main() {
     log::info!("stratum {}", st.cfg.stratum_listen);
     for inc in lis.incoming() {
         if let Ok(s) = inc { let st = st.clone(); thread::spawn(move || handle_miner(s, st)); }
+    }
+}
+
+#[cfg(test)]
+mod vardiff_tests {
+    use super::*;
+
+    const MIN: u64 = 1024;
+    const MAX: u64 = 131072;
+    const START: u64 = 16384;
+
+    #[test]
+    fn burst_from_start_does_not_jump_past_4x_or_cap() {
+        let huge = 1u64 << 40;
+        assert_eq!(step_vardiff(START, huge, MIN, MAX), 65536);
+        assert_eq!(step_vardiff(65536, huge, MIN, MAX), MAX);
+        assert_eq!(step_vardiff(MAX, huge, MIN, MAX), MAX);
+    }
+
+    #[test]
+    fn slow_miner_steps_down_to_floor() {
+        assert_eq!(step_vardiff(START, 1, MIN, MAX), 4096);
+        assert_eq!(step_vardiff(4096, 1, MIN, MAX), MIN);
+        assert_eq!(step_vardiff(MIN, 1, MIN, MAX), MIN);
+    }
+
+    #[test]
+    fn nineteen_ths_stays_near_start() {
+        let ideal = vardiff_ideal(19e12);
+        assert_eq!(ideal, START);
+        assert_eq!(step_vardiff(START, ideal, MIN, MAX), START);
+    }
+
+    #[test]
+    fn five_point_five_ths_walks_down_once() {
+        let ideal = vardiff_ideal(5.5e12);
+        assert!(ideal == 4096 || ideal == 8192, "ideal={ideal}");
+        assert_eq!(step_vardiff(START, ideal, MIN, MAX), ideal.max(START / 4));
+        let mut d = START;
+        for _ in 0..4 {
+            d = step_vardiff(d, ideal, MIN, MAX);
+        }
+        assert_eq!(d, ideal);
     }
 }
