@@ -10,12 +10,17 @@ coinbase-tag = "Lazarus"
 prime-id = 1
 window = 8
 min-payout = 546
-fee-bps = 0
+fee-bps = 50
 activation-height = 961640
 headline = "Lazarus"
 rpc = "http://127.0.0.1:9332"
 rpc-cookie = "/home/umbrel/umbrel/app-data/bitcoin-knots/data/bitcoin/.cookie"
 poll = 0.5
-# off | log | enforce. Start on log after a protocol change: failures are counted
-# but work is still credited, so a new check can be measured before it rejects.
-verify-shares = "log"
+# off | log | enforce. Enforce rejects shares whose coinbase is not the TIDES split
+# (stock DATUM "empty" jobs pay only the pool address). Do not leave this on log
+# in production — empty templates will still find blocks, but they must not earn window credit.
+verify-shares = "enforce"
+# Stock OCEAN DATUM publishes empty/tiny jobs while waiting for the coinbaser.
+# Only lazarus-gateway, or datum_gateway patched so its hello UA contains
+# "lazarus-split", is allowed to connect. Set false only to debug a remote.
+require-split-gateway = true

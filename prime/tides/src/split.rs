@@ -11,8 +11,10 @@ use crate::MinerStat;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SplitParams {
-    /// Pool fee in basis points (50 = 0.5%).
+    /// DATUM / Prime-gateway fee in basis points (50 = 0.5%).
     pub fee_bps: u32,
+    /// Public house-stratum fee in basis points (500 = 5%). 0 means same as `fee_bps`.
+    pub stratum_fee_bps: u32,
     /// Smallest output the split will emit, in sats.
     pub min_payout: u64,
     /// Cap on the number of outputs (the protocol allows 512).
@@ -25,7 +27,13 @@ pub struct SplitParams {
 
 impl Default for SplitParams {
     fn default() -> Self {
-        SplitParams { fee_bps: 0, min_payout: 546, max_outputs: 512, output_budget_bytes: 14_000 }
+        SplitParams {
+            fee_bps: 0,
+            stratum_fee_bps: 0,
+            min_payout: 546,
+            max_outputs: 512,
+            output_budget_bytes: 14_000,
+        }
     }
 }
 
@@ -75,15 +83,25 @@ pub fn compute(
     p: &SplitParams,
     mut script_for: impl FnMut(&str) -> Option<Vec<u8>>,
 ) -> Split {
-    let fee_sats = fee_for(value, p.fee_bps);
-    let distributable = value - fee_sats;
+    let stratum_bps = if p.stratum_fee_bps == 0 { p.fee_bps } else { p.stratum_fee_bps };
+    let mut fee_sats = 0u64;
     let mut payees = Vec::new();
     let mut unpaid = Vec::new();
     let mut paid = 0u64;
     let mut bytes = 0usize;
     if total_work > 0 {
         for m in miners {
-            let sats = ((u128::from(distributable) * u128::from(m.work)) / u128::from(total_work)) as u64;
+            let sw = m.stratum_work.min(m.work);
+            let dw = m.work - sw;
+            let keep = u128::from(sw) * u128::from(10_000 - stratum_bps)
+                + u128::from(dw) * u128::from(10_000 - p.fee_bps);
+            let sats = (u128::from(value) * keep / u128::from(total_work) / 10_000) as u64;
+            fee_sats = fee_sats.saturating_add(
+                (u128::from(value)
+                    * (u128::from(sw) * u128::from(stratum_bps) + u128::from(dw) * u128::from(p.fee_bps))
+                    / u128::from(total_work)
+                    / 10_000) as u64,
+            );
             if sats == 0 {
                 continue;
             }
@@ -120,7 +138,11 @@ mod tests {
     use super::*;
 
     fn miner(id: &str, work: u64) -> MinerStat {
-        MinerStat { identity: id.into(), work, credits: 1, last_ts: 0 }
+        MinerStat { identity: id.into(), work, stratum_work: 0, credits: 1, last_ts: 0 }
+    }
+
+    fn miner_stratum(id: &str, work: u64) -> MinerStat {
+        MinerStat { identity: id.into(), work, stratum_work: work, credits: 1, last_ts: 0 }
     }
 
     fn script(id: &str) -> Option<Vec<u8>> {
@@ -135,7 +157,13 @@ mod tests {
     fn proportional_with_fee_and_floor() {
         let miners = vec![miner("a", 600), miner("b", 300), miner("c", 100), miner("d", 1)];
         // one unit of work is worth ~310k sats here; a 400k floor drops only `d`
-        let p = SplitParams { fee_bps: 50, min_payout: 400_000, max_outputs: 512, output_budget_bytes: 14_000 };
+        let p = SplitParams {
+            fee_bps: 50,
+            stratum_fee_bps: 50,
+            min_payout: 400_000,
+            max_outputs: 512,
+            output_budget_bytes: 14_000,
+        };
         let s = compute(miners, 1001, 312_538_966, &p, script);
         assert_eq!(s.fee_sats, 1_562_694);
         let dist = 312_538_966 - 1_562_694;
@@ -153,12 +181,12 @@ mod tests {
     fn unpayable_and_budget() {
         let miners: Vec<MinerStat> =
             (0..20).map(|i| miner(&format!("{}{}", if i == 3 { "bad" } else { "m" }, i), 100)).collect();
-        let p = SplitParams { fee_bps: 0, min_payout: 1, max_outputs: 5, output_budget_bytes: 14_000 };
+        let p = SplitParams { fee_bps: 0, stratum_fee_bps: 0, min_payout: 1, max_outputs: 5, output_budget_bytes: 14_000 };
         let s = compute(miners, 2000, 1_000_000, &p, script);
         assert_eq!(s.payees.len(), 5);
         assert!(s.unpaid.iter().any(|u| u.2 == UnpaidReason::NoScript));
         assert_eq!(s.unpaid.iter().filter(|u| u.2 == UnpaidReason::OverBudget).count(), 14);
-        let p = SplitParams { fee_bps: 0, min_payout: 1, max_outputs: 512, output_budget_bytes: 12 * 2 };
+        let p = SplitParams { fee_bps: 0, stratum_fee_bps: 0, min_payout: 1, max_outputs: 512, output_budget_bytes: 12 * 2 };
         let s = compute(vec![miner("a", 1), miner("b", 1), miner("c", 1)], 3, 300, &p, script);
         assert_eq!(s.payees.len(), 2);
         assert_eq!(s.pool_sats, 100);
@@ -169,5 +197,24 @@ mod tests {
         let s = compute(vec![], 0, 100, &SplitParams::default(), script);
         assert!(s.payees.is_empty());
         assert_eq!(s.pool_sats, 100);
+    }
+
+    #[test]
+    fn stratum_pays_a_higher_fee_than_datum() {
+        let miners = vec![miner("datum", 600), miner_stratum("house", 400)];
+        let p = SplitParams {
+            fee_bps: 50,
+            stratum_fee_bps: 500,
+            min_payout: 1,
+            max_outputs: 512,
+            output_budget_bytes: 14_000,
+        };
+        let s = compute(miners, 1000, 10_000_000, &p, script);
+        assert_eq!(s.payees[0].identity, "datum");
+        assert_eq!(s.payees[0].sats, 5_970_000);
+        assert_eq!(s.payees[1].identity, "house");
+        assert_eq!(s.payees[1].sats, 3_800_000);
+        assert_eq!(s.fee_sats, 230_000);
+        assert_eq!(s.pool_sats + s.paid_sats(), 10_000_000);
     }
 }

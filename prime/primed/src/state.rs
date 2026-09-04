@@ -36,6 +36,8 @@ pub struct ClientInfo {
     pub generation: &'static str,
     /// Hex prefix of the gateway's long-term signing key.
     pub gateway: String,
+    /// `stratum` = house public gateway (higher fee); `datum` = external Prime client.
+    pub fee_path: String,
     pub connected_ts: u64,
     pub identity: String,
     pub accepted: u64,

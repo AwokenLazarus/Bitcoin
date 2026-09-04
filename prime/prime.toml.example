@@ -34,8 +34,15 @@ window = 8
 window-min-work = 0
 # Dust floor for split outputs, sats.
 min-payout = 546
-# Pool fee in basis points (50 = 0.5%).
+# DATUM / Prime-gateway fee in basis points (50 = 0.5%).
 fee-bps = 50
+# Public house-stratum fee (500 = 5%). 0 inherits fee-bps.
+stratum-fee-bps = 500
+# Signing-key prefixes (hex) of the pool's own public-stratum gateway.
+# Remote DATUM users who run lazarus-gateway are not matched by UA — only
+# loopback (default) and these prefixes pay the higher fee.
+# house-gateways = ["9d992e5cfec05102"]
+# house-loopback = true
 # Smallest share difficulty accepted; power of two. Also the vardiff floor sent to gateways.
 min-diff = 1
 # Sats of slack per issued output when checking a coinbase against the split.

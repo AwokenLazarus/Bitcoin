@@ -42,6 +42,10 @@ struct FileCfg {
     poll: Option<f64>,
     #[serde(rename = "verify-shares")]
     verify_shares: Option<String>,
+    /// Refuse stock OCEAN DATUM at handshake. It publishes empty/tiny jobs
+    /// while waiting for the coinbaser; a find on that work is unsplit.
+    #[serde(rename = "require-split-gateway")]
+    require_split_gateway: Option<bool>,
 }
 
 #[derive(Clone, Debug)]
@@ -67,6 +71,9 @@ pub struct Config {
     /// off | log | enforce. `log` counts failures without refusing work, so a new
     /// check can be measured against live miners before it starts rejecting them.
     pub verify_shares: String,
+    /// When true, handshake only with `lazarus-gateway` or a DATUM UA that
+    /// contains `lazarus-split`. Stock empty-first gateways are dropped.
+    pub require_split_gateway: bool,
 }
 
 impl Config {
@@ -101,6 +108,7 @@ impl Config {
             })),
             poll_secs: f.poll.unwrap_or(0.5),
             verify_shares: f.verify_shares.unwrap_or_else(|| "log".into()),
+            require_split_gateway: f.require_split_gateway.unwrap_or(true),
         }
     }
 

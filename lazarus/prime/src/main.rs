@@ -65,8 +65,10 @@ struct Shared {
     coinbaser_id: Mutex<u8>,
     tip_gen: AtomicU64,
     /// Splits we handed out, by coinbaser id, so a share's coinbase can be checked
-    /// against what we asked for. Ids wrap at 255, which bounds this map.
-    issued: Mutex<HashMap<u8, CoinbaserV2>>,
+    /// against what we asked for. Ids wrap at 255, which bounds this map. The second tuple
+    /// element is the make-good sats moved to each beneficiary in that split, used to settle a
+    /// debt by the exact amount paid when this split wins a block.
+    issued: Mutex<HashMap<u8, (CoinbaserV2, Vec<(String, u64)>)>>,
     verify: VerifyMode,
     verified: AtomicU64,
     rejected: AtomicU64,
@@ -108,6 +110,15 @@ fn handle(mut sock: TcpStream, st: Arc<Shared>) {
         let body = read_exact(&mut sock, h.cmd_len as usize).map_err(|e| e.to_string())?;
         let hello = handshake::open_hello(&st.keys, &body).map_err(|e| e.to_string())?;
         log::info!("hello ua={} nk={:08x}", hello.version, hello.nk);
+        if st.cfg.require_split_gateway && !handshake::is_split_gateway(&hello.version) {
+            // Stock OCEAN publishes empty/tiny jobs before the coinbaser lands. A
+            // find on that work is already a block on their node; refusing the
+            // handshake is the only pool-side way to stop them hashing it as us.
+            return Err(format!(
+                "split-only gateway required, got ua={}; use lazarus-gateway or datum_gateway patched with lazarus-split",
+                hello.version
+            ));
+        }
 
         let sess = handshake::new_session().map_err(|e| e.to_string())?;
         let mut ch = handshake::prime_channel_after_hello(&hello, &sess);
@@ -176,9 +187,9 @@ fn handle(mut sock: TcpStream, st: Arc<Shared>) {
                         }
                         let cid = *id;
                         drop(id);
-                        let cb = {
+                        let (cb, moves) = {
                             let led = st.ledger.lock().unwrap();
-                            led.coinbaser(
+                            led.coinbaser_with_moves(
                                 req.value,
                                 st.cfg.fee_bps,
                                 st.cfg.min_payout,
@@ -188,7 +199,7 @@ fn handle(mut sock: TcpStream, st: Arc<Shared>) {
                         };
                         let nout = cb.outputs.len();
                         let blob = cb.encode();
-                        st.issued.lock().unwrap().insert(cid, cb);
+                        st.issued.lock().unwrap().insert(cid, (cb, moves));
                         let body = mining::encode_coinbaser_resp(req.value, &blob);
                         let pkt = mining::wrap_mining(&mut ch, &body, None);
                         sock.write_all(&pkt).map_err(|e| e.to_string())?;
@@ -242,8 +253,12 @@ fn handle(mut sock: TcpStream, st: Arc<Shared>) {
                                     let verdict = if st.verify == VerifyMode::Off {
                                         None
                                     } else {
-                                        let issued =
-                                            st.issued.lock().unwrap().get(&s.coinbase_id).cloned();
+                                        let issued = st
+                                            .issued
+                                            .lock()
+                                            .unwrap()
+                                            .get(&s.coinbase_id)
+                                            .map(|(cb, _)| cb.clone());
                                         Some(verify::verify_share(
                                             &s,
                                             &ShareContext {
@@ -421,6 +436,7 @@ fn stats_json(st: &Shared) -> String {
             "failed": st.rejected.load(Ordering::Relaxed),
             "duplicates": st.dupes.load(Ordering::Relaxed),
             "reasons": st.fail_counts.lock().unwrap().clone(),
+            "require_split_gateway": st.cfg.require_split_gateway,
         },
         "clients": st.clients.load(Ordering::Relaxed),
     })
@@ -443,15 +459,49 @@ fn rpc_loop(st: Arc<Shared>) {
                 log::info!("new tip {}", last_hash);
                 if let Some(info) = rpc::coinbase_info(&st.cfg.rpc, &auth, &last_hash, &st.cfg.coinbase_tag) {
                     if info.is_ours && info.value_outputs >= 2 {
+                        // Match the confirmed block to the exact split we issued, so any make-good
+                        // is settled by the real sats it moved (not cleared blindly). The gateway
+                        // builds the coinbase directly from our CoinbaserV2, so the block's value
+                        // outputs equal that coinbaser's outputs.
+                        let block_outs = coinbase_output_set(&info.outputs);
+                        let moves = st
+                            .issued
+                            .lock()
+                            .unwrap()
+                            .values()
+                            .find(|(cb, _)| coinbaser_output_set(cb) == block_outs)
+                            .map(|(_, m)| m.clone());
                         let mut led = st.ledger.lock().unwrap();
-                        if let Some(b) = led.settle_bonus() {
-                            log::info!(
-                                "make-good retired: {} sats were owed to {} out of {} ({})",
-                                b.owed_sats,
-                                b.beneficiary,
-                                b.source,
-                                b.note
-                            );
+                        match moves {
+                            Some(moves) => {
+                                for b in led.settle_bonuses(&moves) {
+                                    log::info!(
+                                        "make-good retired: {} sats paid in full to {} out of {} ({})",
+                                        b.owed_sats,
+                                        b.beneficiary,
+                                        b.source,
+                                        b.note
+                                    );
+                                }
+                                if !moves.is_empty() {
+                                    let paid: u64 = moves.iter().map(|(_, s)| s).sum();
+                                    log::info!(
+                                        "make-good progress: moved {} sats in block {}; {} sats still owed across {} beneficiaries",
+                                        paid,
+                                        last_hash,
+                                        led.owed_sats(),
+                                        led.bonuses.len()
+                                    );
+                                }
+                            }
+                            None if led.owed_sats() > 0 => {
+                                log::warn!(
+                                    "make-good active but the winning split (block {}) did not match a cached coinbaser; \
+                                     NOT settling automatically to avoid over-paying — verify on-chain and settle manually",
+                                    last_hash
+                                );
+                            }
+                            None => {}
                         }
                         led.clear_carry();
                         led.save(&st.ledger_path());
@@ -470,6 +520,26 @@ fn rpc_loop(st: Arc<Shared>) {
     }
 }
 
+/// Canonical multiset of a confirmed coinbase's value outputs, `(scriptPubKey hex, sats)` sorted,
+/// for matching a block against the split we issued.
+fn coinbase_output_set(outs: &[(String, u64)]) -> Vec<(String, u64)> {
+    let mut v: Vec<(String, u64)> = outs.iter().filter(|(_, s)| *s > 0).cloned().collect();
+    v.sort();
+    v
+}
+
+/// Same canonical form for a `CoinbaserV2` we handed out.
+fn coinbaser_output_set(cb: &CoinbaserV2) -> Vec<(String, u64)> {
+    let mut v: Vec<(String, u64)> = cb
+        .outputs
+        .iter()
+        .filter(|o| o.sats > 0)
+        .map(|o| (hex::encode(&o.script), o.sats))
+        .collect();
+    v.sort();
+    v
+}
+
 fn main() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
     let cfg = Config::load();
@@ -479,12 +549,13 @@ fn main() {
         std::process::exit(1);
     });
     log::info!(
-        "lazarus-prime listen={} advertise={} fee_bps={} tag={} verify={} pubkey={}…",
+        "lazarus-prime listen={} advertise={} fee_bps={} tag={} verify={} require_split_gateway={} pubkey={}…",
         cfg.listen,
         cfg.advertise,
         cfg.fee_bps,
         cfg.coinbase_tag,
         cfg.verify_shares,
+        cfg.require_split_gateway,
         &keys.pubkey_hex()[..16]
     );
     let mut ledger = Ledger::load(&cfg.data_dir.join("ledger.json"));
@@ -530,5 +601,39 @@ fn main() {
             }
             Err(e) => log::warn!("accept: {e}"),
         }
+    }
+}
+
+#[cfg(test)]
+mod settle_match_tests {
+    use super::*;
+    use lazarus_protocol::coinbaser::CoinbaserOutput;
+
+    fn cb(outs: &[(&[u8], u64)]) -> CoinbaserV2 {
+        CoinbaserV2 {
+            id: 1,
+            outputs: outs
+                .iter()
+                .map(|(sc, s)| CoinbaserOutput { sats: *s, script: sc.to_vec() })
+                .collect(),
+        }
+    }
+
+    /// A confirmed block's value outputs (scriptPubKey hex + sats) match the exact coinbaser we
+    /// issued, and only that one — so the debt is settled by the real amount that coinbaser moved.
+    #[test]
+    fn winning_block_matches_only_its_own_coinbaser() {
+        let a = cb(&[(&[0x01, 0x02], 100), (&[0x03, 0x04], 200)]);
+        let b = cb(&[(&[0x01, 0x02], 100), (&[0x03, 0x04], 999)]);
+        // The node reports value outputs as (hex, sats), order not guaranteed, plus a 0-sat
+        // OP_RETURN witness commitment which must be ignored.
+        let block = vec![
+            ("aa21a9eddeadbeef".to_string(), 0), // OP_RETURN commitment
+            ("0304".to_string(), 200),
+            ("0102".to_string(), 100),
+        ];
+        let target = coinbase_output_set(&block);
+        assert_eq!(coinbaser_output_set(&a), target, "issued split should match the block");
+        assert_ne!(coinbaser_output_set(&b), target, "a different split must not match");
     }
 }

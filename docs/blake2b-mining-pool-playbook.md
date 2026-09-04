@@ -239,10 +239,10 @@ Do not reboot the hypervisor guest that holds this VM unless asked. Do not `pkil
 
 ### Build / install
 
-- Clone a DATUM tree that speaks this chain (OCEAN upstream + BLAKE2b / header-v2 fork as needed).
+- Preferred for this pool: `lazarus-gateway` in `lazarus/` — it never publishes an unsplit job.
+- Remote `datum_gateway`: clone [FlyTheElephant1 `test/console-collapse-pr14-pr17`](https://github.com/FlyTheElephant1/datum_gateway/tree/test/console-collapse-pr14-pr17) (BLAKE2b type-4 payout coinbase) and apply `lazarus/patches/datum-gateway-split-only.patch`. Stock OCEAN / unpatched FlyTheElephant1 is refused at Prime handshake (`v0.4.1-beta`).
 - CMake with **`-DENABLE_API`**. A first build without API means `:7152` and `/clients` are missing — rebuild.
 - Install to `<PREFIX>/bin/datum_gateway`. Keep `LD_LIBRARY_PATH=<PREFIX>/lib` (or `~/blake2b/lib`).
-- Backup the binary before the coinbaser patch (`datum_gateway.bak-pre-ocean`).
 
 Launch:
 
@@ -324,9 +324,18 @@ Match ensure-scripts by **config path**, not a bare `datum_gateway` pgrep, or th
 ## 2b. DATUM Prime (remote gateways)
 
 This pool must **accept** incoming DATUM protocol connections so other operators can run
-their own `datum_gateway` + Knots, choose their own templates, and still get paid in the
+their own gateway + Knots, choose their own templates, and still get paid in the
 coinbase by contributed work (OCEAN model). That is the **pool-side** listener (DATUM Prime),
 not a client of someone else's pool.
+
+Prime **refuses stock OCEAN DATUM** (`v0.4.1-beta/...`). That client publishes empty/tiny
+jobs (`JOB_STATE_EMPTY_PLUS`, coinbase type 0) while waiting for the coinbaser; a find on
+that work pays only the pool script. Remotes must run `lazarus-gateway` (example
+`lazarus/gateway.remote.example.json`) **or** clone
+[FlyTheElephant1 `test/console-collapse-pr14-pr17`](https://github.com/FlyTheElephant1/datum_gateway/tree/test/console-collapse-pr14-pr17)
+(BLAKE2b type-4 payout coinbase) and apply `lazarus/patches/datum-gateway-split-only.patch`
+so empty-first is closed and the hello UA contains `lazarus-split`. Unpatched FlyTheElephant1
+still uses UA `v0.4.1-beta` and is refused. `require-split-gateway = true` in Prime toml.
 
 Do **not** set `datum.pool_host` to another public pool. Point remote gateways at **this**
 pool's Prime:
@@ -549,7 +558,8 @@ Not the chain’s official mining doc. Not a license to attack other pools. Not 
 ## Upstream pointers
 
 - Knots rc4 linux-gnu release (`v29.4.1.knots20260508rc4`) — official SUMS + sig
-- [DATUM Gateway](https://github.com/OCEAN-xyz/datum_gateway) and BLAKE2b / header-v2 forks
+- [DATUM Gateway](https://github.com/OCEAN-xyz/datum_gateway) (stock; empty-first — refused by this Prime)
+- [FlyTheElephant1 `datum_gateway` BLAKE2b branch](https://github.com/FlyTheElephant1/datum_gateway/tree/test/console-collapse-pr14-pr17) + `lazarus/patches/datum-gateway-split-only.patch`
 - [paulscode/electrs-pruned — electrum-header-v2](https://github.com/paulscode/electrs-pruned/blob/main/docs/electrum-header-v2.md)
 - [mempool.space](https://github.com/mempool/mempool)
 - mempool.guide — live BLAKE2b explorer / Electrum example

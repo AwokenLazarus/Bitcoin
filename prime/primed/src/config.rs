@@ -43,6 +43,15 @@ pub struct Config {
     pub min_payout: u64,
     #[serde(default)]
     pub fee_bps: u32,
+    /// Public house-stratum fee. 0 means use `fee_bps` (same rate for everyone).
+    #[serde(default)]
+    pub stratum_fee_bps: u32,
+    /// Gateway key prefixes (hex) that are the pool's own public stratum.
+    #[serde(default)]
+    pub house_gateways: Vec<String>,
+    /// Treat loopback Prime connections as house stratum. Default on.
+    #[serde(default = "d_true")]
+    pub house_loopback: bool,
     /// Smallest share difficulty gateways may send (power of two). Also sent as the vardiff floor.
     #[serde(default = "d_min_diff")]
     pub min_diff: u64,
@@ -123,6 +132,9 @@ fn d_stale_grace() -> u32 {
 fn d_headline() -> String {
     "Lazarus".into()
 }
+fn d_true() -> bool {
+    true
+}
 
 impl Config {
     pub fn load(path: &Path) -> Result<Self, String> {
@@ -139,6 +151,15 @@ impl Config {
         }
         if c.fee_bps > 10_000 {
             return Err("fee-bps cannot exceed 10000".into());
+        }
+        if c.stratum_fee_bps == 0 {
+            c.stratum_fee_bps = c.fee_bps;
+        }
+        if c.stratum_fee_bps > 10_000 {
+            return Err("stratum-fee-bps cannot exceed 10000".into());
+        }
+        for g in &mut c.house_gateways {
+            *g = g.to_ascii_lowercase();
         }
         if c.coinbase_tag.len() > 32 {
             return Err("coinbase-tag is too long (32 bytes max)".into());
@@ -213,6 +234,8 @@ require-split-gateway = true
         let c = Config::load(&p).unwrap();
         assert_eq!(c.listen.port(), 28915);
         assert_eq!(c.fee_bps, 50);
+        assert_eq!(c.stratum_fee_bps, 50);
+        assert!(c.house_loopback);
         assert_eq!(c.window, 8);
         assert_eq!(c.key_file(), dir.join("prime.key"));
         assert_eq!(c.min_pot(), 0);

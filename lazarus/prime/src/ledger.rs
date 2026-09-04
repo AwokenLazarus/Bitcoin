@@ -31,9 +31,23 @@ struct Credit {
 pub struct Bonus {
     pub beneficiary: String,
     pub source: String,
+    /// Total satoshis owed. Immutable once armed, so the file doubles as the receipt of intent.
     pub owed_sats: u64,
+    /// Satoshis actually moved on-chain by settled blocks so far. `owed_sats - paid_sats` is what
+    /// is still owed; the debt retires when this reaches `owed_sats`. Tracking the real amount
+    /// paid (rather than clearing on the first block) is what lets one debt span many blocks and
+    /// stop exactly when the beneficiary is whole.
+    #[serde(default)]
+    pub paid_sats: u64,
     #[serde(default)]
     pub note: String,
+}
+
+impl Bonus {
+    /// Satoshis still owed to this beneficiary.
+    pub fn remaining(&self) -> u64 {
+        self.owed_sats.saturating_sub(self.paid_sats)
+    }
 }
 
 #[derive(Default, Serialize, Deserialize)]
@@ -42,8 +56,13 @@ struct Persist {
     carry: HashMap<String, u64>,
     shares: u64,
     accepted_work: u64,
-    #[serde(default)]
+    /// Legacy single make-good. Still read for backward compatibility and migrated into
+    /// `bonuses` on load; never written back (see `save`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     bonus: Option<Bonus>,
+    /// Outstanding make-goods, each drawing only from its own `source`.
+    #[serde(default)]
+    bonuses: Vec<Bonus>,
 }
 
 #[derive(Default)]
@@ -59,8 +78,10 @@ pub struct Ledger {
     seen: HashMap<[u8; 16], ()>,
     last_save: Option<Instant>,
     dirty: bool,
-    /// Outstanding make-good, applied to every split we issue until a block retires it.
-    pub bonus: Option<Bonus>,
+    /// Outstanding make-goods, each applied to every split we issue until a block makes its
+    /// beneficiary whole. Multiple beneficiaries are supported; each draws only from its own
+    /// `source` output, so no other miner is ever debited.
+    pub bonuses: Vec<Bonus>,
 }
 
 impl Ledger {
@@ -109,13 +130,21 @@ impl Ledger {
         let before = p.credits.len();
         let credits = Self::compacted(p.credits);
         let total = credits.iter().map(|c| c.work).sum();
+        // Migrate a legacy single `bonus` into the `bonuses` list.
+        let mut bonuses = p.bonuses;
+        if let Some(b) = p.bonus {
+            bonuses.push(b);
+        }
+        let owed: u64 = bonuses.iter().map(|b| b.remaining()).sum();
         log::info!(
-            "ledger loaded credits={} (compacted from {}) carry_ids={} shares={} window_work={}",
+            "ledger loaded credits={} (compacted from {}) carry_ids={} shares={} window_work={} make_goods={} owed_sats={}",
             credits.len(),
             before,
             p.carry.len(),
             p.shares,
-            total
+            total,
+            bonuses.len(),
+            owed
         );
         Self {
             credits,
@@ -126,7 +155,7 @@ impl Ledger {
             seen: HashMap::new(),
             last_save: None,
             dirty: before != 0,
-            bonus: p.bonus,
+            bonuses,
         }
     }
 
@@ -136,7 +165,8 @@ impl Ledger {
             carry: self.carry.clone(),
             shares: self.shares,
             accepted_work: self.accepted_work,
-            bonus: self.bonus.clone(),
+            bonus: None,
+            bonuses: self.bonuses.clone(),
         };
         if let Ok(raw) = serde_json::to_string(&p) {
             let tmp = path.with_extension("json.tmp");
@@ -273,6 +303,21 @@ impl Ledger {
         pool_script: &[u8],
         id: u8,
     ) -> CoinbaserV2 {
+        self.coinbaser_with_moves(value, fee_bps, min_payout, pool_script, id).0
+    }
+
+    /// As [`Self::coinbaser`], but also returns the satoshis each make-good beneficiary was moved
+    /// in this split, keyed by beneficiary address. The caller records this against the coinbaser
+    /// id so that, if this exact split wins a block, the debt can be settled by the *actual*
+    /// amount paid rather than cleared blindly.
+    pub fn coinbaser_with_moves(
+        &self,
+        value: u64,
+        fee_bps: u64,
+        min_payout: u64,
+        pool_script: &[u8],
+        id: u8,
+    ) -> (CoinbaserV2, Vec<(String, u64)>) {
         let fee = value.saturating_mul(fee_bps) / 10_000;
         let miners = value.saturating_sub(fee);
         let total = self.window_work().max(1);
@@ -301,29 +346,62 @@ impl Ledger {
                 script: pool_script.to_vec(),
             });
         }
-        if let Some(b) = self.bonus.as_ref().filter(|b| b.owed_sats > 0) {
+        // Apply each outstanding make-good in turn. They are applied largest-first (the list is
+        // stored that way) so a beneficiary is paid off before the next begins when the source's
+        // share in one block cannot cover them all; the remainder simply rolls to the next block.
+        // Each draws only from its own `source`, so no other miner is ever debited.
+        let mut moves: Vec<(String, u64)> = Vec::new();
+        for b in self.bonuses.iter().filter(|b| b.remaining() > 0) {
             if let (Some(src), Some(dst)) =
                 (identity_script(&b.source), identity_script(&b.beneficiary))
             {
-                apply_bonus(&mut outputs, &src, &dst, b.owed_sats, min_payout);
+                let moved = apply_bonus(&mut outputs, &src, &dst, b.remaining(), min_payout);
+                if moved > 0 {
+                    moves.push((b.beneficiary.clone(), moved));
+                }
             }
         }
-        CoinbaserV2 { id, outputs }
+        (CoinbaserV2 { id, outputs }, moves)
     }
 
-    /// Retire the make-good once one of our own split blocks is confirmed.
+    /// Settle make-goods against the moves a confirmed block actually paid, returning the debts
+    /// that are now fully retired (for logging/receipts).
     ///
-    /// This clears the balance rather than decrementing by the exact sats paid. Working out the
-    /// exact figure would mean identifying which of the cached coinbasers the winning block
-    /// used, and being wrong there risks paying the make-good a second time. Clearing can only
-    /// ever underpay, never double-pay, and the amount moved is logged on every issue, so a
-    /// shortfall is visible and can be re-armed deliberately.
-    pub fn settle_bonus(&mut self) -> Option<Bonus> {
-        let b = self.bonus.take();
-        if b.is_some() {
+    /// Each move adds to the matching beneficiary's `paid_sats`; decrementing by the *actual*
+    /// amount moved (never clearing) is what lets a debt span many blocks and stop exactly when
+    /// the beneficiary is whole. A debt whose `paid_sats` reaches `owed_sats` is removed.
+    pub fn settle_bonuses(&mut self, moves: &[(String, u64)]) -> Vec<Bonus> {
+        if moves.is_empty() {
+            return Vec::new();
+        }
+        for (beneficiary, moved) in moves {
+            if let Some(b) = self
+                .bonuses
+                .iter_mut()
+                .find(|b| &b.beneficiary == beneficiary && b.remaining() > 0)
+            {
+                b.paid_sats = b.paid_sats.saturating_add(*moved).min(b.owed_sats);
+                self.dirty = true;
+            }
+        }
+        let mut retired = Vec::new();
+        self.bonuses.retain(|b| {
+            if b.remaining() == 0 {
+                retired.push(b.clone());
+                false
+            } else {
+                true
+            }
+        });
+        if !retired.is_empty() {
             self.dirty = true;
         }
-        b
+        retired
+    }
+
+    /// Total satoshis still owed across all outstanding make-goods.
+    pub fn owed_sats(&self) -> u64 {
+        self.bonuses.iter().map(|b| b.remaining()).sum()
     }
 }
 
@@ -550,6 +628,18 @@ mod bonus_tests {
         assert_eq!(total(&v), before);
     }
 
+    const DST2: &str = "bc1q7zvn93g2c374alqhaytreutde930m06hr6u0vh";
+
+    fn bonus(dst: &str, owed: u64) -> Bonus {
+        Bonus {
+            beneficiary: dst.into(),
+            source: SRC.into(),
+            owed_sats: owed,
+            paid_sats: 0,
+            note: String::new(),
+        }
+    }
+
     /// The pool address is both a miner and the remainder script in production, so the debt has
     /// to survive the source appearing twice in one split.
     #[test]
@@ -557,12 +647,7 @@ mod bonus_tests {
         let mut led = Ledger::default();
         assert!(led.credit(SRC.into(), 1_000, [1u8; 16]));
         assert!(led.credit(DST.into(), 1_000, [2u8; 16]));
-        led.bonus = Some(Bonus {
-            beneficiary: DST.into(),
-            source: SRC.into(),
-            owed_sats: 59_000_000,
-            note: String::new(),
-        });
+        led.bonuses = vec![bonus(DST, 59_000_000)];
         for _ in 0..50 {
             let cb = led.coinbaser(313_000_000, 0, 546, &s(SRC), 1);
             assert_eq!(
@@ -578,12 +663,82 @@ mod bonus_tests {
                 .sum::<u64>();
             assert!(paid > 59_000_000, "beneficiary did not receive the make-good");
         }
-        assert_eq!(
-            led.bonus.as_ref().unwrap().owed_sats,
-            59_000_000,
-            "issuing splits drained the debt without a block"
+        assert_eq!(led.owed_sats(), 59_000_000, "issuing splits drained the debt without a block");
+    }
+
+    /// Multiple make-goods all draw from the same source; other miners stay byte-identical.
+    #[test]
+    fn multiple_make_goods_only_debit_their_shared_source() {
+        let mut led = Ledger::default();
+        led.credit(OTHER.into(), 100, [3u8; 16]);
+        led.credit(SRC.into(), 100, [4u8; 16]);
+        led.bonuses = vec![bonus(DST, 40_000_000), bonus(DST2, 25_000_000)];
+        let (cb, moves) = led.coinbaser_with_moves(313_000_000, 0, 546, &s(SRC), 1);
+        assert_eq!(cb.outputs.iter().map(|o| o.sats).sum::<u64>(), 313_000_000);
+        // OTHER's slice is what the plain split gave it, untouched by either make-good.
+        let plain = {
+            let mut l2 = Ledger::default();
+            l2.credit(OTHER.into(), 100, [3u8; 16]);
+            l2.credit(SRC.into(), 100, [4u8; 16]);
+            l2.coinbaser(313_000_000, 0, 546, &s(SRC), 1)
+        };
+        let other_of = |v: &CoinbaserV2| v.outputs.iter().filter(|o| o.script == s(OTHER)).map(|o| o.sats).sum::<u64>();
+        assert_eq!(other_of(&cb), other_of(&plain), "an uninvolved miner was debited");
+        assert!(sats_of(&cb.outputs, DST) >= 40_000_000);
+        assert!(sats_of(&cb.outputs, DST2) >= 25_000_000);
+        let m: HashMap<_, _> = moves.into_iter().collect();
+        assert_eq!(m.get(DST), Some(&40_000_000));
+        assert_eq!(m.get(DST2), Some(&25_000_000));
+    }
+
+    /// A debt bigger than the source can cover in one block clears over several, and stops
+    /// exactly when the beneficiary is whole (never over- or under-paying).
+    #[test]
+    fn settle_until_whole_spans_blocks_and_stops_exactly() {
+        let mut led = Ledger::default();
+        // jfaq earns a modest slice each block; owe far more than one block can move.
+        led.credit(SRC.into(), 30, [1u8; 16]);
+        led.credit(OTHER.into(), 70, [2u8; 16]);
+        led.bonuses = vec![bonus(DST, 250_000_000)];
+        let mut safety = 0;
+        while led.owed_sats() > 0 {
+            let (_cb, moves) = led.coinbaser_with_moves(313_000_000, 0, 546, &s(SRC), 1);
+            led.settle_bonuses(&moves);
+            safety += 1;
+            assert!(safety < 100, "debt failed to converge");
+        }
+        assert!(safety > 1, "debt should have needed more than one block");
+        // Exactly whole: the beneficiary's own bonus recorded exactly what was owed.
+        assert!(led.bonuses.is_empty(), "retired debt lingered");
+    }
+
+    /// Settlement decrements by the actual amount moved, and retires only fully-paid debts.
+    #[test]
+    fn settle_records_partial_payment_and_retires_completed() {
+        let mut led = Ledger::default();
+        led.bonuses = vec![bonus(DST, 100_000_000), bonus(DST2, 5_000)];
+        let retired = led.settle_bonuses(&[(DST.into(), 30_000_000), (DST2.into(), 5_000)]);
+        assert_eq!(retired.len(), 1, "only the fully-paid debt should retire");
+        assert_eq!(retired[0].beneficiary, DST2);
+        assert_eq!(led.owed_sats(), 70_000_000, "partial payment not recorded");
+        assert_eq!(led.bonuses.len(), 1);
+        assert_eq!(led.bonuses[0].paid_sats, 30_000_000);
+    }
+
+    /// A legacy single `bonus` on disk is migrated into `bonuses` on load.
+    #[test]
+    fn legacy_single_bonus_is_migrated_on_load() {
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!("lz-ledger-legacy-{}.json", std::process::id()));
+        let raw = format!(
+            r#"{{"credits":[],"carry":{{}},"shares":0,"accepted_work":0,"bonus":{{"beneficiary":"{DST}","source":"{SRC}","owed_sats":59000000,"note":"legacy"}}}}"#
         );
-        assert!(led.settle_bonus().is_some());
-        assert!(led.bonus.is_none(), "debt survived settlement");
+        std::fs::write(&path, raw).unwrap();
+        let led = Ledger::load(&path);
+        std::fs::remove_file(&path).ok();
+        assert_eq!(led.bonuses.len(), 1);
+        assert_eq!(led.bonuses[0].owed_sats, 59_000_000);
+        assert_eq!(led.bonuses[0].paid_sats, 0);
+        assert_eq!(led.owed_sats(), 59_000_000);
     }
 }

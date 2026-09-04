@@ -28,7 +28,9 @@ pub mod xor;
 pub use address::{identity_of, identity_script};
 pub use channel::ChannelKeys;
 pub use coinbaser::{parse_coinbase, split_satisfied, CoinbaserOutput, CoinbaserV2, ParsedCoinbase};
-pub use handshake::{open_hello, ClientHello, HELLO_XOR};
+pub use handshake::{
+    is_split_gateway, open_hello, ClientHello, HELLO_XOR, SPLIT_GATEWAY_UA,
+};
 pub use header::Header;
 pub use keys::{load_or_create_pool_keys, PoolKeys, SessionKeys};
 pub use mining::{PowSubmit, SUB_COINBASER_REQ, SUB_SHARE};

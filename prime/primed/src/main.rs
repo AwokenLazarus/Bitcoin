@@ -67,8 +67,8 @@ fn main() {
     let code = match cli.cmd.unwrap_or(Cmd::Run) {
         Cmd::Check => {
             println!(
-                "ok: listen={} stats={} payout={} fee={}bps window={}x",
-                cfg.listen, cfg.stats_listen, cfg.payout_address, cfg.fee_bps, cfg.window
+                "ok: listen={} stats={} payout={} fee={}bps stratum={}bps window={}x",
+                cfg.listen, cfg.stats_listen, cfg.payout_address, cfg.fee_bps, cfg.stratum_fee_bps, cfg.window
             );
             0
         }
@@ -228,6 +228,7 @@ fn run(cfg: Config) -> i32 {
     let shared = Arc::new(Shared {
         split_params: SplitParams {
             fee_bps: cfg.fee_bps,
+            stratum_fee_bps: cfg.stratum_fee_bps,
             min_payout: cfg.min_payout,
             // The gateway accepts at most 512 coinbaser entries; one is the pool's own
             // output appended after the payees. The byte budget leaves room for it too.
@@ -253,9 +254,10 @@ fn run(cfg: Config) -> i32 {
     });
     log::info!("pool pubkey {}", shared.pool.public_hex());
     log::info!(
-        "payout {} fee {}bps window {}x min-diff {}",
+        "payout {} fee {}bps stratum {}bps window {}x min-diff {}",
         shared.cfg.payout_address,
         shared.cfg.fee_bps,
+        shared.cfg.stratum_fee_bps,
         shared.cfg.window,
         shared.cfg.min_diff
     );

@@ -31,6 +31,13 @@ use serde::{Deserialize, Serialize};
 pub mod split;
 pub use split::{Payee, Split, SplitParams};
 
+/// Work that arrived before dual-fee tagging. Split as DATUM (the lower fee).
+pub const SOURCE_UNKNOWN: u8 = 0;
+/// Public house stratum (our gateway, our templates).
+pub const SOURCE_STRATUM: u8 = 1;
+/// External DATUM / Prime gateway.
+pub const SOURCE_DATUM: u8 = 2;
+
 /// One accepted unit of work, possibly several coalesced shares.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Credit {
@@ -42,6 +49,8 @@ pub struct Credit {
     pub work: u64,
     /// Height the work was for.
     pub height: u32,
+    /// `SOURCE_*` — stored in the last 4 bytes of the on-disk row (was padding).
+    pub source: u8,
 }
 
 impl Credit {
@@ -52,7 +61,7 @@ impl Credit {
         out.extend_from_slice(&self.ident.to_le_bytes());
         out.extend_from_slice(&self.work.to_le_bytes());
         out.extend_from_slice(&self.height.to_le_bytes());
-        out.extend_from_slice(&0u32.to_le_bytes());
+        out.extend_from_slice(&[self.source, 0, 0, 0]);
     }
 
     fn read(b: &[u8; Self::SIZE]) -> Self {
@@ -61,6 +70,7 @@ impl Credit {
             ident: u32::from_le_bytes(b[4..8].try_into().unwrap()),
             work: u64::from_le_bytes(b[8..16].try_into().unwrap()),
             height: u32::from_le_bytes(b[16..20].try_into().unwrap()),
+            source: b[20],
         }
     }
 }
@@ -70,6 +80,8 @@ impl Credit {
 pub struct MinerStat {
     pub identity: String,
     pub work: u64,
+    /// Work tagged `SOURCE_STRATUM`. The rest of `work` is DATUM (or untagged).
+    pub stratum_work: u64,
     pub credits: u64,
     pub last_ts: u32,
 }
@@ -143,7 +155,7 @@ impl Window {
 
     /// Add work. Returns the credit as stored (it may have been merged into the tail row),
     /// and whether a new row was appended.
-    pub fn credit(&mut self, identity: &str, work: u64, height: u32, ts: u32) -> (Credit, bool) {
+    pub fn credit(&mut self, identity: &str, work: u64, height: u32, ts: u32, source: u8) -> (Credit, bool) {
         let ident = self.intern(identity);
         self.lifetime_shares += 1;
         self.lifetime_work = self.lifetime_work.saturating_add(work);
@@ -152,13 +164,15 @@ impl Window {
         t.0 = t.0.saturating_add(work);
         t.2 = ts;
         let appended = match self.credits.back_mut() {
-            Some(tail) if tail.ident == ident && tail.ts == ts && tail.height == height => {
+            Some(tail)
+                if tail.ident == ident && tail.ts == ts && tail.height == height && tail.source == source =>
+            {
                 tail.work = tail.work.saturating_add(work);
                 false
             }
             _ => {
                 t.1 += 1;
-                self.credits.push_back(Credit { ts, ident, work, height });
+                self.credits.push_back(Credit { ts, ident, work, height, source });
                 true
             }
         };
@@ -200,12 +214,19 @@ impl Window {
 
     /// Per-identity totals, largest first.
     pub fn miners(&self) -> Vec<MinerStat> {
+        let mut stratum: HashMap<u32, u64> = HashMap::new();
+        for c in &self.credits {
+            if c.source == SOURCE_STRATUM {
+                *stratum.entry(c.ident).or_insert(0) += c.work;
+            }
+        }
         let mut v: Vec<MinerStat> = self
             .totals
             .iter()
             .map(|(&i, &(work, credits, last_ts))| MinerStat {
                 identity: self.idents[i as usize].clone(),
                 work,
+                stratum_work: stratum.get(&i).copied().unwrap_or(0).min(work),
                 credits,
                 last_ts,
             })
@@ -297,9 +318,9 @@ impl Ledger {
     /// Record work. Coalesced rows are rewritten in place on the next flush via compaction
     /// bookkeeping; here we append only when a new row was created and otherwise patch the
     /// tail row's work on disk.
-    pub fn credit(&mut self, identity: &str, work: u64, height: u32, ts: u32) -> io::Result<()> {
+    pub fn credit(&mut self, identity: &str, work: u64, height: u32, ts: u32, source: u8) -> io::Result<()> {
         let known = self.window.ident_index.contains_key(identity);
-        let (row, appended) = self.window.credit(identity, work, height, ts);
+        let (row, appended) = self.window.credit(identity, work, height, ts, source);
         if !known {
             self.idents_out.write_all(identity.as_bytes())?;
             self.idents_out.write_all(b"\n")?;
@@ -402,7 +423,7 @@ impl Ledger {
             serde_json::from_slice(&fs::read(path)?).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
         let n = doc.credits.len();
         for r in doc.credits {
-            self.credit(&r.identity, r.work, r.height, r.ts)?;
+            self.credit(&r.identity, r.work, r.height, r.ts, SOURCE_UNKNOWN)?;
         }
         self.flush()?;
         Ok(n)
@@ -500,14 +521,14 @@ mod tests {
         let mut w = Window::new();
         w.set_target(100);
         for i in 0..10 {
-            w.credit("a", 20, 1, 1000 + i);
+            w.credit("a", 20, 1, 1000 + i, SOURCE_UNKNOWN);
         }
         // 10 × 20 = 200 in, window keeps the newest rows summing to ≥ 100 → 5 rows
         assert_eq!(w.total_work(), 100);
         assert_eq!(w.len(), 5);
-        w.credit("b", 5, 1, 2000);
+        w.credit("b", 5, 1, 2000, SOURCE_UNKNOWN);
         assert_eq!(w.total_work(), 105);
-        w.credit("b", 5, 1, 2000); // coalesces with the previous row
+        w.credit("b", 5, 1, 2000, SOURCE_UNKNOWN); // coalesces with the previous row
         assert_eq!(w.len(), 6);
         assert_eq!(w.total_work(), 110);
         assert_eq!(w.work_of("b"), 10);
@@ -523,6 +544,18 @@ mod tests {
     }
 
     #[test]
+    fn stratum_and_datum_work_do_not_coalesce() {
+        let mut w = Window::new();
+        w.set_target(10_000);
+        w.credit("a", 600, 1, 100, SOURCE_DATUM);
+        w.credit("a", 400, 1, 100, SOURCE_STRATUM);
+        assert_eq!(w.len(), 2);
+        let m = &w.miners()[0];
+        assert_eq!(m.work, 1000);
+        assert_eq!(m.stratum_work, 400);
+    }
+
+    #[test]
     fn ledger_persists_replays_and_compacts() {
         let dir = std::env::temp_dir().join(format!("tides-test-{}-{}", std::process::id(), line!()));
         let _ = fs::remove_dir_all(&dir);
@@ -530,11 +563,11 @@ mod tests {
             let mut l = Ledger::open(&dir).unwrap();
             l.set_target(50);
             for i in 0..100u32 {
-                l.credit(if i % 3 == 0 { "x" } else { "y" }, 1, 7, i).unwrap();
+                l.credit(if i % 3 == 0 { "x" } else { "y" }, 1, 7, i, SOURCE_UNKNOWN).unwrap();
             }
             // coalesced tail rewrite
-            l.credit("y", 3, 7, 99).unwrap();
-            l.credit("y", 4, 7, 99).unwrap();
+            l.credit("y", 3, 7, 99, SOURCE_UNKNOWN).unwrap();
+            l.credit("y", 4, 7, 99, SOURCE_UNKNOWN).unwrap();
             l.sync().unwrap();
             assert!(l.window.total_work() >= 50);
         }

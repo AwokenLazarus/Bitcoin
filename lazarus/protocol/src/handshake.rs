@@ -167,3 +167,40 @@ pub fn encode_client_hello(
 pub fn new_session() -> Result<SessionKeys, HandshakeError> {
     Ok(generate_session())
 }
+
+/// Hello UA `lazarus-gateway` sends. Prime allowlists this prefix when
+/// `require-split-gateway` is on.
+pub const SPLIT_GATEWAY_UA: &str = "lazarus-gateway/0.1";
+
+/// Gateways that never publish empty/tiny coinbase jobs while pooled.
+///
+/// Stock OCEAN DATUM (`v0.4.1-beta/...`) blasts `JOB_STATE_EMPTY_PLUS` / type-0
+/// "tiny" work (pool script only) the instant a new template arrives, then
+/// waits for the coinbaser. A block found on that work pays the TIDES window
+/// nothing. `lazarus-gateway` refuses to publish those jobs. A patched
+/// `datum_gateway` advertises `lazarus-split` in its hello UA.
+pub fn is_split_gateway(ua: &str) -> bool {
+    let u = ua.to_ascii_lowercase();
+    u.starts_with("lazarus-gateway") || u.contains("lazarus-split")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn allowlists_lazarus_gateway_and_patched_ocean() {
+        assert!(is_split_gateway(SPLIT_GATEWAY_UA));
+        assert!(is_split_gateway("lazarus-gateway/0.2"));
+        assert!(is_split_gateway("v0.4.1-beta+lazarus-split/abc(tag)"));
+        assert!(is_split_gateway("DATUM/lazarus-split"));
+    }
+
+    #[test]
+    fn refuses_stock_ocean_empty_first() {
+        assert!(!is_split_gateway("v0.4.1-beta/c4e7a8c(v0.4.1beta)"));
+        assert!(!is_split_gateway("v0.4.1-beta"));
+        assert!(!is_split_gateway(""));
+        assert!(!is_split_gateway("ratum/0.1.3"));
+    }
+}

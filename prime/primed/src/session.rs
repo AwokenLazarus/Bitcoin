@@ -19,13 +19,22 @@ use datum_wire::pow::Hash;
 use datum_wire::verify::{self, CoinbaseKind, JobSlot, Policy, VerifiedShare};
 use datum_wire::{cmd, MAX_CMD_LEN};
 use rand_core::{OsRng, RngCore};
-use tides::{BlockRecord, Payee};
+use tides::{BlockRecord, Payee, SOURCE_DATUM, SOURCE_STRATUM};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::time::{interval, MissedTickBehavior};
 
 use crate::address::{self};
+use crate::config::Config;
 use crate::state::{now, ClientInfo, Shared};
+
+fn house_stratum(cfg: &Config, remote: SocketAddr, gateway_hex: &str) -> bool {
+    if cfg.house_loopback && remote.ip().is_loopback() {
+        return true;
+    }
+    let g = gateway_hex.to_ascii_lowercase();
+    cfg.house_gateways.iter().any(|h| !h.is_empty() && g.starts_with(h))
+}
 
 const MAX_HELLO: usize = 4096;
 const KEEPALIVE: Duration = Duration::from_secs(20);
@@ -111,8 +120,9 @@ pub async fn run(shared: Arc<Shared>, mut stream: TcpStream, remote: SocketAddr)
     write_frame(&mut stream, &h, &reply, &mut send_keys).await?;
 
     let gateway_hex = hex::encode(&hello.identity_sign_pk[..8]);
+    let fee_path = if house_stratum(&shared.cfg, remote, &gateway_hex) { "stratum" } else { "datum" };
     log::info!(
-        "[{id}] {remote} hello ua={:?} gateway={gateway_hex} gen={:?}{}",
+        "[{id}] {remote} hello ua={:?} gateway={gateway_hex} gen={:?} fee={fee_path}{}",
         hello.user_agent,
         hello.generation,
         if hello.resume_token.is_some() { " (asked to resume; declined)" } else { "" }
@@ -129,6 +139,7 @@ pub async fn run(shared: Arc<Shared>, mut stream: TcpStream, remote: SocketAddr)
             },
             gateway: gateway_hex.clone(),
             connected_ts: now(),
+            fee_path: fee_path.into(),
             ..Default::default()
         },
     );
@@ -159,6 +170,10 @@ pub async fn run(shared: Arc<Shared>, mut stream: TcpStream, remote: SocketAddr)
 }
 
 impl Session {
+    fn is_house_stratum(&self) -> bool {
+        house_stratum(&self.shared.cfg, self.remote, &self.gateway_hex)
+    }
+
     async fn serve(&mut self) -> Result<(), SessionError> {
         self.send_configure().await?;
 
@@ -408,7 +423,8 @@ impl Session {
             if table_full && address::to_script(&identity, self.shared.network).is_none() {
                 false
             } else {
-                if let Err(e) = ledger.credit(&identity, v.work, v.height, ts as u32) {
+                let source = if self.is_house_stratum() { SOURCE_STRATUM } else { SOURCE_DATUM };
+                if let Err(e) = ledger.credit(&identity, v.work, v.height, ts as u32, source) {
                     log::error!("ledger write failed: {e}");
                 }
                 true

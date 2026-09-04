@@ -58,6 +58,8 @@ pub fn build(shared: &Shared) -> Value {
             json!({
                 "identity": m.identity,
                 "work": m.work,
+                "stratum_work": m.stratum_work,
+                "fee_path": if m.stratum_work * 2 > m.work { "stratum" } else { "datum" },
                 "credits": m.credits,
                 "share_percent": if w.total_work() > 0 { 100.0 * m.work as f64 / w.total_work() as f64 } else { 0.0 },
                 "payout_sats": payout_of(&m.identity).unwrap_or(0),
@@ -114,6 +116,7 @@ pub fn build(shared: &Shared) -> Value {
             "tag": shared.cfg.coinbase_tag,
             "prime_id": shared.cfg.prime_id,
             "fee_bps": shared.cfg.fee_bps,
+            "stratum_fee_bps": shared.cfg.stratum_fee_bps,
             "window_multiple": shared.cfg.window,
             "min_payout": shared.cfg.min_payout,
             "min_diff": shared.cfg.min_diff,

@@ -13,6 +13,9 @@ pub struct ChainTip {
 pub struct CoinbaseInfo {
     pub is_ours: bool,
     pub value_outputs: u32,
+    /// The coinbase's value outputs as `(scriptPubKey hex, sats)`, so a confirmed block can be
+    /// matched to the exact split we issued and a make-good settled by the real amount paid.
+    pub outputs: Vec<(String, u64)>,
 }
 
 pub fn cookie_basic(path: &Path) -> Option<String> {
@@ -62,16 +65,26 @@ pub fn coinbase_info(url: &str, auth: &str, blockhash: &str, tag: &str) -> Optio
         .collect();
     let is_ours = !tag.is_empty() && text.contains(tag);
     let mut value_outputs = 0u32;
+    let mut outputs: Vec<(String, u64)> = Vec::new();
     if let Some(vouts) = tx0.get("vout").and_then(|v| v.as_array()) {
         for o in vouts {
             let v = o.get("value").and_then(|x| x.as_f64()).unwrap_or(0.0);
             if v > 0.0 {
                 value_outputs += 1;
+                let sats = (v * 1e8).round() as u64;
+                let spk = o
+                    .get("scriptPubKey")
+                    .and_then(|s| s.get("hex"))
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                outputs.push((spk, sats));
             }
         }
     }
     Some(CoinbaseInfo {
         is_ours,
         value_outputs,
+        outputs,
     })
 }
