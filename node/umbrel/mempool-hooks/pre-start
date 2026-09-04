@@ -1,0 +1,49 @@
+#!/bin/bash
+# Umbrel mempool app hook (install: ~/umbrel/app-data/mempool/hooks/pre-start, chmod +x).
+# Runs as root before `docker compose up`, including after Umbrel rewrites docker-compose.yml
+# on an app update, so every edit below is idempotent.
+#
+# BLAKE2b v2 headers are 164 bytes / 328 hex; stock schema is varchar(160).
+/home/umbrel/blake2b/bin/widen-mempool-header.sh || true
+/home/umbrel/blake2b/bin/ensure-blake2b-services.sh || true
+
+COMPOSE="$(readlink -f "$(dirname "${BASH_SOURCE[0]}")/../docker-compose.yml")"
+[[ -f "$COMPOSE" ]] || exit 0
+
+python3 - "$COMPOSE" <<'PY'
+from pathlib import Path
+import re, sys
+
+p = Path(sys.argv[1])
+t = p.read_text()
+orig = t
+
+# --- backend (api) ---------------------------------------------------------
+# Address pages need an Electrum backend. The header-v2 electrs on the host listens on
+# 0.0.0.0:50011; 10.21.0.1 is the host on umbrel_main_network. electrs must allow the
+# "mempool-v2" client to negotiate 1.4 (legacy_protocol_clients in electrs.toml).
+t = t.replace("      MEMPOOL_BACKEND: none\n", "      MEMPOOL_BACKEND: electrum\n", 1)
+t = re.sub(r"^      ELECTRUM_HOST: .*$", "      ELECTRUM_HOST: 10.21.0.1", t, count=1, flags=re.M)
+t = re.sub(r"^      ELECTRUM_PORT: .*$", "      ELECTRUM_PORT: '50011'", t, count=1, flags=re.M)
+
+api_extra = {
+    # Local pools JSON (miner tags for this chain), served by serve-pools.sh.
+    "MEMPOOL_POOLS_JSON_URL": "http://10.21.0.1:8765/pools-v2.json",
+    # Knots BLAKE2b / BIP110 consensus: temporary 800 kWU block weight limit. Stock 4 MWU
+    # makes projected blocks look ~5x emptier than they are.
+    "MEMPOOL_BLOCK_WEIGHT_UNITS": "'800000'",
+}
+for k, v in api_extra.items():
+    if f"      {k}:" not in t:
+        t = t.replace("      MEMPOOL_BACKEND: electrum\n",
+                      f"      MEMPOOL_BACKEND: electrum\n      {k}: {v}\n", 1)
+
+# --- frontend (web) --------------------------------------------------------
+if "      BLOCK_WEIGHT_UNITS:" not in t:
+    t = t.replace("      FRONTEND_HTTP_PORT: $APP_MEMPOOL_PORT\n",
+                  "      FRONTEND_HTTP_PORT: $APP_MEMPOOL_PORT\n      BLOCK_WEIGHT_UNITS: '800000'\n", 1)
+
+if t != orig:
+    p.write_text(t)
+    print("mempool pre-start: patched docker-compose.yml")
+PY

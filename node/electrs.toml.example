@@ -9,3 +9,6 @@ log_filters = "INFO"
 jsonrpc_timeout = 30
 index_batch_size = 10
 server_banner = "Umbrel electrs header-v2 (BLAKE2b)"
+# Clients allowed to negotiate protocol 1.4 on this v2-header chain. They are still refused
+# block headers; mempool's backend only queries scripthashes, so it is safe here.
+legacy_protocol_clients = "mempool-v2"

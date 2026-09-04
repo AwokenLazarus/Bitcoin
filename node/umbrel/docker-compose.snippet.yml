@@ -1,4 +1,4 @@
-# Add this volume on the Knots `app` service so the container runs rc4,
+# Add this volume on the Knots `app` service so the container runs the blake2b/prefix Knots,
 # not the stock image bitcoind. pre-start re-applies it after an app update.
 #
 # Under services.app.volumes, after the data bind:
@@ -8,6 +8,6 @@
 #
 # Confirm inside the container:
 #   bitcoind -version
-#   # Bitcoin Knots daemon version v29.4.1.knots20260508rc4
+#   # Bitcoin Knots daemon version v29.4.1.knots20260508
 #
 # Do not commit a full live compose file (RPC/Tor env).

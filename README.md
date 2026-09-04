@@ -10,7 +10,7 @@ This is the working tree from a homelab Umbrel node after the SHA-256d → BLAKE
 |------|------|
 | `pool/` | Public pool dashboard (reads `primed` stats: window, coinbase preview, gateways, blocks), Electrum cutover, block-notify mail |
 | `pool/config.example.json` | Copy to `config.json` and fill in |
-| `node/` | Live Umbrel Knots path (rc4 prefix, `blake2b.conf`, app `bitcoin.conf`, pre-start hook) |
+| `node/` | Live Umbrel Knots path (prefix install script, `blake2b.conf`, app `bitcoin.conf`, Knots + mempool pre-start hooks) |
 | `node/umbrel/` | App `bitcoin.conf`, compose bind snippet, `hooks/pre-start` |
 | `scripts/` | Umbrel helpers: DATUM/electrs/pool persist, mempool header widen, status |
 | `systemd/` | User units + ensure timer |
@@ -25,9 +25,9 @@ This is the working tree from a homelab Umbrel node after the SHA-256d → BLAKE
 
 See [`node/README.md`](node/README.md). Short version:
 
-1. `PREFIX=~/blake2b/prefix ./node/install-rc4.sh` after you verify the official rc4 tarball.
+1. `PREFIX=~/blake2b/prefix ./node/install-knots.sh` (downloads and verifies the official tarball).
 2. Install `node/blake2b.conf` + `node/umbrel/bitcoin.conf` in the Knots app datadir.
-3. Install `node/umbrel/hooks/pre-start` so rc4 is bind-mounted again after an app update.
+3. Install `node/umbrel/hooks/pre-start` so the prefix `bitcoind` is bind-mounted again after an app update.
 4. App stays on RPC **9332** / P2P **9333**. Do not commit `umbrel-bitcoin.conf`.
 
 ## Quick start (pool UI)

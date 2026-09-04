@@ -1,5 +1,5 @@
 [Unit]
-Description=Bitcoin Knots 29.4.1rc4 BLAKE2b node
+Description=Bitcoin Knots 29.4.1 BLAKE2b node
 After=network-online.target
 
 [Service]

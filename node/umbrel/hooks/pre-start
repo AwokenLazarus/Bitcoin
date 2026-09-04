@@ -1,10 +1,14 @@
 #!/usr/bin/env bash
 # Umbrel Bitcoin Knots app hook. Stock permission + Tor HS wait, plus:
-#   1) bind-mount Knots 29.4.1rc4 over the image bitcoind (every start)
+#   1) bind-mount the BLAKE2b Knots build in blake2b/prefix over the image bitcoind (every start)
 #   2) ensure DATUM / electrs / pool helpers
 #
+# Policy such as the relay/mining fee floor lives in the app's data/app/settings.json (sat/vB,
+# fractions allowed): the app regenerates umbrel-bitcoin.conf from it on every start, and the
+# first includeconf wins, so blake2b.conf cannot override those keys.
+#
 # Install: copy to ~/umbrel/app-data/bitcoin-knots/hooks/pre-start and chmod +x
-# The rc4 bind is applied BEFORE the hidden-service early-exit so it still
+# The bind is applied BEFORE the hidden-service early-exit so it still
 # runs on later boots (stock hook exited first and skipped this).
 
 APP_DATA_DIR="$(readlink -f "$(dirname "${BASH_SOURCE[0]}")/../data")"
@@ -38,7 +42,7 @@ if [[ -d "${APP_DATA_DIR}/app" ]]; then
 	chown -R "${DESIRED_OWNER}" "${APP_DATA_DIR}/app"
 fi
 
-# Keep Knots 29.4.1rc4 on the live datadir (re-applied every start / after app update).
+# Keep the blake2b/prefix Knots on the live datadir (re-applied every start / after app update).
 COMPOSE="$(readlink -f "$(dirname "${BASH_SOURCE[0]}")/../docker-compose.yml")"
 RC4_BIND="      - ${PREFIX_BITCOIND}:/opt/bitcoind/v29.4.knots20260508/bitcoind:ro"
 if [[ -f "${COMPOSE}" && -x "${PREFIX_BITCOIND}" ]] && ! grep -q "blake2b/prefix/bin/bitcoind\|knots20260508/bitcoind" "${COMPOSE}"; then
@@ -53,7 +57,6 @@ if needle in text and "bitcoind:ro" not in text:
     p.write_text(text.replace(needle, needle + bind, 1))
 PY
 fi
-
 if [[ -x "${ENSURE}" ]]; then
 	"${ENSURE}" || true
 fi
