@@ -127,6 +127,10 @@ deduplication keeps whichever arrived first — quietly moving credit between mi
 
 Cookie files, DATUM admin env, SMTP tokens, wallet addresses, or live `config.json`.
 
+## License
+
+[MIT](LICENSE), except `lazarus/` which remains [AGPL-3.0](https://github.com/iohzrd/ratum/blob/master/LICENSE) as a Ratum derivative (see Credits). `prime/` is MIT and is not derived from Ratum.
+
 ## Credits
 
 ### DATUM — Bitcoin Ocean / Jason Hughes
