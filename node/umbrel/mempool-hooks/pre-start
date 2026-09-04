@@ -23,7 +23,18 @@ if [[ -f "$THEME/nginx-mempool.conf" && -f "$THEME/www/theme.css" ]]; then
   THEME_OK=1
 fi
 
-THEME_OK="$THEME_OK" THEME="$THEME" python3 - "$COMPOSE" <<'PY'
+# Backend patch (repo: node/umbrel/mempool-patches): DATUM template-creator names for any
+# pool, so a block found through a remote DATUM gateway shows "Lazarus" + the gateway's tag.
+# patch-backend.py copies the three compiled files out of the pinned api image and applies
+# the change; on any anchor mismatch it exits non-zero and the mounts below are dropped, so
+# an image upgrade falls back to stock behaviour instead of a broken backend.
+PATCHES="${MEMPOOL_PATCHES_DIR:-/home/umbrel/blake2b/mempool-patches}"
+PATCH_OK=0
+if [[ -f "$PATCHES/patch-backend.py" ]] && python3 "$PATCHES/patch-backend.py" "$COMPOSE" "$PATCHES/run"; then
+  PATCH_OK=1
+fi
+
+THEME_OK="$THEME_OK" THEME="$THEME" PATCH_OK="$PATCH_OK" PATCHES="$PATCHES" python3 - "$COMPOSE" <<'PY'
 from pathlib import Path
 import os, re, sys
 
@@ -50,6 +61,17 @@ for k, v in api_extra.items():
     if f"      {k}:" not in t:
         t = t.replace("      MEMPOOL_BACKEND: electrum\n",
                       f"      MEMPOOL_BACKEND: electrum\n      {k}: {v}\n", 1)
+
+# Patched backend files, bind-mounted read-only over the image's copies.
+patches = os.environ.get("PATCHES", "")
+patch_files = ["api/blocks.js", "repositories/BlocksRepository.js", "utils/bitcoin-script.js"]
+patch_entries = "".join(f"      - {patches}/run/backend/{f}:/backend/package/{f}:ro\n" for f in patch_files)
+t = re.sub(r"^      - .*:/backend/package/.*\n", "", t, flags=re.M)
+if os.environ.get("PATCH_OK") == "1":
+    m = re.search(r"^  api:\n(.*?)(?=^  \S)", t, flags=re.M | re.S)
+    if m and re.search(r"^    volumes:\n", m.group(0), flags=re.M):
+        api = m.group(0)
+        t = t.replace(api, re.sub(r"^    volumes:\n", "    volumes:\n" + patch_entries, api, count=1, flags=re.M), 1)
 
 # --- frontend (web) --------------------------------------------------------
 if "      BLOCK_WEIGHT_UNITS:" not in t:

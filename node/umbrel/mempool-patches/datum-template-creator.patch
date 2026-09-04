@@ -1,0 +1,231 @@
+From c7f6c8081bdc39041f0314e6aa5baf259e3652ea Mon Sep 17 00:00:00 2001
+From: Lazarus <lazarus@awokenlazarus.xyz>
+Date: Fri, 4 Sep 2026 04:54:28 +0000
+Subject: [PATCH] Expose DATUM template creator names for any pool
+
+Detect the DATUM coinbase layout (pooled unique-id push, primary 0x0F secondary 0x00 tag push) structurally instead of gating on the OCEAN pool name.
+---
+ .../__tests__/utils/bitcoin-script.test.ts    | 67 +++++++++++++++++
+ backend/src/api/blocks.ts                     | 10 +--
+ backend/src/repositories/BlocksRepository.ts  |  8 +-
+ backend/src/utils/bitcoin-script.ts           | 75 +++++++++++++++++++
+ 4 files changed, 146 insertions(+), 14 deletions(-)
+ create mode 100644 backend/src/__tests__/utils/bitcoin-script.test.ts
+
+diff --git a/backend/src/__tests__/utils/bitcoin-script.test.ts b/backend/src/__tests__/utils/bitcoin-script.test.ts
+new file mode 100644
+index 0000000..ad75a05
+--- /dev/null
++++ b/backend/src/__tests__/utils/bitcoin-script.test.ts
+@@ -0,0 +1,67 @@
++import { isDATUMCoinbase, parseDATUMTemplateCreator, parseTemplateCreator } from '../../utils/bitcoin-script';
++
++function hex(s: string): string {
++  return Buffer.from(s, 'latin1').toString('hex');
++}
++
++// Coinbase scriptSigs as datum_gateway builds them (src/datum_coinbaser.c): BIP34 height push,
++// `<primary> 0x0F <secondary> 0x00` tag push, unique-id push, then the stratum extranonces.
++function datumCoinbase(primary: string, secondary: string | null): string {
++  const tags = secondary === null ? `${primary}\x00` : `${primary}\x0f${secondary}\x00`;
++  return '03ccc10e'
++    + tags.length.toString(16).padStart(2, '0') + hex(tags)
++    + '0bff34120102030405060708'
++    + '000000000000000000000000';
++}
++
++describe('bitcoin-script', () => {
++  describe('isDATUMCoinbase', () => {
++    test('detects a pool tag with a template-creator tag', () => {
++      expect(isDATUMCoinbase(datumCoinbase('Lazarus', 'Their Name'))).toBe(true);
++      expect(isDATUMCoinbase(datumCoinbase('OCEAN.XYZ', 'Bitaxe Solo'))).toBe(true);
++    });
++
++    test('ignores a DATUM coinbase without a secondary tag', () => {
++      expect(isDATUMCoinbase(datumCoinbase('Lazarus', null))).toBe(false);
++    });
++
++    test('ignores coinbases that do not follow the DATUM layout', () => {
++      // Lazarus public stratum: tag push with no separator or terminator
++      expect(isDATUMCoinbase('03ccc10e074c617a61727573e99dcaea0000000000000000')).toBe(false);
++      // Foundry USA
++      expect(isDATUMCoinbase('03a8ff0c' + '1c' + hex('/Foundry USA Pool #dropgold/') + '2f3d5e0d')).toBe(false);
++      // DMND: NUL delimiter instead of a push
++      expect(isDATUMCoinbase('03a8ff0c00' + hex('/DMND/miner one/') + '00')).toBe(false);
++      // separator present but the tag bytes are not printable
++      expect(isDATUMCoinbase('03ccc10e' + '08' + 'ff0102030f0a0b00')).toBe(false);
++      // empty secondary
++      expect(isDATUMCoinbase('03ccc10e' + '09' + hex('Lazarus\x0f\x00'))).toBe(false);
++      // two separators
++      expect(isDATUMCoinbase(datumCoinbase('Lazarus', 'a\x0fb'))).toBe(false);
++      // truncated
++      expect(isDATUMCoinbase('03ccc10e20' + hex('Lazarus\x0fx\x00'))).toBe(false);
++      expect(isDATUMCoinbase('')).toBe(false);
++      expect(isDATUMCoinbase('zz')).toBe(false);
++    });
++  });
++
++  describe('parseTemplateCreator', () => {
++    test('exposes the template creator for any pool using DATUM', () => {
++      expect(parseTemplateCreator('Lazarus', datumCoinbase('Lazarus', 'Their Name'))).toEqual(['Lazarus', 'Their Name']);
++      expect(parseTemplateCreator('Unknown', datumCoinbase('SomePool', 'solo-1'))).toEqual(['SomePool', 'solo1']);
++    });
++
++    test('keeps the existing OCEAN and DMND behaviour', () => {
++      const ocean = datumCoinbase('OCEAN.XYZ', 'Bitaxe');
++      expect(parseTemplateCreator('OCEAN', ocean)).toEqual(parseDATUMTemplateCreator(ocean));
++      expect(parseTemplateCreator('OCEAN', datumCoinbase('OCEAN.XYZ', null))).toEqual(['OCEANXYZ']);
++      expect(parseTemplateCreator('DMND', '03a8ff0c00' + hex('/DMND/miner one/') + '00')).toEqual(['DMND', 'miner one']);
++    });
++
++    test('returns null for pools without template-creator tags', () => {
++      expect(parseTemplateCreator('Lazarus', '03ccc10e074c617a61727573e99dcaea0000000000000000')).toBeNull();
++      expect(parseTemplateCreator('Foundry USA', '03a8ff0c1c' + hex('/Foundry USA Pool #dropgold/') + '2f3d5e0d')).toBeNull();
++      expect(parseTemplateCreator('Unknown', '')).toBeNull();
++    });
++  });
++});
+diff --git a/backend/src/api/blocks.ts b/backend/src/api/blocks.ts
+index 14fc0a9..fbf7d0d 100644
+--- a/backend/src/api/blocks.ts
++++ b/backend/src/api/blocks.ts
+@@ -37,7 +37,7 @@ import { calculateGoodBlockCpfp } from './cpfp';
+ import blockProcessor, { BlockProcessingResult, detectTemplateAlgorithm, saveCpfpDataToCpfpSummary } from './block-processor';
+ import mempool from './mempool';
+ import CpfpRepository from '../repositories/CpfpRepository';
+-import { parseDATUMTemplateCreator, parseDMNDTemplateCreator } from '../utils/bitcoin-script';
++import { parseTemplateCreator } from '../utils/bitcoin-script';
+ import database from '../database';
+ import { getBlockFirstSeenFromLogs, getOldestLogTimestampFromLogs, scanLogsForBlocksFirstSeen } from '../utils/file-read';
+ import FlagValueRepository, { INDEXING_PRESETS } from '../repositories/FlagValueRepository';
+@@ -358,14 +358,8 @@ class Blocks {
+           id: pool.uniqueId,
+           name: pool.name,
+           slug: pool.slug,
+-          minerNames: null,
++          minerNames: parseTemplateCreator(pool.name, extras.coinbaseRaw),
+         };
+-
+-        if (extras.pool.name === 'OCEAN') {
+-          extras.pool.minerNames = parseDATUMTemplateCreator(extras.coinbaseRaw);
+-        } else if (extras.pool.name === 'DMND') {
+-          extras.pool.minerNames = parseDMNDTemplateCreator(extras.coinbaseRaw);
+-        }
+       }
+ 
+       extras.matchRate = null;
+diff --git a/backend/src/repositories/BlocksRepository.ts b/backend/src/repositories/BlocksRepository.ts
+index 4108ca0..6fd4d80 100644
+--- a/backend/src/repositories/BlocksRepository.ts
++++ b/backend/src/repositories/BlocksRepository.ts
+@@ -14,7 +14,7 @@ import chainTips from '../api/chain-tips';
+ import blocks from '../api/blocks';
+ import BlocksAuditsRepository from './BlocksAuditsRepository';
+ import transactionUtils from '../api/transaction-utils';
+-import { parseDATUMTemplateCreator, parseDMNDTemplateCreator } from '../utils/bitcoin-script';
++import { parseTemplateCreator } from '../utils/bitcoin-script';
+ import poolsUpdater from '../tasks/pools-updater';
+ 
+ interface DatabaseBlock {
+@@ -1356,11 +1356,7 @@ class BlocksRepository {
+       }
+     }
+ 
+-    if (extras.pool.name === 'OCEAN') {
+-      extras.pool.minerNames = parseDATUMTemplateCreator(extras.coinbaseRaw);
+-    } else if (extras.pool.name === 'DMND') {
+-      extras.pool.minerNames = parseDMNDTemplateCreator(extras.coinbaseRaw);
+-    }
++    extras.pool.minerNames = parseTemplateCreator(extras.pool.name, extras.coinbaseRaw);
+ 
+     blk.extras = <BlockExtension>extras;
+     return <BlockExtended>blk;
+diff --git a/backend/src/utils/bitcoin-script.ts b/backend/src/utils/bitcoin-script.ts
+index 2a88477..7a43fec 100644
+--- a/backend/src/utils/bitcoin-script.ts
++++ b/backend/src/utils/bitcoin-script.ts
+@@ -226,6 +226,81 @@ export function parseDATUMTemplateCreator(coinbaseRaw: string): string[] | null
+   return tagString.split('\x0f').map((name) => name.replace(/[^a-zA-Z0-9 ]/g, ''));
+ }
+ 
++/**
++ * Whether a coinbase scriptSig carries a DATUM template-creator tag.
++ *
++ * DATUM gateways (datum_gateway/src/datum_coinbaser.c, generate_coinbase_input) write the
++ * first push after the BIP34 height as `<primary tag> 0x0F <secondary tag> 0x00`, where the
++ * primary tag is set by the pool and the secondary tag by the gateway operator. Any pool that
++ * speaks DATUM produces this layout, so it is detected structurally instead of by pool name:
++ * exactly one 0x0F separator, printable ASCII on both sides, and a terminating NUL.
++ */
++export function isDATUMCoinbase(coinbaseRaw: string): boolean {
++  if (!coinbaseRaw || coinbaseRaw.length % 2 !== 0 || !/^[0-9a-fA-F]+$/.test(coinbaseRaw)) {
++    return false;
++  }
++  const bytes = Buffer.from(coinbaseRaw, 'hex');
++
++  // BIP34 height push
++  const heightLength = bytes[0];
++  if (heightLength < 1 || heightLength > 8) {
++    return false;
++  }
++  let lengthIndex = 1 + heightLength;
++  if (lengthIndex >= bytes.length) {
++    return false;
++  }
++  let tagsLength = bytes[lengthIndex];
++  if (tagsLength === 0x4c) {
++    lengthIndex += 1;
++    if (lengthIndex >= bytes.length) {
++      return false;
++    }
++    tagsLength = bytes[lengthIndex];
++  }
++  const tagStart = lengthIndex + 1;
++  if (tagsLength < 4 || tagStart + tagsLength > bytes.length) {
++    return false;
++  }
++
++  // `<primary> 0x0F <secondary> 0x00`
++  const tags = bytes.subarray(tagStart, tagStart + tagsLength);
++  if (tags[tags.length - 1] !== 0x00) {
++    return false;
++  }
++  let separators = 0;
++  for (let i = 0; i < tags.length - 1; i++) {
++    const b = tags[i];
++    if (b === 0x0f) {
++      // both tags must be non-empty
++      if (i === 0 || i === tags.length - 2) {
++        return false;
++      }
++      separators++;
++    } else if (b < 0x20 || b > 0x7e) {
++      return false;
++    }
++  }
++  return separators === 1;
++}
++
++/**
++ * Miner (template creator) names for a block, when the pool exposes them in the coinbase.
++ * Returns null when the coinbase carries none.
++ */
++export function parseTemplateCreator(poolName: string, coinbaseRaw: string): string[] | null {
++  if (poolName === 'OCEAN') {
++    return parseDATUMTemplateCreator(coinbaseRaw);
++  }
++  if (poolName === 'DMND') {
++    return parseDMNDTemplateCreator(coinbaseRaw);
++  }
++  if (isDATUMCoinbase(coinbaseRaw)) {
++    return parseDATUMTemplateCreator(coinbaseRaw);
++  }
++  return null;
++}
++
+ /** Extracts miner names from a DMND coinbase transaction */
+ export function parseDMNDTemplateCreator(coinbaseRaw: string): string[] {
+   try {
+-- 
+2.43.0
+

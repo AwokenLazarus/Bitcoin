@@ -349,12 +349,35 @@
     if (legal) tree.insertBefore(col, legal); else tree.appendChild(col);
   }
 
+  // Blocks mined through a DATUM gateway carry the gateway's own tag next to the pool's; the
+  // backend exposes it as minerNames[1] and the block badge then shows only that name over a
+  // faded pool logo. Prefix the pool so the badge reads "Lazarus - <gateway>" and the reader
+  // still sees whose block it is. The pool name comes from the logo's alt text.
+  function minerBadges() {
+    var badges = document.querySelectorAll('a.badge.miner-name:not([data-lz-pool])');
+    for (var i = 0; i < badges.length; i++) {
+      var a = badges[i];
+      var img = a.querySelector('img.pool-logo');
+      var m = img && /^Logo of (.+) mining pool$/.exec(img.getAttribute('alt') || '');
+      if (!m) continue;
+      var text = null;
+      for (var n = a.firstChild; n; n = n.nextSibling) {
+        if (n.nodeType === 3 && n.nodeValue.trim()) { text = n; break; }
+      }
+      if (!text) continue;
+      a.setAttribute('data-lz-pool', m[1]);
+      a.setAttribute('title', m[1] + ' \u00b7 template by ' + text.nodeValue.trim());
+      a.insertBefore(el('span', { class: 'lz-pool-prefix' }, m[1] + ' - '), text);
+    }
+  }
+
   var scheduled = false;
   function apply() {
     scheduled = false;
     try { nav(); } catch (e) { /* never break the explorer */ }
     try { footer(); } catch (e) { /* never break the explorer */ }
     try { dashboard(); } catch (e) { /* never break the explorer */ }
+    try { minerBadges(); } catch (e) { /* never break the explorer */ }
   }
   function schedule() {
     if (scheduled) return;

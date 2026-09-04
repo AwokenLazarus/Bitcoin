@@ -15,7 +15,8 @@ RPC **9332**, P2P **9333**. Lightning/mempool keep talking to this node.
 | `umbrel/hooks/pre-start` | Re-bind the prefix `bitcoind` into the Knots compose after app updates, run `ensure-blake2b-services.sh`; then stock Tor HS wait |
 | `umbrel/mempool-hooks/pre-start` | Mempool app hook: widen `blocks.header` for 164-byte headers, `MEMPOOL_BACKEND=electrum` -> host electrs :50011, 800 kWU block weight, local pools JSON |
 | `umbrel/mempool-theme/` | Lazarus look for the mempool frontend: `nginx-mempool.conf` (`sub_filter` injects the theme into the app shell), `www/theme.css` (palette, type, layout), `www/theme.js` (nav + footer links, fee/goggles/chart recolouring) |
-| `pools/pools-sync.py`, `pools/pools-overrides.json` | Mining-pool list merge (Kilombino + mempool.guide + ours) and block re-attribution; runs from `../systemd/pools-sync.timer` |
+| `pools/pools-sync.py`, `pools/pools-overrides.json` | Mining-pool list merge (Kilombino + mempool.guide + ours), priority-ordered pool ids, block re-attribution; runs from `../systemd/pools-sync.timer` |
+| `umbrel/mempool-patches/` | Backend patch: DATUM template-creator names for any pool (`patch-backend.py` applied by the hook to the pinned image; `datum-template-creator.patch` for upstream) |
 | `umbrel/docker-compose.snippet.yml` | The volume line to add (do not commit a live compose — it has RPC/Tor env) |
 | `bitcoin.conf.example` | Layout B only |
 | `datum_gateway_config.example.json` | DATUM (cookie path redacted) |
@@ -86,5 +87,30 @@ The stock backend ships a SHA-256 pool list, so almost every BLAKE2b block was "
 It upserts the `pools` table by slug (stable `unique_id`s, so a backend `pools-v2.json` import agrees),
 writes the merged list to `~/blake2b/pools/pools-v2.json` (served on :8765 for the backend), then
 re-attributes blocks from the fork height in priority order -- Lazarus, other pools, named tags, named
-addresses, `Solo <addr>` entries, generic tags -- and patches the API disk cache. New blocks are tagged
-live by the backend from the same rows; the sync only fixes ordering differences after the fact.
+addresses, `Solo <addr>` entries, generic tags -- and patches the API disk cache.
+
+The backend itself matches a new block against `SELECT ... FROM pools`, i.e. in **row-id order**, and a
+Lazarus block pays a dozen member addresses that Kilombino also lists individually, so whichever row came
+first used to win (Lazarus was id 214; the generic `DATUM` tag was 207). The sync therefore owns the ids:
+each priority has a band (Lazarus 1-99, shared pools 100-999, tag pools 1000-9999, address pools
+10000-59999, generic 60000+, Unknown 65500), new pools are inserted into their band, and if anything sits
+outside its band the table is renumbered in one transaction with `blocks.pool_id` / `hashrates.pool_id`
+remapped (two-phase through a scratch range; `hashrate_timestamp` pinned since it is `ON UPDATE
+current_timestamp()`). Pools dropped from the list keep their rows (FK from `blocks`) but lose their
+matchers. Result: the backend tags blocks correctly on arrival, including the in-memory recent-blocks
+window that a DB fix-up cannot reach; a steady-state run logs `0 renumbered ... 0 retagged`.
+`pools-sync.py --dry-run` shows what a run would change.
+
+## Mempool explorer: DATUM gateway names on blocks
+
+A block found through a DATUM gateway carries two coinbase tags, `Lazarus` (set by the pool) and the
+gateway operator's own, as `<primary> 0x0F <secondary> 0x00`. mempool already parses this and shows the
+secondary tag on the block (`extras.pool.minerNames`), but only for the pool literally named `OCEAN`.
+`umbrel/mempool-patches/` generalises that check so any pooled DATUM coinbase gets its names -- see its
+README for the detection rule and the upstream patch. `pre-start` runs `patch-backend.py`, which copies the
+three compiled files out of the pinned `api` image, applies the change and bind-mounts them read-only over
+`/backend/package/...`; if an image upgrade moves the anchors, it exits non-zero and the mounts are dropped,
+so the backend falls back to stock behaviour. `theme.js` then prefixes the pool on the block badge, so the
+block bar reads `Lazarus - <gateway tag>`, and `pools-sync.py` keeps `minerNames` when it patches the cache.
+The recent-blocks window is seeded from `data/cache.json`, so after deploying the patch clear its `blocks`
+across a stop/start to see names on blocks indexed before it.
