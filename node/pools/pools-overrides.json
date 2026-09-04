@@ -1,0 +1,92 @@
+{
+  "_comment": "Local corrections layered over the upstream pool lists by pools-sync.py. Keys: pools (merged by slug; replace=true discards upstream addresses/tags for that slug; pool=true matches before individual miners' addresses), drop (slugs never emitted), generic (tag-only software identifiers matched last so a miner's own tag or address wins). PyBLOCK's LOTTO/CAROUSEL/CHIRP modes are folded into one PyBLOCK entry, as mempool.guide shows them.",
+  "pools": [
+    {
+      "name": "Lazarus",
+      "link": "https://pool.awokenlazarus.xyz",
+      "addresses": [
+        "bc1qt5praystcdle0nq04e3h02yjszha82uzhww85x6972lcy40k4eyqz9jfaq"
+      ],
+      "tags": [
+        "Lazarus"
+      ],
+      "replace": true,
+      "pool": true
+    },
+    {
+      "name": "AlphaPool",
+      "link": "",
+      "addresses": [],
+      "tags": [
+        "AlphaPool"
+      ]
+    },
+    {
+      "name": "PyBLOCK",
+      "link": "https://pyblock.xyz",
+      "addresses": [
+        "1PyBLoCKdiaC46vD9CWcmxa3ey2VzSc5Q2"
+      ],
+      "tags": [
+        "PyBLOCK"
+      ],
+      "pool": true
+    },
+    {
+      "name": "Pow.re",
+      "link": "https://pow.re",
+      "addresses": [],
+      "tags": [
+        "Pow.re",
+        "pow.re"
+      ]
+    },
+    {
+      "name": "blake2b.cash",
+      "link": "https://blake2b.cash",
+      "addresses": [],
+      "tags": [
+        "blake2b.cash"
+      ]
+    },
+    {
+      "name": "DATUM",
+      "link": "https://ocean.xyz/docs/datum",
+      "addresses": [],
+      "tags": [
+        "DATUM solo mined",
+        "DATUM"
+      ]
+    },
+    {
+      "name": "Knots",
+      "link": "https://bitcoinknots.org",
+      "addresses": [],
+      "tags": [
+        "Knots"
+      ]
+    },
+    {
+      "name": "blake2b-mainnet",
+      "link": "",
+      "addresses": [],
+      "tags": [
+        "blake2b-mainnet"
+      ]
+    }
+  ],
+  "drop": [
+    "lazarusp",
+    "datumsolomined",
+    "pyblocklotto",
+    "pyblockcarousel",
+    "pyblockchirp",
+    "solo1pyblock"
+  ],
+  "generic": [
+    "datum",
+    "datumuser",
+    "knots",
+    "blake2bmainnet"
+  ]
+}

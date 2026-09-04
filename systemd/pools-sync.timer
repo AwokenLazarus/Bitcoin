@@ -1,0 +1,10 @@
+[Unit]
+Description=Every 3 minutes merge the pool list and fix block attribution
+
+[Timer]
+OnBootSec=90
+OnUnitActiveSec=180
+AccuracySec=30
+
+[Install]
+WantedBy=timers.target

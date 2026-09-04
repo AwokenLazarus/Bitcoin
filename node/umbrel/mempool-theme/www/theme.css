@@ -1,0 +1,314 @@
+/* Lazarus theme for the mempool frontend (v3.x).
+ * Injected after styles.css by nginx sub_filter, so equal-specificity rules here win.
+ * Palette and type mirror pool/static/pool.css: warm near-black, brass accent,
+ * IBM Plex Sans / Newsreader / IBM Plex Mono. Chart colours live in JS and are left alone.
+ */
+@import url("https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;1,400&family=Newsreader:ital,opsz,wght@0,6..72,500;1,6..72,400;1,6..72,500&display=swap");
+
+:root {
+  /* Lazarus tokens (hex fallbacks of the oklch values in pool.css) */
+  --lz-bg: #100d08;
+  --lz-bg-raised: #17130d;
+  --lz-bg-inset: #0b0906;
+  --lz-ink: #eee9de;
+  --lz-muted: #a69d8f;
+  --lz-faint: #6e685e;
+  --lz-line: #332d24;
+  --lz-line-strong: #534c41;
+  --lz-brass: #dbb565;
+  --lz-brass-dim: #9d824c;
+  --lz-brass-ink: #201301;
+  --lz-brass-wash: #3b3020;
+  --lz-good: #65c98c;
+  --lz-bad: #e47164;
+  --lz-warn: #e1b75c;
+  --lz-sans: "IBM Plex Sans", "Helvetica Neue", Helvetica, Arial, sans-serif;
+  --lz-serif: "Newsreader", "Iowan Old Style", Palatino, "Times New Roman", serif;
+  --lz-mono: "IBM Plex Mono", ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+
+  /* mempool theme variables */
+  --bg: var(--lz-bg);
+  --active-bg: var(--lz-bg-inset);
+  --hover-bg: var(--lz-bg-raised);
+  --fg: var(--lz-ink);
+  --nav-bg: var(--lz-bg);
+  --navbar-bg: var(--lz-bg);
+  --title-fg: var(--lz-brass);
+  --primary: var(--lz-brass);
+  --secondary: #2a251d;
+  --tertiary: var(--lz-brass-wash);
+  --success: var(--lz-good);
+  --info: var(--lz-brass);
+  --link-color: var(--lz-brass);
+  --link-hover-color: #f0d08a;
+  --icon: var(--lz-ink);
+  --skeleton-bg: #2a251d;
+  --skeleton-bg-light: #3d362b;
+  --box-bg: var(--lz-bg-raised);
+  --stat-box-bg: var(--lz-bg-inset);
+  --alert-bg: #2a251d;
+  --transparent-fg: #eee9debb;
+  --fade-out-box-bg-start: rgba(23, 19, 13, 0);
+  --fade-out-box-bg-end: rgba(23, 19, 13, 1);
+  --mainnet-alt: var(--lz-brass-dim);
+  --taproot: var(--lz-brass);
+  --taproot-light: #e1b75c;
+  --taproot-dark: var(--lz-brass-dim);
+  --green: var(--lz-good);
+  --red: var(--lz-bad);
+  --yellow: var(--lz-warn);
+  --grey: var(--lz-faint);
+  --tooltip-grey: var(--lz-muted);
+  --orange: var(--lz-warn);
+  --search-button: var(--lz-brass-wash);
+  --search-button-border: var(--lz-line-strong);
+  --search-button-focus: #4a3c21;
+  --search-button-shadow: #dbb56540;
+  color-scheme: dark;
+}
+@supports (color: oklch(50% 0.1 80)) {
+  :root {
+    --lz-bg: oklch(14% 0.012 78);
+    --lz-bg-raised: oklch(17.5% 0.014 78);
+    --lz-bg-inset: oklch(12% 0.012 78);
+    --lz-ink: oklch(93.5% 0.016 86);
+    --lz-muted: oklch(70% 0.022 80);
+    --lz-faint: oklch(52% 0.018 80);
+    --lz-line: oklch(30% 0.016 78);
+    --lz-line-strong: oklch(42% 0.02 78);
+    --lz-brass: oklch(79% 0.108 84);
+    --lz-brass-dim: oklch(62% 0.08 84);
+    --lz-good: oklch(76% 0.13 155);
+    --lz-bad: oklch(68% 0.145 28);
+    --lz-warn: oklch(80% 0.12 85);
+  }
+}
+
+/* --- base ---------------------------------------------------------------- */
+html { scrollbar-gutter: stable; }
+body {
+  font-family: var(--lz-sans);
+  color: var(--lz-ink);
+  background:
+    radial-gradient(1200px 500px at 8% -10%, rgba(64, 48, 18, 0.45), transparent 55%),
+    var(--lz-bg) !important;
+  text-rendering: optimizeLegibility;
+}
+::selection { background: #6d5a2e; color: var(--lz-ink); }
+:focus-visible { outline: 2px solid var(--lz-brass); outline-offset: 2px; }
+a { color: var(--lz-brass); }
+a:hover { color: #f0d08a; }
+.text-monospace, code, .txid, .hash, .address-text {
+  font-family: var(--lz-mono) !important;
+  font-feature-settings: "tnum" 1;
+}
+h1, h2, h3, h4, .h1, .h2, .h3 { text-wrap: balance; }
+.text-white, .text-white a { color: var(--lz-ink) !important; }
+.text-muted { color: var(--lz-muted) !important; }
+
+/* --- header ---------------------------------------------------------------- */
+.sticky-header {
+  background: rgba(16, 13, 8, 0.82) !important;
+  border-bottom: 1px solid var(--lz-line);
+}
+/* Blur behind the header via a pseudo-element: backdrop-filter on the header itself would
+ * turn it into the containing block for the mobile nav, which is position: fixed. */
+.sticky-header::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  backdrop-filter: blur(14px) saturate(1.1);
+  -webkit-backdrop-filter: blur(14px) saturate(1.1);
+  pointer-events: none;
+}
+.sticky-header::before {
+  content: "";
+  position: absolute;
+  inset: 0 0 auto;
+  height: 2px;
+  background: linear-gradient(90deg, var(--lz-brass), transparent 55%);
+  pointer-events: none;
+}
+.navbar { background: transparent !important; }
+
+/* Wordmark in place of the mempool logo; the footer keeps the project's own mark. */
+.navbar-brand app-svg-images.mempool-logo { display: none !important; }
+.navbar-brand {
+  align-items: baseline !important;
+  gap: 0.4rem;
+  font-family: var(--lz-serif);
+  font-size: 1.7rem;
+  font-weight: 500;
+  letter-spacing: -0.02em;
+  line-height: 1;
+  color: var(--lz-ink) !important;
+  text-decoration: none;
+  padding-top: 0.55rem;
+  padding-bottom: 0.45rem;
+}
+.navbar-brand::before { content: "Lazarus"; }
+.navbar-brand::after {
+  content: "Mempool";
+  font-style: italic;
+  font-weight: 400;
+  color: var(--lz-brass);
+}
+.navbar-brand .connection-badge { top: -8px; }
+
+/* Nav items: quiet by default, brass underline on hover, brass wash when active. */
+.navbar-nav .nav-item { border-bottom: 2px solid transparent; transition: border-color 140ms, background-color 140ms; }
+.navbar-nav .nav-item:hover { border-bottom-color: var(--lz-brass); }
+.navbar-nav li.nav-item.active { background-color: var(--lz-brass-wash) !important; border-bottom-color: var(--lz-brass); }
+.navbar-nav .nav-link { color: var(--lz-muted) !important; }
+.navbar-nav .nav-item.active .nav-link, .navbar-nav .nav-item:hover .nav-link { color: var(--lz-ink) !important; }
+.navbar-nav .nav-link svg { fill: currentColor; }
+
+/* Injected "Lazarus Pool" nav link (theme.js) */
+.lz-pool-item .nav-link {
+  display: flex !important;
+  align-items: center;
+  justify-content: center;
+  gap: 0.45rem;
+  height: 100%;
+  padding-inline: 0.7rem !important;
+}
+.lz-pool-item .lz-mark {
+  display: inline-grid;
+  place-items: center;
+  width: 1.45rem;
+  height: 1.45rem;
+  border: 1px solid var(--lz-brass);
+  color: var(--lz-brass);
+  font-family: var(--lz-serif);
+  font-style: italic;
+  font-size: 1.05rem;
+  line-height: 1;
+}
+.lz-pool-item .lz-label {
+  font-family: var(--lz-mono);
+  font-size: 0.72rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+.lz-pool-item .lz-label::after { content: " ↗"; color: var(--lz-faint); }
+.lz-pool-item:hover .lz-mark { background: var(--lz-brass); color: var(--lz-brass-ink); }
+@media (max-width: 991.98px) {
+  /* Bottom tab bar on small screens: icon only, like the stock items. */
+  .lz-pool-item .lz-label { display: none; }
+  .lz-pool-item .nav-link { padding: 12px 0 !important; }
+}
+
+/* Search */
+.form-control, .custom-select {
+  background-color: var(--lz-bg-inset) !important;
+  border: 1px solid var(--lz-line) !important;
+  border-radius: 2px !important;
+  color: var(--lz-ink) !important;
+}
+.form-control::placeholder { color: var(--lz-faint); }
+.form-control:focus { border-color: var(--lz-brass-dim) !important; box-shadow: 0 0 0 0.15rem #dbb56533 !important; }
+.btn-purple, .btn-primary {
+  background-color: var(--lz-brass) !important;
+  border-color: var(--lz-brass) !important;
+  color: var(--lz-brass-ink) !important;
+  border-radius: 2px;
+}
+.btn-purple:hover, .btn-primary:hover, .btn-purple:focus, .btn-primary:focus {
+  background-color: #e6c579 !important;
+  border-color: #e6c579 !important;
+  box-shadow: none !important;
+}
+.btn-purple svg, .btn-primary svg { fill: var(--lz-brass-ink); }
+.btn-secondary { background-color: var(--lz-bg-raised) !important; border-color: var(--lz-line-strong) !important; color: var(--lz-ink) !important; }
+.btn-outline-info, .btn-outline-primary { color: var(--lz-brass) !important; border-color: var(--lz-brass-dim) !important; }
+.btn-outline-info:hover, .btn-outline-primary:hover { background-color: var(--lz-brass) !important; color: var(--lz-brass-ink) !important; }
+.btn { border-radius: 2px; }
+
+/* --- surfaces ---------------------------------------------------------------- */
+.box, .card {
+  background-color: var(--lz-bg-raised) !important;
+  border: 1px solid var(--lz-line) !important;
+  border-radius: 2px !important;
+  box-shadow: none !important;
+}
+.card-header { background-color: var(--lz-bg-inset) !important; border-bottom: 1px solid var(--lz-line) !important; }
+.title-link, .title-link:hover, .title-link:focus { color: var(--lz-brass) !important; }
+.box h5, .box .title, .card h5 {
+  font-family: var(--lz-serif);
+  font-weight: 500;
+  letter-spacing: -0.01em;
+}
+.table { color: var(--lz-ink); }
+.table td, .table th { border-color: var(--lz-line) !important; }
+.table thead th { border-bottom: 1px solid var(--lz-line-strong) !important; color: var(--lz-muted); font-weight: 500; }
+.table-hover tbody tr:hover, .table tr:hover td { background-color: rgba(219, 181, 101, 0.05); color: inherit; }
+.table-striped tbody tr:nth-of-type(odd) { background-color: rgba(255, 255, 255, 0.015); }
+hr { border-color: var(--lz-line); }
+
+/* Badges / pills: brass = primary, muted greys for secondary */
+.badge { border-radius: 2px; font-weight: 500; }
+.badge-primary, .badge-info { background-color: var(--lz-brass) !important; color: var(--lz-brass-ink) !important; }
+.badge-secondary { background-color: #2a251d !important; color: var(--lz-ink) !important; border: 1px solid var(--lz-line-strong); }
+.badge-success { background-color: var(--lz-good) !important; color: #0b2214 !important; }
+.badge-danger { background-color: var(--lz-bad) !important; color: #2a0b06 !important; }
+.badge-warning { background-color: var(--lz-warn) !important; color: var(--lz-brass-ink) !important; }
+.badge-dark { background-color: var(--lz-bg-inset) !important; border: 1px solid var(--lz-line); }
+
+/* Progress meters */
+.progress { background-color: #2a251d !important; border-radius: 2px !important; }
+.progress-bar { background-color: var(--lz-brass) !important; color: var(--lz-brass-ink); }
+.progress-bar.bg-success { background-color: var(--lz-good) !important; }
+.progress-bar.bg-warning { background-color: var(--lz-warn) !important; }
+.progress-bar.bg-danger { background-color: var(--lz-bad) !important; }
+
+/* Dropdowns, tooltips, alerts, pagination */
+.dropdown-menu { background-color: var(--lz-bg-raised) !important; border: 1px solid var(--lz-line) !important; border-radius: 2px !important; color: var(--lz-ink); }
+.dropdown-item { color: var(--lz-ink) !important; }
+.dropdown-item:hover, .dropdown-item:focus { background-color: var(--lz-brass-wash) !important; }
+.tooltip-inner { background-color: var(--lz-bg-inset) !important; border: 1px solid var(--lz-line-strong); color: var(--lz-ink); border-radius: 2px; font-family: var(--lz-sans); }
+.alert, .alert-mempool { background-color: var(--lz-bg-raised) !important; border: 1px solid var(--lz-line-strong) !important; color: var(--lz-ink) !important; border-radius: 2px; }
+.page-link { background-color: var(--lz-bg-raised) !important; border-color: var(--lz-line) !important; color: var(--lz-brass) !important; }
+.page-item.active .page-link { background-color: var(--lz-brass) !important; border-color: var(--lz-brass) !important; color: var(--lz-brass-ink) !important; }
+.page-item.disabled .page-link { color: var(--lz-faint) !important; }
+.nav-tabs .nav-link.active, .nav-pills .nav-link.active { background-color: var(--lz-brass-wash) !important; color: var(--lz-ink) !important; border-color: var(--lz-line) !important; }
+.nav-tabs .nav-link { color: var(--lz-muted); }
+.btn-group .btn.active, .btn-group .btn-primary.active { background-color: var(--lz-brass) !important; color: var(--lz-brass-ink) !important; }
+
+/* Bootstrap colour utilities that mempool leans on */
+.text-info, .text-primary { color: var(--lz-brass) !important; }
+.text-success, .green-color { color: var(--lz-good) !important; }
+.text-danger, .red-color { color: var(--lz-bad) !important; }
+.text-warning, .yellow-color { color: var(--lz-warn) !important; }
+.bg-primary, .bg-info { background-color: var(--lz-brass) !important; color: var(--lz-brass-ink) !important; }
+.bg-success { background-color: var(--lz-good) !important; }
+.bg-danger { background-color: var(--lz-bad) !important; }
+
+/* Blockchain strip: the 3-D block side faces are hard-coded blue-greys in component CSS.
+ * Face gradients and fee colours come from JS (see theme.js). */
+.bitcoin-block::after { background-color: #2b261e !important; }
+.bitcoin-block::before { background-color: #1d1912 !important; }
+.mempool-block.bitcoin-block::after { background-color: #3a3328 !important; }
+.mempool-block.bitcoin-block::before { background-color: #251f17 !important; }
+.band-separator.fill { background: repeating-linear-gradient(90deg, #3a3328, #3a3328 2px, #17130d 2px 4px) !important; }
+.badge.badge-accelerated { background-color: var(--lz-brass-dim) !important; box-shadow: none !important; animation: none !important; }
+
+/* Skeleton loaders */
+.skeleton-loader { background: linear-gradient(90deg, #2a251d 25%, #3d362b 37%, #2a251d 63%) !important; }
+
+/* --- footer ---------------------------------------------------------------- */
+footer { border-top: 1px solid var(--lz-line); background-color: var(--lz-bg) !important; }
+footer a { color: var(--lz-muted) !important; }
+footer a:hover { color: var(--lz-brass) !important; }
+footer .links .category { color: var(--lz-brass) !important; font-family: var(--lz-mono); font-weight: 500 !important; font-size: 0.78em; letter-spacing: 0.06em; text-transform: uppercase; }
+footer .row.version p a { color: var(--lz-brass) !important; }
+footer .main-logo svg { opacity: 0.85; }
+footer .lz-links p { margin-bottom: 0.25rem; }
+
+/* Angular Material / ng-bootstrap bits that show up on tx pages */
+.modal-content { background-color: var(--lz-bg-raised) !important; border: 1px solid var(--lz-line-strong) !important; color: var(--lz-ink); border-radius: 2px; }
+.close { color: var(--lz-ink); text-shadow: none; }
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: var(--lz-bg); }
+::-webkit-scrollbar-thumb { background: var(--lz-line-strong); border-radius: 2px; }

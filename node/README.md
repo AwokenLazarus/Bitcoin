@@ -14,6 +14,8 @@ RPC **9332**, P2P **9333**. Lightning/mempool keep talking to this node.
 | `umbrel/bitcoin.conf` | App `bitcoin.conf`: `includeconf=umbrel-bitcoin.conf` + `includeconf=blake2b.conf` |
 | `umbrel/hooks/pre-start` | Re-bind the prefix `bitcoind` into the Knots compose after app updates, run `ensure-blake2b-services.sh`; then stock Tor HS wait |
 | `umbrel/mempool-hooks/pre-start` | Mempool app hook: widen `blocks.header` for 164-byte headers, `MEMPOOL_BACKEND=electrum` -> host electrs :50011, 800 kWU block weight, local pools JSON |
+| `umbrel/mempool-theme/` | Lazarus look for the mempool frontend: `nginx-mempool.conf` (`sub_filter` injects the theme into the app shell), `www/theme.css` (palette, type, layout), `www/theme.js` (nav + footer links, fee/goggles/chart recolouring) |
+| `pools/pools-sync.py`, `pools/pools-overrides.json` | Mining-pool list merge (Kilombino + mempool.guide + ours) and block re-attribution; runs from `../systemd/pools-sync.timer` |
 | `umbrel/docker-compose.snippet.yml` | The volume line to add (do not commit a live compose — it has RPC/Tor env) |
 | `bitcoin.conf.example` | Layout B only |
 | `datum_gateway_config.example.json` | DATUM (cookie path redacted) |
@@ -44,3 +46,42 @@ The app regenerates `umbrel-bitcoin.conf` from `data/app/settings.json` on every
 the chain's backlog sits at ~0.2-0.3 sat/vB, and the stock 1 sat/vB floor kept it out of our mempool
 and out of our block templates.
 
+
+## Mempool explorer: Lazarus theme
+
+The mempool frontend image is nginx serving a prebuilt Angular bundle, so the theme is applied without
+rebuilding it. `umbrel/mempool-hooks/pre-start` stages `umbrel/mempool-theme/` to `~/blake2b/mempool-theme/`
+and bind-mounts two paths into the `web` service: `run/conf.d` over `/etc/nginx/conf.d` (our copy of the
+stock server block plus a `sub_filter` that appends `theme.css` + `theme.js` to `</head>`, and a
+`location /lazarus/` for the assets) and `www/` at `/lazarus-theme`. Editing `www/` on the host is live;
+the nginx config needs an app restart.
+
+* `theme.css` re-points mempool's CSS variables and Bootstrap classes at the pool's palette (warm
+  near-black, brass, off-white; IBM Plex / Newsreader) and fixes the hard-coded block-side colours.
+* `theme.js` adds the **Lazarus Pool** nav item and a footer column (re-inserted on route changes via a
+  `MutationObserver`), and recolours everything the CSS cannot reach: the fee colour ramp used by the
+  mempool blocks, the fee bar and the Goggles WebGL treemap (swapped in place inside webpack's module
+  registry before the app boots), the categorical series palette (pool pie), and every colour written to
+  the SVG/canvas charts (hue-banded into the palette at `setAttribute` / `fillStyle` time; greys pass
+  through). `window.__lazarusTheme` reports which hooks took effect.
+
+If a mempool upgrade changes the bundle, the hooks degrade to stock colours rather than breaking the page.
+
+## Mempool explorer: mining-pool names
+
+The stock backend ships a SHA-256 pool list, so almost every BLAKE2b block was "Unknown".
+`pools/pools-sync.py` (every 3 min, `systemd/pools-sync.timer`, needs `~/blake2b/lib/python/pymysql`) merges:
+
+1. [Kilombino's `pools-v2.json`](https://github.com/Kilombino/mempool-bip110) -- payout addresses for
+   ~400 BLAKE2b miners and pools,
+2. [mempool.guide](https://mempool.guide/mining) pool definitions (coinbase-tag regexes), fetched per slug
+   from its weekly list and cached for a week (their API is slow; ~25 fetched per run),
+3. `pools/pools-overrides.json` -- Lazarus (pool payout address + tag, always first), extra tags, entries to
+   drop or fold (PyBLOCK's LOTTO/CAROUSEL/CHIRP -> PyBLOCK), and the generic software tags
+   (`DATUM`, `Knots`, `blake2b-mainnet`) that must match last.
+
+It upserts the `pools` table by slug (stable `unique_id`s, so a backend `pools-v2.json` import agrees),
+writes the merged list to `~/blake2b/pools/pools-v2.json` (served on :8765 for the backend), then
+re-attributes blocks from the fork height in priority order -- Lazarus, other pools, named tags, named
+addresses, `Solo <addr>` entries, generic tags -- and patches the API disk cache. New blocks are tagged
+live by the backend from the same rows; the sync only fixes ordering differences after the fact.

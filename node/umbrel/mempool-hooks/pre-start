@@ -10,9 +10,22 @@
 COMPOSE="$(readlink -f "$(dirname "${BASH_SOURCE[0]}")/../docker-compose.yml")"
 [[ -f "$COMPOSE" ]] || exit 0
 
-python3 - "$COMPOSE" <<'PY'
+# Lazarus theme for the frontend (repo: node/umbrel/mempool-theme, rsync'd to THEME).
+# nginx-mempool.conf is staged into run/conf.d, which is bind-mounted over the image's
+# /etc/nginx/conf.d: the entrypoint sed -i's the backend host/port into it, so the copy
+# must be writable by the container user (1000). www/ is mounted read-only at
+# /lazarus-theme and edits there go live without a restart.
+THEME=/home/umbrel/blake2b/mempool-theme
+THEME_OK=0
+if [[ -f "$THEME/nginx-mempool.conf" && -f "$THEME/www/theme.css" ]]; then
+  install -d -m 755 -o 1000 -g 1000 "$THEME/run" "$THEME/run/conf.d"
+  install -m 644 -o 1000 -g 1000 "$THEME/nginx-mempool.conf" "$THEME/run/conf.d/nginx-mempool.conf"
+  THEME_OK=1
+fi
+
+THEME_OK="$THEME_OK" THEME="$THEME" python3 - "$COMPOSE" <<'PY'
 from pathlib import Path
-import re, sys
+import os, re, sys
 
 p = Path(sys.argv[1])
 t = p.read_text()
@@ -42,6 +55,22 @@ for k, v in api_extra.items():
 if "      BLOCK_WEIGHT_UNITS:" not in t:
     t = t.replace("      FRONTEND_HTTP_PORT: $APP_MEMPOOL_PORT\n",
                   "      FRONTEND_HTTP_PORT: $APP_MEMPOOL_PORT\n      BLOCK_WEIGHT_UNITS: '800000'\n", 1)
+
+# Lazarus theme mounts on the web service (only when the staged files exist, since an
+# empty conf.d would leave nginx with no server block).
+theme = os.environ.get("THEME", "")
+if os.environ.get("THEME_OK") == "1" and "/lazarus-theme" not in t:
+    entries = (f"      - {theme}/run/conf.d:/etc/nginx/conf.d\n"
+               f"      - {theme}/www:/lazarus-theme:ro\n")
+    m = re.search(r"^  web:\n(.*?)(?=^  \S)", t, flags=re.M | re.S)
+    if m:
+        web = m.group(0)
+        if re.search(r"^    volumes:\n", web, flags=re.M):
+            new_web = re.sub(r"^    volumes:\n", "    volumes:\n" + entries, web, count=1, flags=re.M)
+        else:
+            new_web = web.replace("    container_name: mempool_web_1\n",
+                                  "    container_name: mempool_web_1\n    volumes:\n" + entries, 1)
+        t = t.replace(web, new_web, 1)
 
 if t != orig:
     p.write_text(t)

@@ -11,9 +11,10 @@ This is the working tree from a homelab Umbrel node after the SHA-256d → BLAKE
 | `pool/` | Public pool dashboard (reads `primed` stats: window, coinbase preview, gateways, blocks), Electrum cutover, block-notify mail |
 | `pool/config.example.json` | Copy to `config.json` and fill in |
 | `node/` | Live Umbrel Knots path (prefix install script, `blake2b.conf`, app `bitcoin.conf`, Knots + mempool pre-start hooks) |
-| `node/umbrel/` | App `bitcoin.conf`, compose bind snippet, `hooks/pre-start` |
+| `node/umbrel/` | App `bitcoin.conf`, compose bind snippet, `hooks/pre-start`, mempool hook + Lazarus theme for the mempool explorer |
+| `node/pools/` | Mining-pool list merge + block re-attribution for the mempool explorer (Kilombino, mempool.guide, Lazarus) |
 | `scripts/` | Umbrel helpers: DATUM/electrs/pool persist, mempool header widen, status |
-| `systemd/` | User units + ensure timer |
+| `systemd/` | User units, ensure timer, pools-sync timer |
 | `miner/` | OpenCL BLAKE2b GPU miner |
 | `patches/` | DATUM PROP / coinbaser wiring notes |
 | `docs/blake2b-mining-pool-playbook.md` | Operator playbook (no personal secrets) |

@@ -1,0 +1,10 @@
+[Unit]
+Description=Mempool mining-pool list merge + block re-attribution (Kilombino, mempool.guide, Lazarus)
+After=network-online.target
+
+[Service]
+Type=oneshot
+Environment=PYTHONPATH=/home/umbrel/blake2b/lib/python
+Environment=POOLS_DIR=/home/umbrel/blake2b/pools
+ExecStart=/usr/bin/python3 /home/umbrel/blake2b/bin/pools-sync.py
+TimeoutStartSec=600
