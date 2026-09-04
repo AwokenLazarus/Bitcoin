@@ -791,7 +791,7 @@
   }
   @container (max-width: 44rem) {
     .payout-hero { grid-template-columns: 1fr; }
-    .payout-arrow { display: none; }
+    .payout-hero .payout-arrow { display: none; } /* outranks the base rule below */
   }
   .payout-big {
     display: grid;
