@@ -649,7 +649,7 @@
     // Per-session rate as the stratum session reports it; the address-level credited rate
     // (what the pool actually counts) is the Hashrate metric above the table. Gateway-window
     // rows have no session, so they carry the credited rate.
-    const workerHr = (w) => (w.via === "stratum" && Number(w.firmware_hr_ghs) > 0 ? w.firmware_hr_ghs : w.hr_ghs);
+    const workerHr = (w) => (w.via === "stratum" ? (Number(w.firmware_hr_ghs) > 0 ? w.firmware_hr_ghs : null) : w.hr_ghs);
     const workers = (m.workers || [])
       .map(
         (w) =>
