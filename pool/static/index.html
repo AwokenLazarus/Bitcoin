@@ -45,7 +45,7 @@
   <section id="status" aria-label="Pool status">
     <dl class="ticker" id="stats"></dl>
     <div class="chart-wrap">
-      <div class="chart-caption">Pool hashrate · last 24h</div>
+      <div class="chart-caption">Pool hashrate · last 24h <span class="chart-legend" id="poolchart-legend" hidden></span></div>
       <canvas id="poolchart" width="1100" height="120" aria-label="Pool hashrate over the last 24 hours" role="img"></canvas>
     </div>
     <p class="note offline-note" id="prime-offline" hidden>Prime is not answering right now. Window, gateway and payout figures are the last ones it published.</p>
@@ -219,7 +219,7 @@
     </div>
     <div id="miner"></div>
     <div class="chart-wrap" id="chart-wrap" hidden>
-      <div class="chart-caption">Your hashrate · last 24h</div>
+      <div class="chart-caption">Your hashrate · last 24h <span class="chart-legend" id="chart-legend" hidden></span></div>
       <canvas id="chart" width="1100" height="120" aria-label="Your hashrate over the last 24 hours" role="img"></canvas>
     </div>
   </section>

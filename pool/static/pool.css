@@ -321,6 +321,30 @@
     text-transform: uppercase;
     color: var(--faint);
   }
+  /* Key for the block-found ticks the canvas draws along the top of the plot. */
+  .chart-legend { color: var(--good); white-space: nowrap; }
+  .chart-legend::before { content: "\25BE\00a0"; }
+  @container (max-width: 34rem) {
+    .chart-legend-noun { display: none; }
+  }
+  /* Tooltip for those ticks. Follows the pointer horizontally; sits above the plot. */
+  .chart-tip {
+    position: absolute;
+    top: 1.7rem;
+    z-index: 2;
+    display: grid;
+    gap: 0.05rem;
+    padding: 0.3rem 0.45rem;
+    border: 1px solid var(--line-strong);
+    background: var(--bg-raised);
+    box-shadow: 0 6px 18px rgb(0 0 0 / 45%);
+    font-family: var(--mono);
+    font-size: 0.68rem;
+    line-height: 1.35;
+    white-space: nowrap;
+    pointer-events: none;
+  }
+  .chart-tip b { color: var(--good); font-weight: 600; }
 
   .panel {
     padding: 0.9rem 1rem 1rem;

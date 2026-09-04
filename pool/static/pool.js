@@ -170,6 +170,7 @@
     return x.toExponential(2);
   };
   const when = (ts) => (ts ? new Date(ts * 1000).toLocaleString([], { dateStyle: "medium", timeStyle: "short" }) : "");
+  const clock = (ts) => (ts ? new Date(ts * 1000).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }) : "");
   const j = async (url) => {
     const r = await fetch(url);
     if (!r.ok) throw new Error(url + " " + r.status);
@@ -275,7 +276,6 @@
     }
     const build = $("prime-build");
     if (build) build.textContent = pr.name ? "Pool server: " + pr.name + (pr.version ? " " + pr.version : "") + (pr.uptime_s ? " · up " + dur(pr.uptime_s) : "") + " · coinbase tag " + (pr.tag || "Lazarus") : "";
-    draw($("poolchart"), p.history || [], "hr_ghs");
   }
 
   // ------------------------------------------------------------ payout hero
@@ -423,7 +423,7 @@
   // ---------------------------------------------------------------- blocks
   function foundBlocks(pays, p) {
     const el = $("found");
-    if (!el) return;
+    if (!el) return [];
     const poolAddr = (p.prime && p.prime.address) || "";
     const byPrime = new Map((pays.prime_blocks || []).filter((b) => b.hash).map((b) => [b.hash, b]));
     const partsFor = (hash, combined) => {
@@ -506,6 +506,41 @@
       tr.addEventListener("click", (e) => { if (!e.target.closest("a")) toggle(); });
       tr.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); toggle(); } });
     });
+    return blocks;
+  }
+
+  // Legend + screen-reader text for the marks that landed inside the drawn window.
+  function chartLegend(el, c, one, many) {
+    const n = (c && c.__hits ? c.__hits : []).reduce((a, hit) => a + hit.items.length, 0);
+    const label = n ? `${n} ${n === 1 ? one : many}` : "";
+    if (el) {
+      // The noun is dropped in a narrow container (see .chart-legend-noun), where the
+      // caption has no room for it; the arrow and the count carry the meaning.
+      el.innerHTML = n ? `${n}<span class="chart-legend-noun"> ${esc(n === 1 ? one : many)}</span>` : "";
+      el.hidden = !n;
+    }
+    if (c) {
+      const base = c.dataset.label || c.getAttribute("aria-label") || "";
+      c.dataset.label = base;
+      c.setAttribute("aria-label", n ? `${base}, with ${label} marked` : base);
+    }
+  }
+
+  // One trend marker per found block. Orphans are marked too and say so, since the pool did
+  // find them; the reward just did not stick.
+  function blockMarks(blocks) {
+    return (blocks || [])
+      .filter((b) => Number(b.ts) > 0)
+      .map((b) => {
+        const reward = Number(b.reward) || (Number(b.miner_btc) || 0) + (Number(b.pool_btc) || 0);
+        const st = String(b.prime_only ? b.block_status : b.status || "").toLowerCase();
+        const note = st === "orphaned" || st === "rejected" ? " · " + st : "";
+        return {
+          ts: Number(b.ts),
+          title: (b.height ? "Block " + num(b.height) : "Block found") + " · " + clock(b.ts),
+          sub: (reward ? btc(reward) + " BTC" : "") + note,
+        };
+      });
   }
 
   function continuous(hist, key, bucketSec) {
@@ -543,9 +578,60 @@
     return series;
   }
 
-  function draw(c, hist, key) {
+  // Markers on the trend: one tick per block found, hover for height and amount. `marks` is
+  // [{ts, title, sub}]; ticks closer together than a few pixels share one arrow and tooltip.
+  const CHART_MARK = "oklch(76% 0.13 155)";
+  const MARK_GAP_PX = 7;
+
+  function chartTip(c) {
+    const wrap = c.parentElement;
+    if (!wrap) return null;
+    let tip = wrap.querySelector(".chart-tip");
+    if (!tip) {
+      tip = document.createElement("div");
+      tip.className = "chart-tip";
+      tip.hidden = true;
+      wrap.appendChild(tip);
+    }
+    return tip;
+  }
+
+  function markHover(c) {
+    if (c.__markHover) return;
+    c.__markHover = true;
+    const hide = () => {
+      const tip = chartTip(c);
+      if (tip) tip.hidden = true;
+    };
+    const show = (e) => {
+      const hits = c.__hits || [];
+      const tip = chartTip(c);
+      if (!tip) return;
+      if (!hits.length) return hide();
+      const r = c.getBoundingClientRect();
+      const x = e.clientX - r.left;
+      let best = null;
+      for (const hit of hits) {
+        const d = Math.abs(hit.x - x);
+        if (d <= 11 && (!best || d < Math.abs(best.x - x))) best = hit;
+      }
+      if (!best) return hide();
+      tip.innerHTML = best.html;
+      tip.hidden = false;
+      // Keep the tooltip inside the plot; flip it left of the tick near the right edge.
+      const tw = tip.offsetWidth;
+      tip.style.left = Math.max(2, Math.min(r.width - tw - 2, best.x - tw / 2)) + "px";
+    };
+    c.addEventListener("pointermove", show);
+    c.addEventListener("pointerdown", show);
+    c.addEventListener("pointerleave", hide);
+  }
+
+  function draw(c, hist, key, marks) {
     if (!c) return;
-    try { c.dataset.last = JSON.stringify(hist || []); } catch (e) {}
+    c.__hist = hist || [];
+    c.__marks = marks || [];
+    c.__hits = [];
     const ctx = c.getContext("2d");
     const dpr = Math.max(1, window.devicePixelRatio || 1);
     const cssW = c.clientWidth || c.width;
@@ -566,7 +652,12 @@
     const maxY = Math.max(...ys, 0.01);
     const minX = series[0].ts;
     const maxX = series[series.length - 1].ts || minX + 1;
-    const pad = { l: 6, r: 52, t: 22, b: 18 };
+    // Marks get their own row between the caption and the plot, so the arrows never sit on
+    // top of the caption or the line. No marks in view, no row.
+    const inView = c.__marks
+      .filter((m) => m && Number.isFinite(Number(m.ts)) && m.ts >= minX && m.ts <= maxX)
+      .sort((a, b) => a.ts - b.ts); // clustering below walks left to right
+    const pad = { l: 6, r: 52, t: inView.length ? 30 : 22, b: 18 };
     const w = cssW - pad.l - pad.r;
     const h = cssH - pad.t - pad.b;
     const pt = (item) => {
@@ -587,6 +678,40 @@
     }
     ctx.setLineDash([]);
     ctx.restore();
+    // Cluster the marks by pixel so a burst of blocks reads as one arrow, then draw the
+    // ticks under the area fill and the arrows over the line.
+    const hits = [];
+    for (const m of inView) {
+      const x = pad.l + ((m.ts - minX) / (maxX - minX)) * w;
+      const prev = hits[hits.length - 1];
+      if (prev && x - prev.x <= MARK_GAP_PX) prev.items.push(m);
+      else hits.push({ x, items: [m] });
+    }
+    for (const hit of hits) {
+      const n = hit.items.length;
+      const head = n === 1 ? "" : `<b>${n} blocks</b>`;
+      const rows = hit.items
+        .slice(0, 4)
+        .map((m) => `<span>${esc(m.title || "")}</span>${m.sub ? `<span class="faint">${esc(m.sub)}</span>` : ""}`)
+        .join("");
+      hit.html = head + rows + (n > 4 ? `<span class="faint">+${n - 4} more</span>` : "");
+    }
+    c.__hits = hits;
+    if (hits.length) {
+      ctx.save();
+      ctx.strokeStyle = CHART_MARK;
+      ctx.globalAlpha = 0.3;
+      ctx.lineWidth = 1;
+      ctx.setLineDash([2, 3]);
+      for (const hit of hits) {
+        ctx.beginPath();
+        ctx.moveTo(hit.x, pad.t);
+        ctx.lineTo(hit.x, pad.t + h);
+        ctx.stroke();
+      }
+      ctx.restore();
+      markHover(c);
+    }
     const fill = ctx.createLinearGradient(0, pad.t, 0, pad.t + h);
     fill.addColorStop(0, "rgba(212,180,90,0.28)");
     fill.addColorStop(1, "rgba(212,180,90,0)");
@@ -612,6 +737,17 @@
     ctx.lineJoin = "round";
     ctx.lineCap = "round";
     ctx.stroke();
+    for (const hit of c.__hits || []) {
+      ctx.save();
+      ctx.fillStyle = CHART_MARK;
+      ctx.beginPath();
+      ctx.moveTo(hit.x - 3.5, pad.t - 7);
+      ctx.lineTo(hit.x + 3.5, pad.t - 7);
+      ctx.lineTo(hit.x, pad.t - 2);
+      ctx.closePath();
+      ctx.fill();
+      ctx.restore();
+    }
     ctx.fillStyle = "#8a7d62";
     ctx.font = "10px IBM Plex Mono, ui-monospace, monospace";
     ctx.textAlign = "right";
@@ -711,7 +847,20 @@
         </div>
       </div>`;
     showChart(true);
-    draw($("chart"), m.history || [], "hr_ghs");
+    // Same trend markers, but from this address's side: the blocks its work was paid in.
+    draw(
+      $("chart"),
+      m.history || [],
+      "hr_ghs",
+      (m.blocks_found || [])
+        .filter((b) => Number(b.ts) > 0)
+        .map((b) => ({
+          ts: Number(b.ts),
+          title: (b.height ? "Block " + num(b.height) : "Block") + " · " + clock(b.ts),
+          sub: btc(b.miner_btc) + " BTC to you" + (payStatus(b) === "immature" ? " · immature" : ""),
+        }))
+    );
+    chartLegend($("chart-legend"), $("chart"), "block paid you", "blocks paid you");
   }
 
   // --------------------------------------------------------------- refresh
@@ -774,7 +923,9 @@
         ? `${seenAll.length > SEEN_ROWS ? `${SEEN_ROWS} of ` : ""}${seenAll.length} address${seenAll.length === 1 ? "" : "es"}${holding ? ` · ${holding} still in the window` : ""}`
         : "";
     }
-    foundBlocks(pays, p);
+    const marks = blockMarks(foundBlocks(pays, p));
+    draw($("poolchart"), p.history || [], "hr_ghs", marks);
+    chartLegend($("poolchart-legend"), $("poolchart"), "block found", "blocks found");
     table(
       $("blocktable"),
       ["Height", "Miner tag", "Time", "Txs", ""],
@@ -826,11 +977,14 @@
   refresh().catch((e) => console.error(e));
   setInterval(() => refresh().catch((e) => console.error(e)), 10000);
   window.addEventListener("resize", () => {
-    for (const id of ["poolchart", "chart"]) {
+    for (const [id, legend, one, many] of [
+      ["poolchart", "poolchart-legend", "block found", "blocks found"],
+      ["chart", "chart-legend", "block paid you", "blocks paid you"],
+    ]) {
       const c = $(id);
-      if (c && c.dataset.last) {
-        try { draw(c, JSON.parse(c.dataset.last), "hr_ghs"); } catch (e) {}
-      }
+      if (!c || !c.__hist) continue;
+      draw(c, c.__hist, "hr_ghs", c.__marks);
+      chartLegend($(legend), c, one, many);
     }
   });
 })();
