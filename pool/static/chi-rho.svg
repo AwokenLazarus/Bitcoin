@@ -1,8 +1,8 @@
-<!-- Chi Rho (labarum, U+2627): the Lazarus mark, identical to the mempool theme's copy at
-     node/umbrel/mempool-theme/www/chi-rho.svg. pool.css masks the same geometry inline as
-     --chi-rho so the wordmark's mark inherits --brass; this file is here for anything that
-     needs a real image (touch icon, docs). -->
+<!-- Chi Rho (labarum): the Lazarus mark. A Newsreader Rho whose stem is drawn out into
+     a staff, with a Chi crossing it, in the proportions of classical labarum art: bowl a
+     quarter of the height, Chi just over half, crossing the stem 62 percent of the way
+     down. Same geometry as the copy at node/umbrel/mempool-theme/www/chi-rho.svg,
+     and as the masked copy in pool/static/pool.css. -->
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" role="img" aria-label="Chi Rho">
-  <path fill="none" stroke="#dbb565" stroke-width="3.4" stroke-linecap="round" stroke-linejoin="round"
-        d="M16 3.2v25.6M16 3.2h2.2a3.7 3.7 0 0 1 0 7.4h-2.2M7.6 7.6 24.4 24.4M24.4 7.6 7.6 24.4"/>
+  <path fill="#dbb565" d="M21.42 4.9C21.42 3.72 21.04 2.89 20.16 2.46C19.72 2.24 19.12 2.13 18.38 2.13H15.47L15.54 1H19.25C20.3 1 21.15 1.17 21.79 1.51C22.43 1.85 22.9 2.31 23.2 2.89C23.5 3.46 23.64 4.11 23.64 4.81C23.64 5.54 23.49 6.2 23.19 6.81C22.88 7.41 22.4 7.9 21.76 8.26C21.11 8.62 20.8 8.8 19.59 8.8H15.54L15.47 7.67H19.02C19.95 7.67 20.7 7.24 21.11 6.42C21.32 6.01 21.42 5.5 21.42 4.9ZM17.3 1 17.3 11.15V30.01L18.81 30.58V31H13.2V30.58L14.71 30.01V11.15V1.99L13.2 1.42V1ZM15.64 20.04 10.1 26.38 12.09 27.05V27.55H6.45V27.05L8.41 26.38L14.91 19.18L15.8 18.53L20.69 12.82L18.69 12.15V11.65H24.34V12.15L22.39 12.82L16.55 19.38ZM19.62 26.38 14.93 20.49 14.52 20.12 8.65 12.84 6.74 12.15V11.65H14.82V12.15L12.65 12.82L16.68 17.93L17.12 18.34L23.63 26.36L25.55 27.05V27.55H17.45V27.05Z"/>
 </svg>

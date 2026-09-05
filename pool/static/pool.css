@@ -32,9 +32,10 @@
     --sans: "IBM Plex Sans", "Helvetica Neue", Helvetica, Arial, sans-serif;
     --serif: "Newsreader", "Iowan Old Style", Palatino, "Times New Roman", serif;
     --mono: "IBM Plex Mono", ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
-    /* Chi Rho (labarum, U+2627): the Lazarus mark, geometry identical to static/chi-rho.svg
-       and the mempool theme's copy. Kept as a mask so it takes --brass wherever it is used. */
-    --chi-rho: url("data:image/svg+xml,%3Csvg%20xmlns=%22http://www.w3.org/2000/svg%22%20viewBox=%220%200%2032%2032%22%3E%3Cpath%20fill=%22none%22%20stroke=%22%23000%22%20stroke-width=%223.4%22%20stroke-linecap=%22round%22%20stroke-linejoin=%22round%22%20d=%22M16%203.2v25.6M16%203.2h2.2a3.7%203.7%200%200%201%200%207.4h-2.2M7.6%207.6%2024.4%2024.4M24.4%207.6%207.6%2024.4%22/%3E%3C/svg%3E");
+    /* Chi Rho (labarum): the Lazarus mark, geometry identical to static/chi-rho.svg and the
+       mempool theme's copy. Kept as a mask so it takes --brass wherever it is used. Its viewBox
+       is cropped to the mark, so any box masking it wants width = 0.636 * height. */
+    --chi-rho: url("data:image/svg+xml,%3Csvg%20xmlns=%22http://www.w3.org/2000/svg%22%20viewBox=%220%200%2020.36%2032%22%3E%3Cpath%20d=%22M15.96%204.16C15.96%202.91%2015.56%202.02%2014.61%201.56C14.14%201.33%2013.51%201.21%2012.71%201.21H9.61L9.69%200H13.65C14.77%200%2015.67%200.18%2016.36%200.55C17.04%200.91%2017.54%201.4%2017.86%202.01C18.17%202.63%2018.33%203.32%2018.33%204.07C18.33%204.84%2018.17%205.55%2017.84%206.2C17.52%206.84%2017.01%207.36%2016.32%207.75C15.63%208.13%2015.3%208.33%2014.01%208.33H9.69L9.61%207.12H13.4C14.39%207.12%2015.19%206.66%2015.63%205.78C15.85%205.35%2015.96%204.81%2015.96%204.16ZM11.57%200%2011.57%2010.83V30.94L13.18%2031.55V32H7.2V31.55L8.8%2030.94V10.83V1.06L7.2%200.45V0ZM9.8%2020.31%203.89%2027.07%206.01%2027.79V28.32H0V27.79L2.08%2027.07L9.02%2019.39L9.97%2018.7L15.18%2012.61L13.05%2011.89V11.36H19.07V11.89L16.99%2012.61L10.77%2019.61ZM14.05%2027.07%209.04%2020.79%208.6%2020.39%202.34%2012.63%200.3%2011.89V11.36H8.93V11.89L6.61%2012.61L10.91%2018.05L11.38%2018.5L18.32%2027.04L20.36%2027.79V28.32H11.73V27.79Z%22/%3E%3C/svg%3E");
     --space: 1.15rem;
     --measure: 74rem;
     --radius: 2px;
@@ -133,9 +134,9 @@
   .wordmark::before {
     content: "";
     display: inline-block;
-    width: 1.02em;
+    width: 0.65em;
     height: 1.02em;
-    margin-right: 0.3em;
+    margin-right: 0.34em;
     vertical-align: -0.15em;
     background: var(--brass);
     -webkit-mask: var(--chi-rho) center / contain no-repeat;

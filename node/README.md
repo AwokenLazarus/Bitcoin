@@ -73,8 +73,13 @@ If a mempool upgrade changes the bundle, the hooks degrade to stock colours rath
 
 ### The Chi Rho mark
 
-`www/chi-rho.svg` is the Lazarus mark, a Chi Rho (labarum, U+2627) drawn as one stroked path in brass.
-It is the same geometry as `--chi-rho` in `pool/static/pool.css`, so the two sites carry one mark.
+`www/chi-rho.svg` is the Lazarus mark, a Chi Rho (labarum) as a filled brass letterform: the Rho and Chi
+are real [Newsreader](https://fonts.google.com/specimen/Newsreader) outlines — the same serif as both
+wordmarks — set in the proportions of classical labarum art, with the Rho's stem drawn out into a staff
+(bowl a quarter of the height, Chi just over half, crossing the stem 62% of the way down, whole mark
+0.64 as wide as tall). It is the same geometry as `--chi-rho` in `pool/static/pool.css`, so the two sites
+carry one mark. Because that viewBox is cropped to the mark rather than square, anything masking it wants
+`width: 0.636 * height`; the `.svg` files keep a square canvas so square `<img>` slots letterbox it.
 `nginx-mempool.conf` serves it at three kinds of URL:
 
 * `/resources/mining-pools/lazarus.svg` — **the pool icon.** The frontend builds each badge's image URL
@@ -83,8 +88,8 @@ It is the same geometry as `--chi-rho` in `pool/static/pool.css`, so the two sit
   the block list, the block page's *Miner* row and block strip, and `/mining/pool/lazarus`. Attribution
   is untouched — this is only the image for the `lazarus` slug.
 * `/resources/favicons/{favicon.ico,favicon-16x16.png,favicon-32x32.png,apple-touch-icon.png}` — the tab
-  and touch icons, from `chi-rho-icon.svg` (the mark inset on the pool's near-black, one notch lighter in
-  the stroke so the Rho's counter survives 16px). Regenerate after editing that file:
+  and touch icons, from `chi-rho-icon.svg` (the mark on the pool's near-black with a narrower margin, so
+  it uses every pixel it can at 16px). Regenerate after editing that file:
 
   ```sh
   cd node/umbrel/mempool-theme/www
