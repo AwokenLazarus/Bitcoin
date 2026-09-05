@@ -13,7 +13,7 @@ use crate::MinerStat;
 pub struct SplitParams {
     /// DATUM / Prime-gateway fee in basis points (50 = 0.5%).
     pub fee_bps: u32,
-    /// Public house-stratum fee in basis points (500 = 5%). 0 means same as `fee_bps`.
+    /// Public house-stratum fee in basis points (250 = 2.5%). 0 means same as `fee_bps`.
     pub stratum_fee_bps: u32,
     /// Smallest output the split will emit, in sats.
     pub min_payout: u64,

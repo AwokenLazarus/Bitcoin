@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Lazarus Pool — BLAKE2b Bitcoin mining, paid in the coinbase</title>
-<meta name="description" content="Lazarus Pool mines BLAKE2b Bitcoin. Every block pays miners directly in its coinbase by TIDES window share. 0.5% fee through your own DATUM gateway, 5% on the public stratum.">
+<meta name="description" content="Lazarus Pool mines BLAKE2b Bitcoin. Every block pays miners directly in its coinbase by TIDES window share. 0.5% fee through your own DATUM gateway, 2.5% on the public stratum.">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;1,400&family=Newsreader:ital,opsz,wght@0,6..72,500;1,6..72,400;1,6..72,500&display=swap">
@@ -51,7 +51,7 @@
     <p class="note offline-note" id="prime-offline" hidden>Prime is not answering right now. Window, gateway and payout figures are the last ones it published.</p>
     <ul class="pillars" aria-label="What makes Lazarus different">
       <li><b>Paid in the block itself.</b> No pool balance, no withdrawals. When a block is found, its coinbase pays your address directly. <a href="#payout">See the next payout</a>.</li>
-      <li><b>Bring your own gateway, keep 99.5%.</b> Run Bitcoin Knots and a stock DATUM gateway: your node builds the block, the pool only sets the split. Public stratum is <span id="pillar-stratum-fee">5%</span>. <a href="#connect">Connect</a>.</li>
+      <li><b>Bring your own gateway, keep 99.5%.</b> Run Bitcoin Knots and a stock DATUM gateway: your node builds the block, the pool only sets the split. Public stratum is <span id="pillar-stratum-fee">2.5%</span>. <a href="#connect">Connect</a>.</li>
       <li><b>Verifiable end to end.</b> Every share is rebuilt and hashed; every block found is on the <a href="https://mempool.awokenlazarus.xyz/mining/pool/lazarus" target="_blank" rel="noreferrer">Lazarus Mempool</a>. Source on <a href="https://github.com/AwokenLazarus/Bitcoin" target="_blank" rel="noreferrer">GitHub</a>.</li>
     </ul>
   </section>
@@ -123,7 +123,7 @@
       <div class="fee-card" data-tab="tab-stratum" role="button" tabindex="0">
         <p class="fee-kicker">Simplest · point and go</p>
         <p class="fee-title">Public stratum</p>
-        <p class="fee-rate"><span id="fee-stratum">5%</span></p>
+        <p class="fee-rate"><span id="fee-stratum">2.5%</span></p>
         <p class="fee-copy">Our node, our templates. Any BLAKE2b ASIC or miner. Same TIDES window — switch to a gateway later and your accepted work comes with you.</p>
         <p class="fee-cta">Setup below</p>
       </div>
@@ -132,7 +132,7 @@
     <div class="tabs" data-tabs>
       <div class="tablist" role="tablist" aria-label="Mining paths">
         <button class="tab" role="tab" type="button" id="tab-stratum" aria-controls="pane-stratum" aria-selected="true">
-          <span class="tab-title">Public stratum <span class="tab-fee" id="tab-fee-stratum">5%</span></span>
+          <span class="tab-title">Public stratum <span class="tab-fee" id="tab-fee-stratum">2.5%</span></span>
           <span class="tab-sub">Point and go · our node builds the block</span>
         </button>
         <button class="tab" role="tab" type="button" id="tab-datum" aria-controls="pane-datum" aria-selected="false">
@@ -147,7 +147,7 @@
           <dd class="copyable"><span class="mono" id="stratum"></span><button type="button" class="copy-btn" data-copy-from="stratum" aria-label="Copy stratum URL" title="Copy"></button></dd>
           <dt>User</dt><dd class="mono">bc1q…youraddress.worker</dd>
           <dt>Pass</dt><dd class="mono">x</dd>
-          <dt>Fee</dt><dd><span id="stratum-fee-line">5%</span> of your window share, taken inside the coinbase</dd>
+          <dt>Fee</dt><dd><span id="stratum-fee-line">2.5%</span> of your window share, taken inside the coinbase</dd>
           <dt>Algo</dt><dd>BLAKE2b — Sia-style header, not SHA-256d</dd>
           <dt>Payout</dt><dd>Your share of the TIDES window, in the coinbase of every block the pool finds. See <a href="#payout">Next payout</a>.</dd>
         </dl>
@@ -163,7 +163,7 @@
           <dd class="copyable"><span class="mono" id="datum-port">28915</span><button type="button" class="copy-btn" data-copy-from="datum-port" aria-label="Copy DATUM port" title="Copy"></button></dd>
           <dt>Pubkey</dt>
           <dd class="copyable"><span class="mono pubkey" id="datum-pubkey">—</span><button type="button" class="copy-btn" data-copy-from="datum-pubkey" aria-label="Copy pool pubkey" title="Copy"></button></dd>
-          <dt>Fee</dt><dd><span id="datum-fee-line">0.5%</span> of your window share — ten times lower than the public stratum</dd>
+          <dt>Fee</dt><dd><span id="datum-fee-line">0.5%</span> of your window share — <span id="fee-ratio">five times</span> lower than the public stratum</dd>
           <dt>Gateway</dt>
           <dd>Any stock DATUM gateway that speaks BLAKE2b: <a href="https://github.com/CONVOYMining/datum_gateway" target="_blank" rel="noreferrer">CONVOY</a>, <a href="https://github.com/FlyTheElephant1/datum_gateway" target="_blank" rel="noreferrer">FlyTheElephant1</a> or <a href="https://github.com/iohzrd/datum_gateway" target="_blank" rel="noreferrer">iohzrd</a>. No patch, no special build.</dd>
         </dl>
@@ -327,6 +327,6 @@
   </div>
 </footer>
 
-<script src="/static/pool.js?v=suite1"></script>
+<script src="/static/pool.js?v=fee25"></script>
 </body>
 </html>

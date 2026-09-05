@@ -36,8 +36,8 @@ window-min-work = 0
 min-payout = 546
 # DATUM / Prime-gateway fee in basis points (50 = 0.5%).
 fee-bps = 50
-# Public house-stratum fee (500 = 5%). 0 inherits fee-bps.
-stratum-fee-bps = 500
+# Public house-stratum fee (250 = 2.5%). 0 inherits fee-bps.
+stratum-fee-bps = 250
 # Signing-key prefixes (hex) of the pool's own public-stratum gateway.
 # Remote DATUM users who run lazarus-gateway are not matched by UA — only
 # loopback (default) and these prefixes pay the higher fee.

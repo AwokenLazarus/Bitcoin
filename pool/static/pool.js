@@ -81,7 +81,7 @@
 
   // Fee schedule as primed reports it: one rate for work through a miner's own DATUM
   // gateway, another for our public stratum. Filled from /api/pool on every refresh.
-  const fees = { datum: 0.5, stratum: 5 };
+  const fees = { datum: 0.5, stratum: 2.5 };
   const feePct = (x) => (Number.isFinite(Number(x)) ? Number(x).toLocaleString(undefined, { maximumFractionDigits: 2 }) + "%" : "\u2014");
   const feeForPath = (path) => (String(path || "").toLowerCase() === "stratum" ? fees.stratum : fees.datum);
   // Which fee schedule an address is on, as a small labelled pill.
@@ -200,6 +200,11 @@
     const setText = (id, t) => { const e = $(id); if (e) e.textContent = t; };
     for (const id of ["fee-datum", "tab-fee-datum", "datum-fee-line"]) setText(id, feePct(fees.datum));
     for (const id of ["fee-stratum", "tab-fee-stratum", "stratum-fee-line", "pillar-stratum-fee"]) setText(id, feePct(fees.stratum));
+    if (fees.datum > 0 && fees.stratum > fees.datum) {
+      const r = fees.stratum / fees.datum;
+      const words = { 2: "twice", 5: "five times", 10: "ten times" }[r] || (Number.isInteger(r) ? r + " times" : r.toFixed(1) + "×");
+      setText("fee-ratio", words);
+    }
     setText("how-window", String(Number(p.window_multiple) || 8));
     setText("how-fees", fees.datum === fees.stratum
       ? `Fee: ${feePct(fees.datum)} of each miner's window share, taken inside the coinbase.`

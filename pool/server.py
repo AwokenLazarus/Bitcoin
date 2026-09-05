@@ -22,7 +22,7 @@ NO_WRITE = os.environ.get("POOL_UI_NO_WRITE") == "1"
 
 POOL_FEE = float(CONF.get("pool_fee_percent", 0))
 # Public-stratum fee when primed is not answering; primed's stats.json is authoritative.
-STRATUM_FEE = float(CONF.get("stratum_fee_percent", POOL_FEE))
+STRATUM_FEE = float(CONF.get("stratum_fee_percent", 2.5))
 STRATUM_HOST = CONF.get("stratum_host", "27.69.0.25")
 STRATUM_PORT = int(CONF.get("stratum_port", 23334))
 DATUM_URL = CONF.get("datum_url", "http://127.0.0.1:7152")
