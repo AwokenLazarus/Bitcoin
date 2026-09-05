@@ -1,0 +1,10 @@
+<!-- Favicon / touch-icon form of the Lazarus mark: the Chi Rho inset on the pool's near-black,
+     one notch lighter in the stroke than chi-rho.svg so the Rho's counter stays open at 16px.
+     Source for favicon-16x16.png, favicon-32x32.png, favicon.ico and apple-touch-icon.png
+     beside it; node/README.md has the regeneration command. -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" role="img" aria-label="Chi Rho">
+  <rect width="32" height="32" fill="#1c1914"/>
+  <path transform="translate(16 16) scale(.9) translate(-16 -16)"
+        fill="none" stroke="#dbb565" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"
+        d="M16 3.2v25.6M16 3.2h2.2a3.7 3.7 0 0 1 0 7.4h-2.2M7.6 7.6 24.4 24.4M24.4 7.6 7.6 24.4"/>
+</svg>

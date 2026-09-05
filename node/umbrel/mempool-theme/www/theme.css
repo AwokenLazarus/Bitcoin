@@ -25,6 +25,10 @@
   --lz-sans: "IBM Plex Sans", "Helvetica Neue", Helvetica, Arial, sans-serif;
   --lz-serif: "Newsreader", "Iowan Old Style", Palatino, "Times New Roman", serif;
   --lz-mono: "IBM Plex Mono", ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+  /* Chi Rho (labarum, U+2627): the Lazarus mark, geometry identical to chi-rho.svg next door
+     and to --chi-rho in pool/static/pool.css. Masked so it takes --lz-brass where it is used;
+     the .svg file is what nginx serves as the mining-pool logo. */
+  --lz-chi-rho: url("data:image/svg+xml,%3Csvg%20xmlns=%22http://www.w3.org/2000/svg%22%20viewBox=%220%200%2032%2032%22%3E%3Cpath%20fill=%22none%22%20stroke=%22%23000%22%20stroke-width=%223.4%22%20stroke-linecap=%22round%22%20stroke-linejoin=%22round%22%20d=%22M16%203.2v25.6M16%203.2h2.2a3.7%203.7%200%200%201%200%207.4h-2.2M7.6%207.6%2024.4%2024.4M24.4%207.6%207.6%2024.4%22/%3E%3C/svg%3E");
 
   /* mempool theme variables */
   --bg: var(--lz-bg);
@@ -132,8 +136,22 @@ h1, h2, h3, h4, .h1, .h2, .h3 { text-wrap: balance; }
 }
 .navbar { background: transparent !important; }
 
-/* Wordmark in place of the mempool logo; the footer keeps the project's own mark. */
-.navbar-brand app-svg-images.mempool-logo { display: none !important; }
+/* Wordmark in place of the mempool logo; the footer keeps the project's own mark. The stock
+   logo element stays in the flow and carries the Chi Rho, so the brand reads mark + wordmark
+   without touching the app's DOM. It is the brand's only real child, so it sits between the
+   two pseudo-elements holding the wordmark; order pulls it back in front of them. */
+.navbar-brand app-svg-images.mempool-logo {
+  display: inline-block !important;
+  order: -1;
+  align-self: center;
+  vertical-align: -0.16em;
+  width: 1.05em;
+  height: 1.05em;
+  background: var(--lz-brass);
+  -webkit-mask: var(--lz-chi-rho) center / contain no-repeat;
+  mask: var(--lz-chi-rho) center / contain no-repeat;
+}
+.navbar-brand app-svg-images.mempool-logo svg { display: none !important; }
 .navbar-brand {
   align-items: baseline !important;
   gap: 0.4rem;
@@ -174,16 +192,13 @@ h1, h2, h3, h4, .h1, .h2, .h3 { text-wrap: balance; }
   padding-inline: 0.7rem !important;
 }
 .lz-pool-item .lz-mark {
-  display: inline-grid;
-  place-items: center;
-  width: 1.45rem;
-  height: 1.45rem;
-  border: 1px solid var(--lz-brass);
-  color: var(--lz-brass);
-  font-family: var(--lz-serif);
-  font-style: italic;
-  font-size: 1.05rem;
-  line-height: 1;
+  display: block;
+  width: 1.3rem;
+  height: 1.3rem;
+  background: var(--lz-brass-dim);
+  -webkit-mask: var(--lz-chi-rho) center / contain no-repeat;
+  mask: var(--lz-chi-rho) center / contain no-repeat;
+  transition: background-color 140ms;
 }
 .lz-pool-item .lz-label {
   font-family: var(--lz-mono);
@@ -193,7 +208,7 @@ h1, h2, h3, h4, .h1, .h2, .h3 { text-wrap: balance; }
   white-space: nowrap;
 }
 .lz-pool-item .lz-label::after { content: " ↗"; color: var(--lz-faint); }
-.lz-pool-item:hover .lz-mark { background: var(--lz-brass); color: var(--lz-brass-ink); }
+.lz-pool-item:hover .lz-mark { background: var(--lz-brass); }
 @media (max-width: 991.98px) {
   /* Bottom tab bar on small screens: icon only, like the stock items. */
   .lz-pool-item .lz-label { display: none; }

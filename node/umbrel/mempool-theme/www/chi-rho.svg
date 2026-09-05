@@ -1,0 +1,10 @@
+<!-- Chi Rho (labarum, U+2627): the Lazarus mark. Chi centred on the Rho's stem, bowl top
+     right, stroked so it survives the 20-25px the mempool block badges render it at. One
+     path with four subpaths, so overlaps rasterise as a single region with no seams.
+     Served as /resources/mining-pools/lazarus.svg, which is what makes Lazarus blocks show
+     this instead of the frontend's default pickaxe. theme.css masks the same geometry for
+     the nav mark; pool/static/chi-rho.svg is the identical twin on the pool site. -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" role="img" aria-label="Chi Rho">
+  <path fill="none" stroke="#dbb565" stroke-width="3.4" stroke-linecap="round" stroke-linejoin="round"
+        d="M16 3.2v25.6M16 3.2h2.2a3.7 3.7 0 0 1 0 7.4h-2.2M7.6 7.6 24.4 24.4M24.4 7.6 7.6 24.4"/>
+</svg>

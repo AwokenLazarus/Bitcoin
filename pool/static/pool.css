@@ -32,6 +32,9 @@
     --sans: "IBM Plex Sans", "Helvetica Neue", Helvetica, Arial, sans-serif;
     --serif: "Newsreader", "Iowan Old Style", Palatino, "Times New Roman", serif;
     --mono: "IBM Plex Mono", ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+    /* Chi Rho (labarum, U+2627): the Lazarus mark, geometry identical to static/chi-rho.svg
+       and the mempool theme's copy. Kept as a mask so it takes --brass wherever it is used. */
+    --chi-rho: url("data:image/svg+xml,%3Csvg%20xmlns=%22http://www.w3.org/2000/svg%22%20viewBox=%220%200%2032%2032%22%3E%3Cpath%20fill=%22none%22%20stroke=%22%23000%22%20stroke-width=%223.4%22%20stroke-linecap=%22round%22%20stroke-linejoin=%22round%22%20d=%22M16%203.2v25.6M16%203.2h2.2a3.7%203.7%200%200%201%200%207.4h-2.2M7.6%207.6%2024.4%2024.4M24.4%207.6%207.6%2024.4%22/%3E%3C/svg%3E");
     --space: 1.15rem;
     --measure: 74rem;
     --radius: 2px;
@@ -124,6 +127,19 @@
     line-height: 1;
     color: var(--ink);
     text-decoration: none;
+  }
+  /* Chi Rho ahead of the wordmark. Masked rather than inlined so it takes --brass and scales
+     with font-size, which is what shrinks it for .wordmark.small in the footer. */
+  .wordmark::before {
+    content: "";
+    display: inline-block;
+    width: 1.02em;
+    height: 1.02em;
+    margin-right: 0.3em;
+    vertical-align: -0.15em;
+    background: var(--brass);
+    -webkit-mask: var(--chi-rho) center / contain no-repeat;
+    mask: var(--chi-rho) center / contain no-repeat;
   }
   .wordmark em {
     font-style: italic;

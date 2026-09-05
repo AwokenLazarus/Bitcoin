@@ -14,7 +14,7 @@ RPC **9332**, P2P **9333**. Lightning/mempool keep talking to this node.
 | `umbrel/bitcoin.conf` | App `bitcoin.conf`: `includeconf=umbrel-bitcoin.conf` + `includeconf=blake2b.conf` |
 | `umbrel/hooks/pre-start` | Re-bind the prefix `bitcoind` into the Knots compose after app updates, run `ensure-blake2b-services.sh`; then stock Tor HS wait |
 | `umbrel/mempool-hooks/pre-start` | Mempool app hook: widen `blocks.header` for 164-byte headers, `MEMPOOL_BACKEND=electrum` -> host electrs :50011, 800 kWU block weight, local pools JSON |
-| `umbrel/mempool-theme/` | Lazarus look for the mempool frontend: `nginx-mempool.conf` (`sub_filter` injects the theme into the app shell), `www/theme.css` (palette, type, layout), `www/theme.js` (nav + footer links, fee/goggles/chart recolouring) |
+| `umbrel/mempool-theme/` | Lazarus look for the mempool frontend: `nginx-mempool.conf` (`sub_filter` injects the theme into the app shell; serves our mining-pool logo and favicons), `www/theme.css` (palette, type, layout), `www/theme.js` (nav + footer links, fee/goggles/chart recolouring), `www/chi-rho*.svg` + `www/favicon*` (the Chi Rho mark) |
 | `pools/pools-sync.py`, `pools/pools-overrides.json` | Mining-pool list merge (Kilombino + mempool.guide + ours), priority-ordered pool ids, block re-attribution; runs from `../systemd/pools-sync.timer` |
 | `umbrel/mempool-patches/` | Backend patch: DATUM template-creator names for any pool (`patch-backend.py` applied by the hook to the pinned image; `datum-template-creator.patch` for upstream) |
 | `umbrel/docker-compose.snippet.yml` | The volume line to add (do not commit a live compose — it has RPC/Tor env) |
@@ -70,6 +70,40 @@ the nginx config needs an app restart.
   through). `window.__lazarusTheme` reports which hooks took effect.
 
 If a mempool upgrade changes the bundle, the hooks degrade to stock colours rather than breaking the page.
+
+### The Chi Rho mark
+
+`www/chi-rho.svg` is the Lazarus mark, a Chi Rho (labarum, U+2627) drawn as one stroked path in brass.
+It is the same geometry as `--chi-rho` in `pool/static/pool.css`, so the two sites carry one mark.
+`nginx-mempool.conf` serves it at three kinds of URL:
+
+* `/resources/mining-pools/lazarus.svg` — **the pool icon.** The frontend builds each badge's image URL
+  from the pool's slug and swaps in `default.svg` (a pickaxe) when that 404s, which is what Lazarus
+  blocks used to show. Serving our slug here puts the Chi Rho on every surface that draws a pool logo:
+  the block list, the block page's *Miner* row and block strip, and `/mining/pool/lazarus`. Attribution
+  is untouched — this is only the image for the `lazarus` slug.
+* `/resources/favicons/{favicon.ico,favicon-16x16.png,favicon-32x32.png,apple-touch-icon.png}` — the tab
+  and touch icons, from `chi-rho-icon.svg` (the mark inset on the pool's near-black, one notch lighter in
+  the stroke so the Rho's counter survives 16px). Regenerate after editing that file:
+
+  ```sh
+  cd node/umbrel/mempool-theme/www
+  for px in 16 32 48 180; do
+    printf '<!doctype html><style>html,body{margin:0;width:%dpx;height:%dpx;overflow:hidden}img{display:block;width:%dpx;height:%dpx}</style><img src="chi-rho-icon.svg">' $px $px $px $px > _ico.html
+    google-chrome --headless --disable-gpu --hide-scrollbars --force-device-scale-factor=1 \
+      --window-size=$px,$px --screenshot=/tmp/ico-$px.png "file://$PWD/_ico.html"
+  done
+  rm _ico.html
+  cp /tmp/ico-16.png favicon-16x16.png; cp /tmp/ico-32.png favicon-32x32.png
+  cp /tmp/ico-180.png apple-touch-icon.png
+  convert /tmp/ico-16.png /tmp/ico-32.png /tmp/ico-48.png favicon.ico
+  ```
+
+* `/lazarus/chi-rho.svg` — the theme's own copy, alongside `theme.css`'s `--lz-chi-rho` mask. `theme.css`
+  masks the mark onto the stock `app-svg-images.mempool-logo` element (rather than hiding it) so the nav
+  brand reads mark + *Lazarus Mempool*, and onto the injected **Lazarus Pool** nav item's `.lz-mark`.
+  All four locations are exact-match, so they win over the `location /resources` block; they are in the
+  nginx config, so a mempool image upgrade keeps them.
 
 ## Mempool explorer: mining-pool names
 

@@ -273,7 +273,7 @@
               '<p class="lz-kicker">Miners</p>' +
               '<p class="lz-head">Mine with Lazarus Pool, paid in the block itself</p>' +
               '<p class="lz-stats" id="lz-pool-stats"><span class="lz-dot" aria-hidden="true"></span><span class="lz-stats-text">Loading pool status…</span></p>' +
-              '<p class="lz-copy" id="lz-pool-copy">Every block found pays each miner directly in its coinbase by TIDES window share. 0.5% fee through your own DATUM gateway, 5% on the public stratum.</p>' +
+              '<p class="lz-copy" id="lz-pool-copy">Every block found pays each miner directly in its coinbase by TIDES window share. 0.5% fee through your own DATUM gateway, 2.5% on the public stratum.</p>' +
               '<p class="lz-actions">' +
                 '<a class="btn btn-primary btn-sm" href="' + POOL + '" target="_blank" rel="noopener">Open Lazarus Pool ↗</a>' +
                 '<a class="btn btn-secondary btn-sm" href="/mining/pool/' + POOL_SLUG + '">Blocks found by Lazarus</a>' +
@@ -310,7 +310,8 @@
       title: 'Lazarus Pool: TIDES payouts in the coinbase, bring your own DATUM gateway',
       'aria-label': 'Lazarus Pool (opens in a new tab)'
     });
-    a.appendChild(el('span', { class: 'lz-mark', 'aria-hidden': 'true' }, 'P'));
+    // Empty: theme.css masks the Chi Rho onto this span.
+    a.appendChild(el('span', { class: 'lz-mark', 'aria-hidden': 'true' }));
     a.appendChild(el('span', { class: 'lz-label' }, 'Lazarus Pool'));
     li.appendChild(a);
     ul.appendChild(li);
