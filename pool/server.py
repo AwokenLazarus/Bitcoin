@@ -130,6 +130,17 @@ db_conn.executescript(
       last_ts INTEGER,
       peak_work REAL NOT NULL DEFAULT 0
     );
+    -- What a gateway operator calls themselves, learned from the secondary coinbase tag on a
+    -- block that gateway found. Keyed by gateway (the signing key prefix, stable across
+    -- reconnects); `identity` is its payout address, refreshed while it is connected.
+    CREATE TABLE IF NOT EXISTS gateway_tags (
+      gateway TEXT PRIMARY KEY,
+      tag TEXT,
+      identity TEXT,
+      height INTEGER,
+      ts INTEGER
+    );
+    CREATE INDEX IF NOT EXISTS idx_gateway_tags_identity ON gateway_tags(identity);
     """
 )
 db_conn.commit()
@@ -762,6 +773,36 @@ def ascii_from_hex(hx):
     return "".join(chr(x) if 32 <= x < 127 else "." for x in raw)
 
 
+def secondary_coinbase_tag(coinbase_hex):
+    """The gateway operator's own name from a DATUM coinbase, or "" if it carries none.
+
+    `datum_gateway` writes the first push after the BIP34 height as
+    ``<primary tag> 0x0F <secondary tag> 0x00``: the pool sets the primary ("Lazarus"), whoever
+    runs the gateway sets the secondary. Our own gateway leaves it empty.
+    """
+    try:
+        raw = bytes.fromhex(coinbase_hex or "")
+    except Exception:
+        return ""
+    if not raw:
+        return ""
+    height_len = raw[0]
+    if not 1 <= height_len <= 8 or len(raw) <= 1 + height_len:
+        return ""
+    i = 1 + height_len
+    push = raw[i]
+    if push == 0x4C:  # OP_PUSHDATA1
+        i += 1
+        if i >= len(raw):
+            return ""
+        push = raw[i]
+    tags = raw[i + 1 : i + 1 + push]
+    if len(tags) != push or 0x0F not in tags:
+        return ""
+    tag = tags.split(b"\x0f", 1)[1].split(b"\x00", 1)[0]
+    return "".join(chr(b) for b in tag if 32 <= b < 127).strip()[:40]
+
+
 def _scrape_datum_home(url):
     home = curl(url + "/")
     text_home = re.sub(r"<[^>]+>", " ", home)
@@ -1114,6 +1155,103 @@ def mature_rounds():
             )
 
 
+def learn_gateway_tags(budget=4):
+    """Learn what each gateway operator calls themselves, from blocks their gateway found.
+
+    primed records *which* gateway found each block, so the secondary tag on that block's
+    coinbase names that gateway's operator. Reading the tag off the block's own outputs would
+    not: the first output is the largest payee in the window, usually somebody else entirely.
+
+    One RPC per newly-learnable gateway, a few per tick. A row is written even when the block
+    carried no tag, so gateways that never set one are not re-fetched until they find a newer
+    block. Our own gateway is skipped -- its `identity` is just whichever stratum address it
+    last reported, so a tag there would name the wrong miner.
+    """
+    if NO_WRITE:  # read-only replicas share the writer's database; do not spend RPC on it
+        return
+    meta = state.get("prime_meta") or {}
+    blocks = meta.get("blocks") or []
+    if not blocks:
+        return
+    own = {
+        c.get("gateway")
+        for c in meta.get("clients") or []
+        if str(c.get("user_agent") or "").startswith(OWN_GATEWAY_UA_PREFIX)
+    }
+    best = {}
+    for b in blocks:
+        gw = str(b.get("gateway") or "")
+        h = int(b.get("height") or 0)
+        if not gw or gw in own or not h or not b.get("hash"):
+            continue
+        if h > int((best.get(gw) or (0, ""))[0]):
+            best[gw] = (h, b["hash"])
+    known = {
+        r["gateway"]: int(r["height"] or 0)
+        for r in db("SELECT gateway, height FROM gateway_tags") or []
+    }
+    spent = 0
+    for gw, (h, hsh) in sorted(best.items(), key=lambda kv: -kv[1][0]):
+        if spent >= budget:
+            break
+        if gw in known and known[gw] >= h:
+            continue
+        blk = rpc("getblock", [hsh, 2])
+        spent += 1
+        if not blk:
+            continue
+        vin = ((blk.get("tx") or [{}])[0].get("vin") or [{}])[0]
+        tag = secondary_coinbase_tag(vin.get("coinbase") or "")
+        db(
+            "INSERT INTO gateway_tags(gateway,tag,height,ts) VALUES(?,?,?,?) "
+            "ON CONFLICT(gateway) DO UPDATE SET tag=excluded.tag, height=excluded.height, ts=excluded.ts",
+            (gw, tag, h, int(time.time())),
+            write=True,
+        )
+
+
+def refresh_gateway_identities():
+    """Keep each learned gateway's payout address current while it is connected."""
+    if NO_WRITE:
+        return
+    for c in (state.get("prime_meta") or {}).get("clients") or []:
+        gw = str(c.get("gateway") or "")
+        ident = str(c.get("identity") or "").strip()
+        if gw and ident and not str(c.get("user_agent") or "").startswith(OWN_GATEWAY_UA_PREFIX):
+            db("UPDATE gateway_tags SET identity=? WHERE gateway=?", (ident, gw), write=True)
+
+
+def gateway_names_by_address():
+    """address -> {name, gateway, connected} for addresses running their own DATUM gateway.
+
+    `name` is the operator's secondary coinbase tag once one of their blocks has taught us it,
+    and "" until then; the caller decides what to show in its place.
+    """
+    meta = state.get("prime_meta") or {}
+    tags = {}
+    for r in db("SELECT gateway, tag, identity FROM gateway_tags") or []:
+        if r["identity"]:
+            tags[str(r["identity"])] = (str(r["gateway"]), str(r["tag"] or ""))
+    out = {}
+    live = set()
+    for c in meta.get("clients") or []:
+        ident = str(c.get("identity") or "").strip()
+        if not ident or str(c.get("user_agent") or "").startswith(OWN_GATEWAY_UA_PREFIX):
+            continue
+        gw = str(c.get("gateway") or "")
+        live.add(ident)
+        out[ident] = {
+            "name": tags.get(ident, ("", ""))[1] if tags.get(ident, ("", ""))[0] == gw else "",
+            "gateway": gw,
+            "connected": True,
+        }
+    # A gateway that dropped this minute still holds work in the window, so keep naming it.
+    for ident, (gw, tag) in tags.items():
+        if ident not in live:
+            out[ident] = {"name": tag, "gateway": gw, "connected": False}
+    return out
+
+
 def scan_found_blocks():
     tip = rpc("getblockcount")
     if not tip:
@@ -1186,6 +1324,8 @@ def loop():
             restore_unsplit_effort()
             scan_found_blocks()
             mature_rounds()
+            refresh_gateway_identities()
+            learn_gateway_tags()
         except Exception as e:
             print("scan", e, flush=True)
         time.sleep(max(0.5, 10 - (time.time() - t0)))
@@ -1394,7 +1534,19 @@ def prime_coinbaser_preview():
     pool_sats = int(meta.get("sample_pool_sats") or max(0, value - miner_sats))
     fee_sats = int(meta.get("sample_fee_sats") or 0)
     pool_addr = (meta.get("pool") or {}).get("address") or ""
-    outputs = [dict(m, to="miner") for m in miners]
+    # Who each output belongs to, for the donut's labels: an address on the DATUM path is running
+    # its own gateway, and once one of its blocks has taught us the operator's secondary coinbase
+    # tag we can name them rather than just abbreviate the address.
+    names = gateway_names_by_address()
+    outputs = []
+    for m in miners:
+        o = dict(m, to="miner")
+        who = names.get(m["address"])
+        if who and m.get("fee_path") == "datum":
+            o["name"] = who["name"]
+            o["gateway"] = who["gateway"]
+            o["gateway_connected"] = who["connected"]
+        outputs.append(o)
     if pool_sats > 0:
         outputs.append({"address": pool_addr, "sats": pool_sats, "to": "pool"})
     return {

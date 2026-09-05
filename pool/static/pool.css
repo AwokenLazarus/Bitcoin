@@ -882,6 +882,90 @@
   .payout-split .split-miners b { color: var(--ink); }
   .payout-split .split-pool { border-left: 3px solid var(--brass-dim); }
 
+  /* The same coinbase split as the table below, as a ring: a slice per payout address. */
+  .donut-row {
+    display: grid;
+    grid-template-columns: minmax(0, 15rem) minmax(0, 1fr);
+    align-items: center;
+    gap: 1.5rem;
+    margin: 0.35rem 0 1.1rem;
+  }
+  @container (max-width: 38rem) {
+    .donut-row { grid-template-columns: 1fr; justify-items: center; gap: 1rem; }
+  }
+  .donut-figure { position: relative; width: 100%; max-width: 15rem; margin: 0; }
+  .donut { display: block; width: 100%; height: auto; }
+  .donut-arc { transition: opacity 120ms var(--ease); }
+  .donut-figure:hover .donut-arc { opacity: 0.55; }
+  .donut-figure .donut-arc:hover { opacity: 1; }
+  .donut-hole {
+    position: absolute;
+    inset: 22%;
+    display: grid;
+    place-content: center;
+    text-align: center;
+    pointer-events: none;
+  }
+  .donut-hole b {
+    display: block;
+    font-family: var(--mono);
+    font-size: clamp(1.1rem, 0.9rem + 0.8vw, 1.45rem);
+    font-weight: 500;
+    letter-spacing: -0.03em;
+    font-variant-numeric: tabular-nums;
+    color: var(--brass);
+    line-height: 1.05;
+  }
+  .donut-hole small {
+    display: block;
+    margin-top: 0.15rem;
+    font-size: 0.62rem;
+    letter-spacing: 0.07em;
+    text-transform: uppercase;
+    color: var(--faint);
+  }
+  .donut-side { display: grid; gap: 0.6rem; min-width: 0; }
+  /* Multi-column rather than grid so the ranking reads down one column and on to the next,
+     the same order as the table under it. */
+  .donut-legend {
+    columns: 2;
+    column-gap: 1.4rem;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+  }
+  @container (max-width: 30rem) {
+    .donut-legend { columns: 1; }
+  }
+  .donut-item {
+    display: grid;
+    grid-template-columns: 0.55rem minmax(0, 1fr) auto;
+    align-items: baseline;
+    gap: 0.45rem;
+    padding: 0.16rem 0;
+    font-size: 0.78rem;
+    border-bottom: 1px solid color-mix(in oklch, var(--line) 55%, transparent);
+    break-inside: avoid;
+  }
+  .donut-swatch {
+    width: 0.55rem;
+    height: 0.55rem;
+    border-radius: 1px;
+    /* baseline-aligned with the row's text rather than its box */
+    transform: translateY(0.06rem);
+  }
+  .donut-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .donut-label a { font-size: 0.76rem; }
+  .donut-name { color: var(--ink); }
+  .donut-name::before { content: "\00b7\00a0"; color: var(--faint); }
+  .donut-pct {
+    font-family: var(--mono);
+    font-weight: 500;
+    font-variant-numeric: tabular-nums;
+    color: var(--muted);
+  }
+  .donut-desc { margin: 0; font-size: 0.74rem; line-height: 1.45; color: var(--faint); }
+
   /* Fee schedule cards ahead of the connect tabs. */
   .fee-schema {
     display: grid;

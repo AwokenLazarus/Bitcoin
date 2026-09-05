@@ -306,10 +306,158 @@
       : "\u2014";
   }
 
-  // ------------------------------------------------------------- coinbase
+  // --------------------------------------------------------- payout donut
+  // One control drives both views of the split: collapsed groups the long tail, expanded gives
+  // every address its own slice and row.
   let coinbaseExpanded = false;
+
+  // The same split as the table below it, as a ring: one slice per payout address, plus the
+  // pool's own slice, so the whole coinbase adds up to the circle. Labelled by the last four
+  // characters of the address, and by the operator's name where Prime has learned one from the
+  // secondary coinbase tag on a block their gateway found.
+  const DONUT_SLICES = 12;
+  // Circumference 100 at r=15.9155, so a slice's dash length *is* its percentage.
+  const DONUT_R = 15.9155;
+
+  // Fan the brass hue across the slices so neighbours stay apart at a glance. Largest slice is
+  // full brass; the tail cools towards ember. The pool's slice sits outside the ramp on purpose.
+  const donutColour = (i, n) => {
+    const t = n > 1 ? i / (n - 1) : 0;
+    return `oklch(${(84 - 27 * t).toFixed(1)}% ${(0.115 - 0.03 * t).toFixed(3)} ${(90 - 44 * t).toFixed(1)})`;
+  };
+
+  const last4 = (a) => (a && a.length > 4 ? "\u2026" + a.slice(-4) : a || "\u2014");
+
+  // What to call an address in the legend: the gateway operator's own name once we know it,
+  // otherwise just a note that this address runs its own gateway.
+  const donutWho = (o) => {
+    if (o.name) return { text: o.name, known: true };
+    if (o.fee_path === "datum") return { text: "own gateway", known: false };
+    return null;
+  };
+
+  function donutSlices(cb, expanded) {
+    const value = Number(cb.value) || 0;
+    if (!value) return [];
+    const miners = (cb.miners || []).filter((o) => o.to !== "pool");
+    const pool = (cb.miners || []).find((o) => o.to === "pool");
+    const cut = expanded ? miners.length : DONUT_SLICES;
+    const head = miners.slice(0, cut);
+    const tail = miners.slice(cut);
+    const out = head.map((o, i) => ({
+      address: o.address,
+      label: last4(o.address),
+      who: donutWho(o),
+      sats: Number(o.sats) || 0,
+      percent: (100 * (Number(o.sats) || 0)) / value,
+      colour: donutColour(i, Math.max(head.length, 2)),
+    }));
+    if (tail.length) {
+      const s = tail.reduce((a, o) => a + (Number(o.sats) || 0), 0);
+      out.push({
+        label: `${tail.length} smaller address${tail.length === 1 ? "" : "es"}`,
+        tail: tail.length,
+        sats: s,
+        percent: (100 * s) / value,
+        colour: "oklch(45% 0.03 80)",
+      });
+    }
+    if (pool) {
+      out.push({
+        address: pool.address,
+        label: "Lazarus",
+        pool: true,
+        note: "pool fee",
+        sats: Number(pool.sats) || 0,
+        percent: (100 * (Number(pool.sats) || 0)) / value,
+        colour: "oklch(32% 0.022 78)",
+      });
+    }
+    return out;
+  }
+
+  function donut(cb) {
+    const svg = $("payout-donut");
+    if (!svg) return;
+    const slices = donutSlices(cb, coinbaseExpanded);
+    const legend = $("donut-legend");
+    const hole = $("donut-hole-value");
+    const holeLabel = $("donut-hole-label");
+    const desc = $("donut-desc");
+    const value = Number(cb.value) || 0;
+    if (!slices.length) {
+      svg.innerHTML = '<title id="donut-title">Share of the coinbase by payout address</title>';
+      if (legend) legend.innerHTML = "";
+      if (hole) hole.textContent = "\u2014";
+      if (holeLabel) holeLabel.textContent = "no split yet";
+      if (desc) desc.textContent = "Prime has not issued a split yet.";
+      return;
+    }
+    // Slices are drawn as dashes on one circle: offset walks backwards because a positive
+    // dashoffset rotates the dash anticlockwise.
+    let offset = 25; // start at twelve o'clock
+    const arcs = slices.map((s) => {
+      // Keep a hairline between slices, but never eat a slice that is thinner than the gap.
+      // Dust outputs are left at their true width rather than padded, so the ring stays honest.
+      const gap = s.percent > 1.2 ? 0.4 : 0;
+      const len = s.percent >= 0.08 ? Math.max(0.1, s.percent - gap) : s.percent;
+      const arc =
+        `<circle class="donut-arc" r="${DONUT_R}" cx="20" cy="20" fill="none"` +
+        ` stroke="${s.colour}" stroke-width="5"` +
+        ` stroke-dasharray="${len.toFixed(3)} ${(100 - len).toFixed(3)}"` +
+        ` stroke-dashoffset="${offset.toFixed(3)}">` +
+        `<title>${esc(s.label)}${s.who ? " \u00b7 " + esc(s.who.text) : ""}${s.note ? " \u00b7 " + s.note : ""} \u2014 ${pct(s.percent, 2)} of the block, ${sats(s.sats)} BTC</title>` +
+        "</circle>";
+      offset -= s.percent;
+      return arc;
+    });
+    svg.innerHTML =
+      '<title id="donut-title">Share of the coinbase by payout address</title>' +
+      `<circle r="${DONUT_R}" cx="20" cy="20" fill="none" stroke="var(--bg-inset)" stroke-width="5"></circle>` +
+      arcs.join("");
+
+    if (legend) {
+      legend.innerHTML = slices
+        .map((s) => {
+          const name = s.who
+            ? `<span class="${s.who.known ? "donut-name" : "faint"}">${esc(s.who.text)}</span>`
+            : s.note
+              ? `<span class="faint">${esc(s.note)}</span>`
+              : "";
+          const label = s.address
+            ? `<a class="mono" href="#${esc(s.address)}" title="${esc(s.address)}">${esc(s.label)}</a>`
+            : `<span class="faint">${esc(s.label)}</span>`;
+          return (
+            '<li class="donut-item">' +
+            `<span class="donut-swatch" style="background:${s.colour}" aria-hidden="true"></span>` +
+            `<span class="donut-label">${label}${name ? " " + name : ""}</span>` +
+            `<b class="donut-pct">${pct(s.percent, s.percent < 1 ? 2 : 1)}</b>` +
+            "</li>"
+          );
+        })
+        .join("");
+    }
+    const minerSats = Number(cb.miner_sats) || 0;
+    if (hole) hole.textContent = value ? pct((100 * minerSats) / value, 1) : "\u2014";
+    if (holeLabel) {
+      const n = Number(cb.miner_outputs) || 0;
+      holeLabel.textContent = `to ${n} address${n === 1 ? "" : "es"}`;
+    }
+    if (desc) {
+      const named = slices.filter((s) => s.who && s.who.known).length;
+      const total = Number(cb.miner_outputs) || 0;
+      desc.textContent =
+        `Each slice is one payout address's share of the whole coinbase, labelled by the last four characters of its address` +
+        (named ? `; ${named} ${named === 1 ? "is a gateway that has" : "are gateways that have"} named ${named === 1 ? "itself" : "themselves"} in a block ${named === 1 ? "it" : "they"} found` : "") +
+        (total > DONUT_SLICES && !coinbaseExpanded ? `. The ${total - DONUT_SLICES} smallest are grouped; use “Show all” below to split them out` : "") +
+        ".";
+    }
+  }
+
+  // ------------------------------------------------------------- coinbase
   const COINBASE_ROWS = 8;
   function coinbase(cb) {
+    donut(cb);
     const el = $("coinbase");
     if (!el) return;
     const miners = (cb.miners || []).filter((o) => o.to !== "pool");
