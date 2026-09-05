@@ -46,13 +46,14 @@ pub fn build(shared: &Shared) -> Value {
     // the split a block would pay right now: how the UI shows each miner's expected payout
     let sample_value = 312_500_000u64;
     let split = w.split(sample_value, &shared.split_params, |i| address::to_script(i, shared.network));
-    let payout_of = |ident: &str| split.payees.iter().find(|p| p.identity == ident).map(|p| p.sats);
+    let payouts: std::collections::HashMap<&str, u64> =
+        split.payees.iter().map(|p| (p.identity.as_str(), p.sats)).collect();
 
     let miners: Vec<Value> = w
         .miners()
         .into_iter()
         .map(|m| {
-            let idx = ledger.window.identities().iter().position(|i| *i == m.identity).map(|i| i as u32);
+            let idx = ledger.window.index_of(&m.identity);
             let (rw, last) = idx.and_then(|i| recent.get(&i)).copied().unwrap_or((0, m.last_ts));
             let payable = address::to_script(&m.identity, shared.network).is_some();
             json!({
@@ -62,7 +63,7 @@ pub fn build(shared: &Shared) -> Value {
                 "fee_path": if m.stratum_work * 2 > m.work { "stratum" } else { "datum" },
                 "credits": m.credits,
                 "share_percent": if w.total_work() > 0 { 100.0 * m.work as f64 / w.total_work() as f64 } else { 0.0 },
-                "payout_sats": payout_of(&m.identity).unwrap_or(0),
+                "payout_sats": payouts.get(m.identity.as_str()).copied().unwrap_or(0),
                 "payable": payable,
                 "hashrate_ghs": ghs(rw),
                 "last_share_s": ts.saturating_sub(u64::from(last.max(m.last_ts))),

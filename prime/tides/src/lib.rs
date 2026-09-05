@@ -122,6 +122,13 @@ impl Window {
         &self.idents
     }
 
+    /// Index of an interned identity, without scanning [`Window::identities`]. The table
+    /// grows monotonically, so a linear scan per lookup gets slower for the life of the
+    /// process; this is the same `HashMap` [`Window::intern`] already maintains.
+    pub fn index_of(&self, identity: &str) -> Option<u32> {
+        self.ident_index.get(identity).copied()
+    }
+
     pub fn target_work(&self) -> u64 {
         self.target_work
     }
@@ -515,6 +522,55 @@ impl BlockLog {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Cost of resolving each window miner to its identity index, the way `stats::build`
+    /// does on every `stats.json`. Run with
+    /// `cargo test --release -p tides -- --ignored --nocapture bench_index_lookup`.
+    #[test]
+    #[ignore]
+    fn bench_index_lookup() {
+        use std::time::Instant;
+        let mut w = Window::new();
+        // the identity table as it looks after a long uptime, plus the miners actually in
+        // the window: the table keeps every identity ever seen, the window does not
+        for i in 0..60_000u32 {
+            w.credit(&format!("bc1qidle{i:040}"), 1, 1, 1, SOURCE_DATUM);
+        }
+        w.set_target(0);
+        let active: Vec<String> = (0..500).map(|i| format!("bc1qactive{i:038}")).collect();
+        for a in &active {
+            w.credit(a, 1000, 1, 2, SOURCE_DATUM);
+        }
+        let mut sink = 0u64;
+        let t = Instant::now();
+        for a in &active {
+            sink += w.identities().iter().position(|i| i == a).unwrap_or(0) as u64;
+        }
+        let scan = t.elapsed();
+        let t = Instant::now();
+        for a in &active {
+            sink += w.index_of(a).unwrap_or(0) as u64;
+        }
+        let map = t.elapsed();
+        println!("identities={} miners={} sink={sink}", w.identities().len(), active.len());
+        println!("  identities().position() : {scan:?}");
+        println!("  index_of()              : {map:?}");
+    }
+
+    #[test]
+    fn index_of_matches_a_linear_scan() {
+        let mut w = Window::new();
+        for id in ["a", "b", "c"] {
+            w.credit(id, 1, 1, 1, SOURCE_DATUM);
+        }
+        for (i, id) in w.identities().to_vec().iter().enumerate() {
+            assert_eq!(w.index_of(id), Some(i as u32));
+        }
+        assert_eq!(w.index_of("nope"), None);
+        // survives trimming: the table keeps identities whose rows have aged out
+        w.set_target(1);
+        assert_eq!(w.index_of("a"), Some(0));
+    }
 
     #[test]
     fn window_trims_to_target_and_tracks_totals() {
