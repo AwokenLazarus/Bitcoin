@@ -44,36 +44,65 @@ impl Network {
     }
 }
 
-/// Decode an address into its output script. `None` if it is not a valid address for `net`.
+/// Largest non-`OP_RETURN` scriptPubKey an output of the generation transaction may carry
+/// while RDTS is enforced, and the larger allowance for an `OP_RETURN` one.
+pub const RDTS_MAX_OUTPUT_SCRIPT: usize = 34;
+pub const RDTS_MAX_OUTPUT_DATA: usize = 83;
+
+/// Whether a script may appear as a coinbase output under RDTS (BIP 110), which Knots
+/// activates as a flag day at the BLAKE2b fork height. A block carrying a larger output
+/// script is rejected as `bad-txns-vout-script-toolarge`, so such a script can never be
+/// paid. Gateways enforce it as well: an oversized miner payout is left out of the coinbase
+/// and an oversized *pool* payout stops the gateway serving work for the block at all.
+pub fn rdts_output_ok(script: &[u8]) -> bool {
+    match script.first() {
+        None => true,
+        Some(0x6a) => script.len() <= RDTS_MAX_OUTPUT_DATA,
+        Some(_) => script.len() <= RDTS_MAX_OUTPUT_SCRIPT,
+    }
+}
+
+/// Decode an address into its output script. `None` if it is not a valid address for `net`,
+/// or if the script it decodes to could not be paid in a coinbase under RDTS — a witness
+/// program longer than 32 bytes is well-formed but unpayable here, and treating it as
+/// unpayable keeps its share in the pool remainder instead of handing the gateway an output
+/// it would silently drop. Use [`decode_script`] to tell the two rejections apart.
 pub fn to_script(addr: &str, net: Network) -> Option<Vec<u8>> {
+    decode_script(addr, net).filter(|s| rdts_output_ok(s))
+}
+
+/// Decode an address into its output script with no coinbase-payability check.
+pub fn decode_script(addr: &str, net: Network) -> Option<Vec<u8>> {
     let addr = addr.trim();
     if addr.is_empty() || addr.len() > 90 {
         return None;
     }
-    if let Ok((hrp, ver, prog)) = bech32::segwit::decode(addr) {
+    let script = if let Ok((hrp, ver, prog)) = bech32::segwit::decode(addr) {
         if !hrp.as_str().eq_ignore_ascii_case(net.hrp()) {
             return None;
         }
-        return Some(segwit_script(ver, &prog));
-    }
-    let raw = bs58::decode(addr).with_check(None).into_vec().ok()?;
-    if raw.len() != 21 {
-        return None;
-    }
-    let (ver, hash) = (raw[0], &raw[1..]);
-    if ver == net.p2pkh_version() {
-        let mut s = vec![0x76, 0xa9, 0x14];
-        s.extend_from_slice(hash);
-        s.extend_from_slice(&[0x88, 0xac]);
-        Some(s)
-    } else if ver == net.p2sh_version() {
-        let mut s = vec![0xa9, 0x14];
-        s.extend_from_slice(hash);
-        s.push(0x87);
-        Some(s)
+        segwit_script(ver, &prog)
     } else {
-        None
-    }
+        let raw = bs58::decode(addr).with_check(None).into_vec().ok()?;
+        if raw.len() != 21 {
+            return None;
+        }
+        let (ver, hash) = (raw[0], &raw[1..]);
+        if ver == net.p2pkh_version() {
+            let mut s = vec![0x76, 0xa9, 0x14];
+            s.extend_from_slice(hash);
+            s.extend_from_slice(&[0x88, 0xac]);
+            s
+        } else if ver == net.p2sh_version() {
+            let mut s = vec![0xa9, 0x14];
+            s.extend_from_slice(hash);
+            s.push(0x87);
+            s
+        } else {
+            return None;
+        }
+    };
+    Some(script)
 }
 
 fn segwit_script(ver: Fe32, prog: &[u8]) -> Vec<u8> {
@@ -113,6 +142,24 @@ mod tests {
         assert!(to_script("tb1qw508d6qejxtdg4y5r3zarvary0c5xw7kxpjzsx", Network::Testnet).is_some());
         assert!(to_script("worker1", Network::Mainnet).is_none());
         assert!(to_script("bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t5", Network::Mainnet).is_none());
+    }
+
+    #[test]
+    fn rdts_rejects_output_scripts_a_coinbase_cannot_carry() {
+        assert!(rdts_output_ok(&[]));
+        assert!(rdts_output_ok(&[0x6a; RDTS_MAX_OUTPUT_DATA]));
+        assert!(!rdts_output_ok(&[0x6a; RDTS_MAX_OUTPUT_DATA + 1]));
+        assert!(rdts_output_ok(&[0x51; RDTS_MAX_OUTPUT_SCRIPT]));
+        assert!(!rdts_output_ok(&[0x51; RDTS_MAX_OUTPUT_SCRIPT + 1]));
+
+        // A 40-byte witness program is a valid address but a 42-byte output script, which
+        // no block may carry once RDTS is enforced, so it is not payable.
+        let hrp = bech32::Hrp::parse("bc").unwrap();
+        let long = bech32::segwit::encode(hrp, Fe32::Z, &[0xab; 40]).unwrap();
+        assert!(to_script(&long, Network::Mainnet).is_none());
+        // 32 bytes is the largest program that still fits.
+        let fits = bech32::segwit::encode(hrp, Fe32::P, &[0xab; 32]).unwrap();
+        assert_eq!(to_script(&fits, Network::Mainnet).unwrap().len(), RDTS_MAX_OUTPUT_SCRIPT);
     }
 
     #[test]

@@ -221,7 +221,15 @@ pub async fn housekeeping(shared: Arc<Shared>) {
         n += 1;
         {
             let mut ledger = shared.ledger.lock().unwrap();
-            let r = if n.is_multiple_of(12) { ledger.sync() } else { ledger.flush() };
+            // Every 5s flush; every 60s fsync; every 5 min rewrite credits.bin to the live window
+            // so a crash or restart reloads the same shares the UI was showing.
+            let r = if n.is_multiple_of(60) {
+                ledger.persist_window()
+            } else if n.is_multiple_of(12) {
+                ledger.sync()
+            } else {
+                ledger.flush()
+            };
             if let Err(e) = r {
                 log::error!("ledger flush failed: {e}");
             }

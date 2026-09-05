@@ -23,7 +23,7 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, BufRead, BufReader, BufWriter, Read, Seek, SeekFrom, Write};
+use std::io::{self, BufRead, BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -181,6 +181,23 @@ impl Window {
         (stored, appended)
     }
 
+    /// Add work as its own row, never merging into the tail. Used by [`Ledger`] so that
+    /// on-disk rows stay 1:1 with window rows and a replay lands on the same trim boundary.
+    pub fn credit_row(&mut self, identity: &str, work: u64, height: u32, ts: u32, source: u8) -> Credit {
+        let ident = self.intern(identity);
+        self.lifetime_shares += 1;
+        self.lifetime_work = self.lifetime_work.saturating_add(work);
+        self.total_work = self.total_work.saturating_add(work);
+        let t = self.totals.entry(ident).or_insert((0, 0, 0));
+        t.0 = t.0.saturating_add(work);
+        t.1 += 1;
+        t.2 = ts;
+        let c = Credit { ts, ident, work, height, source };
+        self.credits.push_back(c);
+        self.trim();
+        c
+    }
+
     /// Replay a stored row without coalescing or lifetime accounting.
     fn push_raw(&mut self, c: Credit) {
         self.total_work = self.total_work.saturating_add(c.work);
@@ -305,7 +322,7 @@ impl Ledger {
         let credits_out = BufWriter::new(OpenOptions::new().create(true).append(true).open(&credits_path)?);
         let idents_out = BufWriter::new(OpenOptions::new().create(true).append(true).open(&idents_path)?);
         let mut l = Ledger { dir, window, credits_out, idents_out, rows_on_disk, dirty: false };
-        if l.rows_on_disk > 2 * l.window.len() as u64 + 4096 {
+        if l.rows_on_disk > l.window.len() as u64 + 8192 {
             l.compact()?;
         }
         Ok(l)
@@ -315,32 +332,23 @@ impl Ledger {
         &self.dir
     }
 
-    /// Record work. Coalesced rows are rewritten in place on the next flush via compaction
-    /// bookkeeping; here we append only when a new row was created and otherwise patch the
-    /// tail row's work on disk.
+    /// Record work as one appended row.
+    ///
+    /// `credits.bin` is opened O_APPEND, which on Linux ignores the file offset on write,
+    /// so a row can never be patched in place: a seek-then-write silently appends a
+    /// duplicate instead. The window therefore does not coalesce on this path, keeping
+    /// disk rows 1:1 with window rows so a replay reproduces the window exactly.
     pub fn credit(&mut self, identity: &str, work: u64, height: u32, ts: u32, source: u8) -> io::Result<()> {
         let known = self.window.ident_index.contains_key(identity);
-        let (row, appended) = self.window.credit(identity, work, height, ts, source);
+        let row = self.window.credit_row(identity, work, height, ts, source);
         if !known {
             self.idents_out.write_all(identity.as_bytes())?;
             self.idents_out.write_all(b"\n")?;
         }
         let mut b = Vec::with_capacity(Credit::SIZE);
         row.write(&mut b);
-        if appended {
-            self.credits_out.write_all(&b)?;
-            self.rows_on_disk += 1;
-        } else {
-            // overwrite the tail row: flush pending appends first so the offsets line up
-            self.credits_out.flush()?;
-            let f = self.credits_out.get_mut();
-            let end = f.seek(SeekFrom::End(0))?;
-            if end >= Credit::SIZE as u64 {
-                f.seek(SeekFrom::Start(end - Credit::SIZE as u64))?;
-                f.write_all(&b)?;
-                f.seek(SeekFrom::End(0))?;
-            }
-        }
+        self.credits_out.write_all(&b)?;
+        self.rows_on_disk += 1;
         self.dirty = true;
         Ok(())
     }
@@ -366,7 +374,10 @@ impl Ledger {
         };
         write_atomic(&self.dir.join(Self::META), &serde_json::to_vec_pretty(&meta)?)?;
         self.dirty = false;
-        if self.rows_on_disk > 2 * self.window.len() as u64 + 4096 {
+        // Keep the file close to the live window. The old 2× threshold meant a full
+        // window almost never compacted, so a restart replayed a different set of rows
+        // than the process had been paying from.
+        if self.rows_on_disk > self.window.len() as u64 + 8192 {
             self.compact()?;
         }
         Ok(())
@@ -377,6 +388,16 @@ impl Ledger {
         self.flush()?;
         self.credits_out.get_ref().sync_data()?;
         self.idents_out.get_ref().sync_data()
+    }
+
+    /// Make the on-disk ledger identical to the in-memory window, then fsync.
+    /// Call on a timer and on graceful shutdown so a restart reloads the same shares.
+    pub fn persist_window(&mut self) -> io::Result<()> {
+        self.sync()?;
+        if self.rows_on_disk != self.window.len() as u64 {
+            self.compact()?;
+        }
+        Ok(())
     }
 
     /// Rewrite the credits file with only the rows still in the window.
@@ -559,32 +580,97 @@ mod tests {
     fn ledger_persists_replays_and_compacts() {
         let dir = std::env::temp_dir().join(format!("tides-test-{}-{}", std::process::id(), line!()));
         let _ = fs::remove_dir_all(&dir);
-        {
+        let before = {
             let mut l = Ledger::open(&dir).unwrap();
             l.set_target(50);
             for i in 0..100u32 {
                 l.credit(if i % 3 == 0 { "x" } else { "y" }, 1, 7, i, SOURCE_UNKNOWN).unwrap();
             }
-            // coalesced tail rewrite
+            // two credits for the same miner in the same second: separate rows, never merged
             l.credit("y", 3, 7, 99, SOURCE_UNKNOWN).unwrap();
             l.credit("y", 4, 7, 99, SOURCE_UNKNOWN).unwrap();
             l.sync().unwrap();
             assert!(l.window.total_work() >= 50);
-        }
+            (l.window.total_work(), l.window.len(), l.window.credits().copied().collect::<Vec<_>>())
+        };
         let l = Ledger::open(&dir).unwrap();
         assert!(l.window.total_work() >= 50);
         assert_eq!(l.window.target_work(), 50);
         assert_eq!(l.window.lifetime_shares, 102);
         assert_eq!(l.window.lifetime_work, 107);
         assert_eq!(l.window.identities(), &["x".to_string(), "y".to_string()]);
+        // the whole point: a reload lands on the same rows the process was paying from
+        assert_eq!(l.window.total_work(), before.0, "reloaded window work must match");
+        assert_eq!(l.window.len(), before.1, "reloaded row count must match");
+        assert_eq!(l.window.credits().copied().collect::<Vec<_>>(), before.2, "rows must match");
         let tail = *l.window.credits().last().unwrap();
-        assert_eq!(tail.work, 7, "coalesced 3+4 for y at ts 99 survived a restart");
+        assert_eq!(tail.work, 4, "the last credit is its own row, not merged into 3+4");
         assert_eq!(tail.ts, 99);
         // the file holds only what the window holds after compaction
         let mut l = l;
         l.compact().unwrap();
         let len = fs::metadata(dir.join("credits.bin")).unwrap().len();
         assert_eq!(len as usize, l.window.len() * Credit::SIZE);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn persist_window_makes_restart_a_noop() {
+        let dir = std::env::temp_dir().join(format!("tides-test-{}-{}", std::process::id(), line!()));
+        let _ = fs::remove_dir_all(&dir);
+        let (work, rows, miners) = {
+            let mut l = Ledger::open(&dir).unwrap();
+            l.set_target(10_000);
+            for i in 0..500u32 {
+                l.credit(if i % 5 == 0 { "slow" } else { "fast" }, 40, 1, 1000 + i, SOURCE_DATUM).unwrap();
+            }
+            l.persist_window().unwrap();
+            let miners: Vec<(String, u64)> =
+                l.window.miners().into_iter().map(|m| (m.identity, m.work)).collect();
+            let file_rows = fs::metadata(dir.join("credits.bin")).unwrap().len() as usize / Credit::SIZE;
+            assert_eq!(file_rows, l.window.len(), "credits.bin must be exactly the live window");
+            (l.window.total_work(), l.window.len(), miners)
+        };
+        let l = Ledger::open(&dir).unwrap();
+        assert_eq!(l.window.total_work(), work);
+        assert_eq!(l.window.len(), rows);
+        let after: Vec<(String, u64)> = l.window.miners().into_iter().map(|m| (m.identity, m.work)).collect();
+        assert_eq!(after, miners);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Several miners submitting in the same second interleave, so an in-memory coalesce
+    /// can target a row that is no longer physically last in the file. Per-miner totals
+    /// must still survive a reload byte for byte.
+    #[test]
+    fn interleaved_same_second_credits_reload_exactly() {
+        let dir = std::env::temp_dir().join(format!("tides-test-{}-{}", std::process::id(), line!()));
+        let _ = fs::remove_dir_all(&dir);
+        let names = ["gwA", "gwB", "gwC", "gwD"];
+        let before: Vec<(String, u64)> = {
+            let mut l = Ledger::open(&dir).unwrap();
+            l.set_target(400_000);
+            // same ts for a whole burst, rotating owners, so tails churn constantly
+            for ts in 0..60u32 {
+                for i in 0..40usize {
+                    let who = names[(i * 7 + ts as usize) % names.len()];
+                    l.credit(who, 512, 1, 5000 + ts, SOURCE_DATUM).unwrap();
+                    // same miner twice in a row -> exercises the coalesce path
+                    l.credit(who, 512, 1, 5000 + ts, SOURCE_DATUM).unwrap();
+                }
+            }
+            l.flush().unwrap();
+            let mut m: Vec<(String, u64)> =
+                l.window.miners().into_iter().map(|x| (x.identity, x.work)).collect();
+            m.sort();
+            assert_eq!(m.iter().map(|x| x.1).sum::<u64>(), l.window.total_work());
+            m
+        };
+        let l = Ledger::open(&dir).unwrap();
+        let mut after: Vec<(String, u64)> =
+            l.window.miners().into_iter().map(|x| (x.identity, x.work)).collect();
+        after.sort();
+        assert_eq!(after, before, "per-miner work must be identical after reload");
         let _ = fs::remove_dir_all(&dir);
     }
 

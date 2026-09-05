@@ -36,6 +36,9 @@ pub async fn run(shared: Arc<Shared>) {
                     if ledger.window.target_work() != target {
                         log::info!("TIDES window target -> {target} ({}x difficulty)", shared.cfg.window);
                         ledger.set_target(target);
+                        if let Err(e) = ledger.persist_window() {
+                            log::error!("ledger persist after target change failed: {e}");
+                        }
                     }
                 }
                 if confirm_at <= Instant::now() {

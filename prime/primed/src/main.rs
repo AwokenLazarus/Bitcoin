@@ -65,13 +65,19 @@ fn main() {
         log::warn!("config: {note}");
     }
     let code = match cli.cmd.unwrap_or(Cmd::Run) {
-        Cmd::Check => {
-            println!(
-                "ok: listen={} stats={} payout={} fee={}bps stratum={}bps window={}x",
-                cfg.listen, cfg.stats_listen, cfg.payout_address, cfg.fee_bps, cfg.stratum_fee_bps, cfg.window
-            );
-            0
-        }
+        Cmd::Check => match pool_payout_script(&cfg) {
+            Ok(_) => {
+                println!(
+                    "ok: listen={} stats={} payout={} fee={}bps stratum={}bps window={}x",
+                    cfg.listen, cfg.stats_listen, cfg.payout_address, cfg.fee_bps, cfg.stratum_fee_bps, cfg.window
+                );
+                0
+            }
+            Err(e) => {
+                eprintln!("{e}");
+                2
+            }
+        },
         Cmd::Pubkey => match load_or_create_key(&cfg) {
             Ok(k) => {
                 println!("{}", k.public_hex());
@@ -163,18 +169,30 @@ fn write_secret(path: &std::path::Path, data: &[u8]) -> std::io::Result<()> {
     std::fs::write(path, data)
 }
 
+/// The network and the pool's own coinbase output script, or why the config cannot be used.
+/// `check` runs this too, so an unpayable payout address is caught before a restart.
+fn pool_payout_script(cfg: &Config) -> Result<(Network, Vec<u8>), String> {
+    let network = Network::parse(&cfg.network).ok_or_else(|| format!("unknown network {:?}", cfg.network))?;
+    match address::decode_script(&cfg.payout_address, network) {
+        // The pool's output carries the value the split could not place, so a gateway cannot
+        // just leave it out: the newest ones refuse to serve work for the block instead.
+        Some(s) if !address::rdts_output_ok(&s) => Err(format!(
+            "payout-address {:?} decodes to a {}-byte output script, which a coinbase cannot \
+             carry (limit {} bytes); gateways will not serve work for it",
+            cfg.payout_address,
+            s.len(),
+            address::RDTS_MAX_OUTPUT_SCRIPT
+        )),
+        Some(s) => Ok((network, s)),
+        None => Err(format!("payout-address {:?} is not a valid {} address", cfg.payout_address, cfg.network)),
+    }
+}
+
 fn run(cfg: Config) -> i32 {
-    let network = match Network::parse(&cfg.network) {
-        Some(n) => n,
-        None => {
-            eprintln!("unknown network {:?}", cfg.network);
-            return 2;
-        }
-    };
-    let pool_script = match address::to_script(&cfg.payout_address, network) {
-        Some(s) => s,
-        None => {
-            eprintln!("payout-address {:?} is not a valid {} address", cfg.payout_address, cfg.network);
+    let (network, pool_script) = match pool_payout_script(&cfg) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("{e}");
             return 2;
         }
     };
@@ -220,6 +238,7 @@ fn run(cfg: Config) -> i32 {
         ledger.window.identities().len(),
         ledger.window.lifetime_shares
     );
+    warn_if_window_cliff(&cfg.data_dir, &ledger);
     let block_log = BlockLog::open(&cfg.data_dir);
     let blocks = block_log.read_all().unwrap_or_default();
 
@@ -307,12 +326,50 @@ fn run(cfg: Config) -> i32 {
             _ = accept => {}
             _ = shutdown_signal() => {}
         }
-        log::info!("shutting down; syncing ledger");
-        if let Err(e) = shared.ledger.lock().unwrap().sync() {
-            log::error!("final ledger sync failed: {e}");
+        log::info!("shutting down; persisting TIDES window");
+        if let Err(e) = shared.ledger.lock().unwrap().persist_window() {
+            log::error!("final ledger persist failed: {e}");
         }
         0
     })
+}
+
+/// If the last `stats.json` (written by the previous process) disagrees with the
+/// window we just loaded, the file and RAM had drifted — the cliff we hit on 2026-09-05.
+fn warn_if_window_cliff(dir: &std::path::Path, ledger: &Ledger) {
+    let raw = match std::fs::read(dir.join("stats.json")) {
+        Ok(b) => b,
+        Err(_) => return,
+    };
+    let v: serde_json::Value = match serde_json::from_slice(&raw) {
+        Ok(v) => v,
+        Err(_) => return,
+    };
+    let Some(miners) = v.pointer("/window/miners").and_then(|m| m.as_array()) else {
+        return;
+    };
+    let live: std::collections::HashMap<String, u64> =
+        ledger.window.miners().into_iter().map(|m| (m.identity, m.work)).collect();
+    let mut cliffs = 0u32;
+    for m in miners {
+        let Some(id) = m.get("identity").and_then(|x| x.as_str()) else { continue };
+        let prev = m.get("work").and_then(|x| x.as_u64()).unwrap_or(0);
+        if prev < 1_000_000 {
+            continue;
+        }
+        let now = live.get(id).copied().unwrap_or(0);
+        if now + prev / 10 < prev {
+            log::error!(
+                "TIDES window cliff on reload: {id} work {prev} -> {now} ({}% of prior). \
+                 Disk and the previous process disagreed; miners will see a next-block drop.",
+                if prev > 0 { 100 * now / prev } else { 0 }
+            );
+            cliffs += 1;
+        }
+    }
+    if cliffs == 0 {
+        log::info!("TIDES window on disk matches the previous process (no reload cliff)");
+    }
 }
 
 async fn shutdown_signal() {
