@@ -14,7 +14,7 @@ RPC **9332**, P2P **9333**. Lightning/mempool keep talking to this node.
 | `umbrel/bitcoin.conf` | App `bitcoin.conf`: `includeconf=umbrel-bitcoin.conf` + `includeconf=blake2b.conf` |
 | `umbrel/hooks/pre-start` | Re-bind the prefix `bitcoind` into the Knots compose after app updates, run `ensure-blake2b-services.sh`; then stock Tor HS wait |
 | `umbrel/mempool-hooks/pre-start` | Mempool app hook: widen `blocks.header` for 164-byte headers, `MEMPOOL_BACKEND=electrum` -> host electrs :50011, 800 kWU block weight, local pools JSON |
-| `umbrel/mempool-theme/` | Lazarus look for the mempool frontend: `nginx-mempool.conf` (`sub_filter` injects the theme into the app shell; serves our mining-pool logo and favicons), `www/theme.css` (palette, type, layout), `www/theme.js` (nav + footer links, fee/goggles/chart recolouring), `www/chi-rho*.svg` + `www/favicon*` (the Chi Rho mark) |
+| `umbrel/mempool-theme/` | Lazarus look for the mempool frontend: `nginx-mempool.conf` (`sub_filter` injects the theme into the app shell; serves our mining-pool logo and favicons), `www/theme.css` (palette, type, layout), `www/theme.js` (nav + footer links, fee/goggles/chart recolouring), `www/chi-rho*.svg` + `www/favicon*` (the Chi Rho mark and the wreathed crest) |
 | `pools/pools-sync.py`, `pools/pools-overrides.json` | Mining-pool list merge (Kilombino + mempool.guide + ours), priority-ordered pool ids, block re-attribution; runs from `../systemd/pools-sync.timer` |
 | `umbrel/mempool-patches/` | Backend patch: DATUM template-creator names for any pool (`patch-backend.py` applied by the hook to the pinned image; `datum-template-creator.patch` for upstream) |
 | `umbrel/docker-compose.snippet.yml` | The volume line to add (do not commit a live compose — it has RPC/Tor env) |
@@ -87,18 +87,22 @@ carry one mark. Because that viewBox is cropped to the mark rather than square, 
   blocks used to show. Serving our slug here puts the Chi Rho on every surface that draws a pool logo:
   the block list, the block page's *Miner* row and block strip, and `/mining/pool/lazarus`. Attribution
   is untouched — this is only the image for the `lazarus` slug.
-* `/resources/favicons/{favicon.ico,favicon-16x16.png,favicon-32x32.png,apple-touch-icon.png}` — the tab
-  and touch icons, from `chi-rho-icon.svg` (the mark on the pool's near-black with a narrower margin, so
-  it uses every pixel it can at 16px). Regenerate after editing that file:
+* `/resources/favicons/{favicon.ico,favicon-16x16.png,favicon-32x32.png}` — the tab icons, from
+  `chi-rho-icon.svg` (the bare mark on the pool's near-black with a narrower margin, so it uses every
+  pixel it can at 16px). `/resources/favicons/apple-touch-icon.png` is the **crest** instead: at 180px
+  there is room for the wreath, and a home-screen tile is the one place the mark is looked at rather
+  than glanced past. Regenerate after editing either file:
 
   ```sh
   cd node/umbrel/mempool-theme/www
-  for px in 16 32 48 180; do
-    printf '<!doctype html><style>html,body{margin:0;width:%dpx;height:%dpx;overflow:hidden}img{display:block;width:%dpx;height:%dpx}</style><img src="chi-rho-icon.svg">' $px $px $px $px > _ico.html
+  shot() {  # shot <src.svg> <px> <out.png>
+    printf '<!doctype html><style>html,body{margin:0;width:%dpx;height:%dpx;overflow:hidden}img{display:block;width:%dpx;height:%dpx}</style><img src="%s">' $2 $2 $2 $2 "$1" > _ico.html
     google-chrome --headless --disable-gpu --hide-scrollbars --force-device-scale-factor=1 \
-      --window-size=$px,$px --screenshot=/tmp/ico-$px.png "file://$PWD/_ico.html"
-  done
-  rm _ico.html
+      --window-size=$2,$2 --screenshot="$3" "file://$PWD/_ico.html"
+    rm _ico.html
+  }
+  for px in 16 32 48; do shot chi-rho-icon.svg $px /tmp/ico-$px.png; done
+  shot chi-rho-crest-icon.svg 180 /tmp/ico-180.png
   cp /tmp/ico-16.png favicon-16x16.png; cp /tmp/ico-32.png favicon-32x32.png
   cp /tmp/ico-180.png apple-touch-icon.png
   convert /tmp/ico-16.png /tmp/ico-32.png /tmp/ico-48.png favicon.ico
@@ -109,6 +113,18 @@ carry one mark. Because that viewBox is cropped to the mark rather than square, 
   brand reads mark + *Lazarus Mempool*, and onto the injected **Lazarus Pool** nav item's `.lz-mark`.
   All four locations are exact-match, so they win over the `location /resources` block; they are in the
   nginx config, so a mempool image upgrade keeps them.
+
+`www/chi-rho-crest.svg` is the full arms: the same Chi Rho inside a laurel wreath, with Alpha and Omega
+under the Chi's upper arms (Revelation 22:13 — the letters that flank the labarum in the historical art).
+The wreath is generated rather than traced: each branch is a tapered arc down one side of a ring with two
+staggered rows of almond leaves, the two branches crossing below the staff. `chi-rho-crest-icon.svg` is
+that on the near-black, for the touch icon.
+
+The crest only appears where it is big enough to read — the 180px touch icons and the READMEs. Everything
+small keeps the bare mark: the nav brands, the 16/32px favicons and the `lazarus` pool badge, which is
+drawn at 16-44px in block lists. A wreath at those sizes closes into a blob and costs the Chi Rho the
+contrast it needs, so the mark stays alone there. Both are built by the same script, so they cannot drift
+apart.
 
 ## Mempool explorer: mining-pool names
 

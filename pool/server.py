@@ -1923,6 +1923,10 @@ class Handler(BaseHTTPRequestHandler):
                     ".js": "application/javascript",
                     ".wasm": "application/wasm",
                     ".html": "text/html; charset=utf-8",
+                    ".svg": "image/svg+xml",
+                    ".png": "image/png",
+                    ".ico": "image/x-icon",
+                    ".webmanifest": "application/manifest+json",
                 }
                 self.send_file(fp, mime.get(fp.suffix, "application/octet-stream"))
                 return
