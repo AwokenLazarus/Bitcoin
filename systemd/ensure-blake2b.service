@@ -3,4 +3,8 @@ Description=Ensure BLAKE2b electrs/datum/pool are running
 
 [Service]
 Type=oneshot
+# The script nohup's electrs/primed/pool. Default KillMode=control-group would
+# SIGTERM those children when the oneshot exits — that is why electrs died every
+# 3 minutes and mempool address pages returned 500.
+KillMode=process
 ExecStart=/home/umbrel/blake2b/bin/ensure-blake2b-services.sh
