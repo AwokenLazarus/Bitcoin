@@ -17,7 +17,7 @@ jobs:
     name: prime — primed, datum-wire, tides
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
       # The share-validation invariants in the README are pinned by these tests.
       # `--locked` also proves the committed Cargo.lock still resolves.
@@ -37,7 +37,7 @@ jobs:
     name: lazarus — protocol, prime, gateway
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
       - name: cargo build
         working-directory: lazarus
@@ -47,7 +47,7 @@ jobs:
     name: python — syntax
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
       # server.py and the sync/notify helpers are deployed by rsync with no build step,
       # so a syntax error reaches the host intact. This is the cheapest guard against that.
