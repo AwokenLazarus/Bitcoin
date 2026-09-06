@@ -1,0 +1,20 @@
+{
+  "_comment": "Solo stratum for GPUs and CPU miners. Same payout rule as solo-asic.json (97.5% to the miner, 2.5% fee), with the low starting difficulty a non-ASIC needs. Its own solo_data_dir: two instances must not write the same book file.",
+  "profile": "solo-gpu",
+  "mode": "solo",
+  "stratum_listen": "0.0.0.0:3334",
+  "api_listen": "127.0.0.1:7155",
+  "_vardiff_comment": "A 500 MH/s GPU wants difficulty 1 (500e6 * 4s / 2^32 = 0.47), and a 2 GH/s card only wants 2, so the floor and the start are both 1 as on the pooled GPU port (:3333). The cap matches the ASIC port so an ASIC that lands here still settles at a sane share rate instead of climbing to the 2^40 exponent limit.",
+  "vardiff_min": 1,
+  "vardiff_start": 1,
+  "vardiff_max": 131072,
+  "rpc": "http://127.0.0.1:9332",
+  "rpc_cookie": "/home/umbrel/umbrel/app-data/bitcoin-knots/data/bitcoin/.cookie",
+  "prime_host": "127.0.0.1",
+  "prime_port": 0,
+  "solo_fee_bps": 250,
+  "solo_fee_address": "<pool payout address>",
+  "solo_data_dir": "/home/umbrel/blake2b/lazarus-solo/gpu",
+  "coinbase_tag": "Lazarus/solo",
+  "verify_shares": "enforce"
+}

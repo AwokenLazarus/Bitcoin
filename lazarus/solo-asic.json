@@ -1,0 +1,20 @@
+{
+  "_comment": "Solo stratum for ASICs. Every miner gets its own coinbase: 97.5% to the address it authorises with, 2.5% to solo_fee_address. Nothing is credited to the TIDES window and nothing is owed after the block - the payout is the block. prime_port 0 keeps this instance standalone, so it cannot disturb the pooled gateways or Prime.",
+  "profile": "solo-asic",
+  "mode": "solo",
+  "stratum_listen": "0.0.0.0:23335",
+  "api_listen": "127.0.0.1:7154",
+  "_vardiff_comment": "Same ladder as the pooled ASIC port (:23334). Box firmware reports an optimal range around 1164-6985, so 4096 is inside it from the first share, and vardiff still climbs 4x per eight shares to the 131072 cap (~140 TH/s at one share every four seconds). Share difficulty does not affect a solo payout at all, only the share rate and the hashrate readout.",
+  "vardiff_min": 1024,
+  "vardiff_start": 4096,
+  "vardiff_max": 131072,
+  "rpc": "http://127.0.0.1:9332",
+  "rpc_cookie": "/home/umbrel/umbrel/app-data/bitcoin-knots/data/bitcoin/.cookie",
+  "prime_host": "127.0.0.1",
+  "prime_port": 0,
+  "solo_fee_bps": 250,
+  "solo_fee_address": "<pool payout address>",
+  "solo_data_dir": "/home/umbrel/blake2b/lazarus-solo/asic",
+  "coinbase_tag": "Lazarus/solo",
+  "verify_shares": "enforce"
+}

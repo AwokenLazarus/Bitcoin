@@ -26,7 +26,20 @@ fi
 if ! pgrep -f 'lazarus-gateway --config /home/umbrel/blake2b/etc/lazarus-asic.json' >/dev/null; then
   nohup /home/umbrel/blake2b/bin/start-lazarus-gateway.sh /home/umbrel/blake2b/etc/lazarus-asic.json >> /home/umbrel/blake2b/logs/lazarus-asic.log 2>&1 &
 fi
-# GPU mining gateway (:3333) retired -- the pool is stratum-only via lazarus-asic.json.
+# Pooled GPU gateway (:3333) retired -- pooled mining is stratum-only via lazarus-asic.json.
+#
+# Solo stratum: one instance per miner class, both paying the finder directly (97.5%) with
+# a 2.5% fee output. They hold no window state and never talk to Prime, so a solo restart
+# cannot touch a pooled miner or a connected DATUM gateway.
+#   solo-asic :23335 (api 7154, vardiff 1024/4096/131072)
+#   solo-gpu  :3334  (api 7155, vardiff 1/1/131072)
+for solo in asic gpu; do
+  cfg=/home/umbrel/blake2b/etc/lazarus-solo-$solo.json
+  [[ -f $cfg ]] || continue
+  if ! pgrep -f "lazarus-gateway --config $cfg" >/dev/null; then
+    nohup /home/umbrel/blake2b/bin/start-lazarus-gateway.sh "$cfg" >> "/home/umbrel/blake2b/logs/lazarus-solo-$solo.log" 2>&1 &
+  fi
+done
 #
 # Pool UI (pool/server.py): :8888 local, :8889 lan-edge, :8890 public NPM.
 # Static files are read from disk per request, so pool/static/* deploys are live at once;

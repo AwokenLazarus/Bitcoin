@@ -2,6 +2,17 @@
   "_comment": "Local corrections layered over the upstream pool lists by pools-sync.py. Keys: pools (merged by slug; replace=true discards upstream addresses/tags for that slug; pool=true matches before individual miners' addresses), drop (slugs never emitted), generic (tag-only software identifiers matched last so a miner's own tag or address wins). PyBLOCK's LOTTO/CAROUSEL/CHIRP modes are folded into one PyBLOCK entry, as mempool.guide shows them.",
   "pools": [
     {
+      "_comment": "Blocks found by a miner on the solo ports. Tag only, never the payout address: the pool's address is in a solo coinbase too, as the fee output, and matching on it would take pooled blocks as well. Ranked ahead of Lazarus because 'Lazarus/solo' contains 'Lazarus'.",
+      "name": "Lazarus Solo",
+      "link": "https://pool.awokenlazarus.xyz/#solo",
+      "addresses": [],
+      "tags": [
+        "Lazarus/solo"
+      ],
+      "replace": true,
+      "pool": true
+    },
+    {
       "name": "Lazarus",
       "link": "https://pool.awokenlazarus.xyz",
       "addresses": [

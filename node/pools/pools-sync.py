@@ -202,7 +202,7 @@ def merge(kilombino, guide, ov):
 
     def prio(slug):
         e = pools[slug]
-        if slug == "lazarus":
+        if slug in ("lazarussolo", "lazarus"):
             return 0
         if slug in shared:          # a pool's blocks also pay its members' addresses
             return 1
@@ -216,7 +216,11 @@ def merge(kilombino, guide, ov):
 
     ordered = [s for s in order if s in pools]
     pos = {s: i for i, s in enumerate(ordered)}
-    ordered.sort(key=lambda s: (prio(s), pos[s]))
+    # Within a band the more specific matcher has to come first. "Lazarus/solo" contains
+    # "Lazarus", so without this a block found by a solo miner would be credited to the
+    # pool, whose window earned nothing from it.
+    within = {"lazarussolo": 0, "lazarus": 1}
+    ordered.sort(key=lambda s: (prio(s), within.get(s, 2), pos[s]))
     return [(s, pools[s], prio(s)) for s in ordered]
 
 
