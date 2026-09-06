@@ -1,0 +1,171 @@
+# BLAKE2b pooled jobs: never hand a miner an unsplit coinbase
+#
+# Upstream-facing version of lazarus/patches/datum-gateway-split-only.patch, with the
+# Lazarus-specific user-agent bump removed so it can be proposed as-is.
+#
+# Target: FlyTheElephant1/datum_gateway master @ 121edd06 (== test/console-collapse-pr14-pr17)
+# Verified: applies with no fuzz, and `cmake --build` is clean with no new warnings.
+#
+#   git clone https://github.com/FlyTheElephant1/datum_gateway.git
+#   cd datum_gateway && patch -p1 < datum-gateway-blake2b-split-upstream.patch
+#
+# The bug: in send_mining_notify, `if (new_block) cbselect = 0;` runs before the BLAKE2b
+# branch, and the subsidy-only pairing below it is gated on !stratum_job_is_blake2b(j). So a
+# SHA256d miner gets a genuinely empty job on a new block, but a BLAKE2b miner gets coinbase
+# type 0 -- which carries no coinbaser outputs -- attached to the *full* template, fees and
+# all. A block found on that job pays the pool script alone and the DATUM split is lost. The
+# miner keeps that job until the next work update, so the exposure is the whole gap, not an
+# instant.
+#
+diff --git a/src/datum_blocktemplates.c b/src/datum_blocktemplates.c
+index 601c462..2d36da8 100644
+--- a/src/datum_blocktemplates.c
++++ b/src/datum_blocktemplates.c
+@@ -698,7 +698,6 @@ void *datum_gateway_template_thread(void *args) {
+ 					const bool new_block = strcmp(t->previousblockhash, p1);
+ 					if (new_block || notify_othercause) {
+ 						notify_othercause = 0;
+-						update_stratum_job(t,true,JOB_STATE_EMPTY_PLUS);
+ 						if (new_block) {
+ 							last_block_change = current_time_millis();
+ 							strcpy(p1, t->previousblockhash);
+@@ -707,24 +706,24 @@ void *datum_gateway_template_thread(void *args) {
+ 						} else {
+ 							DLOG_DEBUG("Urgent work update triggered");
+ 						}
+-						
+-						// sleep for a milisecond
+-						// this will let other threads churn for a moment.  we wont get all the empty jobs blasted out in a milisecond anyway
+-						usleep(1000);
+-						
+-						// wait for the empties to complete
+-						DLOG_DEBUG("Waiting on empty work send completion...");
+-						for(j=0;j<4000;j++) {
+-							if (stratum_latest_empty_check_ready_for_full()) break;
+-							usleep(1001);
+-						}
+-						DLOG_DEBUG("Empty sends done!");
+-						
+-						// use this template to setup for a coinbaser wait job while the empty + full w/blank jobs are blasted
+-						// then this job will get blasted when its ready.
+ 						i = datum_stratum_v1_global_subscriber_count();
+-						DLOG_INFO("Updating priority stratum job for block %lu: %.8f BTC, %lu txns, %lu bytes (Sent to %llu stratum client%s)", (unsigned long)t->height, (double)t->coinbasevalue / (double)100000000.0, (unsigned long)t->txn_count, (unsigned long)t->txn_total_size, (unsigned long long)i, (i!=1)?"s":"");
+-						update_stratum_job(t,false,JOB_STATE_FULL_PRIORITY_WAIT_COINBASER);
++						if (datum_protocol_is_active()) {
++							// Pooled: never blast empty/tiny work. Miners wait for the
++							// coinbaser split instead of hashing a pool-only coinbase.
++							DLOG_INFO("Updating priority stratum job for block %lu (split-only): %.8f BTC, %lu txns, %lu bytes (Sent to %llu stratum client%s)", (unsigned long)t->height, (double)t->coinbasevalue / (double)100000000.0, (unsigned long)t->txn_count, (unsigned long)t->txn_total_size, (unsigned long long)i, (i!=1)?"s":"");
++							update_stratum_job(t,true,JOB_STATE_FULL_PRIORITY_WAIT_COINBASER);
++						} else {
++							update_stratum_job(t,true,JOB_STATE_EMPTY_PLUS);
++							usleep(1000);
++							DLOG_DEBUG("Waiting on empty work send completion...");
++							for(j=0;j<4000;j++) {
++								if (stratum_latest_empty_check_ready_for_full()) break;
++								usleep(1001);
++							}
++							DLOG_DEBUG("Empty sends done!");
++							DLOG_INFO("Updating priority stratum job for block %lu: %.8f BTC, %lu txns, %lu bytes (Sent to %llu stratum client%s)", (unsigned long)t->height, (double)t->coinbasevalue / (double)100000000.0, (unsigned long)t->txn_count, (unsigned long)t->txn_total_size, (unsigned long long)i, (i!=1)?"s":"");
++							update_stratum_job(t,false,JOB_STATE_FULL_PRIORITY_WAIT_COINBASER);
++						}
+ 					} else {
+ 						if (was_notified) {
+ 							// we got a notification of a new block, but there doesn't seem to actually be a new block.
+diff --git a/src/datum_coinbaser.c b/src/datum_coinbaser.c
+index 00fbb54..508fba2 100644
+--- a/src/datum_coinbaser.c
++++ b/src/datum_coinbaser.c
+@@ -582,7 +582,8 @@ void generate_coinbase_txns_for_stratum_job(T_DATUM_STRATUM_JOB *s, bool empty_o
+ 		memcpy(&s->pool_addr_script[0], datum_config.override_mining_pool_scriptsig, datum_config.override_mining_pool_scriptsig_len);
+ 		s->is_datum_job = true;
+ 		if (s->available_coinbase_outputs_count == 0) {
+-			empty_only = true;
++			DLOG_WARN("pooled job has no coinbaser outputs; not generating an empty coinbase");
++			return;
+ 		}
+ 	} else {
+ 		// No pool
+@@ -780,6 +781,12 @@ void generate_coinbase_txns_for_stratum_job(T_DATUM_STRATUM_JOB *s, bool empty_o
+ 		// TYPE 2 - Older Antminer stock (S19)
+ 		i = datum_stratum_coinbase_fit_to_template(755, cb_req_sz[2], s);
+ 		generate_coinbase_txns_for_stratum_job_subtypebysize(s, 2, i, false, cb1idx, cb2idx, true);
++		
++		// Type 0 is firmware "tiny" and is empty on stock DATUM even when types
++		// 1–5 hold the pool split. Copy the BLAKE2b payout coinbase (type 4)
++		// into it so a miner that still picks type 0 pays TIDES.
++		strcpy(s->coinbase[0].coinb1, s->coinbase[4].coinb1);
++		strcpy(s->coinbase[0].coinb2, s->coinbase[4].coinb2);
+ 	}
+ 	
+ 	// prep binary versions of the coinbase for speeding up later
+@@ -926,7 +933,7 @@ void *datum_coinbaser_thread(void *ptr) {
+ 				s->available_coinbase_outputs_count = 0;
+ 				i = 0;
+ 			}
+-			if (i>=0) {
++			if (i >= 1 || !datum_protocol_is_active()) {
+ 				DLOG_DEBUG("Generating coinbases for up to %d outputs", i);
+ 				generate_coinbase_txns_for_stratum_job(s, false);
+ 				if (need_coinbaser_rwlocks_init_done) {
+@@ -936,6 +943,8 @@ void *datum_coinbaser_thread(void *ptr) {
+ 					need_coinbaser = false;
+ 				}
+ 				DLOG_DEBUG("Generated and notified.");
++			} else {
++				DLOG_WARN("coinbaser returned no outputs; keeping job unpublished");
+ 			}
+ 		}
+ 		
+diff --git a/src/datum_stratum.c b/src/datum_stratum.c
+index 36df144..5f0ba4d 100644
+--- a/src/datum_stratum.c
++++ b/src/datum_stratum.c
+@@ -408,8 +408,8 @@ int datum_stratum_v1_get_thread_subscriber_count(T_DATUM_THREAD_DATA *my) {
+ bool stratum_job_coinbaser_ready(T_DATUM_STRATUM_THREADPOOL_DATA *sdata, T_DATUM_STRATUM_JOB *job) {
+ 	bool a = false;
+ 	// backup timeout for coinbaser on these jobs
+-	if ((sdata->loop_tsms > job->tsms) && (sdata->loop_tsms - job->tsms) > 5000) {
+-		// enforce a timeout of 5 seconds on waiting on a coinbaser...
++	if (!datum_protocol_is_active() && (sdata->loop_tsms > job->tsms) && (sdata->loop_tsms - job->tsms) > 5000) {
++		// Solo: 5s fallback to empty work. Pooled: wait for the split.
+ 		sdata->full_coinbase_ready = false;
+ 		return true;
+ 	}
+@@ -1740,6 +1740,12 @@ int send_mining_notify(T_DATUM_CLIENT_DATA *c, bool clean, bool quickdiff, bool
+ 	if (!j) {
+ 		return -1;
+ 	}
++
++	// Split-only pooled jobs skip EMPTY_PLUS, so case 4 is the first notify
++	// of a new height. Miners must drop stale prevhash work.
++	if (j->is_new_block) {
++		clean = true;
++	}
+ 	
+ 	//job_id - ID of the job. Use this ID while submitting share generated from this job.
+ 	//prevhash - Hash of previous block.
+@@ -1828,14 +1834,18 @@ int send_mining_notify(T_DATUM_CLIENT_DATA *c, bool clean, bool quickdiff, bool
+ 	// coinbase selection is tacked on to the job ID
+ 	// prepending a Q means it's a duplicate job, but with a new diff (needed per stratum protocol "spec")
+ 	// prepending an N means this is an empty (subsidy-only) block with a small coinbase and has coinbase ID 255/0xff
+-	if (new_block) {
++	if (stratum_job_is_blake2b(j) && datum_protocol_is_active()) {
++		// Pooled BLAKE2b: never send type 0. The job waits until the coinbaser
++		// has filled blake2b_coinbase_index (type 4). Skipping notify here is
++		// cheaper than hashing an unsplit coinbase.
++		if (!full_coinbase || j->blake2b_coinbase_index == 0) {
++			return 0;
++		}
++		cbselect = (unsigned int)j->blake2b_coinbase_index;
++	} else if (new_block) {
+ 		cbselect = 0;
+ 	} else if (stratum_job_is_blake2b(j)) {
+-		// Every v2 client shares one coinbase, since the hasher extranonce
+-		// lives in the header. The job-level choice therefore applies to all
+-		// of them: the payout-carrying coinbase once the coinbaser has
+-		// answered, the pool-address-only type 0 before that. The job ID
+-		// carries the index, so the submit path and the pool protocol follow.
++		// Solo BLAKE2b: type 4 once a split exists, type 0 until then.
+ 		cbselect = full_coinbase ? (unsigned int)j->blake2b_coinbase_index : 0;
+ 	} else {
+ 		if (full_coinbase) {

@@ -10,7 +10,13 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
 use crate::address;
+use crate::config::Config;
 use crate::state::{now, Shared};
+
+fn house_gateway(cfg: &Config, gateway: &str) -> bool {
+    let g = gateway.to_ascii_lowercase();
+    cfg.house_gateways.iter().any(|h| !h.is_empty() && g.starts_with(&h.to_ascii_lowercase()))
+}
 
 /// One unit of window work is one difficulty-1 share: 2^32 hashes.
 const HASHES_PER_WORK: f64 = 4_294_967_296.0;
@@ -71,18 +77,24 @@ pub fn build(shared: &Shared) -> Value {
         })
         .collect();
 
-    let blocks: Vec<Value> = {
+    let (blocks, finds, owed) = {
         let b = shared.blocks.lock().unwrap();
-        b.iter().rev().take(100).map(|r| serde_json::to_value(r).unwrap_or(Value::Null)).collect()
+        let finds = tides::gateway_finds(&b);
+        let blocks: Vec<Value> =
+            b.iter().rev().take(100).map(|r| serde_json::to_value(r).unwrap_or(Value::Null)).collect();
+        let owed: u64 = b.iter().filter(|r| !r.kind.starts_with("orphan")).map(|r| r.owed_sats).sum();
+        (blocks, finds, owed)
     };
-    let owed: u64 =
-        shared.blocks.lock().unwrap().iter().filter(|b| !b.kind.starts_with("orphan")).map(|b| b.owed_sats).sum();
+    let found_total: u64 = finds.values().map(|f| f.found).sum();
     let clients: Vec<Value> = {
         let c = shared.clients.lock().unwrap();
         let mut v: Vec<_> = c.values().cloned().collect();
         v.sort_by_key(|c| c.id);
-        v.into_iter()
+        let mut present = std::collections::HashSet::new();
+        let mut rows: Vec<Value> = v
+            .into_iter()
             .map(|c| {
+                present.insert(c.gateway.clone());
                 let mut j = serde_json::to_value(&c).unwrap_or(Value::Null);
                 if let Some(o) = j.as_object_mut() {
                     o.insert("connected_s".into(), json!(ts.saturating_sub(c.connected_ts)));
@@ -90,10 +102,44 @@ pub fn build(shared: &Shared) -> Value {
                         "last_share_s".into(),
                         json!(if c.last_share_ts > 0 { ts.saturating_sub(c.last_share_ts) } else { 0 }),
                     );
+                    // Session counter resets on restart; the log is the lifetime count.
+                    o.insert("block_candidates".into(), json!(finds.get(&c.gateway).map(|f| f.found).unwrap_or(0)));
+                    o.insert("offline".into(), json!(false));
                 }
                 j
             })
-            .collect()
+            .collect();
+        // Gateways that found blocks before the last restart, even if they are not connected now.
+        let mut historic: Vec<_> = finds
+            .iter()
+            .filter(|(gw, f)| f.found > 0 && !gw.is_empty() && !present.contains(*gw))
+            .collect();
+        historic.sort_by(|a, b| b.1.found.cmp(&a.1.found).then_with(|| a.0.cmp(b.0)));
+        for (gw, f) in historic {
+            let own = house_gateway(&shared.cfg, gw);
+            rows.push(json!({
+                "id": 0,
+                "remote": "",
+                "user_agent": "",
+                "generation": "",
+                "gateway": gw,
+                "fee_path": if own { "stratum" } else { "datum" },
+                "connected_ts": 0,
+                "connected_s": 0,
+                "identity": f.last_finder,
+                "accepted": 0,
+                "rejected": 0,
+                "work": 0,
+                "last_share_ts": 0,
+                "last_share_s": 0,
+                "coinbasers": 0,
+                "block_candidates": f.found,
+                "last_reject": Value::Null,
+                "offline": true,
+                "own": own,
+            }));
+        }
+        rows
     };
 
     let t = &shared.totals;
@@ -152,7 +198,19 @@ pub fn build(shared: &Shared) -> Value {
             "lifetime_shares": w.lifetime_shares,
             "lifetime_work": w.lifetime_work,
             "coinbasers": t.coinbasers.load(Ordering::Relaxed),
-            "block_candidates": t.block_candidates.load(Ordering::Relaxed),
+            "coinbasers_repeated": t.coinbasers_repeated.load(Ordering::Relaxed),
+            "coinbasers_over_rate": t.coinbasers_over_rate.load(Ordering::Relaxed),
+            "coinbasers_slow": t.coinbasers_slow.load(Ordering::Relaxed),
+            "coinbaser_max_ms": t.coinbaser_max_us.load(Ordering::Relaxed) / 1000,
+            // Window snapshots actually built. Far below `coinbasers` means replies are
+            // served from a shared snapshot rather than recomputed under the ledger lock.
+            "coinbaser_base_builds": t.coinbaser_base_builds.load(Ordering::Relaxed),
+            // Accepted shares that could not have paid the window had they been a block.
+            // Stock DATUM's per-height subsidy-only job lands in `pool_only_shares` and is
+            // expected; `pool_only_full_jobs` is the one that should be zero.
+            "pool_only_shares": t.pool_only_shares.load(Ordering::Relaxed),
+            "pool_only_full_jobs": t.pool_only_full_jobs.load(Ordering::Relaxed),
+            "block_candidates": found_total,
             "blocks_submitted": t.blocks_submitted.load(Ordering::Relaxed),
             "connections": t.connections.load(Ordering::Relaxed),
             "connections_refused": t.connections_refused.load(Ordering::Relaxed),

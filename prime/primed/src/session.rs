@@ -49,6 +49,14 @@ const MAX_LIVE_SLOTS: usize = 16;
 /// block — so a burst of 32 refilled one per second never touches a real one.
 const COINBASER_BURST: u32 = 32;
 const COINBASER_REFILL: Duration = Duration::from_secs(1);
+/// How long stock DATUM's coinbaser thread blocks waiting for a reply before it publishes the
+/// job without a split — `datum_protocol_coinbaser_fetch` in `datum_protocol.c`.
+const STOCK_COINBASER_DEADLINE: Duration = Duration::from_secs(5);
+/// A coinbaser reply this slow is worth a warning: still answered, but the margin against
+/// `STOCK_COINBASER_DEADLINE` has gone from a rounding error to a fifth of the budget.
+const COINBASER_SLOW: Duration = Duration::from_secs(1);
+/// How often one session may repeat the "mining work without the split" warning.
+const POOL_ONLY_WARN_EVERY: Duration = Duration::from_secs(300);
 /// A session with this many rejects (or malformed messages) inside `REJECT_WINDOW` is
 /// doing nothing useful and costing verification CPU: drop it. The live house gateway
 /// runs at 13 rejects per 50 000 shares; a broken farm behind one gateway might manage
@@ -77,6 +85,29 @@ struct IssuedCoinbaser {
     value: u64,
     outputs: Vec<Output>,
     payees: Vec<Payee>,
+}
+
+/// How a coinbaser request gets answered. Deliberately has no "drop" variant: a request left
+/// unanswered makes a stock gateway publish a coinbase paying only the pool, so the token
+/// bucket may choose the cost of the answer but never withhold it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CoinbaserAction {
+    /// Inside the bucket: compute a fresh split under a new id.
+    Fresh,
+    /// Over the bucket, and this exact value was already answered: repeat that reply.
+    Repeat(u8),
+    /// Over the bucket with nothing to repeat: compute anyway, and count it.
+    FreshOverRate,
+}
+
+fn coinbaser_action(tokens: u32, issued: &VecDeque<IssuedCoinbaser>, value: u64) -> CoinbaserAction {
+    if tokens > 0 {
+        return CoinbaserAction::Fresh;
+    }
+    match issued.iter().rev().find(|c| c.value == value) {
+        Some(c) => CoinbaserAction::Repeat(c.id),
+        None => CoinbaserAction::FreshOverRate,
+    }
 }
 
 struct PendingBlock {
@@ -118,6 +149,50 @@ struct Session {
     coinbaser_refill_at: Instant,
     /// Timestamps of recent rejects and malformed messages; see `note_reject`.
     recent_rejects: VecDeque<Instant>,
+    /// Accepted shares from this session whose coinbase paid only the pool, and when we last
+    /// said so; see `note_pool_only_share`.
+    pool_only_shares: u64,
+    /// Of those, the ones on a full job — the kind that is not stock DATUM's per-height
+    /// subsidy-only job and should not be happening.
+    pool_only_full_jobs: u64,
+    pool_only_warned: Option<Instant>,
+}
+
+/// Which of the two gateway-side faults produced a pool-only coinbase, read off the share rather
+/// than guessed at.
+///
+/// The pool cannot fix either, but they are different bugs and the distinction decides where an
+/// operator looks. If the coinbaser the job cited carried payees, the gateway had our split and
+/// published a section that does not use it — that is stock's unconditional type-0 selection on
+/// the first notify of a height, and it is what block 968440 was. If it carried none, the gateway
+/// had nothing to place: either it never asked for this job's coinbaser, or it gave up before the
+/// reply landed.
+fn pool_only_cause(section: u8, coinbaser_id: u8, payees: usize) -> String {
+    if payees > 0 {
+        format!(
+            "it published section {section} while holding coinbaser {coinbaser_id}, which carried {payees} miner \
+             output{} — the split was in hand and the section it handed miners did not use it",
+            if payees == 1 { "" } else { "s" },
+        )
+    } else {
+        format!(
+            "coinbaser {coinbaser_id} named by the job carried no miner outputs here, so the gateway had no split \
+             to place when it built section {section} — it either never asked for this job's coinbaser or gave up \
+             before our reply landed",
+        )
+    }
+}
+
+/// What an accepted pool-only share says about why its coinbase had no miner outputs.
+struct PoolOnly {
+    /// The share was on stock DATUM's per-height subsidy-only job (no transactions).
+    subsidy_only: bool,
+    txcount: u32,
+    /// The gateway's own coinbase section index (`cbselect`) for the work it handed miners.
+    section: u8,
+    /// The coinbaser id the job named, and how many miner outputs we had issued under it.
+    coinbaser_id: u8,
+    payees: usize,
 }
 
 pub async fn run(shared: Arc<Shared>, mut stream: TcpStream, remote: SocketAddr) -> Result<(), SessionError> {
@@ -197,6 +272,9 @@ pub async fn run(shared: Arc<Shared>, mut stream: TcpStream, remote: SocketAddr)
         coinbaser_tokens: COINBASER_BURST,
         coinbaser_refill_at: Instant::now(),
         recent_rejects: VecDeque::new(),
+        pool_only_shares: 0,
+        pool_only_full_jobs: 0,
+        pool_only_warned: None,
     };
     s.serve().await
 }
@@ -221,6 +299,21 @@ impl Session {
 
     async fn serve(&mut self) -> Result<(), SessionError> {
         self.send_configure().await?;
+        // Ask the gateway to rebuild its templates right now.
+        //
+        // A gateway that just reconnected is still serving jobs whose coinbases carry a split
+        // from coinbaser ids the *previous* Prime process issued. This session has no record of
+        // those ids, so every share on one of those jobs pays outputs Prime cannot vouch for and
+        // is refused as bad-coinbase-outputs — valid miner work, thrown away, purely because we
+        // restarted. A block-notify makes the gateway build fresh jobs and ask for a fresh
+        // coinbaser, so it rotates off that stale work in seconds instead of minutes.
+        //
+        // This is also the only thing Prime can usefully push. An unsolicited *coinbaser* is
+        // worse than useless: stock only reads the reply buffer from inside a fetch and only when
+        // the value matches the one it asked for, so a pushed split is discarded — and because
+        // the buffer index flips and signals the condvar on every reply, one arriving mid-fetch
+        // wakes that fetch on the wrong slot and makes it give up with no outputs at all.
+        self.send_mining(&mining::block_notify(), false).await?;
 
         let mut notify = self.shared.notify.subscribe();
         let mut tick = interval(Duration::from_secs(5));
@@ -361,31 +454,68 @@ impl Session {
     // --- coinbaser ---------------------------------------------------------------------
 
     async fn on_coinbaser_request(&mut self, value: u64, prev_hash: [u8; 32]) -> Result<(), SessionError> {
-        // Each reply is a full TIDES split over the window, computed under the ledger lock.
-        // Real gateways ask a few times a minute; a stream of requests is a CPU sink for
-        // every other session, so past the bucket they are dropped unanswered (a gateway
-        // without a reply keeps building pool-only coinbases, which are still credited).
+        // A coinbaser request is never left unanswered.
+        //
+        // Stock DATUM's coinbaser thread sends this request and then blocks on a condvar for
+        // five seconds. On timeout it publishes the job with `available_coinbase_outputs_count`
+        // still zero, which builds a coinbase paying only the pool script — work that owes the
+        // whole reward back to the window if it finds a block. Silence is the one answer that
+        // guarantees that outcome, so the bucket below only decides whether the reply is
+        // recomputed or repeated, never whether it is sent.
+        //
+        // This is not why 968440 paid the pool alone — stock selects coinbase type 0 on the
+        // first notify of every height regardless of any reply (see the README). It is so that
+        // the pool is never the *second* cause of the same thing.
+        //
+        // For the same reason Prime never sends a coinbaser the gateway did not ask for: the
+        // reply is only used when its value equals the requested one, and it lands in a global
+        // two-slot buffer whose index flips per reply, so a spurious one can make a legitimate
+        // fetch read the wrong value and fall back to exactly the pool-only coinbase this
+        // guards against.
+        let started = Instant::now();
         let elapsed = self.coinbaser_refill_at.elapsed();
         if elapsed >= COINBASER_REFILL {
             let n = (elapsed.as_secs_f64() / COINBASER_REFILL.as_secs_f64()) as u32;
             self.coinbaser_tokens = (self.coinbaser_tokens.saturating_add(n)).min(COINBASER_BURST);
             self.coinbaser_refill_at = Instant::now();
         }
-        if self.coinbaser_tokens == 0 {
-            log::debug!("[{}] coinbaser request over rate limit; ignored", self.id);
-            return self.note_reject();
+        match coinbaser_action(self.coinbaser_tokens, &self.coinbasers, value) {
+            CoinbaserAction::Fresh => self.coinbaser_tokens -= 1,
+            CoinbaserAction::Repeat(prev_id) => {
+                // Already answered for this exact value: repeat that reply rather than issue a
+                // new id. Costs nothing and is what the gateway would have kept anyway. Matched
+                // on id *and* value, and never sent empty: a list the gateway reads as shorter
+                // than one output is "no coinbaser" to it, which forgets the id.
+                let repeat = self
+                    .coinbasers
+                    .iter()
+                    .rev()
+                    .find(|c| c.id == prev_id && c.value == value && !c.outputs.is_empty())
+                    .map(|c| coinbaser::encode_v2(c.id, &c.outputs));
+                if let Some(repeat) = repeat {
+                    log::debug!("[{}] coinbaser over rate; repeating #{prev_id} for value={value}", self.id);
+                    self.shared.totals.add(&self.shared.totals.coinbasers_repeated, 1);
+                    self.send_mining(&mining::coinbaser_reply(value, &repeat), false).await?;
+                    return self.note_coinbaser_latency(started, Some(prev_id));
+                }
+                self.shared.totals.add(&self.shared.totals.coinbasers_over_rate, 1);
+            }
+            CoinbaserAction::FreshOverRate => {
+                self.shared.totals.add(&self.shared.totals.coinbasers_over_rate, 1);
+            }
         }
-        self.coinbaser_tokens -= 1;
 
         let id = self.next_coinbaser_id;
         self.next_coinbaser_id = if id == 255 { 1 } else { id + 1 };
 
-        let (split, target, total_work) = {
-            let ledger = self.shared.ledger.lock().unwrap();
-            let net = self.shared.network;
-            let s = ledger.window.split(value, &self.shared.split_params, |ident| address::to_script(ident, net));
-            (s, ledger.window.target_work(), ledger.window.total_work())
-        };
+        // Computed off a shared snapshot, so a reply never waits on the ledger mutex behind
+        // share crediting or the other gateways asking at the same tip change.
+        let base = self.shared.coinbaser_base();
+        let split =
+            tides::split::compute(base.miners.clone(), base.total_work, value, &self.shared.split_params, |ident| {
+                base.script_for(ident)
+            });
+        let (target, total_work) = (base.target_work, base.total_work);
         let mut outputs: Vec<Output> =
             split.payees.iter().map(|p| Output { sats: p.sats, script: p.script.clone() }).collect();
         // The list is complete: the pool's fee and whatever the split could not place go
@@ -420,6 +550,27 @@ impl Session {
         }
         self.shared.totals.add(&self.shared.totals.coinbasers, 1);
         self.shared.client_update(self.id, |c| c.coinbasers += 1);
+        self.note_coinbaser_latency(started, Some(id))
+    }
+
+    /// Record how long a coinbaser reply took to reach the wire, and say so if it came close
+    /// to the five seconds a stock gateway waits before giving up and mining a pool-only
+    /// coinbase. This is the number that goes wrong first when the pool is the reason a
+    /// gateway published unsplit work.
+    fn note_coinbaser_latency(&mut self, started: Instant, id: Option<u8>) -> Result<(), SessionError> {
+        let took = started.elapsed();
+        self.shared.totals.raise(&self.shared.totals.coinbaser_max_us, took.as_micros() as u64);
+        if took >= COINBASER_SLOW {
+            self.shared.totals.add(&self.shared.totals.coinbasers_slow, 1);
+            log::warn!(
+                "[{}] {} coinbaser{} took {} ms: a stock gateway gives up at {} s and then mines a coinbase paying only the pool",
+                self.id,
+                self.gateway_hex,
+                id.map(|i| format!(" #{i}")).unwrap_or_default(),
+                took.as_millis(),
+                STOCK_COINBASER_DEADLINE.as_secs(),
+            );
+        }
         Ok(())
     }
 
@@ -579,6 +730,19 @@ impl Session {
         } else {
             mining::ACCEPTED_TENTATIVELY
         };
+        if matches!(v.coinbase_kind, CoinbaseKind::PoolOnly) {
+            // Why this job had no miner outputs is the whole question, and the share answers it:
+            // `s.coinbase_id` is the gateway's own section index (its `cbselect`), and the
+            // coinbaser we issued for the job says whether it had a split to place at all.
+            let payees = self.issued(coinbaser_id).map_or(0, |c| c.payees.len());
+            self.note_pool_only_share(PoolOnly {
+                subsidy_only: s.subsidy_only(),
+                txcount: v.commitment.txcount,
+                section: s.coinbase_id,
+                coinbaser_id,
+                payees,
+            });
+        }
         self.send_mining(&mining::share_receipt(status, 0, s.nonce32, s.target_pot, s.job_id), false).await?;
 
         if v.is_block_candidate {
@@ -597,6 +761,61 @@ impl Session {
         });
         self.send_mining(&mining::share_receipt(mining::REJECTED, code, s.nonce32, s.target_pot, s.job_id), false).await?;
         self.note_reject()
+    }
+
+    /// Note an accepted share whose coinbase paid only the pool script.
+    ///
+    /// The share is good work and is credited; what it cannot do is pay the window if it turns
+    /// out to be a block, because the coinbase it committed to has no miner outputs. A gateway
+    /// publishing that work says so over thousands of shares before it gets lucky, so this is
+    /// the signal to act on — 968440 was found on a job like this and nothing in the log said
+    /// so beforehand.
+    ///
+    /// The two kinds are worth telling apart by cost. Stock DATUM emits one subsidy-only job per
+    /// height (`JOB_STATE_EMPTY_PLUS`, no transactions, coinbase id `0xff`), which is cheap to
+    /// lose. A *full* job with a pool-only coinbase is the expensive one: a whole template's
+    /// fees and subsidy with no miner outputs, which is what 968440 was.
+    fn note_pool_only_share(&mut self, p: PoolOnly) {
+        let PoolOnly { subsidy_only, txcount, section, coinbaser_id, payees } = p;
+        self.pool_only_shares += 1;
+        self.shared.totals.add(&self.shared.totals.pool_only_shares, 1);
+        if !subsidy_only {
+            self.pool_only_full_jobs += 1;
+            self.shared.totals.add(&self.shared.totals.pool_only_full_jobs, 1);
+        }
+        let (n, full) = (self.pool_only_shares, self.pool_only_full_jobs);
+        self.shared.client_update(self.id, |c| {
+            c.pool_only_shares = n;
+            c.pool_only_full_jobs = full;
+        });
+        if self.pool_only_warned.is_some_and(|t| t.elapsed() < POOL_ONLY_WARN_EVERY) {
+            return;
+        }
+        self.pool_only_warned = Some(Instant::now());
+        if full == 0 {
+            // Every one so far is the per-height subsidy-only job every stock gateway sends.
+            log::warn!(
+                "[{}] {} {} has {n} share{} on a subsidy-only coinbase paying just the pool. Stock DATUM emits one \
+                 such job per height, so a low count here is expected; a block found on one owes the window.",
+                self.id,
+                self.remote,
+                self.gateway_hex,
+                if n == 1 { "" } else { "s" },
+            );
+            return;
+        }
+        let cause = pool_only_cause(section, coinbaser_id, payees);
+        log::warn!(
+            "[{}] {} {} is mining FULL jobs whose coinbase pays only the pool ({full} of {n} pool-only share{}, \
+             latest carried {} transactions): a whole template's fees and subsidy with no miner outputs, so a \
+             block found on it owes the window everything — 968440 was one of these. Diagnosis: {cause}. Either \
+             way it is fixed at the gateway: lazarus/patches/datum-gateway-split-only.patch, or lazarus-gateway.",
+            self.id,
+            self.remote,
+            self.gateway_hex,
+            if n == 1 { "" } else { "s" },
+            txcount.saturating_sub(1),
+        );
     }
 
     /// Count a reject or malformed message against the session's flood budget.
@@ -820,4 +1039,82 @@ async fn write_frame(
     out.extend_from_slice(payload);
     stream.write_all(&out).await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn issued(id: u8, value: u64) -> IssuedCoinbaser {
+        IssuedCoinbaser { id, value, outputs: vec![Output { sats: value, script: vec![0x00, 0x14, id] }], payees: vec![] }
+    }
+
+    /// The property block 968440 came down to: whatever the bucket says, the gateway gets an
+    /// answer. Silence makes stock DATUM time out after `STOCK_COINBASER_DEADLINE` and publish
+    /// a coinbase with no miner outputs.
+    #[test]
+    fn a_coinbaser_request_is_never_dropped() {
+        let mut empty = VecDeque::new();
+        let mut seen = VecDeque::new();
+        seen.push_back(issued(7, 312_500_000));
+        for tokens in [0u32, 1, 32] {
+            for value in [312_500_000u64, 312_644_067] {
+                for q in [&mut empty, &mut seen] {
+                    // no variant of the decision withholds a reply
+                    match coinbaser_action(tokens, q, value) {
+                        CoinbaserAction::Fresh | CoinbaserAction::Repeat(_) | CoinbaserAction::FreshOverRate => {}
+                    }
+                }
+            }
+        }
+    }
+
+    /// The two faults must not be reported as each other: an operator told "the split was in hand"
+    /// goes and looks at coinbase selection, and one told it was missing goes and looks at the
+    /// coinbaser request path. Live 968440-class shares are the first case.
+    #[test]
+    fn pool_only_cause_separates_the_two_gateway_faults() {
+        let had_split = pool_only_cause(0, 1, 41);
+        assert!(had_split.contains("section 0"), "{had_split}");
+        assert!(had_split.contains("41 miner outputs"), "{had_split}");
+        assert!(had_split.contains("split was in hand"), "{had_split}");
+
+        let no_split = pool_only_cause(4, 7, 0);
+        assert!(no_split.contains("no split"), "{no_split}");
+        assert!(!no_split.contains("in hand"), "{no_split}");
+
+        // singular reads correctly; a one-payee split is still a split the gateway ignored
+        assert!(pool_only_cause(0, 2, 1).contains("1 miner output —"), "{}", pool_only_cause(0, 2, 1));
+    }
+
+    #[test]
+    fn inside_the_bucket_every_request_is_computed_fresh() {
+        let mut q = VecDeque::new();
+        q.push_back(issued(7, 312_500_000));
+        assert_eq!(coinbaser_action(1, &q, 312_500_000), CoinbaserAction::Fresh);
+        assert_eq!(coinbaser_action(32, &q, 312_500_000), CoinbaserAction::Fresh);
+    }
+
+    #[test]
+    fn over_the_bucket_repeats_the_reply_for_that_exact_value() {
+        let mut q = VecDeque::new();
+        q.push_back(issued(7, 312_500_000));
+        q.push_back(issued(8, 312_644_067));
+        // The gateway only accepts a reply whose value equals the one it asked about, so a
+        // repeat is only usable when the value matches exactly.
+        assert_eq!(coinbaser_action(0, &q, 312_500_000), CoinbaserAction::Repeat(7));
+        assert_eq!(coinbaser_action(0, &q, 312_644_067), CoinbaserAction::Repeat(8));
+        // newest wins when a value was answered twice
+        q.push_back(issued(9, 312_500_000));
+        assert_eq!(coinbaser_action(0, &q, 312_500_000), CoinbaserAction::Repeat(9));
+        // a value never answered is computed rather than skipped
+        assert_eq!(coinbaser_action(0, &q, 999_999_999), CoinbaserAction::FreshOverRate);
+        assert_eq!(coinbaser_action(0, &VecDeque::new(), 312_500_000), CoinbaserAction::FreshOverRate);
+    }
+
+    /// The warning has to fire while there is still margin, or it is just an obituary.
+    #[test]
+    fn the_slow_warning_leaves_room_before_a_gateway_gives_up() {
+        assert!(COINBASER_SLOW < STOCK_COINBASER_DEADLINE);
+    }
 }

@@ -210,6 +210,96 @@ outputs. The pool's own output is exempt from any minimum; it takes what is left
 found on a Partial or PoolOnly coinbase records `owed_sats` — what the pool holds on behalf of
 the window — in `blocks.jsonl`.
 
+### Why stock gateways mine pool-only coinbases, and what the pool can do about it
+
+The cause is in the gateway, not here. In stock `send_mining_notify`:
+
+```c
+if (new_block) {
+        cbselect = 0;
+} else if (stratum_job_is_blake2b(j)) {
+        cbselect = full_coinbase ? (unsigned int)j->blake2b_coinbase_index : 0;
+}
+```
+
+On the **first notify of every new height** stock hands every miner coinbase type 0, and stock
+builds type 0 as the "tiny firmware" variant with no miner outputs even when types 1–5 hold the
+split. So that job is a full template — hundreds of transactions, all the fees — whose coinbase
+pays only the pool script, and the miners keep hashing it until the gateway's next work update.
+It is unconditional: no coinbaser reply, however fast, changes it.
+
+Block 968440 was found on exactly that job, nine minutes after the tip moved. Measured over ten
+minutes on 28 live gateways, every pool-only share was a *full* job (37–162 transactions), none
+was the subsidy-only startup job, and the two gateways running `lazarus-gateway` and the
+split-only patch had none at all.
+
+That the reply is not the problem is now recorded per share rather than inferred. Each pool-only
+warning names the gateway's own coinbase section index next to the coinbaser that job cited and
+the number of outputs we issued under it, and every case reads:
+
+```
+published section 0 while holding coinbaser 1, which carried 41 miner outputs
+```
+
+The gateway held a fresh 41-output split and published section 0 regardless, with replies at
+30 ms and `coinbasers_slow` at zero. Nothing timed out and nothing was missing.
+
+Only the gateway can fix it, and `lazarus/patches/datum-gateway-split-only.patch` does: it never
+sends type 0 on a pooled BLAKE2b job, and copies the type-4 split into type 0 so firmware that
+insists on type 0 still pays TIDES. Point an operator at that patch or at `lazarus-gateway`.
+`lazarus/patches/datum-gateway-blake2b-split-upstream.patch` is the same fix without the Lazarus
+user-agent bump, for proposing upstream; `docs/blake2b-unsplit-coinbase-advisory.md` is the
+plain-language write-up to hand to a gateway operator.
+
+What the pool owes in return is to not be a *second* cause, because a reply that never arrives
+leaves `available_coinbase_outputs_count` at zero and produces the same unsplit coinbase.
+`datum_protocol_coinbaser_fetch` blocks on a condvar for five seconds and then gives up, so
+silence is the one reply Prime cannot give. The per-session token bucket now chooses only
+whether a reply is recomputed or repeated verbatim from the last one for that same value; it
+never withholds one, and being over it no longer counts toward the reject-flood budget. The
+split is computed off a snapshot of the window shared by all sessions and rebuilt at most once a
+second (`Shared::coinbaser_base`), so a reply never queues behind the ledger mutex when every
+gateway asks at once at a tip change. Live, that holds replies to tens of milliseconds with
+`coinbasers_slow` at zero — which is how we know the gateway is the remaining cause.
+
+For the same reason Prime **never sends a coinbaser the gateway did not ask for**. The reply is
+only used when its value equals the requested one, and it lands in a global two-slot buffer
+whose index flips on every reply — so an unsolicited one can make a legitimate in-flight fetch
+read the wrong value and fall back to the pool-only coinbase this is all guarding against.
+
+### Restarts used to throw away a burst of good work
+
+A reconnecting gateway is still serving jobs whose coinbases carry the split from coinbaser ids
+the *previous* process issued. The new session has no record of those ids, so those outputs are
+ones Prime cannot vouch for and the shares are refused as `bad-coinbase-outputs` — valid miner
+work discarded purely because we restarted. Measured at ~100 shares per restart.
+
+A session now sends a block-notify immediately after `configure`, which stock handles as
+`datum_blocktemplates_notifynew` and answers by rebuilding its templates and asking for a fresh
+coinbaser. The gateway rotates off the stale work in seconds instead of minutes: the same restart
+went from 101 refused shares to 1.
+
+Note this is the *only* thing worth pushing at handshake. Pushing an unsolicited **coinbaser**
+does not work and is actively harmful — see above.
+
+`totals` in `stats.json` carries the early warning: `pool_only_shares` counts accepted shares
+whose coinbase could not have paid the window, per gateway in `clients` as well. A gateway
+publishing unsplit work says so over thousands of shares before it gets lucky, and each one
+logs a warning naming the gateway (at most once every five minutes).
+
+Two kinds land there and they mean different things. Stock emits one **subsidy-only** job per
+height (`JOB_STATE_EMPTY_PLUS`: no transactions, coinbase id `0xff`), which is cheap to lose. A
+**full** job with a pool-only coinbase is the expensive one — a whole template's fees and
+subsidy with no miner outputs — and it is counted separately as `pool_only_full_jobs`, per
+gateway too. That is the number to watch, and on an unpatched stock gateway it climbs on every
+new height. 968440 was one of these. The warning also states which of the two gateway faults it
+is, read off the share: if the coinbaser it cited carried outputs, the gateway had the split and
+published a section without it; if it carried none, the gateway never got a split to place.
+`coinbasers_slow`,
+`coinbaser_max_ms`, `coinbasers_repeated` and `coinbasers_over_rate` show whether the pool is
+the reason: a reply over a second logs a warning while there is still margin against the
+gateway's five-second deadline.
+
 ### On disk (`data-dir`)
 
 | File | What |
@@ -227,8 +317,8 @@ the window — in `blocks.jsonl`.
 pool UI reads: `pool` (pubkey, fee, window multiple, advertise address, uptime), `node`
 (height, tip hash, difficulty, tip age), `window` (target/total work, fill percent, per-miner
 `work`, `shares`, `hashrate_ghs`, `share_percent`, `payout_sats` at the current reward),
-`clients` (per gateway: generation, user agent, accepted/rejected, last reject reason),
-`blocks`, `owed`, `totals`. `/ledger.json` is the previous Prime's credits view for the UI's
+`clients` (per gateway: generation, user agent, accepted/rejected, last reject reason,
+`pool_only_shares`), `blocks`, `owed`, `totals`. `/ledger.json` is the previous Prime's credits view for the UI's
 hashrate graph; `/healthz` returns `ok`.
 
 ## Tests

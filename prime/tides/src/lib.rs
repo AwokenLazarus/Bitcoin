@@ -543,6 +543,36 @@ impl BlockLog {
     }
 }
 
+/// Lifetime non-orphan finds per gateway signing-key prefix, recovered from the block log.
+///
+/// Session counters reset when primed restarts; this is what the UI should show.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct GatewayFinds {
+    pub found: u64,
+    pub last_ts: u64,
+    pub last_finder: String,
+}
+
+pub fn gateway_finds(blocks: &[BlockRecord]) -> HashMap<String, GatewayFinds> {
+    let mut out: HashMap<String, GatewayFinds> = HashMap::new();
+    for b in blocks {
+        if b.gateway.is_empty() || b.kind.starts_with("orphan") {
+            continue;
+        }
+        let e = out.entry(b.gateway.clone()).or_default();
+        e.found += 1;
+        if b.ts >= e.last_ts {
+            e.last_ts = b.ts;
+            if let Some(f) = &b.finder {
+                if !f.is_empty() {
+                    e.last_finder = f.clone();
+                }
+            }
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -779,5 +809,40 @@ mod tests {
         log.append(&r2).unwrap();
         assert_eq!(log.read_all().unwrap(), vec![r2]);
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    fn rec(hash: &str, gw: &str, kind: &str, ts: u64, finder: &str) -> BlockRecord {
+        BlockRecord {
+            ts,
+            height: 1,
+            hash: hash.into(),
+            finder: Some(finder.into()),
+            coinbase_value: 1,
+            kind: kind.into(),
+            owed_sats: 0,
+            split: vec![],
+            pool_sats: 0,
+            settled: kind == "split",
+            submit: "accepted".into(),
+            gateway: gw.into(),
+        }
+    }
+
+    #[test]
+    fn gateway_finds_survive_as_the_log_not_the_session() {
+        let blocks = vec![
+            rec("aa", "gw-a", "split", 10, "bc1qa"),
+            rec("bb", "gw-a", "split", 20, "bc1qb"),
+            rec("cc", "gw-b", "split", 15, "bc1qc"),
+            rec("dd", "gw-a", "orphan:split", 25, "bc1qd"),
+            rec("ee", "", "split", 30, "bc1qe"),
+        ];
+        let m = gateway_finds(&blocks);
+        assert_eq!(m["gw-a"].found, 2);
+        assert_eq!(m["gw-a"].last_finder, "bc1qb");
+        assert_eq!(m["gw-a"].last_ts, 20);
+        assert_eq!(m["gw-b"].found, 1);
+        assert!(!m.contains_key(""));
+        assert_eq!(m.values().map(|f| f.found).sum::<u64>(), 3);
     }
 }

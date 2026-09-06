@@ -3,17 +3,25 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::net::IpAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Mutex;
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use datum_wire::crypto::Identity;
 use datum_wire::pow::Hash;
-use tides::{BlockLog, BlockRecord, Ledger, SplitParams};
+use tides::{BlockLog, BlockRecord, Ledger, MinerStat, SplitParams};
 use tokio::sync::{broadcast, watch};
 
-use crate::address::Network;
+use crate::address::{self, Network};
 use crate::config::Config;
 use crate::rpc::Rpc;
+
+/// How long a [`CoinbaserBase`] is reused before the window is snapshotted again.
+///
+/// A gateway asks for a coinbaser once per template — every ten seconds or so — but at a tip
+/// change every one of them asks at once. One second collapses that burst into a single
+/// snapshot while keeping the window effectively live: a share credited inside the last
+/// second lands in the next coinbaser instead of this one, and the window spans hours.
+pub const COINBASER_BASE_TTL: Duration = Duration::from_secs(1);
 
 pub fn now() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
@@ -49,6 +57,13 @@ pub struct ClientInfo {
     pub coinbasers: u64,
     pub block_candidates: u64,
     pub last_reject: Option<&'static str>,
+    /// Accepted shares whose coinbase paid only the pool script. Work the window earns
+    /// nothing from if it finds a block, so a gateway sitting above zero here is publishing
+    /// jobs without the split and wants looking at before it gets lucky.
+    pub pool_only_shares: u64,
+    /// Of those, the ones on a job that carried transactions. Stock DATUM's per-height
+    /// subsidy-only job is expected and unavoidable; this is the count that should be zero.
+    pub pool_only_full_jobs: u64,
 }
 
 #[derive(Default)]
@@ -63,11 +78,56 @@ pub struct Totals {
     pub handshake_failures: AtomicU64,
     /// Accepts turned away at the connection limits.
     pub connections_refused: AtomicU64,
+    /// Coinbaser replies repeated verbatim because the session was over its bucket and had
+    /// already been answered for that exact value.
+    pub coinbasers_repeated: AtomicU64,
+    /// Coinbaser replies computed while the session was over its bucket. Answered anyway:
+    /// silence costs a pool-only coinbase.
+    pub coinbasers_over_rate: AtomicU64,
+    /// Coinbaser replies slow enough to be worth a warning; see `session::COINBASER_SLOW`.
+    pub coinbasers_slow: AtomicU64,
+    /// Longest request-to-reply time for a coinbaser, in microseconds.
+    pub coinbaser_max_us: AtomicU64,
+    /// Times the shared window snapshot behind coinbaser replies was actually rebuilt. Far
+    /// below `coinbasers` is the point: it means replies are being served from one snapshot
+    /// instead of each taking the ledger lock and recomputing the same split.
+    pub coinbaser_base_builds: AtomicU64,
+    /// Accepted shares whose coinbase paid only the pool script.
+    pub pool_only_shares: AtomicU64,
+    /// Of those, the ones on a job that carried transactions — the kind that should be zero.
+    pub pool_only_full_jobs: AtomicU64,
 }
 
 impl Totals {
     pub fn add(&self, c: &AtomicU64, n: u64) {
         c.fetch_add(n, Ordering::Relaxed);
+    }
+
+    pub fn raise(&self, c: &AtomicU64, n: u64) {
+        c.fetch_max(n, Ordering::Relaxed);
+    }
+}
+
+/// Everything a coinbaser reply is computed from, snapshotted out of the window with the
+/// identity → payout script conversion already done.
+///
+/// Stock DATUM's coinbaser thread sends its request and then blocks for five seconds; if the
+/// reply has not arrived it publishes the job anyway with a coinbase that pays only the pool
+/// script, and a block found on that work owes the window everything (block 968440). A reply
+/// therefore must not queue behind the ledger mutex, and at a tip change every gateway asks
+/// at once — so the expensive half is done once per [`COINBASER_BASE_TTL`] and shared.
+pub struct CoinbaserBase {
+    pub miners: Vec<MinerStat>,
+    pub total_work: u64,
+    pub target_work: u64,
+    /// Payout script per identity in `miners`, so a reply never redoes bech32.
+    pub scripts: HashMap<String, Vec<u8>>,
+    built_at: Instant,
+}
+
+impl CoinbaserBase {
+    pub fn script_for(&self, identity: &str) -> Option<Vec<u8>> {
+        self.scripts.get(identity).cloned()
     }
 }
 
@@ -199,6 +259,8 @@ pub struct Shared {
     pub started: Instant,
     pub started_ts: u64,
     pub next_client_id: AtomicU64,
+    /// Shared window snapshot behind coinbaser replies; see [`Shared::coinbaser_base`].
+    pub coinbaser_base: Mutex<Option<Arc<CoinbaserBase>>>,
 }
 
 impl Shared {
@@ -210,6 +272,34 @@ impl Shared {
 
     pub fn tip_snapshot(&self) -> Option<Tip> {
         self.tip.borrow().clone()
+    }
+
+    /// The window snapshot a coinbaser reply is computed from, rebuilt at most once per
+    /// [`COINBASER_BASE_TTL`].
+    ///
+    /// The rebuild holds this mutex across the ledger lock, so the gateways that arrive
+    /// during one wait for it and then all read the same snapshot instead of each taking the
+    /// ledger lock and redoing the same work. Nothing takes the ledger lock and then this
+    /// one, so the order cannot deadlock.
+    pub fn coinbaser_base(&self) -> Arc<CoinbaserBase> {
+        let mut slot = self.coinbaser_base.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(base) = slot.as_ref() {
+            if base.built_at.elapsed() < COINBASER_BASE_TTL {
+                return base.clone();
+            }
+        }
+        let (miners, total_work, target_work) = {
+            let ledger = self.ledger.lock().unwrap_or_else(|e| e.into_inner());
+            (ledger.window.miners(), ledger.window.total_work(), ledger.window.target_work())
+        };
+        let scripts = miners
+            .iter()
+            .filter_map(|m| address::to_script(&m.identity, self.network).map(|s| (m.identity.clone(), s)))
+            .collect();
+        let base = Arc::new(CoinbaserBase { miners, total_work, target_work, scripts, built_at: Instant::now() });
+        *slot = Some(base.clone());
+        self.totals.add(&self.totals.coinbaser_base_builds, 1);
+        base
     }
 
     /// Target work for the TIDES window from the current network difficulty.
@@ -268,6 +358,47 @@ mod tests {
         assert_eq!(s.insert(101, h(1)), Seen::Fresh);
         assert_eq!(s.len(), 2);
         assert_eq!(s.heights(), 2);
+    }
+
+    /// A coinbaser reply is computed off a shared snapshot rather than the live window, so the
+    /// snapshot must pay exactly what the window would have. This is the money path: if the two
+    /// ever disagree, gateways are handed a split the pool did not intend.
+    #[test]
+    fn a_snapshot_split_pays_what_the_live_window_would() {
+        use tides::{Window, SOURCE_DATUM, SOURCE_STRATUM};
+
+        let net = Network::Mainnet;
+        let mut w = Window::new();
+        w.set_target(1_000_000);
+        // real payout addresses, so the bech32 path is the one under test
+        w.credit("bc1qk3kxstl02hqnhynwtx0zws7merw6ynut52vtzs", 400_000, 1, 100, SOURCE_DATUM);
+        w.credit("bc1qpxcy2pgedcfccfpw0p9xpzm3edkgajmjl5xe02", 250_000, 1, 100, SOURCE_DATUM);
+        w.credit("bc1q4kar3d2l33utmscncmhc923gg8xy459qp2e554", 100_000, 1, 100, SOURCE_STRATUM);
+        w.credit("38vJdhcMNudZSNHPQdmfCAL1VnZRjK4ouk", 40_000, 1, 100, SOURCE_DATUM);
+        // an identity with no payable script must be dropped by both paths alike
+        w.credit("not-an-address", 10_000, 1, 100, SOURCE_DATUM);
+
+        let params = SplitParams { fee_bps: 50, stratum_fee_bps: 250, ..SplitParams::default() };
+        let scripts: HashMap<String, Vec<u8>> = w
+            .miners()
+            .iter()
+            .filter_map(|m| address::to_script(&m.identity, net).map(|s| (m.identity.clone(), s)))
+            .collect();
+
+        // the subsidy alone, and a value carrying fees, as a real template would
+        for value in [312_500_000u64, 312_644_067] {
+            let live = w.split(value, &params, |i| address::to_script(i, net));
+            let snap =
+                tides::split::compute(w.miners(), w.total_work(), value, &params, |i| scripts.get(i).cloned());
+            assert_eq!(snap.fee_sats, live.fee_sats, "fee at value={value}");
+            assert_eq!(snap.pool_sats, live.pool_sats, "pool remainder at value={value}");
+            assert_eq!(snap.payees.len(), live.payees.len(), "payee count at value={value}");
+            for (a, b) in snap.payees.iter().zip(live.payees.iter()) {
+                assert_eq!((&a.identity, a.sats, &a.script), (&b.identity, b.sats, &b.script));
+            }
+            assert_eq!(snap.pool_sats + snap.paid_sats(), value, "outputs must sum to the template value");
+            assert!(snap.payees.iter().all(|p| p.identity != "not-an-address"));
+        }
     }
 
     #[test]
