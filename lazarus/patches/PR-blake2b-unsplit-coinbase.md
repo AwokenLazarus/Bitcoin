@@ -44,6 +44,28 @@ It is not a race and not the coinbaser timeout. It happens on every new height r
 quickly the pool answers the coinbaser request, and the miner keeps that job until the gateway's
 next work update, so the exposure is that entire interval rather than an instant.
 
+### Why the pool cannot work around it
+
+Worth stating up front, because the natural first suggestion is that the pool should answer faster
+or send a shorter output list. Neither can help: type 0 never consults the coinbaser at all.
+
+In `generate_coinbase_txns_for_stratum_job`, types 1–5 get their outputs from
+`generate_coinbase_txns_for_stratum_job_subtypebysize`, which loops over
+`s->available_coinbase_outputs_count`. Type 0 is not one of those calls. It is built inline with a
+hard-coded output count:
+
+```c
+cb2idx[0] += append_bitcoin_varint_hex(2, &s->coinbase[0].coinb2[cb2idx[0]]); // us and witness commit
+...
+cb2idx[0] += sprintf(&s->coinbase[0].coinb2[cb2idx[0]], "%016llx", __builtin_bswap64(s->coinbase_value));
+cb2idx[0] += append_bitcoin_varint_hex(s->pool_addr_script_len, ...);   // the pool's script
+```
+
+Two outputs, fixed: the pool's script taking the entire `coinbase_value`, plus the witness
+commitment. The header comment says so — `0 = "empty" --- just pays pool addr`. So no coinbaser
+reply of any size or timing can make type 0 pay a miner, which is why this has to be fixed by not
+selecting type 0 for a pooled job.
+
 ### Evidence
 
 Observed on a live BLAKE2b pool (Lazarus). Block
