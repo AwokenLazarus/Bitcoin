@@ -6,10 +6,10 @@
   "vardiff_start": 4096,
   "vardiff_max": 131072,
   "rpc": "http://127.0.0.1:9332",
-  "rpc_cookie": "/home/umbrel/umbrel/app-data/bitcoin-knots/data/bitcoin/.cookie",
-  "prime_host": "127.0.0.1",
+  "rpc_cookie": "<your knots cookie path>",
+  "prime_host": "stratum.awokenlazarus.xyz",
   "prime_port": 28915,
-  "pool_pubkey": "<from lazarus-prime /stats.json pool.pubkey>",
+  "pool_pubkey": "<from pool.awokenlazarus.xyz DATUM section /stats.json pool.pubkey>",
   "coinbase_tag": "Lazarus",
   "verify_shares": "enforce"
 }

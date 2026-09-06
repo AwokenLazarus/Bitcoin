@@ -1,7 +1,7 @@
 {
   "profile": "gpu",
   "stratum_listen": "0.0.0.0:3333",
-  "api_listen": "0.0.0.0:7153",
+  "api_listen": "127.0.0.1:7153",
   "vardiff_min": 1,
   "rpc": "http://127.0.0.1:9332",
   "rpc_cookie": "/home/umbrel/umbrel/app-data/bitcoin-knots/data/bitcoin/.cookie",
