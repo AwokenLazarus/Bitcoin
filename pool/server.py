@@ -716,14 +716,24 @@ def db(q, args=(), one=False, write=False):
         return rows[0] if one and rows else (rows if not one else None)
 
 
+def _curl_quote(s):
+    """Quote a value for a curl config file (`-K`): double quotes, backslash escapes."""
+    return '"' + str(s).replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n") + '"'
+
+
 def curl(url, digest=False, timeout=3):
-    cmd = ["curl", "-sS", "--max-time", str(timeout)]
+    # Credentials go to curl through a config file on stdin (`-K -`), never on the command
+    # line, where every local process could read them from /proc/*/cmdline.
+    cmd = ["curl", "-sS", "--max-time", str(timeout), "-K", "-"]
+    conf = [f"url = {_curl_quote(url)}"]
     if digest:
         u, p = datum_user_pass()
-        cmd += ["--digest", "-u", f"{u}:{p}"]
-    cmd.append(url)
+        conf += ["digest", f"user = {_curl_quote(f'{u}:{p}')}"]
     try:
-        return subprocess.check_output(cmd, stderr=subprocess.DEVNULL).decode("utf-8", "replace")
+        return subprocess.run(
+            cmd, input="\n".join(conf).encode(), stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            timeout=timeout + 5, check=True,
+        ).stdout.decode("utf-8", "replace")
     except Exception:
         return ""
 
@@ -733,18 +743,65 @@ def rpc(method, params=None):
         return None
     auth = COOKIE.read_text().strip()
     payload = json.dumps({"jsonrpc": "1.0", "id": "p", "method": method, "params": params or []})
+    conf = "\n".join(
+        [
+            'url = "http://127.0.0.1:9332"',
+            f"user = {_curl_quote(auth)}",
+            f"data-binary = {_curl_quote(payload)}",
+            'header = "content-type:text/plain"',
+        ]
+    )
     try:
-        out = subprocess.check_output(
-            [
-                "curl", "-sS", "--max-time", "8", "--user", auth,
-                "--data-binary", payload, "-H", "content-type:text/plain",
-                "http://127.0.0.1:9332",
-            ],
-            stderr=subprocess.DEVNULL,
-        )
+        out = subprocess.run(
+            ["curl", "-sS", "--max-time", "8", "-K", "-"],
+            input=conf.encode(), stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=15, check=True,
+        ).stdout
         return json.loads(out).get("result")
     except Exception:
         return None
+
+
+# Short-lived response cache for the anonymous API. Every one of these endpoints forks curl
+# to bitcoind or the mempool API, or walks the database, per request; behind Cloudflare
+# that is a fork-per-request the whole internet can drive. Payloads change on the order of
+# seconds anyway.
+_resp_cache = {}
+_resp_cache_lock = threading.Lock()
+_RESP_CACHE_MAX = 512
+
+
+def cached(key, ttl, fn):
+    now = time.time()
+    with _resp_cache_lock:
+        hit = _resp_cache.get(key)
+        if hit and now - hit[0] < ttl:
+            return hit[1]
+    val = fn()
+    with _resp_cache_lock:
+        if len(_resp_cache) >= _RESP_CACHE_MAX:
+            # drop the oldest quarter rather than the whole thing
+            for k in sorted(_resp_cache, key=lambda k: _resp_cache[k][0])[: _RESP_CACHE_MAX // 4]:
+                _resp_cache.pop(k, None)
+        _resp_cache[key] = (now, val)
+    return val
+
+
+# Identities are DATUM usernames minus the worker suffix: an address, or whatever a
+# gateway forwarded. Anything else is not a miner we could know about.
+_ADDRESS_RE = re.compile(r"^[A-Za-z0-9._~-]{1,128}$")
+# Concurrent requests actually doing work; the rest get a fast 503 instead of a thread each.
+_inflight = threading.BoundedSemaphore(64)
+# The chat proxy holds a thread for up to 180 s per request, so it gets its own, smaller
+# budget: it must not be able to eat the whole request pool.
+_chat_inflight = threading.BoundedSemaphore(8)
+# Browsers may call the chat proxy cross-origin only from our own sites. The read-only
+# GET APIs stay world-readable; they are public pool statistics.
+_CHAT_ORIGIN_RE = re.compile(r"^https://([a-z0-9-]+\.)*awokenlazarus\.xyz$")
+
+
+def chat_origin(handler):
+    o = handler.headers.get("Origin") or ""
+    return o if _CHAT_ORIGIN_RE.match(o) else None
 
 
 def parse_hr(s):
@@ -1896,8 +1953,28 @@ def miner_payload(address):
 
 
 class Handler(BaseHTTPRequestHandler):
+    # Socket timeout per request: a client that opens a connection and trickles bytes
+    # (slowloris) otherwise holds a thread forever on this thread-per-connection server.
+    timeout = 20
+
     def log_message(self, fmt, *args):
         return
+
+    def handle(self):
+        if not _inflight.acquire(blocking=False):
+            try:
+                self.raw_requestline = self.rfile.readline(65537)
+                if not self.raw_requestline:
+                    return
+                self.parse_request()
+                self.send_json({"error": "busy"}, 503)
+            except Exception:
+                pass
+            return
+        try:
+            super().handle()
+        finally:
+            _inflight.release()
 
     def send_json(self, obj, code=200):
         body = json.dumps(obj).encode()
@@ -1905,6 +1982,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Cache-Control", "no-store")
         self.end_headers()
         self.wfile.write(body)
@@ -1914,60 +1992,169 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(data)))
+        self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Cache-Control", "no-store")
         self.end_headers()
         self.wfile.write(data)
 
+    def do_OPTIONS(self):
+        u = urlparse(self.path)
+        if unquote(u.path) != "/api/laz/chat":
+            self.send_json({"error": "not found"}, 404)
+            return
+        self.send_response(204)
+        origin = chat_origin(self)
+        if origin:
+            self.send_header("Access-Control-Allow-Origin", origin)
+            self.send_header("Vary", "Origin")
+            self.send_header("Access-Control-Allow-Methods", "POST, OPTIONS")
+            self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.end_headers()
+
     def do_POST(self):
-        self.send_json({"error": "not found"}, 404)
+        u = urlparse(self.path)
+        if unquote(u.path) != "/api/laz/chat":
+            self.send_json({"error": "not found"}, 404)
+            return
+        try:
+            n = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            self.send_json({"error": "bad content-length"}, 400)
+            return
+        if n < 0 or n > 8000:
+            self.send_json({"error": "payload too large"}, 413)
+            return
+        raw = self.rfile.read(n)
+        try:
+            json.loads(raw)
+        except Exception:
+            self.send_json({"error": "body must be JSON"}, 400)
+            return
+        if not _chat_inflight.acquire(blocking=False):
+            self.send_json({"error": "chat busy, try again shortly"}, 429)
+            return
+        try:
+            self._proxy_chat(raw)
+        finally:
+            _chat_inflight.release()
+
+    def _proxy_chat(self, raw):
+        req = urllib_request.Request(
+            f"{LAZ_AGENT.rstrip('/')}/chat",
+            data=raw,
+            headers={
+                "Content-Type": "application/json",
+                "X-Forwarded-For": self.client_address[0],
+            },
+            method="POST",
+        )
+        try:
+            with urllib_request.urlopen(req, timeout=180) as resp:
+                body = resp.read()
+                code = resp.status
+        except urllib_error.HTTPError as e:
+            body = e.read()
+            code = e.code
+        except Exception as e:
+            # Detail (internal host, socket errors) goes to stderr, not to the client.
+            print(f"laz chat upstream error: {type(e).__name__}: {e}", file=sys.stderr, flush=True)
+            self.send_json({"error": "Laz agent unreachable"}, 502)
+            return
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        origin = chat_origin(self)
+        if origin:
+            self.send_header("Access-Control-Allow-Origin", origin)
+            self.send_header("Vary", "Origin")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(body)
 
     def do_GET(self):
         u = urlparse(self.path)
         path = unquote(u.path)
         if path == "/api/pool":
-            self.send_json(pool_payload())
+            self.send_json(cached("pool", 1.0, pool_payload))
             return
         if path == "/api/miners":
-            online = online_miners()
-            seen = db("SELECT * FROM miners ORDER BY last_ts DESC LIMIT 200")
-            seen_out = []
-            for r in seen or []:
-                d = dict(r)
-                life_a, life_r, sess = address_share_totals(d.get("address") or "")
-                info = prime_info_for(d.get("address") or "")
-                d["shares_lifetime"] = life_a or int(info.get("window_work") or d.get("shares_lifetime") or d.get("shares_acc") or 0)
-                d["shares_session"] = int(sess or d.get("shares_session") or 0)
-                d["shares_acc"] = d["shares_lifetime"]
-                d["shares_rej"] = life_r or int(d.get("shares_rej") or 0)
-                d["window_work"] = int(info.get("window_work") or 0)
-                d["window_percent"] = float(info.get("window_percent") or 0)
-                d["window_sats"] = int(info.get("window_sats") or 0)
-                d["fee_path"] = info.get("fee_path") or ""
-                d["via"] = "prime" if (d.get("address") in (state.get("prime") or {}) and not any(o.get("address")==d.get("address") and o.get("via") == "stratum" for o in online)) else d.get("via")
-                try:
-                    if float(d.get("best_hr_ghs") or 0) > _PRIME_HR_CAP_GHS:
-                        d["best_hr_ghs"] = _PRIME_HR_CAP_GHS
-                except (TypeError, ValueError):
-                    pass
-                d["hr_ghs"] = float(info.get("hr_ghs") or 0)
-                seen_out.append(d)
-            self.send_json({"online": rollup_online_by_address(online), "seen": seen_out})
+            self.send_json(cached("miners", 2.0, self._miners_payload))
             return
         if path.startswith("/api/miner/"):
             addr = path.split("/api/miner/", 1)[1].strip("/")
-            self.send_json(miner_payload(addr))
+            if not _ADDRESS_RE.match(addr):
+                self.send_json({"error": "not found"}, 404)
+                return
+            self.send_json(cached(("miner", addr), 3.0, lambda: miner_payload(addr)))
             return
         if path == "/api/blocks":
-            self.send_json({"blocks": mempool_blocks()})
+            self.send_json(cached("blocks", 10.0, lambda: {"blocks": mempool_blocks()}))
             return
         if path == "/api/coinbaser":
-            self.send_json(prime_coinbaser_preview())
+            self.send_json(cached("coinbaser", 2.0, prime_coinbaser_preview))
             return
         if path == "/api/gateways":
-            pr = prime_summary()
-            self.send_json({"reachable": pr["reachable"], "gateways": pr["gateways"], "totals": pr["totals"]})
+            self.send_json(cached("gateways", 2.0, self._gateways_payload))
             return
         if path == "/api/payouts":
+            self.send_json(cached("payouts", 5.0, self._payouts_payload))
+            return
+        if path in ("/", "/index.html"):
+            self.send_file(STATIC / "index.html", "text/html; charset=utf-8")
+            return
+        if path.startswith("/static/"):
+            fp = STATIC / path[len("/static/") :]
+            if fp.resolve().is_relative_to(STATIC.resolve()) and fp.is_file():
+                mime = {
+                    ".css": "text/css",
+                    ".js": "application/javascript",
+                    ".wasm": "application/wasm",
+                    ".html": "text/html; charset=utf-8",
+                    ".svg": "image/svg+xml",
+                    ".png": "image/png",
+                    ".ico": "image/x-icon",
+                    ".webmanifest": "application/manifest+json",
+                }
+                self.send_file(fp, mime.get(fp.suffix, "application/octet-stream"))
+                return
+        self.send_json({"error": "not found"}, 404)
+
+    @staticmethod
+    def _gateways_payload():
+        pr = prime_summary()
+        return {"reachable": pr["reachable"], "gateways": pr["gateways"], "totals": pr["totals"]}
+
+    @staticmethod
+    def _miners_payload():
+        online = online_miners()
+        seen = db("SELECT * FROM miners ORDER BY last_ts DESC LIMIT 200")
+        seen_out = []
+        for r in seen or []:
+            d = dict(r)
+            life_a, life_r, sess = address_share_totals(d.get("address") or "")
+            info = prime_info_for(d.get("address") or "")
+            d["shares_lifetime"] = life_a or int(info.get("window_work") or d.get("shares_lifetime") or d.get("shares_acc") or 0)
+            d["shares_session"] = int(sess or d.get("shares_session") or 0)
+            d["shares_acc"] = d["shares_lifetime"]
+            d["shares_rej"] = life_r or int(d.get("shares_rej") or 0)
+            d["window_work"] = int(info.get("window_work") or 0)
+            d["window_percent"] = float(info.get("window_percent") or 0)
+            d["window_sats"] = int(info.get("window_sats") or 0)
+            d["fee_path"] = info.get("fee_path") or ""
+            d["via"] = "prime" if (d.get("address") in (state.get("prime") or {}) and not any(o.get("address")==d.get("address") and o.get("via") == "stratum" for o in online)) else d.get("via")
+            try:
+                if float(d.get("best_hr_ghs") or 0) > _PRIME_HR_CAP_GHS:
+                    d["best_hr_ghs"] = _PRIME_HR_CAP_GHS
+            except (TypeError, ValueError):
+                pass
+            d["hr_ghs"] = float(info.get("hr_ghs") or 0)
+            seen_out.append(d)
+        return {"online": rollup_online_by_address(online), "seen": seen_out}
+
+    @staticmethod
+    def _payouts_payload():
+        if True:
             tip = rpc("getblockcount") or 0
             fbs = db("SELECT height, hash, ts, reward_btc FROM found_blocks ORDER BY height DESC LIMIT 20") or []
             payouts = []
@@ -2064,36 +2251,14 @@ class Handler(BaseHTTPRequestHandler):
                 ),
                 key=lambda r: -int(r["work"] or 0),
             )
-            self.send_json(
-                {
-                    "scheme": "TIDES",
-                    "fee_percent": POOL_FEE,
-                    "maturity_blocks": 100,
-                    "current_round": current,
-                    "payouts": payouts,
-                    "prime_blocks": list(prime_blocks.values()),
-                }
-            )
-            return
-        if path in ("/", "/index.html"):
-            self.send_file(STATIC / "index.html", "text/html; charset=utf-8")
-            return
-        if path.startswith("/static/"):
-            fp = STATIC / path[len("/static/") :]
-            if fp.resolve().is_relative_to(STATIC.resolve()) and fp.is_file():
-                mime = {
-                    ".css": "text/css",
-                    ".js": "application/javascript",
-                    ".wasm": "application/wasm",
-                    ".html": "text/html; charset=utf-8",
-                    ".svg": "image/svg+xml",
-                    ".png": "image/png",
-                    ".ico": "image/x-icon",
-                    ".webmanifest": "application/manifest+json",
-                }
-                self.send_file(fp, mime.get(fp.suffix, "application/octet-stream"))
-                return
-        self.send_json({"error": "not found"}, 404)
+            return {
+                "scheme": "TIDES",
+                "fee_percent": POOL_FEE,
+                "maturity_blocks": 100,
+                "current_round": current,
+                "payouts": payouts,
+                "prime_blocks": list(prime_blocks.values()),
+            }
 
 
 def main():

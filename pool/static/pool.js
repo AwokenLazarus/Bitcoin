@@ -129,9 +129,11 @@
     if (x >= 1e3) return (x / 1e3).toFixed(1) + "k";
     return x.toFixed(x < 10 ? 2 : 0);
   };
-  const short = (a) => (a && a.length > 20 ? a.slice(0, 10) + "\u2026" + a.slice(-8) : a || "\u2014");
+  // Every use of these is HTML text, and the inputs are miner-supplied identities, so
+  // they escape here rather than trusting each call site to remember.
+  const short = (a) => esc(a && a.length > 20 ? a.slice(0, 10) + "\u2026" + a.slice(-8) : a || "\u2014");
   // Block hashes lead with zeros; the tail is what identifies them.
-  const shortHash = (h) => (h && h.length > 16 ? "\u2026" + h.slice(-12) : h || "\u2014");
+  const shortHash = (h) => esc(h && h.length > 16 ? "\u2026" + h.slice(-12) : h || "\u2014");
   const pct = (n, d = 1) => (Number.isFinite(Number(n)) ? Number(n).toFixed(d) + "%" : "\u2014");
   const ago = (ts) => {
     if (!ts) return "\u2014";
