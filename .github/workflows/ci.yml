@@ -1,0 +1,55 @@
+# Build and test on every push and pull request.
+#
+# Uses only the toolchains preinstalled on the GitHub runner and `actions/checkout`,
+# so there are no third-party actions to trust or keep pinned.
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  prime:
+    name: prime — primed, datum-wire, tides
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # The share-validation invariants in the README are pinned by these tests.
+      # `--locked` also proves the committed Cargo.lock still resolves.
+      - name: cargo test
+        working-directory: prime
+        run: cargo test --workspace --locked
+
+      - name: cargo clippy
+        working-directory: prime
+        run: |
+          rustup component add clippy
+          cargo clippy --workspace --all-targets --locked
+
+  lazarus:
+    # Retired per the README, but `lazarus/gateway` is still what serves the public
+    # stratum, so a compile break here is a production break.
+    name: lazarus — protocol, prime, gateway
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: cargo build
+        working-directory: lazarus
+        run: cargo build --locked
+
+  python:
+    name: python — syntax
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # server.py and the sync/notify helpers are deployed by rsync with no build step,
+      # so a syntax error reaches the host intact. This is the cheapest guard against that.
+      - name: compile all
+        run: python3 -m compileall -q pool miner node patches scripts
