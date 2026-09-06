@@ -7,18 +7,23 @@ import os
 import re
 import sqlite3
 import subprocess
+import sys
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from collections import defaultdict, deque
 from urllib.parse import parse_qs, unquote, urlparse
+from urllib import error as urllib_error
+from urllib import request as urllib_request
 
 ROOT = Path(__file__).resolve().parent
 DB = Path(os.environ.get("POOL_DB") or (ROOT / "pool.sqlite"))
 STATIC = ROOT / "static"
 CONF = json.loads((ROOT / "config.json").read_text())
 NO_WRITE = os.environ.get("POOL_UI_NO_WRITE") == "1"
+# Read-only Laz chat (AgentLaz). POST /api/laz/chat is proxied; no write RPCs.
+LAZ_AGENT = os.environ.get("LAZ_AGENT_URL", "http://27.69.0.37:1921")
 
 POOL_FEE = float(CONF.get("pool_fee_percent", 0))
 # Public-stratum fee when primed is not answering; primed's stats.json is authoritative.
@@ -1594,6 +1599,9 @@ def pool_payload():
     first_ts = first["t"] if first and first["t"] else state.get("ts")
     share, ttf_s, nfound, expected, luck = luck_and_ttf(pool_hr, net, first_ts)
     est_btc_day = share * 144 * SUBSIDY * (1 - POOL_FEE / 100.0)
+    # 1 TH/s vs current network hashrate, 144 blocks/day, base subsidy (no tx fees).
+    ths_share = (1e12 / net) if net else 0.0
+    ths_btc_day = ths_share * 144 * SUBSIDY
     known = db("SELECT COUNT(*) AS n FROM miners", one=True)
     hist = db("SELECT ts, hr_ghs, miners FROM pool_samples WHERE ts > ? ORDER BY ts", (int(time.time()) - 86400,))
     win = tides_window_snapshot()
@@ -1644,6 +1652,9 @@ def pool_payload():
         "network_hr_hs": net,
         "pool_share": share,
         "est_btc_day": est_btc_day,
+        "ths_btc_day": ths_btc_day,
+        "ths_btc_day_datum": ths_btc_day * (1 - datum_fee / 100.0),
+        "ths_btc_day_stratum": ths_btc_day * (1 - stratum_fee / 100.0),
         "ttf_seconds": ttf_s,
         "blocks_found": nfound,
         "blocks_expected": expected,

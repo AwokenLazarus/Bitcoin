@@ -162,6 +162,17 @@
     if (Math.abs(x) >= 0.01) return x.toFixed(4);
     return x.toExponential(2);
   };
+  // 1 TH/s of continuous work vs the live network, 144 blocks/day, base subsidy.
+  const thsDay = (p, feePercent) => {
+    const billed = Number(p && p["ths_btc_day_" + (feePercent === fees.stratum ? "stratum" : "datum")]);
+    if (Number.isFinite(billed) && billed > 0) return billed;
+    const gross = Number(p && p.ths_btc_day);
+    if (Number.isFinite(gross) && gross > 0) return gross * (1 - (Number(feePercent) || 0) / 100);
+    const net = Number(p && p.network_hr_hs);
+    const sub = Number(p && p.subsidy_btc) || 3.125;
+    if (!Number.isFinite(net) || net <= 0) return null;
+    return (1e12 / net) * 144 * sub * (1 - (Number(feePercent) || 0) / 100);
+  };
   const sats = (n) => (n == null || Number.isNaN(Number(n)) ? "\u2014" : (Number(n) / 1e8).toFixed(8).replace(/0+$/, "").replace(/\.$/, ".0"));
   const expPct = (n) => {
     const x = Number(n);
@@ -218,7 +229,10 @@
     const rejPct = tot.shares_accepted + tot.shares_rejected > 0 ? (100 * tot.shares_rejected / (tot.shares_accepted + tot.shares_rejected)).toFixed(2) + "% rejected" : "no rejects";
     const gws = Number(pr.gateways_online) || 0;
     const remote = Number(pr.gateways_remote) || 0;
+    const thsDatum = thsDay(p, fees.datum);
+    const thsStratum = thsDay(p, fees.stratum);
     const cells = [
+      ["1 TH/s yields (est.)", thsDatum != null ? btc(thsDatum) + " BTC/Day" : "\u2014", "estimate vs current network · DATUM " + feePct(fees.datum) + " · " + (thsStratum != null ? btc(thsStratum) + " BTC/Day" : "\u2014") + " on stratum"],
       ["Hashrate", fmtHr(p.pool_hr_ghs), (p.miners_online || 0) + " worker" + (p.miners_online === 1 ? "" : "s") + " online"],
       ["Miners", String(inWindow || p.miners_online || 0), inWindow ? "holding work in the window · " + (p.miners_seen ?? "\u2014") + " ever" : (p.miners_seen ?? "\u2014") + " ever"],
       ["Shares", num(tot.shares_accepted), pr.reachable ? "verified by Prime since start · " + rejPct : "Prime unreachable"],
@@ -254,6 +268,7 @@
     if ($("datum-pubkey")) $("datum-pubkey").textContent = pubkey || "\u2014";
 
     if ($("live-hr")) $("live-hr").textContent = fmtHr(p.pool_hr_ghs);
+    if ($("live-ths")) $("live-ths").textContent = thsDatum != null ? "~" + btc(thsDatum) + " BTC/Day" : "\u2014";
     if ($("live-tip")) $("live-tip").textContent = p.height || "\u2014";
     if ($("live-window")) $("live-window").textContent = fillTxt;
     if ($("live-gateways")) $("live-gateways").textContent = String(gws);
@@ -437,12 +452,9 @@
         })
         .join("");
     }
-    const minerSats = Number(cb.miner_sats) || 0;
-    if (hole) hole.textContent = value ? pct((100 * minerSats) / value, 1) : "\u2014";
-    if (holeLabel) {
-      const n = Number(cb.miner_outputs) || 0;
-      holeLabel.textContent = `to ${n} address${n === 1 ? "" : "es"}`;
-    }
+    const n = Number(cb.miner_outputs) || 0;
+    if (hole) hole.textContent = n ? num(n) : "\u2014";
+    if (holeLabel) holeLabel.textContent = n === 1 ? "address to pay" : "addresses to pay";
     if (desc) {
       const named = slices.filter((s) => s.who && s.who.known).length;
       const total = Number(cb.miner_outputs) || 0;
