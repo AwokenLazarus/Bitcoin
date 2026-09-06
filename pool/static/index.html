@@ -8,7 +8,7 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;1,400&family=Newsreader:ital,opsz,wght@0,6..72,500;1,6..72,400;1,6..72,500&display=swap">
-<link rel="stylesheet" href="/static/pool.css?v=donut1">
+<link rel="stylesheet" href="/static/pool.css?v=price1">
 <link rel="stylesheet" href="/static/laz-chat.css?v=2">
 <link rel="icon" href="data:image/svg+xml,%3Csvg%20xmlns=%22http://www.w3.org/2000/svg%22%20viewBox=%220%200%2032%2032%22%3E%3Crect%20width=%2232%22%20height=%2232%22%20fill=%22%231c1914%22/%3E%3Cpath%20fill=%22%23dbb565%22%20d=%22M21.64%204.46C21.64%203.23%2021.25%202.37%2020.33%201.92C19.86%201.69%2019.25%201.58%2018.47%201.58H15.44L15.52%200.4H19.38C20.47%200.4%2021.35%200.58%2022.02%200.93C22.69%201.28%2023.18%201.76%2023.49%202.36C23.8%202.96%2023.95%203.63%2023.95%204.37C23.95%205.12%2023.79%205.81%2023.47%206.44C23.16%207.07%2022.66%207.57%2021.99%207.95C21.32%208.33%2020.99%208.52%2019.74%208.52H15.52L15.44%207.34H19.14C20.11%207.34%2020.88%206.89%2021.31%206.04C21.53%205.61%2021.64%205.08%2021.64%204.46ZM17.36%200.4%2017.36%2010.96V30.57L18.92%2031.16V31.6H13.09V31.16L14.66%2030.57V10.96V1.43L13.09%200.84V0.4ZM15.63%2020.2%209.86%2026.79%2011.94%2027.49V28.01H6.07V27.49L8.1%2026.79L14.87%2019.31L15.8%2018.63L20.88%2012.69L18.8%2011.99V11.48H24.67V11.99L22.64%2012.69L16.57%2019.52ZM19.77%2026.79%2014.88%2020.67%2014.46%2020.29%208.36%2012.72%206.37%2011.99V11.48H14.78V11.99L12.52%2012.69L16.71%2018L17.17%2018.43L23.94%2026.77L25.93%2027.49V28.01H17.51V27.49Z%22/%3E%3C/svg%3E">
 <link rel="apple-touch-icon" href="/static/chi-rho-crest-icon.svg">
@@ -23,6 +23,7 @@
   </div>
   <div class="header-meta" aria-live="polite" aria-label="Live pool summary">
     <span class="chip" data-live id="live-chip"><span>Pool</span> <b id="live-hr">—</b></span>
+    <a class="chip" data-live id="live-price-chip" href="https://neoxa.exchange/trade/BTCB2_USDC" target="_blank" rel="noreferrer" title="BLAKE2b BTC (BTCB2) · volume-weighted Neoxa BTCB2/USDC and NonKYC BTCB2/USDT"><span>BTC</span> <b id="live-price">—</b></a>
     <span class="chip" title="Estimate: 1 TH/s versus the current network, 144 blocks/day, base subsidy only (no tx fees), after the DATUM fee. Luck and fees in the next block can move this."><span>1 TH/s yields</span> <b id="live-ths">—</b></span>
     <span class="chip">Window <b id="live-window">—</b></span>
     <span class="chip">Gateways <b id="live-gateways">—</b></span>
@@ -35,10 +36,13 @@
     <a href="#dashboard">Your stats</a>
     <a href="#miners">Miners</a>
     <a href="#gateways">Gateways</a>
+    <a href="#solo" id="nav-solo" hidden>Solo</a>
     <a href="#blocks">Blocks</a>
     <a href="#how">How it works</a>
     <span class="nav-out">
       <a href="https://mempool.awokenlazarus.xyz" target="_blank" rel="noreferrer" title="Lazarus Mempool — block explorer for this chain">Explorer<span class="ext" aria-hidden="true"></span></a>
+      <a href="https://discord.gg/fD33dJXnzz" target="_blank" rel="noreferrer">Discord<span class="ext" aria-hidden="true"></span></a>
+      <a href="https://neoxa.exchange/register?ref=NEXB9423E49" target="_blank" rel="noreferrer" title="Sign up on Neoxa Exchange to trade BLAKE2b BTC (BTCB2)">Exchange<span class="ext" aria-hidden="true"></span></a>
       <a href="https://github.com/AwokenLazarus/Bitcoin" target="_blank" rel="noreferrer">GitHub<span class="ext" aria-hidden="true"></span></a>
     </span>
   </nav>
@@ -145,6 +149,13 @@
         <p class="fee-copy">Our node, our templates. Any BLAKE2b ASIC or miner. Same TIDES window — switch to a gateway later and your accepted work comes with you.</p>
         <p class="fee-cta">Setup below</p>
       </div>
+      <div class="fee-card" data-tab="tab-solo" role="button" tabindex="0" id="fee-card-solo" hidden>
+        <p class="fee-kicker">All or nothing</p>
+        <p class="fee-title">Solo</p>
+        <p class="fee-rate"><span id="fee-solo">2.5%</span></p>
+        <p class="fee-copy">No window, no sharing. Find a block and the whole reward is yours less the fee; find nothing and you earn nothing.</p>
+        <p class="fee-cta">Setup below</p>
+      </div>
     </div>
 
     <div class="tabs" data-tabs>
@@ -156,6 +167,10 @@
         <button class="tab" role="tab" type="button" id="tab-datum" aria-controls="pane-datum" aria-selected="false">
           <span class="tab-title">Your own DATUM gateway <span class="tab-fee reco" id="tab-fee-datum">0.5%</span></span>
           <span class="tab-sub">Your node builds the block · we only split the coinbase</span>
+        </button>
+        <button class="tab" role="tab" type="button" id="tab-solo" aria-controls="pane-solo" aria-selected="false" hidden>
+          <span class="tab-title">Solo <span class="tab-fee" id="tab-fee-solo">2.5%</span></span>
+          <span class="tab-sub">Keep the whole block · no window, no sharing</span>
         </button>
       </div>
 
@@ -222,7 +237,36 @@
           </div>
         </details>
       </div>
+
+      <div class="tabpane panel" role="tabpanel" id="pane-solo" aria-labelledby="tab-solo" hidden>
+        <p class="copy"><strong>Solo is a bet, not a wage.</strong> Your shares buy you nothing — they only prove you are working. When one of them is a block, that block’s entire reward goes to the address in your username, less our fee, paid in that block’s own coinbase. Until then you earn nothing, however long you mine. Pooled mining pays you a steady share of every block the pool finds; solo pays you rarely and enormously. Most miners should stay pooled.</p>
+        <div class="scroll">
+          <table id="solo-endpoints"></table>
+        </div>
+        <dl class="facts tight">
+          <dt>User</dt><dd class="mono">bc1q…youraddress.worker</dd>
+          <dt>Pass</dt><dd class="mono">x</dd>
+          <dt>Fee</dt><dd><span id="solo-fee-line">2.5%</span> of the block, taken as one output in the coinbase you solve. Nothing is withheld and nothing is owed to you between blocks.</dd>
+          <dt>Payout</dt><dd>The rest of the block — subsidy and every transaction fee in it — straight to your address, spendable after 100 confirmations.</dd>
+          <dt>Your odds</dt><dd id="solo-odds">Expected time to a block at your hashrate is shown on your <a href="#dashboard">stats</a> page.</dd>
+        </dl>
+        <p class="note callout">Solo work is kept out of the TIDES window on purpose. Point some miners at solo and others at the pooled ports if you want both; the pooled ones keep earning their window share while the solo ones chase a whole block. Your solo shares will never appear under <a href="#miners">Miners</a> or in <a href="#payout">Next payout</a> — look under <a href="#solo">Solo</a> instead.</p>
+        <p class="note">Already running your own node? Then solo mine against it directly — you do not need us for that, and you should not pay us for it. These ports are for miners who want to solo without running a node.</p>
+      </div>
     </div>
+  </section>
+
+  <section id="solo" hidden>
+    <div class="section-head">
+      <h2>Solo</h2>
+      <p>Mining for the whole block. Separate from the pool’s window — none of this work is paid a share of anything.</p>
+    </div>
+    <dl class="ticker slim" id="solo-ticker"></dl>
+    <p class="kicker table-label">Solo miners</p>
+    <div class="scroll"><table id="solotable"></table></div>
+    <p class="kicker table-label">Blocks found solo</p>
+    <div class="scroll"><table id="soloblocks"></table></div>
+    <p class="note" id="solo-note"></p>
   </section>
 
   <section id="dashboard">
@@ -262,7 +306,7 @@
   <section id="gateways">
     <div class="section-head">
       <h2>Gateways</h2>
-      <p>Every DATUM gateway connected to Prime right now, ours included.</p>
+      <p>Every DATUM gateway on Prime right now, ours included, plus any that have found a block even if they are offline. Block counts are lifetime.</p>
     </div>
     <dl class="ticker slim" id="gateway-ticker"></dl>
     <div class="scroll"><table id="gwtable"></table></div>
@@ -337,6 +381,8 @@
     </div>
     <div class="footer-col">
       <p class="category">Project</p>
+      <a href="https://discord.gg/fD33dJXnzz" target="_blank" rel="noreferrer">Discord</a>
+      <a href="https://neoxa.exchange/register?ref=NEXB9423E49" target="_blank" rel="noreferrer" title="Sign up on Neoxa Exchange to trade BLAKE2b BTC (BTCB2)">Exchange</a>
       <a href="https://github.com/AwokenLazarus/Bitcoin" target="_blank" rel="noreferrer">Source on GitHub</a>
       <a href="https://github.com/AwokenLazarus/Bitcoin/tree/main/prime" target="_blank" rel="noreferrer">Prime — the pool server</a>
       <a href="https://github.com/AwokenLazarus/Bitcoin/blob/main/README.md" target="_blank" rel="noreferrer">Documentation</a>
@@ -345,7 +391,7 @@
   </div>
 </footer>
 
-<script src="/static/pool.js?v=ths3-donut1"></script>
+<script src="/static/pool.js?v=gwblocks1"></script>
 <script>window.LAZ_CHAT_SOURCE = "pool"; window.LAZ_CHAT_URL = "/api/laz/chat";</script>
 <script src="/static/laz-chat.js?v=3"></script>
 </body>

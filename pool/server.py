@@ -34,9 +34,23 @@ DATUM_URL = CONF.get("datum_url", "http://127.0.0.1:7152")
 DATUM_CLIENT_URLS = [(DATUM_URL, "stratum", STRATUM_PORT)]
 MEMPOOL_API = CONF.get("mempool_api", "http://10.21.21.27:8999")
 COOKIE = Path(CONF.get("cookie_file", "/home/umbrel/umbrel/app-data/bitcoin-knots/data/bitcoin/.cookie"))
+RPC_URL = CONF.get("rpc_url", "http://127.0.0.1:9332")
 AUTH_FILE = Path(CONF.get("datum_auth_file", "/home/umbrel/blake2b/secrets/datum-admin.env"))
 EXPLORER = CONF.get("explorer_url", "https://mempool.awokenlazarus.xyz")
 COINBASE_TAG = CONF.get("coinbase_tag", "Lazarus")
+# Solo blocks carry their own tag so this scanner can tell them apart. A solo block pays its
+# finder inside its own coinbase, so it must never close a TIDES round: the window did not
+# earn it and is owed nothing from it. Checked before COINBASE_TAG, since "Lazarus/solo"
+# contains "Lazarus".
+SOLO_TAG = CONF.get("solo_coinbase_tag", "Lazarus/solo")
+# Solo stratum gateways, in the order they should appear. Each serves /solo.json.
+SOLO_APIS = CONF.get(
+    "solo_apis",
+    [
+        {"name": "ASIC", "url": "http://127.0.0.1:7154", "port": 23335},
+        {"name": "GPU", "url": "http://127.0.0.1:7155", "port": 3334},
+    ],
+)
 SUBSIDY = 3.125
 
 PRIME_STATS = CONF.get("datum_prime_stats", "http://127.0.0.1:28916/stats.json")
@@ -102,6 +116,13 @@ db_conn.executescript(
       ts INTEGER PRIMARY KEY, hr_ghs REAL, miners INTEGER, shares_acc INTEGER, shares_rej INTEGER
     );
     CREATE TABLE IF NOT EXISTS found_blocks (
+      height INTEGER PRIMARY KEY, hash TEXT, ts INTEGER, reward_btc REAL,
+      finder TEXT, pool_fee_btc REAL, miner_btc REAL, coinbase TEXT
+    );
+    -- Solo blocks. Deliberately not in `found_blocks`: everything downstream of that table
+    -- (rounds, round_payouts, effort) is TIDES accounting, and a solo block belongs to the
+    -- one miner named in its coinbase.
+    CREATE TABLE IF NOT EXISTS solo_blocks (
       height INTEGER PRIMARY KEY, hash TEXT, ts INTEGER, reward_btc REAL,
       finder TEXT, pool_fee_btc REAL, miner_btc REAL, coinbase TEXT
     );
@@ -408,8 +429,111 @@ def _rolling_credit_hr(hist, last_map, addr, value, ts, avg_s):
 # source of truth, is stateless, and (unlike window_work deltas or gateway diff sums) does not
 # under-count busy or reconnecting miners. Cached briefly so a request storm does not reparse.
 LEDGER_PATH = Path(CONF.get("ledger_path", "/home/umbrel/blake2b/lazarus-prime/ledger.json"))
+BLOCKS_LOG = Path(CONF.get("prime_blocks_log", str(LEDGER_PATH.with_name("blocks.jsonl"))))
 LEDGER_HR_WINDOW_S = int(CONF.get("ledger_hr_window_s", 600))
 _ledger_hr_cache = {"ts": 0.0, "by_addr": {}, "pool_ghs": 0.0, "age": {}}
+# Lifetime finds per gateway, from primed's blocks.jsonl (survives Prime restarts).
+_block_log_cache = {"sig": None, "found": {}, "finder": {}, "n": 0}
+
+
+def gateway_finds_from_log():
+    """Non-orphan finds per gateway signing-key prefix, latest line per block hash.
+
+    primed's in-memory client.block_candidates resets on restart; this file does not.
+    """
+    try:
+        st = BLOCKS_LOG.stat()
+        sig = (st.st_mtime_ns, st.st_size)
+    except OSError:
+        return {}, {}, 0
+    cached = _block_log_cache
+    if cached["sig"] == sig:
+        return cached["found"], cached["finder"], cached["n"]
+    latest = {}
+    try:
+        with BLOCKS_LOG.open() as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                h = rec.get("hash")
+                if h:
+                    latest[h] = rec
+    except OSError:
+        return {}, {}, 0
+    found = {}
+    finder = {}
+    last_ts = {}
+    for rec in latest.values():
+        if str(rec.get("kind") or "").startswith("orphan"):
+            continue
+        gw = str(rec.get("gateway") or "")
+        if not gw:
+            continue
+        found[gw] = found.get(gw, 0) + 1
+        ts = int(rec.get("ts") or 0)
+        ident = str(rec.get("finder") or "")
+        if ident and ts >= last_ts.get(gw, -1):
+            last_ts[gw] = ts
+            finder[gw] = ident
+    n = sum(found.values())
+    cached.update(sig=sig, found=found, finder=finder, n=n)
+    return found, finder, n
+
+
+def _merge_persistent_gateway_finds(clients):
+    """Stamp lifetime finds onto live rows and re-add gateways that found blocks then dropped."""
+    found, finder, nfound = gateway_finds_from_log()
+    tags = {}
+    for r in db("SELECT gateway, identity FROM gateway_tags") or []:
+        if r["identity"]:
+            tags[str(r["gateway"])] = str(r["identity"])
+    by = {}
+    extras = []
+    for row in clients:
+        gw = str(row.get("gateway") or "")
+        if found:
+            row["block_candidates"] = int(found.get(gw, 0)) if gw else int(row.get("block_candidates") or 0)
+        row["offline"] = bool(row.get("offline"))
+        if gw:
+            by[gw] = row
+        else:
+            extras.append(row)
+    for gw, n in found.items():
+        if n <= 0 or gw in by:
+            continue
+        by[gw] = {
+            "id": 0,
+            "gateway": gw,
+            "user_agent": "",
+            "generation": "",
+            "own": False,
+            "offline": True,
+            "fee_path": "datum",
+            "identity": finder.get(gw) or tags.get(gw) or "",
+            "connected_s": 0,
+            "accepted": 0,
+            "rejected": 0,
+            "last_reject": "",
+            "last_share_s": None,
+            "work": 0,
+            "coinbasers": 0,
+            "block_candidates": n,
+        }
+    out = extras + list(by.values())
+    out.sort(
+        key=lambda g: (
+            bool(g.get("offline")),
+            g.get("own"),
+            -(g.get("block_candidates") or 0),
+            -(g.get("work") or 0),
+        )
+    )
+    return out, nfound
 
 
 def _ledger_hashrate(window_s=None):
@@ -745,7 +869,7 @@ def rpc(method, params=None):
     payload = json.dumps({"jsonrpc": "1.0", "id": "p", "method": method, "params": params or []})
     conf = "\n".join(
         [
-            'url = "http://127.0.0.1:9332"',
+            f"url = {_curl_quote(RPC_URL)}",
             f"user = {_curl_quote(auth)}",
             f"data-binary = {_curl_quote(payload)}",
             'header = "content-type:text/plain"',
@@ -784,6 +908,156 @@ def cached(key, ttl, fn):
                 _resp_cache.pop(k, None)
         _resp_cache[key] = (now, val)
     return val
+
+
+# BLAKE2b BTC (ticker BTCB2) USD: volume-weighted average of the two live listings.
+# Each venue is weighted by its 24h quote volume (USDC/USDT treated as $1).
+_NEOXA_BTCB2 = "https://neoxa.exchange/api/exchange/ticker/BTCB2_USDC"
+_NONKYC_BTCB2 = "https://api.nonkyc.io/api/v2/ticker/BTCB2_USDT"
+_price_lock = threading.Lock()
+_price_cache = {"doc": None, "ts": 0.0}
+
+
+def _pos_float(x):
+    try:
+        v = float(x)
+    except (TypeError, ValueError):
+        return None
+    if v != v or v <= 0:
+        return None
+    return v
+
+
+def _http_json(url, timeout=8):
+    raw = curl(url, timeout=timeout)
+    if not raw:
+        return None
+    try:
+        return json.loads(raw)
+    except Exception:
+        return None
+
+
+def _neoxa_btcb2_quote():
+    d = _http_json(_NEOXA_BTCB2)
+    if not isinstance(d, dict):
+        return None, None
+    t = d.get("ticker") or {}
+    return _pos_float(t.get("lastPrice")), _pos_float(t.get("quoteVolume24h"))
+
+
+def _nonkyc_btcb2_quote():
+    d = _http_json(_NONKYC_BTCB2)
+    if not isinstance(d, dict):
+        return None, None
+    last = _pos_float(d.get("last_price"))
+    vol = _pos_float(d.get("usd_volume_est")) or _pos_float(d.get("target_volume"))
+    return last, vol
+
+
+def volume_weighted_usd(quotes):
+    """quotes: iterable of (last, volume_usd). Weight by volume; fall back to a simple mean."""
+    priced = [(p, v) for p, v in quotes if p is not None]
+    if not priced:
+        return None, "none"
+    weighted = [(p, v) for p, v in priced if v]
+    if weighted:
+        return sum(p * v for p, v in weighted) / sum(v for _, v in weighted), "volume_weighted"
+    return sum(p for p, _ in priced) / len(priced), "average"
+
+
+def _fiat_from_sha_basket(usd):
+    """Scale EUR/GBP/… from the mempool backend's SHA basket so those currencies stay relative to USD."""
+    extras = {}
+    raw = curl(f"{MEMPOOL_API.rstrip('/')}/api/v1/prices", timeout=3)
+    try:
+        fx = json.loads(raw) if raw else {}
+    except Exception:
+        fx = {}
+    if not isinstance(fx, dict):
+        return extras
+    sha = _pos_float(fx.get("USD"))
+    if not sha:
+        return extras
+    for k, v in fx.items():
+        if k in ("time", "USD"):
+            continue
+        n = _pos_float(v)
+        if n:
+            extras[k] = round(usd * (n / sha), 2)
+    return extras
+
+
+def price_payload():
+    """BTCB2 USD plus mempool-shaped fiat keys. Last good print is kept if both books fail."""
+    now = time.time()
+    with _price_lock:
+        if _price_cache["doc"] and now - _price_cache["ts"] < 45:
+            return _price_cache["doc"]
+    neoxa_last, neoxa_vol = _neoxa_btcb2_quote()
+    nonkyc_last, nonkyc_vol = _nonkyc_btcb2_quote()
+    usd, method = volume_weighted_usd(((neoxa_last, neoxa_vol), (nonkyc_last, nonkyc_vol)))
+    n_quotes = sum(1 for v in (neoxa_last, nonkyc_last) if v is not None)
+    if usd is not None:
+        doc = {
+            "USD": round(usd, 2),
+            "time": int(now),
+            "stale": False,
+            "pair": "BTCB2",
+            "method": method,
+            "sources": {
+                "neoxa": {
+                    "pair": "BTCB2_USDC",
+                    "last": neoxa_last,
+                    "volume": neoxa_vol,
+                    "url": "https://neoxa.exchange/trade/BTCB2_USDC",
+                },
+                "nonkyc": {
+                    "pair": "BTCB2_USDT",
+                    "last": nonkyc_last,
+                    "volume": nonkyc_vol,
+                    "url": "https://nonkyc.io/market/BTCB2_USDT",
+                },
+            },
+            "average_of": n_quotes,
+        }
+        doc.update(_fiat_from_sha_basket(usd))
+        with _price_lock:
+            _price_cache["doc"] = doc
+            _price_cache["ts"] = now
+        return doc
+    with _price_lock:
+        _price_cache["ts"] = now
+        if _price_cache["doc"]:
+            stale = dict(_price_cache["doc"])
+            stale["stale"] = True
+            return stale
+    return {
+        "USD": None,
+        "time": int(now),
+        "stale": True,
+        "pair": "BTCB2",
+        "method": "none",
+        "sources": {
+            "neoxa": {"pair": "BTCB2_USDC", "last": None, "volume": None, "url": "https://neoxa.exchange/trade/BTCB2_USDC"},
+            "nonkyc": {"pair": "BTCB2_USDT", "last": None, "volume": None, "url": "https://nonkyc.io/market/BTCB2_USDT"},
+        },
+        "average_of": 0,
+    }
+
+
+def mempool_prices_payload():
+    """Same shape as stock mempool /api/v1/prices: {time, USD, EUR, …}."""
+    p = price_payload()
+    out = {"time": int(p.get("time") or time.time())}
+    if p.get("USD") is not None:
+        out["USD"] = p["USD"]
+    for k, v in p.items():
+        if k in ("USD", "time", "stale", "pair", "sources", "average_of", "method"):
+            continue
+        if isinstance(v, (int, float)):
+            out[k] = v
+    return out
 
 
 # Identities are DATUM usernames minus the worker suffix: an address, or whatever a
@@ -1314,6 +1588,150 @@ def gateway_names_by_address():
     return out
 
 
+def solo_blocks_rows(limit=50):
+    rows = db(
+        "SELECT height,hash,ts,reward_btc,finder,pool_fee_btc,miner_btc FROM solo_blocks"
+        " ORDER BY height DESC LIMIT ?",
+        (limit,),
+    )
+    return [dict(r) for r in rows]
+
+
+def solo_payload():
+    """Everything the UI shows about solo.
+
+    Solo is served only by standalone gateways: they build their own templates, pay the
+    finder directly in the coinbase, and never talk to Prime. Nothing here touches the
+    TIDES window and nothing here is ever owed.
+    """
+    endpoints, miners = [], {}
+    hashrate_ghs = 0.0
+    for gw in SOLO_APIS:
+        doc = {}
+        try:
+            raw = curl(gw["url"].rstrip("/") + "/solo.json", timeout=3)
+            doc = json.loads(raw) if raw else {}
+        except Exception:
+            doc = {}
+        up = bool(doc.get("mode") == "solo")
+        ghs = float(doc.get("hashrate") or 0) / 1e9
+        hashrate_ghs += ghs
+        endpoints.append(
+            {
+                "name": gw.get("name") or doc.get("profile") or "solo",
+                "host": STRATUM_HOST,
+                "port": gw.get("port"),
+                "online": up,
+                "fee_percent": (doc.get("fee_bps") or 0) / 100.0,
+                "height": doc.get("height") or 0,
+                "template_age_s": doc.get("template_age_s"),
+                "vardiff": doc.get("vardiff") or {},
+                "hashrate_ghs": ghs,
+                "miners": len(doc.get("miners") or []),
+            }
+        )
+        for m in doc.get("miners") or []:
+            ident = m.get("identity") or ""
+            if not ident:
+                continue
+            e = miners.setdefault(ident, _solo_row(ident))
+            e["hashrate_ghs"] += float(m.get("hashrate") or 0) / 1e9
+            e["workers"] += int(m.get("workers") or 0)
+            e["work"] += int(m.get("work") or 0)
+            e["shares"] += int(m.get("shares") or 0)
+            e["blocks"] += int(m.get("blocks") or 0)
+            e["best_diff"] = max(e["best_diff"], int(m.get("best_diff") or 0))
+            e["via"] = gw.get("name") or "stratum"
+            e["fee_percent"] = (doc.get("fee_bps") or 0) / 100.0
+
+    blocks = solo_blocks_rows()
+    # The chain is the authority on who found what; the gateways' own counters are only a
+    # live view and reset if an instance is replaced.
+    for b in blocks:
+        if b["finder"] in miners:
+            miners[b["finder"]]["blocks_onchain"] = miners[b["finder"]].get("blocks_onchain", 0) + 1
+    rows = sorted(miners.values(), key=lambda m: (-m["hashrate_ghs"], -m["work"]))
+    return {
+        "enabled": any(e["online"] for e in endpoints),
+        "fee_percent": next((e["fee_percent"] for e in endpoints if e["online"]), 2.5),
+        "endpoints": endpoints,
+        "hashrate_ghs": hashrate_ghs,
+        "miners": rows,
+        "miner_count": len(rows),
+        "blocks": blocks,
+        "blocks_found": len(blocks),
+        "ts": int(time.time()),
+    }
+
+
+def _solo_row(ident):
+    return {
+        "address": ident,
+        "hashrate_ghs": 0.0,
+        "workers": 0,
+        "work": 0,
+        "shares": 0,
+        "blocks": 0,
+        "blocks_onchain": 0,
+        "best_diff": 0,
+        "via": "",
+        "fee_percent": 0.0,
+    }
+
+
+def solo_miner_payload(addr):
+    doc = solo_payload()
+    me = next((m for m in doc["miners"] if m["address"] == addr), None)
+    return {
+        "address": addr,
+        "found": me is not None,
+        "solo": me or _solo_row(addr),
+        "blocks": [b for b in doc["blocks"] if b["finder"] == addr],
+        "endpoints": doc["endpoints"],
+        "ts": doc["ts"],
+    }
+
+
+def pool_fee_script():
+    """The scriptPubKey the pool's own outputs pay to.
+
+    The script, not the address: the same script renders as a different address on a
+    different network, and the solo gateways publish exactly this hex as `fee_script`.
+    """
+    return (((prime_doc().get("pool") or {}).get("script")) or CONF.get("payout_script") or "").lower()
+
+
+def record_solo_block(height, blockhash, blk, tx0, coinbase_text):
+    """A block found by a solo miner: logged, never settled.
+
+    The finder is the value output that is not the pool's fee. Matching on the pool's
+    script rather than on output order, because the order is the gateway's choice and not
+    something the chain guarantees.
+    """
+    vouts = tx0.get("vout") or []
+    reward = sum(float(v.get("value") or 0) for v in vouts)
+    fee_spk = pool_fee_script()
+    finder, fee_btc = "", 0.0
+    for v in vouts:
+        val = float(v.get("value") or 0)
+        if val <= 0:
+            continue
+        spk = v.get("scriptPubKey") or {}
+        if fee_spk and str(spk.get("hex") or "").lower() == fee_spk:
+            fee_btc += val
+            continue
+        a = spk.get("address") or (spk.get("addresses") or [None])[0]
+        if a and not finder:
+            finder = a
+    db(
+        "INSERT OR REPLACE INTO solo_blocks(height,hash,ts,reward_btc,finder,pool_fee_btc,miner_btc,coinbase)"
+        " VALUES(?,?,?,?,?,?,?,?)",
+        (height, blockhash, blk.get("time"), reward, finder, fee_btc, reward - fee_btc, coinbase_text[:200]),
+        write=True,
+    )
+    print("solo_block", height, finder or "?", "reward", round(reward, 8), "fee", round(fee_btc, 8), flush=True)
+
+
 def scan_found_blocks():
     tip = rpc("getblockcount")
     if not tip:
@@ -1343,9 +1761,12 @@ def scan_found_blocks():
         vin = (tx0.get("vin") or [{}])[0]
         cb = vin.get("coinbase") or ""
         text = ascii_from_hex(cb)
+        vouts = tx0.get("vout") or []
+        if SOLO_TAG in text:
+            record_solo_block(height, h, blk, tx0, text)
+            continue
         if COINBASE_TAG not in text:
             continue
-        vouts = tx0.get("vout") or []
         reward = sum(float(v.get("value") or 0) for v in vouts)
         addrs = []
         for v in vouts:
@@ -1460,6 +1881,7 @@ def _gateway_row(c):
         "work": int(c.get("work") or 0),
         "coinbasers": int(c.get("coinbasers") or 0),
         "block_candidates": int(c.get("block_candidates") or 0),
+        "offline": bool(c.get("offline")),
     }
 
 
@@ -1506,7 +1928,7 @@ def prime_summary():
     pool = meta.get("pool") or {}
     totals = meta.get("totals") or {}
     clients = [_gateway_row(c) for c in meta.get("clients") or []]
-    clients.sort(key=lambda g: (g["own"], -g["work"]))
+    clients, log_found = _merge_persistent_gateway_finds(clients)
     blocks = [_block_row(b) for b in meta.get("blocks") or []]
     blocks.sort(key=lambda b: -(b["height"] or 0))
     pool_addr = pool.get("address") or ""
@@ -1556,13 +1978,13 @@ def prime_summary():
             "connections": int(totals.get("connections") or 0),
             "handshake_failures": int(totals.get("handshake_failures") or 0),
             "coinbasers": int(totals.get("coinbasers") or 0),
-            "block_candidates": int(totals.get("block_candidates") or 0),
+            "block_candidates": int(log_found or totals.get("block_candidates") or 0),
             "blocks_submitted": int(totals.get("blocks_submitted") or 0),
         },
         "owed_sats": meta.get("owed_sats") or 0,
         "gateways": clients,
-        "gateways_online": len(clients),
-        "gateways_remote": sum(1 for g in clients if not g["own"]),
+        "gateways_online": sum(1 for g in clients if not g.get("offline")),
+        "gateways_remote": sum(1 for g in clients if not g["own"] and not g.get("offline")),
         "blocks": blocks,
     }
 
@@ -1948,8 +2370,27 @@ def miner_payload(address):
         "window_fill_percent": win["window_fill_percent"],
         "blocks_found": [dict(r) for r in (payouts or [])],
         "fee_percent": POOL_FEE,
+        # Solo is a separate book: none of it is in `window_work` above, and none of it is
+        # owed. Present so one address that mines both ways sees both on one page.
+        "solo": _solo_for(address),
         "history": [{"ts": r["ts"], "hr_ghs": r["hr"]} for r in hist],
     }
+
+
+def _solo_for(address):
+    """This address's solo standing, or None if it has never mined solo here."""
+    try:
+        doc = cached("solo", 3.0, solo_payload)
+    except Exception:
+        return None
+    me = next((m for m in doc["miners"] if m["address"] == address), None)
+    blocks = [b for b in doc["blocks"] if b["finder"] == address]
+    if not me and not blocks:
+        return None
+    row = dict(me or _solo_row(address))
+    row["blocks_onchain"] = len(blocks)
+    row["blocks_list"] = blocks
+    return row
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -2075,6 +2516,9 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         u = urlparse(self.path)
         path = unquote(u.path)
+        if path in ("/api/price", "/api/v1/prices"):
+            self.send_json(price_payload() if path == "/api/price" else mempool_prices_payload())
+            return
         if path == "/api/pool":
             self.send_json(cached("pool", 1.0, pool_payload))
             return
@@ -2093,6 +2537,16 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path == "/api/coinbaser":
             self.send_json(cached("coinbaser", 2.0, prime_coinbaser_preview))
+            return
+        if path == "/api/solo":
+            self.send_json(cached("solo", 3.0, solo_payload))
+            return
+        if path.startswith("/api/solo/"):
+            addr = path.split("/api/solo/", 1)[1].strip("/")
+            if not _ADDRESS_RE.match(addr):
+                self.send_json({"error": "not found"}, 404)
+                return
+            self.send_json(cached(("solo", addr), 3.0, lambda: solo_miner_payload(addr)))
             return
         if path == "/api/gateways":
             self.send_json(cached("gateways", 2.0, self._gateways_payload))

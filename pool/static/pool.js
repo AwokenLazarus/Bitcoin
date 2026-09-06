@@ -164,6 +164,18 @@
     if (Math.abs(x) >= 0.01) return x.toFixed(4);
     return x.toExponential(2);
   };
+  // BLAKE2b BTC USD from /api/price (Neoxa + NonKYC last prices, weighted by 24h volume).
+  let priceUsd = null;
+  const moneyOnly = (usd) => {
+    const u = Number(usd);
+    if (!Number.isFinite(u)) return "\u2014";
+    return "$" + u.toLocaleString(undefined, { maximumFractionDigits: u >= 100 ? 0 : 2 });
+  };
+  const money = (btcAmt) => {
+    const u = Number(btcAmt) * Number(priceUsd);
+    if (!Number.isFinite(u) || !Number.isFinite(Number(priceUsd))) return "";
+    return " · " + moneyOnly(u);
+  };
   // 1 TH/s of continuous work vs the live network, 144 blocks/day, base subsidy.
   const thsDay = (p, feePercent) => {
     const billed = Number(p && p["ths_btc_day_" + (feePercent === fees.stratum ? "stratum" : "datum")]);
@@ -234,7 +246,7 @@
     const thsDatum = thsDay(p, fees.datum);
     const thsStratum = thsDay(p, fees.stratum);
     const cells = [
-      ["1 TH/s yields (est.)", thsDatum != null ? btc(thsDatum) + " BTC/Day" : "\u2014", "estimate vs current network · DATUM " + feePct(fees.datum) + " · " + (thsStratum != null ? btc(thsStratum) + " BTC/Day" : "\u2014") + " on stratum"],
+      ["1 TH/s yields (est.)", thsDatum != null ? btc(thsDatum) + " BTC/Day" + money(thsDatum) : "\u2014", "estimate vs current network · DATUM " + feePct(fees.datum) + " · " + (thsStratum != null ? btc(thsStratum) + " BTC/Day" + money(thsStratum) : "\u2014") + " on stratum"],
       ["Hashrate", fmtHr(p.pool_hr_ghs), (p.miners_online || 0) + " worker" + (p.miners_online === 1 ? "" : "s") + " online"],
       ["Miners", String(inWindow || p.miners_online || 0), inWindow ? "holding work in the window · " + (p.miners_seen ?? "\u2014") + " ever" : (p.miners_seen ?? "\u2014") + " ever"],
       ["Shares", num(tot.shares_accepted), pr.reachable ? "verified by Prime since start · " + rejPct : "Prime unreachable"],
@@ -270,7 +282,10 @@
     if ($("datum-pubkey")) $("datum-pubkey").textContent = pubkey || "\u2014";
 
     if ($("live-hr")) $("live-hr").textContent = fmtHr(p.pool_hr_ghs);
-    if ($("live-ths")) $("live-ths").textContent = thsDatum != null ? "~" + btc(thsDatum) + " BTC/Day" : "\u2014";
+    if ($("live-price")) $("live-price").textContent = priceUsd != null ? moneyOnly(priceUsd) : "\u2014";
+    const priceChip = $("live-price-chip");
+    if (priceChip) priceChip.classList.toggle("stale", priceUsd == null);
+    if ($("live-ths")) $("live-ths").textContent = thsDatum != null ? "~" + btc(thsDatum) + " BTC/Day" + money(thsDatum) : "\u2014";
     if ($("live-tip")) $("live-tip").textContent = p.height || "\u2014";
     if ($("live-window")) $("live-window").textContent = fillTxt;
     if ($("live-gateways")) $("live-gateways").textContent = String(gws);
@@ -312,7 +327,7 @@
     const feeSats = Number(cb.fee_sats) || 0;
     const n = Number(cb.miner_outputs) || 0;
     const eff = Number.isFinite(Number(cb.effective_fee_percent)) ? Number(cb.effective_fee_percent) : (value ? 100 * feeSats / value : 0);
-    $("payout-reward").textContent = value ? sats(value) + " BTC" : "\u2014";
+    $("payout-reward").textContent = value ? sats(value) + " BTC" + money(value / 1e8) : "\u2014";
     $("payout-reward-sub").textContent = value ? "base subsidy at height " + (p.height ? num(Number(p.height) + 1) : "\u2014") + " · transaction fees add to every output" : "waiting for Prime";
     $("payout-miners-btc").textContent = value ? sats(minerSats) + " BTC" : "\u2014";
     $("payout-miners-sub").textContent = value ? `${pct(100 * minerSats / value, 1)} of the block · ${n} address${n === 1 ? "" : "es"} paid directly` : "\u2014";
@@ -519,7 +534,11 @@
   function gateways(pr) {
     const el = $("gwtable");
     if (!el) return;
-    const gws = (pr.gateways || []).slice().sort((a, b) => (a.own === b.own ? (b.work || 0) - (a.work || 0) : a.own ? 1 : -1));
+    const gws = (pr.gateways || []).slice().sort((a, b) => {
+      if (!!a.offline !== !!b.offline) return a.offline ? 1 : -1;
+      if (a.own !== b.own) return a.own ? 1 : -1;
+      return (b.block_candidates || 0) - (a.block_candidates || 0) || (b.work || 0) - (a.work || 0);
+    });
     // Client string as "<software> <version>", so the table reads without knowing the wire format.
     const clientLabel = (g) => {
       const ua = String(g.user_agent || "");
@@ -535,9 +554,11 @@
     const rows = gws.map((g) => {
       const who = g.own ? `<span class="pill brass">Lazarus public stratum</span>` : `<span class="mono" title="Gateway signing key (first 16 hex)">${esc(g.gateway || "")}</span>`;
       const ident = g.own ? '<span class="faint">miners’ own addresses</span>' : (g.identity ? `<a href="#${esc(g.identity)}">${short(g.identity)}</a>` : '<span class="faint">no share yet</span>');
-      const hashing = g.last_share_s != null && g.last_share_s < 180 && g.accepted > 0;
-      const state = `<div>${hashing ? '<span class="pill ok">hashing</span>' : g.accepted > 0 ? '<span class="pill warn">idle</span>' : '<span class="pill">connected</span>'}</div>`
-        + (g.accepted > 0 && g.last_share_s != null ? `<div class="faint">last share ${agoS(g.last_share_s)}</div>` : '<div class="faint">no shares yet</div>');
+      const hashing = !g.offline && g.last_share_s != null && g.last_share_s < 180 && g.accepted > 0;
+      const state = g.offline
+        ? `<div><span class="pill">offline</span></div><div class="faint">${num(g.block_candidates || 0)} block${(g.block_candidates || 0) === 1 ? "" : "s"} on record</div>`
+        : `<div>${hashing ? '<span class="pill ok">hashing</span>' : g.accepted > 0 ? '<span class="pill warn">idle</span>' : '<span class="pill">connected</span>'}</div>`
+          + (g.accepted > 0 && g.last_share_s != null ? `<div class="faint">last share ${agoS(g.last_share_s)}</div>` : '<div class="faint">no shares yet</div>');
       const shares = `<div>${num(g.accepted)}</div>${g.rejected ? `<div class="faint" title="${esc(g.last_reject || "")}">${num(g.rejected)} rejected</div>` : ""}`;
       return [
         who,
@@ -555,10 +576,12 @@
     const t = pr.totals || {};
     const tick = $("gateway-ticker");
     if (tick) {
-      const remote = gws.filter((g) => !g.own);
+      const live = gws.filter((g) => !g.offline);
+      const remote = live.filter((g) => !g.own);
+      const historic = gws.filter((g) => g.offline);
       const active = remote.filter((g) => g.accepted > 0).length;
       const cells = [
-        ["Connected", String(gws.length), gws.length ? `${remote.length} remote · ${gws.length - remote.length} ours` : "none"],
+        ["Connected", String(live.length), live.length ? `${remote.length} remote · ${live.length - remote.length} ours` + (historic.length ? ` · ${historic.length} offline with finds` : "") : "none"],
         ["Remote hashing", String(active), remote.length ? `of ${remote.length} remote gateway${remote.length === 1 ? "" : "s"} · ${remote.length - active} connected without shares` : "no remote gateways"],
         ["Splits issued", num(t.coinbasers), "coinbase lists handed out since Prime started"],
         ["Shares verified", num(t.shares_accepted), (t.shares_rejected ? num(t.shares_rejected) + " rejected · " : "") + "since Prime started " + dur(pr.uptime_s) + " ago"],
@@ -568,9 +591,97 @@
     const note = $("gateway-note");
     if (note) {
       note.textContent = pr.reachable
-        ? `A gateway shows “connected” until its miners send work; a stock gateway with no miners attached still requests splits. “Rejected” right after a Prime restart is a gateway still on the previous instance’s split — it clears with its next template. Since start: ${num(t.connections)} connection${t.connections === 1 ? "" : "s"}, ${num(t.block_candidates)} block candidate${t.block_candidates === 1 ? "" : "s"}.`
+        ? `A gateway shows “connected” until its miners send work; a stock gateway with no miners attached still requests splits. “Rejected” right after a Prime restart is a gateway still on the previous instance’s split — it clears with its next template. Blocks found is lifetime (survives Prime restarts). Since this start: ${num(t.connections)} connection${t.connections === 1 ? "" : "s"}. ${num(t.block_candidates)} block${t.block_candidates === 1 ? "" : "s"} found in total.`
         : "Prime is unreachable; this is the last list it published.";
     }
+  }
+
+  // ------------------------------------------------------------------ solo
+  // Solo is its own book. Nothing here is a share of anything: a solo miner is paid only
+  // by the block it finds, so the tables show proven work and blocks, never "owed".
+  function solo(s) {
+    const on = !!(s && s.enabled);
+    for (const id of ["solo", "nav-solo", "fee-card-solo", "tab-solo"]) {
+      const el = $(id);
+      if (el) el.hidden = !on;
+    }
+    if (!on) return;
+    const fee = s.fee_percent;
+    setText("fee-solo", pctFee(fee));
+    setText("tab-fee-solo", pctFee(fee));
+    setText("solo-fee-line", pctFee(fee));
+
+    table(
+      $("solo-endpoints"),
+      ["Port", "For", "Address", "Fee", "Starting difficulty", "State"],
+      (s.endpoints || []).map((e) => [
+        esc(e.name || ""),
+        e.name === "GPU" ? "GPUs and CPUs" : "ASICs",
+        `<span class="mono">${esc(e.host || "")}:${esc(String(e.port || ""))}</span>`,
+        pctFee(e.fee_percent),
+        e.vardiff && e.vardiff.start ? num(e.vardiff.start) : "\u2014",
+        e.online ? '<span class="pill ok">up</span>' : '<span class="pill">down</span>',
+      ]),
+      [null, null, null, "num", "num", null],
+      "No solo endpoint is up"
+    );
+
+    const rows = (s.miners || []).map((m) => [
+      `<a href="#${esc(m.address)}">${short(m.address)}</a>`,
+      esc(m.via || "\u2014"),
+      fmtHr(m.hashrate_ghs),
+      num(m.workers),
+      num(m.shares),
+      num(m.work),
+      m.best_diff ? num(m.best_diff) : "\u2014",
+      String(m.blocks_onchain || m.blocks || 0),
+    ]);
+    table(
+      $("solotable"),
+      ["Address", "Via", "Hashrate", "Workers", "Shares", "Work", "Best share", "Blocks"],
+      rows,
+      [null, null, "num", "num", "num", "num", "num", "num"],
+      "Nobody is mining solo right now"
+    );
+
+    table(
+      $("soloblocks"),
+      ["Height", "Found by", "Reward", "Kept by finder", "Our fee", "Time"],
+      (s.blocks || []).map((b) => [
+        String(b.height),
+        b.finder ? `<a href="#${esc(b.finder)}">${short(b.finder)}</a>` : '<span class="faint">unknown</span>',
+        btc(b.reward_btc),
+        btc(b.miner_btc),
+        btc(b.pool_fee_btc),
+        when(b.ts),
+      ]),
+      ["num", null, "num", "num", "num", null],
+      "No solo block yet"
+    );
+
+    const tick = $("solo-ticker");
+    if (tick) {
+      const up = (s.endpoints || []).filter((e) => e.online).length;
+      const cells = [
+        ["Solo hashrate", fmtHr(s.hashrate_ghs), s.miner_count ? `${s.miner_count} address${s.miner_count === 1 ? "" : "es"} chasing a whole block` : "nobody mining solo"],
+        ["Blocks found solo", String(s.blocks_found || 0), "each one paid its finder in full, less the fee"],
+        ["Fee", pctFee(fee), "taken as one output in the block you solve"],
+        ["Ports", String(up), up ? "our node builds the templates" : "no solo port is up"],
+      ];
+      tick.innerHTML = cells.map(([k, v, sub]) => `<div><dt>${k}</dt><dd>${v}<small>${sub}</small></dd></div>`).join("");
+    }
+    const note = $("solo-note");
+    if (note) {
+      note.textContent = s.miner_count
+        ? "Work here buys no share of any pooled block, and a pooled miner is owed nothing from a block found solo. A solo miner with no block yet has earned nothing — that is what solo means."
+        : "No solo miners connected. Work sent to a solo port is kept entirely out of the TIDES window.";
+    }
+  }
+
+  const pctFee = (v) => (Number.isFinite(Number(v)) ? Number(v).toFixed(Number(v) % 1 ? 2 : 1).replace(/\.0$/, "") + "%" : "\u2014");
+  function setText(id, text) {
+    const el = $(id);
+    if (el) el.textContent = text;
   }
 
   // `align` is an optional array of "num" markers, one per column, so numeric
@@ -999,10 +1110,10 @@
           <div><dt>Accepted</dt><dd>${num(m.shares_lifetime ?? m.shares_acc)}<small>stays with this address on either path</small></dd></div>
           <div><dt>This session</dt><dd>${sessCell(m.via, m.shares_session)}<small>${isPrimePath(m.via) ? "own gateway · Prime credits the window directly" : "public stratum only · resets on reconnect"}</small></dd></div>
           <div><dt>Payout window</dt><dd>${wp.toFixed(1)}%<small>${num(m.window_work)} work · what the next block pays</small></dd></div>
-          <div><dt>Est. / day</dt><dd>${btc(m.est_btc_day)}<small>if the window already matched this hashrate</small></dd></div>
-          <div><dt>Next block</dt><dd>${btc(m.block_payout_btc)}<small>your output in the coinbase Prime dictates now${m.fee_path ? " · your window work is on the " + feePct(m.fee_percent_path != null ? m.fee_percent_path : feeForPath(m.fee_path)) + " " + (m.fee_path === "stratum" ? "public-stratum" : "own-gateway") + " rate" : ""}</small></dd></div>
-          <div><dt>Immature</dt><dd>${btc(m.immature_btc)}<small>in a coinbase, under 100 confs</small></dd></div>
-          <div><dt>Paid</dt><dd>${btc(m.paid_btc)}<small>in a coinbase, 100+ confs</small></dd></div>
+          <div><dt>Est. / day</dt><dd>${btc(m.est_btc_day)}${money(m.est_btc_day)}<small>if the window already matched this hashrate</small></dd></div>
+          <div><dt>Next block</dt><dd>${btc(m.block_payout_btc)}${money(m.block_payout_btc)}<small>your output in the coinbase Prime dictates now${m.fee_path ? " · your window work is on the " + feePct(m.fee_percent_path != null ? m.fee_percent_path : feeForPath(m.fee_path)) + " " + (m.fee_path === "stratum" ? "public-stratum" : "own-gateway") + " rate" : ""}</small></dd></div>
+          <div><dt>Immature</dt><dd>${btc(m.immature_btc)}${money(m.immature_btc)}<small>in a coinbase, under 100 confs</small></dd></div>
+          <div><dt>Paid</dt><dd>${btc(m.paid_btc)}${money(m.paid_btc)}<small>in a coinbase, 100+ confs</small></dd></div>
         </dl>
         <div>
           <p class="kicker table-label">Workers</p>
@@ -1033,17 +1144,22 @@
 
   // --------------------------------------------------------------- refresh
   async function refresh() {
-    const [p, miners, blocks, pays, cb] = await Promise.all([
+    const [p, miners, blocks, pays, cb, px, so] = await Promise.all([
       j("/api/pool"),
       j("/api/miners"),
       j("/api/blocks"),
       j("/api/payouts"),
       j("/api/coinbaser").catch(() => ({})),
+      j("/api/price").catch(() => null),
+      // An older server has no solo endpoint; the whole section just stays hidden.
+      j("/api/solo").catch(() => null),
     ]);
+    if (px && Number.isFinite(Number(px.USD))) priceUsd = Number(px.USD);
     stats(p);
     payoutHero(p, cb || {});
     coinbase(cb || {});
     gateways(p.prime || {});
+    solo(so);
     const online = (miners.online || []).filter((m) => m.address);
     const firstOf = (m, i) => online.findIndex((x) => x.address === m.address) === i;
     table(
@@ -1112,7 +1228,7 @@
   // retired anchors kept so old bookmarks still land somewhere sensible.
   const SECTIONS = new Set([
     "", "top", "status", "payout", "window", "connect", "dashboard", "miners", "gateways",
-    "blocks", "payouts", "how", "datum", "mine",
+    "blocks", "payouts", "how", "datum", "mine", "solo",
   ]);
 
   function fromHash() {
