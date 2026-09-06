@@ -1040,6 +1040,14 @@ fn prime_loop(st: Arc<Shared>, rx: mpsc::Receiver<Vec<u8>>, urgent: mpsc::Receiv
         // reconnect with a fresh session rather than resume mid-frame.
         let _ = sock.set_write_timeout(Some(Duration::from_secs(5)));
         st.prime_depth.store(0, Ordering::Relaxed);
+        // A coinbaser id only means something to the session that issued it. Carrying the last
+        // split across a reconnect builds jobs the *new* session cannot attribute, and it refuses
+        // every share on them as bad-coinbase-outputs — and `split_for_value` would go on
+        // rescaling that dead split onto later template values, so it does not age out on its own.
+        // Drop it and pull a fresh one; until that lands the gateway publishes no split job at
+        // all, which is the same trade as never publishing an unsplit one.
+        *st.last_cb.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        kick_gbt(&st);
         loop {
             // (body, counted): only the share queue holds slots
             let mut outgoing: Vec<(Vec<u8>, bool)> = Vec::new();
