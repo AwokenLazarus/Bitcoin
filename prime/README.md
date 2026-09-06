@@ -254,11 +254,12 @@ user-agent bump, filed upstream as
 
 How bad it is depends on the build, and there are two severities:
 
-| build | when it publishes a pool-only full job |
-|---|---|
-| `FlyTheElephant1` `master` | every BLAKE2b miner, first notify of every height — 100% of shares live |
-| `CONVOYMining` `b9ea7dc`, `iohzrd` `40cf813` | only when the coinbaser is late — 1 share in 167 live |
-| `OCEAN-xyz` `dbc3b14` | same late-coinbaser case, SHA256d (no BLAKE2b code at all) |
+| build | when it publishes a pool-only full job | fix |
+|---|---|---|
+| `FlyTheElephant1` `master` | every BLAKE2b miner, first notify of every height — 100% of shares live | [#5](https://github.com/FlyTheElephant1/datum_gateway/pull/5) |
+| `CONVOYMining` `b9ea7dc` | only when the coinbaser is late — 1 share in 167 live | [#13](https://github.com/CONVOYMining/datum_gateway/pull/13) |
+| `iohzrd` `40cf813` | same late-coinbaser case | [#1](https://github.com/iohzrd/datum_gateway/pull/1) |
+| `OCEAN-xyz` `dbc3b14` | same late-coinbaser case, SHA256d (no BLAKE2b code at all) | not filed |
 
 Convoy and iohzrd already return `DATUM_COINBASE_ID_EMPTY` on a new block and pair it with
 `subsidy_only_coinbase`, so they avoid the unconditional form. What all of them keep is
