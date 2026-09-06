@@ -474,13 +474,20 @@ pub fn parse_client(payload: &[u8]) -> Result<ClientMsg> {
 pub const CONFIG_FLAG_ABW_DISABLED: u8 = 0x01;
 pub const RESUME_TOKEN_LEN: usize = 40;
 
+/// Caps the newest Convoy-lineage gateways apply when parsing a configure: a pool script
+/// over [`MAX_CONFIG_POOL_SCRIPT`] bytes is a malformed configure, and a coinbase tag that
+/// reaches [`MAX_CONFIG_TAG`] is refused outright as one that could never fit. Both are far
+/// above what a real configure carries, and both are hard rejections, so stay inside them.
+pub const MAX_CONFIG_POOL_SCRIPT: usize = 83;
+pub const MAX_CONFIG_TAG: usize = 81;
+
 /// Client configuration body (before signing), **version 1** — OCEAN-lineage gateways
 /// including the BLAKE2b forks.
 ///
 /// `pool_script` is the scriptPubKey the gateway pays the remainder to; `tag` is the
 /// primary coinbase tag; `vardiff_min` must be a power of two.
 pub fn configure_v1(pool_script: &[u8], prime_id: u32, tag: &str, vardiff_min: u64) -> Vec<u8> {
-    debug_assert!(pool_script.len() <= 255 && tag.len() <= 255);
+    debug_assert!(pool_script.len() <= MAX_CONFIG_POOL_SCRIPT && tag.len() <= MAX_CONFIG_TAG);
     debug_assert!(vardiff_min.is_power_of_two());
     let mut m = Vec::with_capacity(20 + pool_script.len() + tag.len());
     m.push(SUB_CONFIGURE);
@@ -510,7 +517,7 @@ pub fn configure_v3(
     tag: &str,
     vardiff_min: u64,
 ) -> Vec<u8> {
-    debug_assert!(pool_script.len() <= 255 && tag.len() <= 255);
+    debug_assert!(pool_script.len() <= MAX_CONFIG_POOL_SCRIPT && tag.len() <= MAX_CONFIG_TAG);
     debug_assert!(vardiff_min.is_power_of_two());
     let mut m = Vec::with_capacity(64 + pool_script.len() + tag.len());
     m.push(SUB_CONFIGURE);

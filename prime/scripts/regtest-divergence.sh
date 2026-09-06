@@ -38,8 +38,19 @@ LINEAGE="${1:-fte}"
 case "$LINEAGE" in
   convoy) GW_REPO=https://github.com/CONVOYMining/datum_gateway; GW_REF=master ;;
   fte)    GW_REPO=https://github.com/FlyTheElephant1/datum_gateway; GW_REF=test/console-collapse-pr14-pr17 ;;
-  iohzrd) GW_REPO=https://github.com/iohzrd/datum_gateway; GW_REF=blake2b ;;
-  *) echo "usage: $0 convoy|fte|iohzrd" >&2; exit 2 ;;
+  # master carries the blake2b branch and two commits more; that is what its users run.
+  iohzrd) GW_REPO=https://github.com/iohzrd/datum_gateway; GW_REF=master ;;
+  # The commit the newest published StartOS "pow" package ships as its submodule.
+  startos)
+    GW_REPO=https://github.com/OCEAN-xyz/datum_gateway
+    GW_REF=$(curl -sSf --max-time 20 -H 'Accept: application/vnd.github+json' \
+      "https://api.github.com/repos/Retropex/datum-gateway-startos/git/trees/${STARTOS_REF:-pow}" |
+      python3 -c 'import json,sys
+for t in json.load(sys.stdin).get("tree") or []:
+    if t["type"] == "commit" and t["path"] == "datum_gateway": print(t["sha"]); break') || true
+    [ -n "$GW_REF" ] || { echo "could not resolve the StartOS gateway commit" >&2; exit 2; }
+    ;;
+  *) echo "usage: $0 convoy|fte|iohzrd|startos" >&2; exit 2 ;;
 esac
 [ -n "${MINER_CMD:-}" ] || { echo "MINER_CMD is required (see header)" >&2; exit 2; }
 
@@ -123,7 +134,16 @@ say "build primed and $LINEAGE gateway"
 (cd "$HERE" && cargo build --release -q)
 PRIMED="$HERE/target/release/primed"
 GW_DIR="$WORKDIR/gw-$LINEAGE"
-[ -d "$GW_DIR/.git" ] || git clone -q --depth 1 --branch "$GW_REF" "$GW_REPO" "$GW_DIR"
+if [ ! -d "$GW_DIR/.git" ]; then
+  if [[ "$GW_REF" =~ ^[0-9a-f]{40}$ ]]; then
+    # A submodule pin is not on any branch, but GitHub serves it by hash.
+    git init -q "$GW_DIR"
+    git -C "$GW_DIR" fetch -q --depth 1 "$GW_REPO" "$GW_REF"
+    git -C "$GW_DIR" checkout -q FETCH_HEAD
+  else
+    git clone -q --depth 1 --branch "$GW_REF" "$GW_REPO" "$GW_DIR"
+  fi
+fi
 (cd "$GW_DIR" && cmake -S . -B build -DCMAKE_BUILD_TYPE=Release >/dev/null && cmake --build build -j"$(nproc)" >/dev/null)
 GW="$GW_DIR/build/datum_gateway"; [ -x "$GW" ] || fail "gateway did not build"
 
@@ -190,7 +210,10 @@ curl -fs "http://127.0.0.1:$STATS_PORT/healthz" >/dev/null || fail "primed did n
 
 say "gateway -> node B"
 EXTRA_MINING=""
-[ "$LINEAGE" != "convoy" ] && EXTRA_MINING=", \"blake2b_activation_height\": $ACT, \"blake2b_headline\": \"Lazarus\""
+# Only fte and iohzrd know these keys; Convoy and the StartOS build read activation from GBT.
+if [ "$LINEAGE" = fte ] || [ "$LINEAGE" = iohzrd ]; then
+  EXTRA_MINING=", \"blake2b_activation_height\": $ACT, \"blake2b_headline\": \"Lazarus\""
+fi
 cat > "$WORKDIR/gw.json" <<EOF
 {
  "bitcoind": { "rpccookiefile": "$B_DIR/regtest/.cookie", "rpcurl": "http://127.0.0.1:$B_RPC_PORT", "work_update_seconds": 10, "notify_fallback": true },
