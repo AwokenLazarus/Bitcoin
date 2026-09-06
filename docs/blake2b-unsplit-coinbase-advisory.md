@@ -122,8 +122,28 @@ The size of it, measured live across 30 connected gateways:
 Three unpatched gateways had *every* accepted share unsplit — 23 of 23, 5 of 5, 3 of 3. On those,
 any block found would have paid the pool alone.
 
-Only forks that implement BLAKE2b jobs are affected. `OCEAN-xyz`, `CONVOYMining` and `iohzrd`
-have no BLAKE2b support on master and cannot hit this.
+## Which build you are running matters
+
+There are two severities here, and an earlier version of this advisory got the scope wrong by
+claiming only one fork was affected. Corrected:
+
+**`FlyTheElephant1/datum_gateway` master — every job, every height.** `if (new_block) cbselect = 0;`
+runs before the BLAKE2b branch and the subsidy-only pairing below it is gated on
+`!stratum_job_is_blake2b(j)`, so a BLAKE2b miner gets class 0 on a *full* template unconditionally.
+This is the 100%-unsplit case and what block 968440 was found on. Fixed by
+[PR #5](https://github.com/FlyTheElephant1/datum_gateway/pull/5).
+
+**`CONVOYMining` (`b9ea7dc`) and `iohzrd` (`40cf813`) — only when the coinbaser is late.** Both
+already return `DATUM_COINBASE_ID_EMPTY` on a new block and pair it with `subsidy_only_coinbase`,
+so the unconditional bug is not there. But both still `return 0` when
+`!sdata->full_coinbase_ready`, class 0 is pool-only in both, and both keep the five-second give-up
+in `stratum_job_coinbaser_ready` that sets `full_coinbase_ready = false` and publishes regardless.
+A Convoy-built gateway on our pool shows this at 1 share in 167.
+
+**`OCEAN-xyz` (`dbc3b14`) — no BLAKE2b, but the same late-coinbaser fallback.** It has no BLAKE2b
+code at all, yet still does `cbselect = 0` when `!full_coinbase` with `cb = &j->coinbase[cbselect]`,
+and its class 0 is the same two hard-coded outputs. So this is an upstream DATUM issue that reaches
+SHA256d gateways too, not a BLAKE2b-only one.
 
 ## Nobody's shares were lost
 

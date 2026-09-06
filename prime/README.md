@@ -248,8 +248,24 @@ Only the gateway can fix it, and `lazarus/patches/datum-gateway-split-only.patch
 sends type 0 on a pooled BLAKE2b job, and copies the type-4 split into type 0 so firmware that
 insists on type 0 still pays TIDES. Point an operator at that patch or at `lazarus-gateway`.
 `lazarus/patches/datum-gateway-blake2b-split-upstream.patch` is the same fix without the Lazarus
-user-agent bump, for proposing upstream; `docs/blake2b-unsplit-coinbase-advisory.md` is the
-plain-language write-up to hand to a gateway operator.
+user-agent bump, filed upstream as
+[FlyTheElephant1#5](https://github.com/FlyTheElephant1/datum_gateway/pull/5);
+`docs/blake2b-unsplit-coinbase-advisory.md` is the plain-language write-up to hand to an operator.
+
+How bad it is depends on the build, and there are two severities:
+
+| build | when it publishes a pool-only full job |
+|---|---|
+| `FlyTheElephant1` `master` | every BLAKE2b miner, first notify of every height — 100% of shares live |
+| `CONVOYMining` `b9ea7dc`, `iohzrd` `40cf813` | only when the coinbaser is late — 1 share in 167 live |
+| `OCEAN-xyz` `dbc3b14` | same late-coinbaser case, SHA256d (no BLAKE2b code at all) |
+
+Convoy and iohzrd already return `DATUM_COINBASE_ID_EMPTY` on a new block and pair it with
+`subsidy_only_coinbase`, so they avoid the unconditional form. What all of them keep is
+`cbselect = 0` when `!full_coinbase_ready`, with class 0 pool-only and the full template attached —
+and the five-second give-up in `stratum_job_coinbaser_ready` makes that reachable by design. So the
+narrow case is upstream DATUM behaviour rather than a BLAKE2b fork bug, and it is why Prime measures
+its own reply latency even though it is not the cause of the unconditional one.
 
 What the pool owes in return is to not be a *second* cause, because a reply that never arrives
 leaves `available_coinbase_outputs_count` at zero and produces the same unsplit coinbase.

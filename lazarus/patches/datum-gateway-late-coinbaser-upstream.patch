@@ -1,0 +1,74 @@
+# Never pair coinbase class 0 with a full template on a pooled job
+#
+# Applies to the forks that already fixed the *unconditional* case by returning
+# DATUM_COINBASE_ID_EMPTY on a new block and pairing it with subsidy_only_coinbase:
+#
+#   CONVOYMining/datum_gateway  master @ b9ea7dc   (has the `miner` parameter)
+#   iohzrd/datum_gateway        master @ 40cf813   (no `miner` parameter)
+#
+# What is left in both: datum_stratum_coinbase_index still returns 0 when the coinbaser is not
+# ready, and class 0 is pool-only (it is excluded from
+# generate_coinbase_txns_for_stratum_job_subtypebysize, and is built inline as exactly two
+# outputs -- the pool's script taking the whole coinbase_value, plus the witness commitment).
+# Paired with a full template that is a job whose coinbase cannot pay the pooled split, so a
+# block found on it pays the pool alone.
+#
+# It is reachable by design, not by accident: stratum_job_coinbaser_ready enforces a five-second
+# timeout that sets full_coinbase_ready = false and returns true, so the job is published in
+# exactly this state. Measured on a live BLAKE2b pool, a Convoy-built gateway produced one such
+# share in 167.
+#
+# Fix: while pooled, fall back to the subsidy-only job instead of class 0. That costs the fees of
+# one template for the moment the coinbaser is late; class 0 on a full template costs the whole
+# block. Solo is untouched, where class 0 legitimately pays the configured address.
+#
+# The two forks differ only in the function's argument list, so a labelled diff for each follows
+# below; apply the matching one with `patch -p1 <`. Both were verified against a fresh clone:
+# `cmake --build` clean, and `./build/datum_gateway --test` exits 0 (unchanged from stock, which
+# also exits 0 -- the existing assertion that the not-ready case yields class 0 still holds,
+# because it runs with the DATUM protocol inactive).
+
+
+# ===== CONVOYMining/datum_gateway @ b9ea7dc =====
+diff --git a/src/datum_stratum.c b/src/datum_stratum.c
+index a1818fa..be175b6 100644
+--- a/src/datum_stratum.c
++++ b/src/datum_stratum.c
+@@ -1457,7 +1457,14 @@ unsigned int datum_stratum_coinbase_index(
+ 	if (!sdata || !miner || !sdata->cur_stratum_job ||
+ 	    sdata->cur_stratum_job->job_state < JOB_STATE_FULL_PRIORITY_WAIT_COINBASER ||
+ 	    !sdata->full_coinbase_ready ||
+-	    miner->coinbase_selection >= MAX_COINBASE_TYPES) return 0;
++	    miner->coinbase_selection >= MAX_COINBASE_TYPES) {
++		// Class 0 pays only the pool, so pairing it with a full template loses the pooled
++		// split on any block found from it -- and stratum_job_coinbaser_ready publishes in
++		// exactly this state once its five-second timeout fires. Serve the subsidy-only job
++		// instead: it costs one template's fees while the coinbaser is late, against the
++		// whole block. Solo still wants class 0, which pays the configured address.
++		return datum_protocol_is_active() ? DATUM_COINBASE_ID_EMPTY : 0;
++	}
+ 	return miner->coinbase_selection;
+ }
+ 
+
+# ===== iohzrd/datum_gateway @ 40cf813 =====
+diff --git a/src/datum_stratum.c b/src/datum_stratum.c
+index d07a508..3c65d0f 100644
+--- a/src/datum_stratum.c
++++ b/src/datum_stratum.c
+@@ -1462,7 +1462,14 @@ unsigned int datum_stratum_coinbase_index(
+ 	if (new_block) return DATUM_COINBASE_ID_EMPTY;
+ 	if (!sdata || !sdata->cur_stratum_job ||
+ 	    sdata->cur_stratum_job->job_state < JOB_STATE_FULL_PRIORITY_WAIT_COINBASER ||
+-	    !sdata->full_coinbase_ready) return 0;
++	    !sdata->full_coinbase_ready) {
++		// Class 0 pays only the pool, so pairing it with a full template loses the pooled
++		// split on any block found from it -- and stratum_job_coinbaser_ready publishes in
++		// exactly this state once its five-second timeout fires. Serve the subsidy-only job
++		// instead: it costs one template's fees while the coinbaser is late, against the
++		// whole block. Solo still wants class 0, which pays the configured address.
++		return datum_protocol_is_active() ? DATUM_COINBASE_ID_EMPTY : 0;
++	}
+ 	return COINBASE_TYPE_YUGE;
+ }
+ 

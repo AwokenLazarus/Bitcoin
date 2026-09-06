@@ -134,6 +134,19 @@ stale hashing, while an unsplit full job costs the entire block.
 
 ### Scope
 
-Only forks implementing BLAKE2b jobs are affected. `OCEAN-xyz/datum_gateway`,
-`CONVOYMining/datum_gateway` and `iohzrd/datum_gateway` have no `stratum_job_is_blake2b` on
-master and cannot hit this.
+The *unconditional* form — every BLAKE2b miner handed type 0 on the first notify of every height —
+is specific to this repo's `master`, and it is what our live gateways show at 100% of their shares.
+
+The narrower form is not. `datum_stratum_coinbase_index` in `CONVOYMining/datum_gateway`
+(`b9ea7dc`) and `iohzrd/datum_gateway` (`40cf813`) already returns `DATUM_COINBASE_ID_EMPTY` on a
+new block and pairs it with `subsidy_only_coinbase`, so they do not have the unconditional bug.
+But both still `return 0` when `!sdata->full_coinbase_ready`, and class 0 is pool-only in both, so
+a late coinbaser still yields a full template with a pool-only coinbase. Both also keep the
+five-second give-up in `stratum_job_coinbaser_ready` that sets `full_coinbase_ready = false` and
+publishes anyway, so that path is reachable by design rather than by accident. On our pool a
+Convoy-built gateway shows it at 1 share in 167, against 100% for this lineage.
+
+`OCEAN-xyz/datum_gateway` (`dbc3b14`) has no BLAKE2b at all, but inherits the same `!full_coinbase
+-> cbselect = 0` fallback with `cb = &j->coinbase[cbselect]`, and its class 0 is likewise two
+hard-coded outputs. So the late-coinbaser case is an upstream DATUM issue affecting SHA256d too,
+and worth fixing separately from this PR.
