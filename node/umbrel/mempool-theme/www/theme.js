@@ -372,6 +372,243 @@
     }
   }
 
+  /* Address charts. Stock mempool only mounts Balance History + Unspent Outputs when
+   * backend$ === 'esplora'. We run Electrum (header-v2 electrs), so the Angular widgets
+   * stay hidden even though /api/address/:addr/txs and /utxo work. These two boxes are
+   * the same views, drawn here from that data so a backend upgrade is not required. */
+  var addrState = { key: '', loading: false, data: null };
+
+  function addrFromPath() {
+    var m = /^\/address\/([^/?#]+)/.exec(location.pathname || '');
+    return m ? decodeURIComponent(m[1]) : '';
+  }
+  function fmtBtc(sats) {
+    var x = Number(sats) / 1e8;
+    if (!isFinite(x)) return '—';
+    var n = Math.abs(x) >= 1 ? 4 : Math.abs(x) >= 0.01 ? 6 : 8;
+    return (x < 0 ? '−' : '') + Math.abs(x).toFixed(n).replace(/0+$/, '').replace(/\.$/, '') + ' BTC';
+  }
+  function txTime(tx) {
+    var s = tx && tx.status;
+    if (s && s.confirmed && s.block_time) return s.block_time;
+    return Math.floor(Date.now() / 1000);
+  }
+  function txNet(tx, addr) {
+    var inn = 0, out = 0, i, v, p;
+    var vin = tx.vin || [];
+    for (i = 0; i < vin.length; i++) {
+      p = vin[i].prevout || {};
+      if (p.scriptpubkey_address === addr) inn += Number(p.value) || 0;
+    }
+    var vout = tx.vout || [];
+    for (i = 0; i < vout.length; i++) {
+      v = vout[i];
+      if (v.scriptpubkey_address === addr) out += Number(v.value) || 0;
+    }
+    return out - inn;
+  }
+  function fetchAllTxs(addr) {
+    var out = [];
+    function page(after) {
+      var url = '/api/address/' + encodeURIComponent(addr) + '/txs' + (after ? '?after_txid=' + after : '');
+      return fetch(url).then(function (r) { return r.ok ? r.json() : []; }).then(function (batch) {
+        if (!batch || !batch.length) return out;
+        out = out.concat(batch);
+        if (out.length >= 500 || batch.length < 10) return out;
+        return page(batch[batch.length - 1].txid);
+      });
+    }
+    return page(null);
+  }
+  function niceTicks(min, max, n) {
+    if (!(max > min)) max = min + 1;
+    var span = max - min, step = Math.pow(10, Math.floor(Math.log10(span / n)));
+    var err = n / (span / step);
+    if (err <= 0.15) step *= 10;
+    else if (err <= 0.35) step *= 5;
+    else if (err <= 0.75) step *= 2;
+    var start = Math.ceil(min / step) * step, ticks = [];
+    for (var v = start; v <= max + step * 0.01; v += step) ticks.push(v);
+    if (!ticks.length) ticks.push(min);
+    return ticks;
+  }
+  function areaSvg(points, period) {
+    var W = 720, H = 200, L = 72, R = 16, T = 12, B = 28;
+    var now = Date.now();
+    var lo = period === '1m' ? now - 30 * 86400 * 1000 : points[0].t;
+    var vis = points.filter(function (p) { return p.t >= lo; });
+    if (!vis.length) vis = points.slice(-2);
+    var startBal = vis[0].bal;
+    for (var i = 0; i < points.length; i++) {
+      if (points[i].t <= lo) startBal = points[i].bal;
+    }
+    if (vis[0].t > lo) vis = [{ t: lo, bal: startBal, txid: '' }].concat(vis);
+    vis = vis.concat([{ t: now, bal: points[points.length - 1].bal, txid: '' }]);
+    var ymin = vis.reduce(function (a, p) { return Math.min(a, p.bal); }, vis[0].bal);
+    var ymax = vis.reduce(function (a, p) { return Math.max(a, p.bal); }, vis[0].bal);
+    if (ymax === ymin) { ymax += 1e6; ymin = Math.max(0, ymin - 1e6); }
+    var pad = (ymax - ymin) * 0.08;
+    ymin -= pad; ymax += pad;
+    if (ymin < 0 && vis.every(function (p) { return p.bal >= 0; })) ymin = 0;
+    function x(t) { return L + (W - L - R) * (t - lo) / Math.max(1, now - lo); }
+    function y(b) { return T + (H - T - B) * (1 - (b - ymin) / (ymax - ymin)); }
+    var d = '';
+    vis.forEach(function (p, i) { d += (i ? 'L' : 'M') + x(p.t).toFixed(1) + ',' + y(p.bal).toFixed(1); });
+    var area = d + 'L' + x(vis[vis.length - 1].t).toFixed(1) + ',' + (H - B) + 'L' + x(vis[0].t).toFixed(1) + ',' + (H - B) + 'Z';
+    var ticks = niceTicks(ymin, ymax, 4);
+    var yaxis = ticks.map(function (v) {
+      var yy = y(v);
+      return '<line x1="' + L + '" x2="' + (W - R) + '" y1="' + yy + '" y2="' + yy + '" class="lz-grid"/>' +
+        '<text x="' + (L - 8) + '" y="' + (yy + 4) + '" class="lz-axis" text-anchor="end">' + esc(fmtBtc(v)) + '</text>';
+    }).join('');
+    var dots = vis.filter(function (p) { return p.txid; }).map(function (p) {
+      return '<a href="/tx/' + encodeURIComponent(p.txid) + '"><circle class="lz-dot-pt" cx="' + x(p.t).toFixed(1) + '" cy="' + y(p.bal).toFixed(1) + '" r="3.2">' +
+        '<title>' + esc(fmtBtc(p.bal) + (p.delta ? '  (' + (p.delta > 0 ? '+' : '') + fmtBtc(p.delta) + ')' : '')) + '</title></circle></a>';
+    }).join('');
+    return '<svg class="lz-area" viewBox="0 0 ' + W + ' ' + H + '" preserveAspectRatio="none" role="img" aria-label="Balance history">' +
+      '<defs><linearGradient id="lzBalFill" x1="0" y1="0" x2="0" y2="1">' +
+      '<stop offset="0" stop-color="#FDD835" stop-opacity="0.45"/><stop offset="1" stop-color="#FB8C00" stop-opacity="0.04"/>' +
+      '</linearGradient><linearGradient id="lzBalStroke" x1="0" y1="0" x2="0" y2="1">' +
+      '<stop offset="0" stop-color="#FDD835"/><stop offset="1" stop-color="#FB8C00"/></linearGradient></defs>' +
+      yaxis +
+      '<path class="lz-area-fill" d="' + area + '" fill="url(#lzBalFill)"/>' +
+      '<path class="lz-area-line" d="' + d + '" fill="none" stroke="url(#lzBalStroke)" stroke-width="2" vector-effect="non-scaling-stroke"/>' +
+      dots + '</svg>';
+  }
+  function packBubbles(utxos, W, H) {
+    var items = utxos.slice().sort(function (a, b) { return (b.value || 0) - (a.value || 0); }).slice(0, 500);
+    if (!items.length) return [];
+    var max = items[0].value || 1;
+    var i, t, ok, p, dx, dy;
+    for (i = 0; i < items.length; i++) {
+      items[i].r = 6 + 42 * Math.sqrt((items[i].value || 0) / max);
+    }
+    items[0].x = 0; items[0].y = 0;
+    for (i = 1; i < items.length; i++) {
+      var c = items[i], placed = false, ang = 0, dist = items[0].r;
+      for (t = 0; t < 900 && !placed; t++) {
+        ang += 0.37;
+        dist += c.r * 0.045;
+        c.x = Math.cos(ang) * dist;
+        c.y = Math.sin(ang) * dist * 0.72;
+        ok = true;
+        for (p = 0; p < i; p++) {
+          dx = c.x - items[p].x; dy = c.y - items[p].y;
+          if (dx * dx + dy * dy < (c.r + items[p].r) * (c.r + items[p].r) * 0.92) { ok = false; break; }
+        }
+        placed = ok;
+      }
+    }
+    var minx = Infinity, maxx = -Infinity, miny = Infinity, maxy = -Infinity;
+    for (i = 0; i < items.length; i++) {
+      minx = Math.min(minx, items[i].x - items[i].r);
+      maxx = Math.max(maxx, items[i].x + items[i].r);
+      miny = Math.min(miny, items[i].y - items[i].r);
+      maxy = Math.max(maxy, items[i].y + items[i].r);
+    }
+    var sx = (W - 24) / Math.max(1, maxx - minx);
+    var sy = (H - 24) / Math.max(1, maxy - miny);
+    var s = Math.min(sx, sy);
+    for (i = 0; i < items.length; i++) {
+      items[i].x = 12 + (items[i].x - minx) * s;
+      items[i].y = 12 + (items[i].y - miny) * s;
+      items[i].r *= s;
+    }
+    return items;
+  }
+  function mixHex(a, b, t) {
+    function hex(h) { return [parseInt(h.slice(0, 2), 16), parseInt(h.slice(2, 4), 16), parseInt(h.slice(4, 6), 16)]; }
+    var A = hex(a), B = hex(b), o = '#';
+    for (var i = 0; i < 3; i++) o += ('0' + Math.round(A[i] + (B[i] - A[i]) * t).toString(16)).slice(-2);
+    return o;
+  }
+  function bubbleSvg(utxos) {
+    var W = 720, H = 260;
+    var now = Math.floor(Date.now() / 1000);
+    var times = utxos.map(function (u) { return (u.status && u.status.block_time) || now; });
+    var tmin = Math.min.apply(null, times), tmax = Math.max.apply(null, times);
+    var packed = packBubbles(utxos, W, H);
+    var circles = packed.map(function (u) {
+      var t = (u.status && u.status.block_time) || now;
+      var age = tmax === tmin ? 0 : (t - tmin) / (tmax - tmin);
+      var fill = u.status && u.status.confirmed ? mixHex('3C39F4', '1BF4AF', age) : '#eba814';
+      var href = '/tx/' + encodeURIComponent(u.txid);
+      return '<a href="' + href + '"><circle cx="' + u.x.toFixed(1) + '" cy="' + u.y.toFixed(1) + '" r="' + Math.max(2, u.r).toFixed(1) + '" fill="' + fill + '" fill-opacity="0.88" stroke="#00000033" stroke-width="0.6">' +
+        '<title>' + esc(fmtBtc(u.value) + (u.status && u.status.block_height ? ' · block ' + u.status.block_height : ' · unconfirmed')) + '</title></circle></a>';
+    }).join('');
+    return '<svg class="lz-bubbles" viewBox="0 0 ' + W + ' ' + H + '" role="img" aria-label="Unspent outputs">' + circles + '</svg>';
+  }
+  function renderAddrCharts(host, addr, data) {
+    var txs = data.txs || [], utxos = data.utxos || [];
+    var chronological = txs.slice().sort(function (a, b) { return txTime(a) - txTime(b); });
+    var bal = 0, points = [];
+    chronological.forEach(function (tx) {
+      var delta = txNet(tx, addr);
+      bal += delta;
+      points.push({ t: txTime(tx) * 1000, bal: bal, delta: delta, txid: tx.txid });
+    });
+    var newest = chronological.length ? txTime(chronological[chronological.length - 1]) : 0;
+    var showPeriod = newest > Date.now() / 1000 - 30 * 86400;
+    var wrap = el('div', { class: 'lz-addr-charts', 'data-lz-addr': addr });
+    if (points.length > 2) {
+      var hist = el('div', { class: 'lz-addr-block' });
+      hist.innerHTML = '<div class="title-tx"><h2 class="text-left">Balance History</h2></div>' +
+        '<div class="box lz-chart-box">' +
+          (showPeriod ? '<div class="widget-toggler lz-period">' +
+            '<a href="#" class="toggler-option" data-period="all"><small>all</small></a>' +
+            '<span class="lz-period-bar"> | </span>' +
+            '<a href="#" class="toggler-option inactive" data-period="1m"><small>recent</small></a></div>' : '') +
+          '<div class="lz-chart-slot" data-slot="area"></div></div>';
+      var slot = hist.querySelector('[data-slot="area"]');
+      slot.innerHTML = areaSvg(points, 'all');
+      if (showPeriod) {
+        hist.addEventListener('click', function (ev) {
+          var a = ev.target.closest('[data-period]');
+          if (!a) return;
+          ev.preventDefault();
+          hist.querySelectorAll('[data-period]').forEach(function (x) { x.classList.toggle('inactive', x !== a); });
+          slot.innerHTML = areaSvg(points, a.getAttribute('data-period'));
+        });
+      }
+      wrap.appendChild(hist);
+    }
+    if (utxos.length > 2) {
+      var uns = el('div', { class: 'lz-addr-block' });
+      uns.innerHTML = '<div class="title-tx"><h2 class="text-left">Unspent Outputs</h2></div>' +
+        '<div class="box lz-chart-box"><div class="lz-chart-slot">' + bubbleSvg(utxos) + '</div></div>';
+      wrap.appendChild(uns);
+    }
+    var old = host.querySelector('.lz-addr-charts');
+    if (old) old.replaceWith(wrap);
+    else {
+      var txTitle = host.querySelector('.title-tx');
+      if (txTitle) host.insertBefore(wrap, txTitle);
+      else host.appendChild(wrap);
+    }
+  }
+  function addressCharts() {
+    var addr = addrFromPath();
+    var host = document.querySelector('app-address');
+    if (!addr || !host) return;
+    var existing = host.querySelector('.lz-addr-charts');
+    if (existing && existing.getAttribute('data-lz-addr') === addr) return;
+    if (addrState.data && addrState.key === addr) {
+      renderAddrCharts(host, addr, addrState.data);
+      return;
+    }
+    if (addrState.loading === addr) return;
+    addrState.loading = addr;
+    Promise.all([
+      fetchAllTxs(addr),
+      fetch('/api/address/' + encodeURIComponent(addr) + '/utxo').then(function (r) { return r.ok ? r.json() : []; })
+    ]).then(function (pair) {
+      if (addrFromPath() !== addr) { addrState.loading = false; return; }
+      addrState = { key: addr, loading: false, data: { txs: pair[0], utxos: pair[1] } };
+      var live = document.querySelector('app-address');
+      if (live) renderAddrCharts(live, addr, addrState.data);
+    }).catch(function () { addrState.loading = false; });
+  }
+
   var scheduled = false;
   function apply() {
     scheduled = false;
@@ -379,6 +616,7 @@
     try { footer(); } catch (e) { /* never break the explorer */ }
     try { dashboard(); } catch (e) { /* never break the explorer */ }
     try { minerBadges(); } catch (e) { /* never break the explorer */ }
+    try { addressCharts(); } catch (e) { /* never break the explorer */ }
   }
   function schedule() {
     if (scheduled) return;
@@ -386,8 +624,22 @@
     (window.requestAnimationFrame || setTimeout)(apply);
   }
 
+  function lazChat() {
+    if (window.__lazChatBooted) return;
+    window.__lazChatBooted = true;
+    window.LAZ_CHAT_SOURCE = 'mempool';
+    window.LAZ_CHAT_URL = 'https://pool.awokenlazarus.xyz/api/laz/chat';
+    if (!document.getElementById('laz-chat-css')) {
+      var link = el('link', { id: 'laz-chat-css', rel: 'stylesheet', href: '/lazarus/laz-chat.css' });
+      document.head.appendChild(link);
+    }
+    var s = el('script', { src: '/lazarus/laz-chat.js' });
+    document.body.appendChild(s);
+  }
+
   function start() {
     apply();
+    try { lazChat(); } catch (e) { /* never break the explorer */ }
     new MutationObserver(schedule).observe(document.body, { childList: true, subtree: true });
   }
   if (document.body) start(); else document.addEventListener('DOMContentLoaded', start);

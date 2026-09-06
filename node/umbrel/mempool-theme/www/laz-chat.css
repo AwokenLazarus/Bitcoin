@@ -1,0 +1,110 @@
+#laz-chat-root {
+  --laz-ink: #1a1610;
+  --laz-paper: #f4efe4;
+  --laz-brass: #b08d4d;
+  --laz-brass-dim: #8a6d38;
+  --laz-line: #d6ccb6;
+  --laz-muted: #6b6154;
+  font-family: "IBM Plex Sans", "Segoe UI", sans-serif;
+}
+#laz-chat-fab {
+  position: fixed;
+  right: 18px;
+  bottom: 18px;
+  z-index: 2147483000;
+  background: var(--laz-ink);
+  color: var(--laz-paper);
+  border: 1px solid var(--laz-brass);
+  border-radius: 999px;
+  padding: 10px 16px;
+  font: 600 14px/1 "Newsreader", Georgia, serif;
+  letter-spacing: 0.02em;
+  cursor: pointer;
+  box-shadow: 0 8px 24px rgba(26, 22, 16, 0.28);
+}
+#laz-chat-fab:hover { background: #2a241c; }
+#laz-chat-panel {
+  position: fixed;
+  right: 18px;
+  bottom: 64px;
+  width: min(380px, calc(100vw - 24px));
+  height: min(520px, calc(100vh - 96px));
+  z-index: 2147483000;
+  display: none;
+  flex-direction: column;
+  background: var(--laz-paper);
+  color: var(--laz-ink);
+  border: 1px solid var(--laz-line);
+  border-radius: 10px;
+  box-shadow: 0 16px 48px rgba(26, 22, 16, 0.22);
+  overflow: hidden;
+}
+#laz-chat-panel.open { display: flex; }
+#laz-chat-head {
+  padding: 12px 14px 10px;
+  border-bottom: 1px solid var(--laz-line);
+  background: #efe8d8;
+}
+#laz-chat-head h2 {
+  margin: 0;
+  font: 600 18px/1.2 "Newsreader", Georgia, serif;
+}
+#laz-chat-head p {
+  margin: 4px 0 0;
+  color: var(--laz-muted);
+  font-size: 12px;
+}
+#laz-chat-log {
+  flex: 1;
+  overflow-y: auto;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.laz-msg {
+  max-width: 92%;
+  padding: 8px 10px;
+  border-radius: 8px;
+  font-size: 13.5px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.laz-msg.user {
+  align-self: flex-end;
+  background: var(--laz-ink);
+  color: var(--laz-paper);
+}
+.laz-msg.bot {
+  align-self: flex-start;
+  background: #fffdf7;
+  border: 1px solid var(--laz-line);
+}
+.laz-msg.err { border-color: #b04d4d; color: #6b2a2a; }
+#laz-chat-form {
+  display: flex;
+  gap: 8px;
+  padding: 10px;
+  border-top: 1px solid var(--laz-line);
+  background: #efe8d8;
+}
+#laz-chat-form input {
+  flex: 1;
+  border: 1px solid var(--laz-line);
+  border-radius: 6px;
+  padding: 8px 10px;
+  font: 14px "IBM Plex Sans", sans-serif;
+  background: #fffdf7;
+  color: var(--laz-ink);
+}
+#laz-chat-form button {
+  background: var(--laz-brass);
+  color: #1a1610;
+  border: 0;
+  border-radius: 6px;
+  padding: 8px 12px;
+  font: 600 13px "IBM Plex Sans", sans-serif;
+  cursor: pointer;
+}
+#laz-chat-form button:disabled { opacity: 0.55; cursor: wait; }

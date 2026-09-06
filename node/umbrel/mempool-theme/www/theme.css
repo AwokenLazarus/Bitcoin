@@ -398,6 +398,24 @@ footer .lz-footer-note { font-size: 0.74rem; color: var(--lz-faint) !important; 
   mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M3 8.5 6.5 12 13 4' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") center / contain no-repeat;
 }
 
+/* Address balance / UTXO charts (injected: stock widgets need an esplora backend) */
+.lz-addr-charts { margin: 0 0 0.4rem; }
+.lz-addr-block { margin: 1.15rem 0 0; }
+.lz-chart-box { position: relative; padding: 0.4rem 0.6rem 0.2rem; }
+.lz-chart-slot { width: 100%; }
+.lz-area, .lz-bubbles { display: block; width: 100%; height: auto; }
+.lz-area { min-height: 200px; }
+.lz-bubbles { min-height: 260px; }
+.lz-grid { stroke: var(--lz-line); stroke-width: 1; }
+.lz-axis { fill: var(--lz-muted); font: 500 10px var(--lz-mono); }
+.lz-dot-pt { fill: #FDD835; }
+.lz-dot-pt:hover { fill: var(--lz-ink); }
+.lz-bubbles a:hover circle { stroke: var(--lz-ink); stroke-width: 1.4; }
+.lz-period { position: absolute; top: 0.45rem; right: 0.8rem; z-index: 2; font-size: 12px; }
+.lz-period .toggler-option { color: var(--lz-brass); text-decoration: none; }
+.lz-period .toggler-option.inactive { color: var(--lz-faint); }
+.lz-period-bar { color: var(--lz-faint); font-size: 8px; }
+
 /* Angular Material / ng-bootstrap bits that show up on tx pages */
 .modal-content { background-color: var(--lz-bg-raised) !important; border: 1px solid var(--lz-line-strong) !important; color: var(--lz-ink); border-radius: 2px; }
 .close { color: var(--lz-ink); text-shadow: none; }
