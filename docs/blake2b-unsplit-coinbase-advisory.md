@@ -112,6 +112,16 @@ hardened that path anyway — Prime never drops a coinbaser request, serves the 
 snapshot so replies never queue behind a lock, and measures its own reply latency. But the cause
 here is the gateway's coinbase selection, and only the gateway can fix it.
 
+The size of it, measured live across 30 connected gateways:
+
+| gateways | accepted shares | on a full job with a pool-only coinbase |
+|---|---|---|
+| patched | 587 | **0** |
+| unpatched | 219 | **34** |
+
+Three unpatched gateways had *every* accepted share unsplit — 23 of 23, 5 of 5, 3 of 3. On those,
+any block found would have paid the pool alone.
+
 Only forks that implement BLAKE2b jobs are affected. `OCEAN-xyz`, `CONVOYMining` and `iohzrd`
 have no BLAKE2b support on master and cannot hit this.
 

@@ -52,13 +52,17 @@ one of these jobs: 266 transactions, 144,067 sats of fees, and a coinbase with a
 the pool script. The job was built when the tip moved and was mined for nine minutes before it
 hit. The pool had to record 3.0656 BTC as owed back to the miners in that payout window.
 
-Measured across 28 connected gateways over ten minutes, classifying every accepted share's
-coinbase:
+Measured across 30 connected gateways, classifying every accepted share's coinbase by whether it
+could have paid the pool's split:
 
-- 41 shares carried a pool-only coinbase, and **all 41 were full jobs** (37–162 transactions).
-  None was the harmless subsidy-only startup job.
-- Every unpatched gateway produced some; one produced 33 out of 33.
-- Gateways running this patch produced **zero** across 541 shares.
+| gateways | accepted shares | on a full job with a pool-only coinbase |
+|---|---|---|
+| running this patch | 587 | **0** |
+| unpatched `master` | 219 | **34** |
+
+Every one of the 34 was a *full* job (37–162 transactions), not the harmless subsidy-only startup
+job. Three unpatched gateways had **100% of their accepted shares unsplit** — 23 of 23, 5 of 5,
+3 of 3 — so on those, every block they could have found would have paid the pool alone.
 
 The coinbaser timeout was ruled out directly, not by elimination. The pool logged, for each
 pool-only share, the gateway's own coinbase section index alongside the coinbaser the job named
