@@ -4,7 +4,7 @@
 //! A session is a single task owning both halves of the socket; there is no per-message
 //! locking beyond a short ledger critical section on accepted shares.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, VecDeque};
 use std::net::SocketAddr;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -15,7 +15,6 @@ use datum_wire::crypto::{self, Channel, Identity};
 use datum_wire::frame::{Header, KeyStream, CLIENT_INITIAL_KEY};
 use datum_wire::handshake::{self, ClientHello, Generation};
 use datum_wire::mining::{self, ClientMsg, JobValidationReply, PowSubmit, ValidationStatus};
-use datum_wire::pow::Hash;
 use datum_wire::verify::{self, CoinbaseKind, JobSlot, Policy, VerifiedShare};
 use datum_wire::{cmd, MAX_CMD_LEN};
 use rand_core::{OsRng, RngCore};
@@ -26,7 +25,7 @@ use tokio::time::{interval, MissedTickBehavior};
 
 use crate::address::{self};
 use crate::config::Config;
-use crate::state::{now, ClientInfo, Shared};
+use crate::state::{now, ClientInfo, Seen, Shared};
 
 fn house_stratum(cfg: &Config, remote: SocketAddr, gateway_hex: &str) -> bool {
     if cfg.house_loopback && remote.ip().is_loopback() {
@@ -42,8 +41,20 @@ const IDLE_LIMIT: Duration = Duration::from_secs(300);
 const HANDSHAKE_LIMIT: Duration = Duration::from_secs(15);
 const COINBASERS_KEPT: usize = 16;
 const PENDING_BLOCK_TTL: Duration = Duration::from_secs(120);
-const MAX_SEEN_PER_JOB: usize = 200_000;
 const MAX_IDENTITIES: usize = 1 << 16;
+/// Job slots whose coinbase sections stay resident per session; see `Session::touch_slot`.
+const MAX_LIVE_SLOTS: usize = 16;
+/// Coinbaser requests a session may make at once, and how often one is added back. A
+/// gateway asks once per template it builds — every ten seconds or so, and on every new
+/// block — so a burst of 32 refilled one per second never touches a real one.
+const COINBASER_BURST: u32 = 32;
+const COINBASER_REFILL: Duration = Duration::from_secs(1);
+/// A session with this many rejects (or malformed messages) inside `REJECT_WINDOW` is
+/// doing nothing useful and costing verification CPU: drop it. The live house gateway
+/// runs at 13 rejects per 50 000 shares; a broken farm behind one gateway might manage
+/// a few a second.
+const REJECT_FLOOD: usize = 2_000;
+const REJECT_WINDOW: Duration = Duration::from_secs(10);
 
 #[derive(Debug, thiserror::Error)]
 pub enum SessionError {
@@ -57,6 +68,8 @@ pub enum SessionError {
     HandshakeTimeout,
     #[error("idle")]
     Idle,
+    #[error("reject flood: {0} rejected or malformed messages in {1}s")]
+    RejectFlood(usize, u64),
 }
 
 struct IssuedCoinbaser {
@@ -84,7 +97,10 @@ struct Session {
     session_key: Identity,
     hello: ClientHello,
     slots: Vec<JobSlot>,
-    seen: Vec<HashSet<Hash>>,
+    /// Coinbase section bytes held across all slots, against `cfg.session_coinbase_budget`.
+    coinbase_bytes: usize,
+    /// Slots in order of their last job change, oldest first.
+    live_slots: VecDeque<usize>,
     coinbasers: VecDeque<IssuedCoinbaser>,
     next_coinbaser_id: u8,
     /// Block candidates waiting for the gateway's transaction list, by job id. A job can solve
@@ -97,6 +113,11 @@ struct Session {
     gateway_hex: String,
     /// Last time this session warned that the gateway's node is ahead of ours (rate limit).
     ahead_warned: Option<Instant>,
+    /// Token bucket for coinbaser requests; see `on_coinbaser_request`.
+    coinbaser_tokens: u32,
+    coinbaser_refill_at: Instant,
+    /// Timestamps of recent rejects and malformed messages; see `note_reject`.
+    recent_rejects: VecDeque<Instant>,
 }
 
 pub async fn run(shared: Arc<Shared>, mut stream: TcpStream, remote: SocketAddr) -> Result<(), SessionError> {
@@ -150,6 +171,8 @@ pub async fn run(shared: Arc<Shared>, mut stream: TcpStream, remote: SocketAddr)
         },
     );
     shared.totals.add(&shared.totals.connections, 1);
+    // Removed on drop, so the clients table cannot keep a row for a session that panicked.
+    let _row = ClientRow { shared: shared.clone(), id };
 
     let mut s = Session {
         shared: shared.clone(),
@@ -162,7 +185,8 @@ pub async fn run(shared: Arc<Shared>, mut stream: TcpStream, remote: SocketAddr)
         session_key,
         hello,
         slots: (0..mining::MAX_JOB_SLOTS).map(|_| JobSlot::default()).collect(),
-        seen: (0..mining::MAX_JOB_SLOTS).map(|_| HashSet::new()).collect(),
+        coinbase_bytes: 0,
+        live_slots: VecDeque::new(),
         coinbasers: VecDeque::new(),
         next_coinbaser_id: 1,
         pending_blocks: HashMap::new(),
@@ -170,10 +194,24 @@ pub async fn run(shared: Arc<Shared>, mut stream: TcpStream, remote: SocketAddr)
         last_recv: Instant::now(),
         ahead_warned: None,
         gateway_hex,
+        coinbaser_tokens: COINBASER_BURST,
+        coinbaser_refill_at: Instant::now(),
+        recent_rejects: VecDeque::new(),
     };
-    let r = s.serve().await;
-    shared.clients.lock().unwrap().remove(&id);
-    r
+    s.serve().await
+}
+
+struct ClientRow {
+    shared: Arc<Shared>,
+    id: u64,
+}
+
+impl Drop for ClientRow {
+    fn drop(&mut self) {
+        if let Ok(mut c) = self.shared.clients.lock() {
+            c.remove(&self.id);
+        }
+    }
 }
 
 impl Session {
@@ -307,8 +345,8 @@ impl Session {
                         Ok(())
                     }
                     Err(e) => {
-                        log::warn!("[{}] malformed mining message: {e}", self.id);
-                        Ok(())
+                        log::debug!("[{}] malformed mining message: {e}", self.id);
+                        self.note_reject()
                     }
                 }
             }
@@ -323,6 +361,22 @@ impl Session {
     // --- coinbaser ---------------------------------------------------------------------
 
     async fn on_coinbaser_request(&mut self, value: u64, prev_hash: [u8; 32]) -> Result<(), SessionError> {
+        // Each reply is a full TIDES split over the window, computed under the ledger lock.
+        // Real gateways ask a few times a minute; a stream of requests is a CPU sink for
+        // every other session, so past the bucket they are dropped unanswered (a gateway
+        // without a reply keeps building pool-only coinbases, which are still credited).
+        let elapsed = self.coinbaser_refill_at.elapsed();
+        if elapsed >= COINBASER_REFILL {
+            let n = (elapsed.as_secs_f64() / COINBASER_REFILL.as_secs_f64()) as u32;
+            self.coinbaser_tokens = (self.coinbaser_tokens.saturating_add(n)).min(COINBASER_BURST);
+            self.coinbaser_refill_at = Instant::now();
+        }
+        if self.coinbaser_tokens == 0 {
+            log::debug!("[{}] coinbaser request over rate limit; ignored", self.id);
+            return self.note_reject();
+        }
+        self.coinbaser_tokens -= 1;
+
         let id = self.next_coinbaser_id;
         self.next_coinbaser_id = if id == 255 { 1 } else { id + 1 };
 
@@ -373,6 +427,29 @@ impl Session {
         self.coinbasers.iter().rev().find(|c| c.id == id)
     }
 
+    /// Undo a coinbase section this share brought in (it pushed the session over budget).
+    fn drop_coinbase(&mut self, job_id: usize, added: Option<u8>) {
+        let Some(id) = added else { return };
+        let before = self.slots[job_id].coinbase_bytes();
+        self.slots[job_id].forget_coinbase(id);
+        let after = self.slots[job_id].coinbase_bytes();
+        self.coinbase_bytes = self.coinbase_bytes.saturating_sub(before.saturating_sub(after));
+    }
+
+    /// Note that `job_id` just started a new job, and evict the sections of the slot that
+    /// has gone longest without one once more than `MAX_LIVE_SLOTS` hold any. A stock gateway
+    /// rotates eight slots and never reaches this; lazarus-gateway walks all 255 but resends
+    /// its sections with every share, so an evicted slot simply refills when next used.
+    fn touch_slot(&mut self, job_id: usize) {
+        self.live_slots.retain(|&s| s != job_id);
+        self.live_slots.push_back(job_id);
+        while self.live_slots.len() > MAX_LIVE_SLOTS {
+            if let Some(old) = self.live_slots.pop_front() {
+                self.slots[old].evict_sections();
+            }
+        }
+    }
+
     // --- shares ------------------------------------------------------------------------
 
     async fn on_pow(&mut self, s: PowSubmit) -> Result<(), SessionError> {
@@ -380,16 +457,40 @@ impl Session {
         if job_id >= self.slots.len() {
             return self.reject(&s, mining::REJECT_BAD_JOB_ID).await;
         }
-        let identity = address::identity_of(&s.username).to_string();
+        // Bech32 folds to one case so one payout address is one TIDES row (see
+        // `canonical_identity`); base58 and non-addresses are kept byte-exact.
+        let identity = address::canonical_identity(address::identity_of(&s.username));
         if identity.is_empty() || identity.len() > 128 || !identity.bytes().all(|b| b.is_ascii_graphic()) {
             return self.reject(&s, mining::REJECT_BAD_USERNAME).await;
         }
 
-        // job/coinbase sections, then duplicate and staleness checks before any hashing
-        let job_changed = s.job.as_ref().is_some_and(|j| self.slots[job_id].job.as_ref() != Some(j));
-        self.slots[job_id].absorb(&s);
-        if job_changed {
-            self.seen[job_id].clear();
+        // Job/coinbase sections, then staleness before any hashing. What a session can make
+        // Prime hold is bounded three ways: a section has a size cap and a slot an id cap
+        // (`JobSlot::absorb`), only the `MAX_LIVE_SLOTS` most recently (re)started slots keep
+        // their sections, and the bytes across slots are budgeted. A stock gateway sends
+        // each section once per job and never again — even after a reject — so a section is
+        // never dropped just because the share carrying it failed.
+        let held_before = self.slots[job_id].coinbase_bytes();
+        let absorbed = match self.slots[job_id].absorb(&s) {
+            Ok(a) => a,
+            Err(code) => return self.reject(&s, code).await,
+        };
+        if absorbed.job_changed {
+            self.touch_slot(job_id);
+            self.coinbase_bytes = self.slots.iter().map(JobSlot::coinbase_bytes).sum();
+        } else {
+            let held_after = self.slots[job_id].coinbase_bytes();
+            self.coinbase_bytes = self.coinbase_bytes.saturating_sub(held_before).saturating_add(held_after);
+        }
+        if absorbed.coinbase_added.is_some() && self.coinbase_bytes > self.shared.cfg.session_coinbase_budget {
+            self.drop_coinbase(job_id, absorbed.coinbase_added);
+            log::warn!(
+                "[{}] {} over the coinbase budget ({} bytes across slots); refusing section",
+                self.id,
+                self.remote,
+                self.shared.cfg.session_coinbase_budget
+            );
+            return self.reject(&s, mining::REJECT_COINBASE_TOO_LARGE).await;
         }
         let (height, coinbaser_id) = match &self.slots[job_id].job {
             Some(j) => (j.height, j.coinbaser_id),
@@ -430,11 +531,20 @@ impl Session {
             Ok(v) => v,
             Err(code) => return self.reject(&s, code).await,
         };
-        if !self.seen[job_id].insert(v.hash) {
-            return self.reject(&s, mining::REJECT_DUPLICATE_WORK).await;
-        }
-        if self.seen[job_id].len() > MAX_SEEN_PER_JOB {
-            self.seen[job_id].clear();
+        // One credit per hash, pool-wide and for as long as the height is live: the set is
+        // shared, keyed by height, and never cleared by anything a gateway can send.
+        let seen = self.shared.seen.lock().unwrap().insert(v.height, v.hash);
+        match seen {
+            Seen::Fresh => {}
+            Seen::Duplicate => return self.reject(&s, mining::REJECT_DUPLICATE_WORK).await,
+            Seen::Full => {
+                log::warn!(
+                    "[{}] share set full at height {}; refusing work rather than forgetting any",
+                    self.id,
+                    v.height
+                );
+                return self.reject(&s, mining::REJECT_OTHER).await;
+            }
         }
 
         // credit
@@ -485,7 +595,21 @@ impl Session {
             c.rejected += 1;
             c.last_reject = Some(name);
         });
-        self.send_mining(&mining::share_receipt(mining::REJECTED, code, s.nonce32, s.target_pot, s.job_id), false).await
+        self.send_mining(&mining::share_receipt(mining::REJECTED, code, s.nonce32, s.target_pot, s.job_id), false).await?;
+        self.note_reject()
+    }
+
+    /// Count a reject or malformed message against the session's flood budget.
+    fn note_reject(&mut self) -> Result<(), SessionError> {
+        let now = Instant::now();
+        self.recent_rejects.push_back(now);
+        while self.recent_rejects.front().is_some_and(|t| now.duration_since(*t) > REJECT_WINDOW) {
+            self.recent_rejects.pop_front();
+        }
+        if self.recent_rejects.len() > REJECT_FLOOD {
+            return Err(SessionError::RejectFlood(self.recent_rejects.len(), REJECT_WINDOW.as_secs()));
+        }
+        Ok(())
     }
 
     // --- blocks ------------------------------------------------------------------------

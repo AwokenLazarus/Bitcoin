@@ -49,6 +49,12 @@ min-diff = 1
 split-tolerance = 2
 # Shares one height behind the tip are accepted for this many seconds after the tip moved.
 stale-grace-secs = 30
+# Bounds on what an unknown gateway key can make the Prime hold. A gateway is one
+# connection; a farm behind one address is a few.
+# max-connections = 256
+# max-connections-per-ip = 8
+# Coinbase-section bytes one session may have buffered across its job slots.
+# session-coinbase-budget = 4194304
 
 # Knots JSON-RPC. Cookie wins if both cookie and user/password are set.
 rpc = "http://127.0.0.1:9332"

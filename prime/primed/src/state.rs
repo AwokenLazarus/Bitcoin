@@ -1,11 +1,13 @@
 //! State shared by every session, the node poller, and the stats server.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::net::IpAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use datum_wire::crypto::Identity;
+use datum_wire::pow::Hash;
 use tides::{BlockLog, BlockRecord, Ledger, SplitParams};
 use tokio::sync::{broadcast, watch};
 
@@ -59,11 +61,119 @@ pub struct Totals {
     pub block_candidates: AtomicU64,
     pub blocks_submitted: AtomicU64,
     pub handshake_failures: AtomicU64,
+    /// Accepts turned away at the connection limits.
+    pub connections_refused: AtomicU64,
 }
 
 impl Totals {
     pub fn add(&self, c: &AtomicU64, n: u64) {
         c.fetch_add(n, Ordering::Relaxed);
+    }
+}
+
+/// Every share hash the pool has credited, by block height, across all sessions.
+///
+/// The hash commits to prev/merkle/nbits/txcount/version and the miner's nonces, so it is
+/// unique per (height, work) and a set keyed by height is a complete dedup. It lives here
+/// rather than on a session so that neither reconnecting, nor re-sending a job section that
+/// differs in a byte nobody reads, nor filling a per-job set can empty it: a share is
+/// credited once, ever. Heights below the stale window are pruned by housekeeping, so the
+/// set is bounded by real hashrate over two or three blocks — and by a hard cap, at which
+/// point new work is refused rather than old work forgotten.
+#[derive(Debug, Default)]
+pub struct SeenShares {
+    by_height: BTreeMap<u32, HashSet<Hash>>,
+    total: usize,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Seen {
+    /// New work; it has been recorded.
+    Fresh,
+    /// This exact hash was already credited.
+    Duplicate,
+    /// The set is at capacity; the share was not recorded and must not be credited.
+    Full,
+}
+
+impl SeenShares {
+    /// Distinct credited shares kept per height. Every entry cost someone 2^32 hashes at
+    /// least (min-diff 1), so at the pool's hashrate this is far more than a block's worth;
+    /// only a flood of genuine diff-1 work gets near it, and refusing that flood is the
+    /// right answer.
+    pub const MAX_PER_HEIGHT: usize = 1_000_000;
+    /// Across all heights still retained.
+    pub const MAX_TOTAL: usize = 2_500_000;
+
+    pub fn insert(&mut self, height: u32, hash: Hash) -> Seen {
+        let set = self.by_height.entry(height).or_default();
+        if set.contains(&hash) {
+            return Seen::Duplicate;
+        }
+        if set.len() >= Self::MAX_PER_HEIGHT || self.total >= Self::MAX_TOTAL {
+            return Seen::Full;
+        }
+        set.insert(hash);
+        self.total += 1;
+        Seen::Fresh
+    }
+
+    /// Forget every height below `min_height`.
+    pub fn prune_below(&mut self, min_height: u32) {
+        while let Some((&h, _)) = self.by_height.first_key_value() {
+            if h >= min_height {
+                break;
+            }
+            if let Some(set) = self.by_height.remove(&h) {
+                self.total -= set.len();
+            }
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.total
+    }
+
+    pub fn heights(&self) -> usize {
+        self.by_height.len()
+    }
+}
+
+/// Live DATUM connections, total and per remote address, so one host cannot hold every
+/// session slot (each session buffers coinbases and job state on the attacker's behalf).
+#[derive(Debug, Default)]
+pub struct Connections {
+    per_ip: HashMap<IpAddr, u32>,
+    total: u32,
+}
+
+impl Connections {
+    /// Reserve a slot for `ip`, or say which limit it would break.
+    pub fn admit(&mut self, ip: IpAddr, max_total: u32, max_per_ip: u32) -> Result<(), &'static str> {
+        if self.total >= max_total {
+            return Err("connection limit reached");
+        }
+        let n = self.per_ip.entry(ip).or_insert(0);
+        if *n >= max_per_ip {
+            return Err("per-address connection limit reached");
+        }
+        *n += 1;
+        self.total += 1;
+        Ok(())
+    }
+
+    pub fn release(&mut self, ip: IpAddr) {
+        if let Some(n) = self.per_ip.get_mut(&ip) {
+            *n = n.saturating_sub(1);
+            if *n == 0 {
+                self.per_ip.remove(&ip);
+            }
+        }
+        self.total = self.total.saturating_sub(1);
+    }
+
+    pub fn total(&self) -> u32 {
+        self.total
     }
 }
 
@@ -77,6 +187,8 @@ pub struct Shared {
     pub blocks: Mutex<Vec<BlockRecord>>,
     pub block_log: BlockLog,
     pub clients: Mutex<HashMap<u64, ClientInfo>>,
+    pub seen: Mutex<SeenShares>,
+    pub connections: Mutex<Connections>,
     pub tip_tx: watch::Sender<Option<Tip>>,
     pub tip: watch::Receiver<Option<Tip>>,
     /// Fired when a block candidate is found or the node tip moves; sessions relay a
@@ -129,5 +241,85 @@ impl Shared {
             log::error!("block log append failed: {e}");
         }
         Some(updated)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn h(n: u64) -> Hash {
+        let mut a = [0u8; 32];
+        a[..8].copy_from_slice(&n.to_le_bytes());
+        a
+    }
+
+    #[test]
+    fn a_share_is_credited_once_regardless_of_who_resubmits_it() {
+        let mut s = SeenShares::default();
+        assert_eq!(s.insert(100, h(1)), Seen::Fresh);
+        // the finding's loop: alternate job sections, resubmit the same share forever
+        for _ in 0..10 {
+            assert_eq!(s.insert(100, h(1)), Seen::Duplicate);
+        }
+        // a reconnect is the same set
+        assert_eq!(s.insert(100, h(1)), Seen::Duplicate);
+        // different height is different work (the hash commits to the height anyway)
+        assert_eq!(s.insert(101, h(1)), Seen::Fresh);
+        assert_eq!(s.len(), 2);
+        assert_eq!(s.heights(), 2);
+    }
+
+    #[test]
+    fn pruning_forgets_only_old_heights() {
+        let mut s = SeenShares::default();
+        for height in 95..=101u32 {
+            for i in 0..3 {
+                s.insert(height, h(u64::from(height) * 10 + i));
+            }
+        }
+        assert_eq!(s.len(), 21);
+        s.prune_below(99);
+        assert_eq!(s.heights(), 3);
+        assert_eq!(s.len(), 9);
+        assert_eq!(s.insert(99, h(990)), Seen::Duplicate);
+        assert_eq!(s.insert(98, h(980)), Seen::Fresh, "an old height can be re-entered; the stale check gates it");
+        s.prune_below(200);
+        assert_eq!(s.len(), 0);
+    }
+
+    #[test]
+    fn a_full_set_refuses_rather_than_forgets() {
+        let mut s = SeenShares::default();
+        for i in 0..SeenShares::MAX_PER_HEIGHT as u64 {
+            assert_eq!(s.insert(7, h(i)), Seen::Fresh);
+        }
+        assert_eq!(s.insert(7, h(u64::MAX)), Seen::Full);
+        // everything already there is still remembered
+        assert_eq!(s.insert(7, h(0)), Seen::Duplicate);
+        assert_eq!(s.insert(7, h(SeenShares::MAX_PER_HEIGHT as u64 - 1)), Seen::Duplicate);
+        // another height still has room until the total cap
+        assert_eq!(s.insert(8, h(1)), Seen::Fresh);
+    }
+
+    #[test]
+    fn connection_limits_are_per_ip_and_total() {
+        let mut c = Connections::default();
+        let a: IpAddr = "10.0.0.1".parse().unwrap();
+        let b: IpAddr = "10.0.0.2".parse().unwrap();
+        assert!(c.admit(a, 3, 2).is_ok());
+        assert!(c.admit(a, 3, 2).is_ok());
+        assert_eq!(c.admit(a, 3, 2), Err("per-address connection limit reached"));
+        assert!(c.admit(b, 3, 2).is_ok());
+        assert_eq!(c.admit(b, 3, 2), Err("connection limit reached"));
+        c.release(a);
+        assert!(c.admit(b, 3, 2).is_ok());
+        assert_eq!(c.total(), 3);
+        c.release(a);
+        c.release(b);
+        c.release(b);
+        assert_eq!(c.total(), 0);
+        c.release(b); // over-release is harmless
+        assert_eq!(c.total(), 0);
     }
 }

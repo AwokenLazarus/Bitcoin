@@ -26,6 +26,32 @@ pub const MAX_TIME_AHEAD: u32 = 7200;
 /// not real-time mining.
 pub const MAX_TIME_BEHIND: u32 = 3600;
 
+/// Largest `coinb1 || coinb2` a coinbase section may carry. A stock gateway's biggest
+/// coinbase class ("huge", type 4) is 16 KiB; the wire encodes each half with a u16 length,
+/// so without this bound a section is up to 128 KiB of caller-chosen bytes.
+pub const MAX_COINBASE_SECTION_BYTES: usize = 20_000;
+/// Distinct coinbase ids a slot keeps. A gateway builds ids 0..=5 plus the 0xff subsidy-only
+/// one; anything past that is a session filling memory, not a job.
+pub const MAX_COINBASES_PER_SLOT: usize = 8;
+/// Bounds on the per-slot caches. Both are keyed partly by share-chosen fields (`target_pot`,
+/// `version`) and the coinbase cache fills *before* the work is checked, so an unbounded
+/// map is attacker-sized. They are caches: on overflow they are simply emptied.
+const MAX_CB_CACHE: usize = 32;
+const MAX_H2_CACHE: usize = 64;
+
+/// What [`JobSlot::absorb`] changed, so the caller can undo a coinbase section the share
+/// then failed to verify against (see [`JobSlot::forget_coinbase`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Absorbed {
+    /// The slot moved to a new job.
+    pub job_changed: bool,
+    /// A coinbase section was inserted or replaced under this id.
+    pub coinbase_added: Option<u8>,
+}
+
+/// Why [`JobSlot::absorb`] refused a section, as a DATUM reject code.
+pub type AbsorbError = u16;
+
 /// One of the gateway's eight job slots as Prime remembers it for a session.
 #[derive(Clone, Debug, Default)]
 pub struct JobSlot {
@@ -36,12 +62,26 @@ pub struct JobSlot {
     h2_cache: HashMap<(u8, u8, u32, u32), Hash>,
     /// The parsed coinbase per (coinbase id, target byte).
     cb_cache: HashMap<(u8, u8), (Vec<u8>, Coinbase)>,
+    /// Whether this gateway's `txn_count` already includes the coinbase, learned from the
+    /// first share that verifies on the job. Once known, only that convention is tried, so
+    /// a share is credited against the header the miner actually hashed and not, at 2^-32
+    /// odds per share, against the other reading of the same bytes.
+    txcount_includes_coinbase: Option<bool>,
 }
 
 impl JobSlot {
     /// Fold a share's optional sections into the slot. A job section always starts a fresh
     /// slot: the gateway only resends it when the slot moved to a new job.
-    pub fn absorb(&mut self, s: &PowSubmit) {
+    ///
+    /// A coinbase section over [`MAX_COINBASE_SECTION_BYTES`], or one that would be the
+    /// slot's ninth id, is refused and nothing is changed.
+    pub fn absorb(&mut self, s: &PowSubmit) -> Result<Absorbed, AbsorbError> {
+        let mut out = Absorbed::default();
+        if let Some(c) = &s.coinbase {
+            if c.coinb1.len() + c.coinb2.len() > MAX_COINBASE_SECTION_BYTES {
+                return Err(mining::REJECT_COINBASE_TOO_LARGE);
+            }
+        }
         if let Some(j) = &s.job {
             let same = self.job.as_ref() == Some(j);
             if !same {
@@ -49,15 +89,48 @@ impl JobSlot {
                 self.coinbases.clear();
                 self.h2_cache.clear();
                 self.cb_cache.clear();
+                self.txcount_includes_coinbase = None;
+                out.job_changed = true;
             }
         }
         if let Some(c) = &s.coinbase {
             if self.coinbases.get(&c.coinbase_id) != Some(c) {
+                if !self.coinbases.contains_key(&c.coinbase_id) && self.coinbases.len() >= MAX_COINBASES_PER_SLOT {
+                    return Err(mining::REJECT_BAD_COINBASE_ID);
+                }
                 self.coinbases.insert(c.coinbase_id, c.clone());
                 self.h2_cache.retain(|k, _| k.0 != c.coinbase_id);
                 self.cb_cache.retain(|k, _| k.0 != c.coinbase_id);
+                out.coinbase_added = Some(c.coinbase_id);
             }
         }
+        Ok(out)
+    }
+
+    /// Drop a coinbase section (and everything derived from it). Called when the share that
+    /// carried it did not verify, so a session only retains coinbases real work was done on.
+    pub fn forget_coinbase(&mut self, id: u8) {
+        self.coinbases.remove(&id);
+        self.h2_cache.retain(|k, _| k.0 != id);
+        self.cb_cache.retain(|k, _| k.0 != id);
+    }
+
+    /// Drop every coinbase section and derived cache but keep the job, for a slot that has
+    /// gone unused long enough that its shares would be stale anyway.
+    pub fn evict_sections(&mut self) {
+        self.coinbases.clear();
+        self.h2_cache.clear();
+        self.cb_cache.clear();
+    }
+
+    /// Bytes of coinbase sections this slot is holding.
+    pub fn coinbase_bytes(&self) -> usize {
+        self.coinbases.values().map(|c| c.coinb1.len() + c.coinb2.len()).sum()
+    }
+
+    /// The txcount convention pinned for this job, if a share has verified on it.
+    pub fn txcount_convention(&self) -> Option<bool> {
+        self.txcount_includes_coinbase
     }
 
     pub fn coinbase_id_for(s: &PowSubmit) -> u8 {
@@ -149,7 +222,7 @@ pub fn classify_coinbase(cb: &Coinbase, pool_script: &[u8], issued: Option<&[Out
         // proportional, so the amount owed per output is the issued amount scaled by
         // actual/issued value, never more than issued.
         let issued_value: u64 = iss.iter().map(|i| i.sats).sum();
-        let actual_value: u64 = cb.outputs.iter().map(|o| o.value).sum();
+        let actual_value: u64 = cb.outputs.iter().fold(0u64, |a, o| a.saturating_add(o.value));
         let owed = |sats: u64| -> u64 {
             if issued_value == 0 || actual_value >= issued_value {
                 sats
@@ -157,14 +230,40 @@ pub fn classify_coinbase(cb: &Coinbase, pool_script: &[u8], issued: Option<&[Out
                 (u128::from(sats) * u128::from(actual_value) / u128::from(issued_value)) as u64
             }
         };
+        // A miner output is never paid *more* than Prime issued against its script either:
+        // the pool's own output is what absorbs the fee, the rounding and everything the
+        // split could not place, so a sanctioned miner script paid above its issued amount
+        // is that remainder being diverted. lazarus-gateway rescales the whole list when
+        // the template is worth more than the split assumed, so the ceiling scales up by
+        // the same ratio (the pool's output, being in the list, scales with it and keeps
+        // its proportion). Held per *script*, not per identity: two window identities can
+        // share one scriptPubKey and `paid_to` sums by script. One sat of slack per issued
+        // output covers a rescale's floor rounding landing on the last output.
+        let cap = |sats: u64| -> u64 {
+            if issued_value == 0 || actual_value <= issued_value {
+                sats
+            } else {
+                (u128::from(sats) * u128::from(actual_value) / u128::from(issued_value)) as u64
+            }
+        };
+        let slack = tolerance.saturating_add(iss.len() as u64);
+        let mut issued_to: HashMap<&[u8], u64> = HashMap::new();
+        for i in &miners {
+            let e = issued_to.entry(i.script.as_slice()).or_insert(0);
+            *e = e.saturating_add(i.sats);
+        }
         let mut present = 0u16;
         let mut shorted = false;
         for i in &miners {
             let paid = cb.paid_to(&i.script);
             if paid > 0 {
                 present += 1;
-                if paid + tolerance < owed(i.sats) {
+                if paid.saturating_add(tolerance) < owed(i.sats) {
                     shorted = true;
+                }
+                let ceiling = cap(issued_to.get(i.script.as_slice()).copied().unwrap_or(i.sats));
+                if paid > ceiling.saturating_add(slack) {
+                    return CoinbaseKind::Foreign;
                 }
             }
         }
@@ -220,6 +319,9 @@ pub fn verify_with_target(
                 return Err(mining::REJECT_BAD_JOB_ID);
             }
         }
+        if slot.cb_cache.len() >= MAX_CB_CACHE {
+            slot.cb_cache.clear();
+        }
         slot.cb_cache.insert(cb_key, (legacy, parsed));
     }
     let (legacy, parsed) = slot.cb_cache.get(&cb_key).unwrap();
@@ -235,9 +337,18 @@ pub fn verify_with_target(
     }
 
     // The header's transaction count includes the coinbase; the job section's does not.
-    // Some gateways count it already, so try the spec'd form first and fall back once.
-    let mut chosen: Option<(Commitment, Hash)> = None;
-    for txcount in [job.txn_count.wrapping_add(1), job.txn_count] {
+    // Some gateways count it already, so try the spec'd form first and fall back once —
+    // but only until one share on the job verifies. From then on the slot is pinned to that
+    // gateway's convention, so `VerifiedShare::commitment` is always the header the miner
+    // ground and never the other reading that happens to land under the target.
+    let conventions: &[bool] = match slot.txcount_includes_coinbase {
+        Some(true) => &[true],
+        Some(false) => &[false],
+        None => &[false, true],
+    };
+    let mut chosen: Option<(Commitment, Hash, bool)> = None;
+    for &includes in conventions {
+        let txcount = if includes { job.txn_count } else { job.txn_count.wrapping_add(1) };
         let key = (cb_id, s.target_pot, txcount, s.version);
         let commitment_of = |h2_hint: Option<Hash>| -> (Commitment, Hash) {
             let c = Commitment {
@@ -268,12 +379,16 @@ pub fn verify_with_target(
         let work = pow::work_header(&sia_prev, &b2.nonce, &b2.ntime, &root);
         let hash = pow::pow_hash_le(&work, &[0u8; 16], 0);
         if pow::meets_target(&hash, share_target) {
+            if slot.h2_cache.len() >= MAX_H2_CACHE {
+                slot.h2_cache.clear();
+            }
             slot.h2_cache.insert(key, h2);
-            chosen = Some((c, hash));
+            chosen = Some((c, hash, includes));
             break;
         }
     }
-    let (mut commitment, hash) = chosen.ok_or(mining::REJECT_HIGH_HASH)?;
+    let (mut commitment, hash, includes) = chosen.ok_or(mining::REJECT_HIGH_HASH)?;
+    slot.txcount_includes_coinbase = Some(includes);
     if commitment.merkle_root == [0u8; 32] {
         // came from the cache; the full commitment is only needed for block assembly
         commitment.merkle_root = pow::merkle_root(pow::sha256d(legacy), &job.merkle_branches);
@@ -446,7 +561,7 @@ pub mod fixtures {
 
     /// Grind `s` until it meets `target`, using the txcount convention `includes_coinbase`.
     pub fn grind_to(slot: &mut JobSlot, s: &mut PowSubmit, target: &Hash, includes_coinbase: bool) {
-        slot.absorb(s);
+        slot.absorb(s).unwrap();
         let jw = job_work_for(slot, s, includes_coinbase).unwrap();
         let b = s.blake2b.as_mut().unwrap();
         let mut n = u32::from_le_bytes(b.nonce[..4].try_into().unwrap());
@@ -501,7 +616,7 @@ mod tests {
         let t = std::time::Instant::now();
         for _ in 0..n {
             let mut fresh = JobSlot::default();
-            fresh.absorb(&s);
+            fresh.absorb(&s).unwrap();
             verify_with_target(&mut fresh, &s, &p, &all).unwrap();
         }
         let cold = t.elapsed();
@@ -621,6 +736,243 @@ mod tests {
         assert_eq!(check(&mut slot, &s, &policy(&iss, &pool)).unwrap().coinbase_kind, CoinbaseKind::Split);
     }
 
+    /// A gateway that pays every issued miner output in full and then sends the pool's
+    /// remainder — fee, rounding, unplaced dust — to a miner's address instead of
+    /// `pool_script` is not a Split; it is the remainder being diverted.
+    #[test]
+    fn coinbase_that_diverts_the_pool_remainder_to_a_miner_is_rejected() {
+        let pool = pool_script();
+        let mut iss = split();
+        let miners_paid: u64 = iss.iter().map(|o| o.sats).sum();
+        iss.push(Output { sats: VALUE - miners_paid, script: pool.clone() });
+
+        // every miner exact, pool output missing, first miner takes the remainder
+        let mut outs: Vec<TxOut> =
+            iss[..3].iter().map(|o| TxOut { value: o.sats, script: o.script.clone() }).collect();
+        outs[0].value += VALUE - miners_paid;
+        let mut slot = JobSlot::default();
+        let mut s = share(0, 4, 1, &outs, &txids(3), 1, [0; 8], [0; 8]);
+        grind(&mut slot, &mut s);
+        assert_eq!(check(&mut slot, &s, &policy(&iss, &pool)), Err(mining::REJECT_BAD_COINBASE_OUTPUTS));
+
+        // same with a token pool output present, so "pool_paid" alone cannot be the tell
+        let mut outs: Vec<TxOut> =
+            iss[..3].iter().map(|o| TxOut { value: o.sats, script: o.script.clone() }).collect();
+        outs[1].value += VALUE - miners_paid - 1_000;
+        outs.push(TxOut { value: 1_000, script: pool.clone() });
+        let mut slot = JobSlot::default();
+        let mut s = share(0, 4, 1, &outs, &txids(3), 1, [0; 8], [0; 8]);
+        grind(&mut slot, &mut s);
+        assert_eq!(check(&mut slot, &s, &policy(&iss, &pool)), Err(mining::REJECT_BAD_COINBASE_OUTPUTS));
+
+        // a Partial coinbase (smaller size class) that pads the one output it carries
+        let outs = vec![
+            TxOut { value: iss[0].sats + 5_000_000, script: iss[0].script.clone() },
+            TxOut { value: VALUE - iss[0].sats - 5_000_000, script: pool.clone() },
+        ];
+        let mut slot = JobSlot::default();
+        let mut s = share(0, 1, 1, &outs, &txids(3), 1, [0; 8], [0; 8]);
+        grind(&mut slot, &mut s);
+        assert_eq!(check(&mut slot, &s, &policy(&iss, &pool)), Err(mining::REJECT_BAD_COINBASE_OUTPUTS));
+
+        // one sat over, within the per-output rounding slack, is still a Split
+        let mut outs: Vec<TxOut> = iss.iter().map(|o| TxOut { value: o.sats, script: o.script.clone() }).collect();
+        outs[0].value += 1;
+        outs[3].value -= 1;
+        let mut slot = JobSlot::default();
+        let mut s = share(0, 4, 1, &outs, &txids(3), 1, [0; 8], [0; 8]);
+        grind(&mut slot, &mut s);
+        assert_eq!(check(&mut slot, &s, &policy(&iss, &pool)).unwrap().coinbase_kind, CoinbaseKind::Split);
+    }
+
+    /// Two window identities can resolve to one scriptPubKey (a bech32 address that was
+    /// interned in two casings, before that was folded). The pool issues two outputs to the
+    /// same script; a gateway pays the sum to that script. That is honest and must verify;
+    /// the bound is per script, not per identity.
+    #[test]
+    fn two_issued_outputs_to_one_script_paid_as_their_sum_is_a_split() {
+        let pool = pool_script();
+        let iss = vec![
+            Output { sats: 200_000_000, script: p2wpkh(0x11) },
+            Output { sats: 50_000_000, script: p2wpkh(0x11) },
+            Output { sats: 10_000_000, script: p2wpkh(0x33) },
+            Output { sats: VALUE - 260_000_000, script: pool.clone() },
+        ];
+        let outs = vec![
+            TxOut { value: 250_000_000, script: p2wpkh(0x11) },
+            TxOut { value: 10_000_000, script: p2wpkh(0x33) },
+            TxOut { value: VALUE - 260_000_000, script: pool.clone() },
+        ];
+        let mut slot = JobSlot::default();
+        let mut s = share(0, 4, 1, &outs, &txids(3), 1, [0; 8], [0; 8]);
+        grind(&mut slot, &mut s);
+        assert_eq!(check(&mut slot, &s, &policy(&iss, &pool)).unwrap().coinbase_kind, CoinbaseKind::Split);
+
+        // ...but paying that script the pool's remainder too is still diversion
+        let outs = vec![
+            TxOut { value: 250_000_000 + 20_000_000, script: p2wpkh(0x11) },
+            TxOut { value: 10_000_000, script: p2wpkh(0x33) },
+            TxOut { value: VALUE - 280_000_000, script: pool.clone() },
+        ];
+        let mut slot = JobSlot::default();
+        let mut s = share(0, 4, 1, &outs, &txids(3), 1, [0; 8], [0; 8]);
+        grind(&mut slot, &mut s);
+        assert_eq!(check(&mut slot, &s, &policy(&iss, &pool)), Err(mining::REJECT_BAD_COINBASE_OUTPUTS));
+    }
+
+    /// lazarus-gateway rescales the issued list when the template turns out to be worth
+    /// *more* than the split assumed (fees arrived). Every output grows by the same ratio,
+    /// the pool's included, so it verifies; growing one miner output past that ratio does not.
+    #[test]
+    fn proportional_upscaling_verifies_but_a_lopsided_one_does_not() {
+        let pool = pool_script();
+        let mut iss = split();
+        let miners_paid: u64 = iss.iter().map(|o| o.sats).sum();
+        iss.push(Output { sats: VALUE - miners_paid, script: pool.clone() });
+
+        let bigger = VALUE + VALUE / 50; // +2% fees
+        let mut scaled: Vec<TxOut> = iss
+            .iter()
+            .map(|o| TxOut {
+                value: (u128::from(o.sats) * u128::from(bigger) / u128::from(VALUE)) as u64,
+                script: o.script.clone(),
+            })
+            .collect();
+        let paid: u64 = scaled.iter().map(|o| o.value).sum();
+        scaled.last_mut().unwrap().value += bigger - paid;
+        let mut slot = JobSlot::default();
+        let mut s = share(0, 4, 1, &scaled, &txids(3), 1, [0; 8], [0; 8]);
+        grind(&mut slot, &mut s);
+        assert_eq!(check(&mut slot, &s, &policy(&iss, &pool)).unwrap().coinbase_kind, CoinbaseKind::Split);
+
+        // the pool's scaled share moved onto a miner: rejected even though the total matches
+        let mut cheat = scaled.clone();
+        cheat[0].value += 1_000_000;
+        cheat[3].value -= 1_000_000;
+        let mut slot = JobSlot::default();
+        let mut s = share(0, 4, 1, &cheat, &txids(3), 1, [0; 8], [0; 8]);
+        grind(&mut slot, &mut s);
+        assert_eq!(check(&mut slot, &s, &policy(&iss, &pool)), Err(mining::REJECT_BAD_COINBASE_OUTPUTS));
+    }
+
+    #[test]
+    fn oversized_and_surplus_coinbase_sections_are_refused() {
+        let pool = pool_script();
+        let iss = split();
+        let outs = gateway_outputs(&iss, &pool, VALUE);
+        let mut slot = JobSlot::default();
+        let mut s = share(0, 4, 1, &outs, &txids(3), 1, [0; 8], [0; 8]);
+        let good = slot.absorb(&s).unwrap();
+        assert!(good.job_changed);
+        assert_eq!(good.coinbase_added, Some(4));
+        assert_eq!(slot.absorb(&s).unwrap(), Absorbed::default(), "a repeat changes nothing");
+
+        // 128 KiB of padding in coinb2: refused, slot untouched
+        let mut fat = s.clone();
+        fat.coinbase.as_mut().unwrap().coinb2.extend(std::iter::repeat_n(0u8, MAX_COINBASE_SECTION_BYTES));
+        assert_eq!(slot.absorb(&fat), Err(mining::REJECT_COINBASE_TOO_LARGE));
+        assert_eq!(slot.coinbases.len(), 1);
+
+        // ids 0..=7 fit (4 is already there); a ninth distinct id does not
+        for id in [0u8, 1, 2, 3, 5, 0xff, 6] {
+            let mut c = s.clone();
+            c.job = None;
+            c.coinbase.as_mut().unwrap().coinbase_id = id;
+            slot.absorb(&c).unwrap();
+        }
+        assert_eq!(slot.coinbases.len(), MAX_COINBASES_PER_SLOT);
+        let mut ninth = s.clone();
+        ninth.job = None;
+        ninth.coinbase.as_mut().unwrap().coinbase_id = 7;
+        assert_eq!(slot.absorb(&ninth), Err(mining::REJECT_BAD_COINBASE_ID));
+        // replacing an existing id is fine at the cap
+        let mut again = s.clone();
+        again.job = None;
+        again.coinbase.as_mut().unwrap().coinb1.push(0);
+        assert_eq!(slot.absorb(&again).unwrap().coinbase_added, Some(4));
+        assert_eq!(slot.coinbases.len(), MAX_COINBASES_PER_SLOT);
+
+        // forgetting a section drops it and its derived state
+        assert!(slot.coinbase_bytes() > 0);
+        slot.forget_coinbase(4);
+        assert!(!slot.coinbases.contains_key(&4));
+        grind(&mut slot, &mut s);
+        let _ = check(&mut slot, &s, &policy(&iss, &pool)).unwrap();
+        assert!(slot.cb_cache.contains_key(&(4, 1)));
+        slot.forget_coinbase(4);
+        assert!(slot.cb_cache.is_empty() && slot.h2_cache.is_empty());
+    }
+
+    #[test]
+    fn caches_stay_bounded_under_share_chosen_keys() {
+        let pool = pool_script();
+        let iss = split();
+        let outs = gateway_outputs(&iss, &pool, VALUE);
+        let mut slot = JobSlot::default();
+        let s = share(0, 4, 1, &outs, &txids(3), 1, [0; 8], [0; 8]);
+        slot.absorb(&s).unwrap();
+        // every target byte parses a fresh coinbase before any work is checked
+        for pot in 0..=255u8 {
+            let mut t = s.clone();
+            t.target_pot = pot;
+            let _ = check(&mut slot, &t, &policy(&iss, &pool));
+        }
+        assert!(slot.cb_cache.len() <= 32, "cb_cache={}", slot.cb_cache.len());
+        // a permissive target lets every version through; the H2 cache is keyed by it
+        let all = [0xff; 32];
+        for v in 0..200u32 {
+            let mut t = s.clone();
+            t.version = 0xa000_0000 | v;
+            verify_with_target(&mut slot, &t, &policy(&iss, &pool), &all).unwrap();
+        }
+        assert!(slot.h2_cache.len() <= 64, "h2_cache={}", slot.h2_cache.len());
+    }
+
+    /// Once one share verifies on a job, the slot is pinned to that gateway's txcount
+    /// convention; a share that only passes under the other reading is refused.
+    #[test]
+    fn txcount_convention_is_pinned_after_the_first_share() {
+        let pool = pool_script();
+        let iss = split();
+        let outs = gateway_outputs(&iss, &pool, VALUE);
+        let txs = txids(5);
+        let mut slot = JobSlot::default();
+        let mut s = share(0, 4, 1, &outs, &txs, 1, [0; 8], [0; 8]);
+        grind_to(&mut slot, &mut s, &easy_target(), false);
+        assert_eq!(slot.txcount_convention(), None);
+        let v = check(&mut slot, &s, &policy(&iss, &pool)).unwrap();
+        assert_eq!(v.commitment.txcount, 6);
+        assert_eq!(slot.txcount_convention(), Some(false));
+
+        // a share ground under the *other* convention on the same job is now a high hash
+        let mut other = share(0, 4, 1, &outs, &txs, 1, [1; 8], [0; 8]);
+        other.job = None;
+        other.coinbase = None;
+        let mut scratch = JobSlot::default();
+        let mut probe = share(0, 4, 1, &outs, &txs, 1, [1; 8], [0; 8]);
+        loop {
+            grind_to(&mut scratch, &mut probe, &easy_target(), true);
+            // make sure it does not *also* pass under the pinned convention (1 in 4096)
+            let jw = job_work_for(&scratch, &probe, false).unwrap();
+            let b = probe.blake2b.as_ref().unwrap();
+            if !pow::meets_target(&jw.hash(&b.nonce, &b.ntime), &easy_target()) {
+                break;
+            }
+            probe.blake2b.as_mut().unwrap().nonce[4] ^= 1;
+        }
+        other.nonce32 = probe.nonce32;
+        other.blake2b = probe.blake2b.clone();
+        assert_eq!(check(&mut slot, &other, &policy(&iss, &pool)), Err(mining::REJECT_HIGH_HASH));
+
+        // a new job on the slot forgets the pin
+        let mut next = share(0, 4, 2, &outs, &txids(7), 1, [0; 8], [0; 8]);
+        grind_to(&mut slot, &mut next, &easy_target(), true);
+        assert_eq!(slot.txcount_convention(), None);
+        let v = check(&mut slot, &next, &policy(&iss, &pool)).unwrap();
+        assert_eq!(v.commitment.txcount, 7);
+        assert_eq!(slot.txcount_convention(), Some(true));
+    }
+
     /// Prime's list is complete — the pool's own output comes last — and a gateway whose
     /// template is worth less than the value the split was computed for may scale the whole
     /// list down proportionally (lazarus-gateway) or drop the pool output (stock). Either
@@ -706,13 +1058,13 @@ mod tests {
         let mut fresh = JobSlot::default();
         let mut no_job = s.clone();
         no_job.job = None;
-        fresh.absorb(&no_job);
+        fresh.absorb(&no_job).unwrap();
         assert_eq!(check(&mut fresh, &no_job, &policy(&iss, &pool)), Err(mining::REJECT_BAD_JOB_ID));
 
         let mut fresh = JobSlot::default();
         let mut no_cb = s.clone();
         no_cb.coinbase = None;
-        fresh.absorb(&no_cb);
+        fresh.absorb(&no_cb).unwrap();
         assert_eq!(check(&mut fresh, &no_cb, &policy(&iss, &pool)), Err(mining::REJECT_COINBASE_MISSING));
 
         // a SHA256d share carries neither the flag nor the 0x03 section
@@ -739,7 +1091,7 @@ mod tests {
         let mut wrong_h = s.clone();
         wrong_h.job.as_mut().unwrap().height += 1;
         let mut fresh = JobSlot::default();
-        fresh.absorb(&wrong_h);
+        fresh.absorb(&wrong_h).unwrap();
         assert_eq!(check(&mut fresh, &wrong_h, &policy(&iss, &pool)), Err(mining::REJECT_BAD_JOB_ID));
     }
 
@@ -762,10 +1114,10 @@ mod tests {
         let outs = gateway_outputs(&iss, &pool, VALUE);
         let mut slot = JobSlot::default();
         let a = share(0, 4, 1, &outs, &txids(5), 1, [0; 8], [0; 8]);
-        slot.absorb(&a);
+        slot.absorb(&a).unwrap();
         let mut b = share(0, 4, 2, &outs, &txids(6), 1, [0; 8], [0; 8]);
         b.coinbase = None; // a real gateway resends it, but the slot must not keep stale ones
-        slot.absorb(&b);
+        slot.absorb(&b).unwrap();
         assert_eq!(slot.job.as_ref().unwrap().coinbaser_id, 2);
         assert!(slot.coinbases.is_empty());
     }

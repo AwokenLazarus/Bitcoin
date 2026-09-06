@@ -214,14 +214,17 @@ impl Window {
             return;
         }
         while let Some(front) = self.credits.front() {
-            if self.total_work - front.work < self.target_work {
+            // Both operands derive from the same rows, so this cannot underflow unless the
+            // totals have drifted; if they have, stop trimming rather than wrap the window.
+            let Some(rest) = self.total_work.checked_sub(front.work) else { break };
+            if rest < self.target_work {
                 break;
             }
             let c = self.credits.pop_front().unwrap();
-            self.total_work -= c.work;
+            self.total_work = rest;
             if let Some(t) = self.totals.get_mut(&c.ident) {
-                t.0 -= c.work;
-                t.1 -= 1;
+                t.0 = t.0.saturating_sub(c.work);
+                t.1 = t.1.saturating_sub(1);
                 if t.1 == 0 {
                     self.totals.remove(&c.ident);
                 }

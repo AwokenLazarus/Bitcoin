@@ -3,8 +3,10 @@
 The pool side of the DATUM protocol for the BLAKE2b Bitcoin chain, written from scratch.
 
 Any stock `datum_gateway` — OCEAN, [CONVOY](https://github.com/CONVOYMining/datum_gateway),
-or the BLAKE2b forks by [FlyTheElephant1](https://github.com/FlyTheElephant1/datum_gateway) and
-[iohzrd](https://github.com/iohzrd/datum_gateway) — points at this Prime, unpatched. The
+the BLAKE2b forks by [FlyTheElephant1](https://github.com/FlyTheElephant1/datum_gateway) and
+[iohzrd](https://github.com/iohzrd/datum_gateway), or the packaged
+[StartOS](https://github.com/Retropex/datum-gateway-startos/releases) build — points at this
+Prime, unpatched (see [Supported gateways](#supported-gateways)). The
 gateway's own node builds every block template. The Prime never sees or chooses transactions;
 it does three things:
 
@@ -104,6 +106,42 @@ legacy coinbase as `coinb1` with an empty `coinb2` (a shape no stock gateway pro
 when its template is worth less than the value a split was issued for it scales every output
 down by the same ratio rather than dropping the ones that no longer fit.
 
+## Supported gateways
+
+Four upstreams, two protocol generations. The refs are what the e2e script builds, and are
+the versions this Prime is checked against.
+
+| Name | Upstream | Ref tracked | Generation |
+|---|---|---|---|
+| `convoy` | `CONVOYMining/datum_gateway` | `master` | Convoy, configure v3 |
+| `fte` | `FlyTheElephant1/datum_gateway` | `test/console-collapse-pr14-pr17` (now also `master`) | OCEAN, configure v1 |
+| `iohzrd` | `iohzrd/datum_gateway` | `master` (has the `blake2b` branch and two commits more) | OCEAN, configure v1 |
+| `startos` | packaged by `Retropex/datum-gateway-startos` | the `datum_gateway` submodule of the newest `pow_*` release | OCEAN, configure v1 |
+
+The StartOS package ships the gateway as a submodule, so a release pins one gateway commit
+rather than naming a branch. `scripts/regtest-e2e.sh startos` resolves that commit from the
+release and builds it, which keeps the test honest as new packages ship. Its unreleased
+`pow-convoy` branch is Convoy-lineage and reachable as `startos-convoy`.
+
+Two upstream rules are load-bearing and are enforced here rather than discovered in
+production:
+
+* **RDTS output scripts.** Knots activates RDTS (BIP 110) as a flag day at the BLAKE2b fork
+  height, which limits every output of the generation transaction to a 34-byte scriptPubKey
+  (83 if it starts with `OP_RETURN`). The newest gateways enforce it too: an oversized miner
+  payout is left out of the coinbase, and an oversized *pool* payout stops them serving work
+  for the block at all. `address::to_script` therefore treats an address whose output script
+  cannot fit — a witness program over 32 bytes is valid but does not — as unpayable, so its
+  share stays in the pool remainder instead of becoming an output a gateway would drop. An
+  unpayable `payout-address` is refused at startup.
+* **The ABW flag.** Convoy's configure v3 carries a flags byte, and this pool sets
+  `ABW_DISABLED` because it runs no anti-withholding. Convoy builds from 2026-09-02 onward
+  require it: without it the gateway waits for an assignment that never comes and serves no
+  work. Convoy-lineage builds from *before* that date reject a non-zero flags byte outright,
+  so they need a gateway update rather than a change here. Only the unreleased `pow-convoy`
+  branch is still pinned that far back; every published StartOS package is OCEAN-lineage and
+  never sees this byte.
+
 ## Protocol
 
 Recovered from the C client; the same bytes any gateway already speaks.
@@ -196,10 +234,17 @@ hashrate graph; `/healthz` returns `ok`.
 ## Tests
 
 ```bash
-cargo test                                  # wire (38), tides (9), primed (6)
-scripts/regtest-e2e.sh convoy               # or fte | iohzrd: real C gateway + real Knots on regtest
+cargo test                                  # wire (44), tides (11), primed (12)
+cargo test --release -p primed --test replay_e2e -- --ignored --nocapture   # hostile gateway vs a real primed
+scripts/regtest-e2e.sh convoy               # or fte | iohzrd | startos: real C gateway + real Knots on regtest
 MINER_CMD='...' scripts/regtest-divergence.sh fte   # two nodes with different mempools and tips
 ```
+
+`replay_e2e` starts a `primed`, speaks DATUM to it as a gateway would, grinds one genuine
+diff-1 share (~2^32 BLAKE2b hashes, 10–60 s across all cores) and replays it fourteen ways —
+job section flipped in an unread field, bare, on another slot, after a reconnect, from another
+key — asserting it is credited exactly once. `PRIMED_BIN=/path/to/primed` points the same
+attack at another build; against the pre-fix binary the first replay is accepted.
 
 The unit tests pin the frame obfuscation, nonce derivation, hello round trip for both
 generations, configure v1/v3 byte layouts, coinbaser v2, pow submit parse/encode, tagged
@@ -207,8 +252,11 @@ hashes, and share verification including grinding real BLAKE2b shares against an
 
 The end-to-end script builds the named `datum_gateway`, points it at a `primed` on a local
 BLAKE2b regtest node, and checks that the handshake, configure, coinbaser, shares, block
-candidates and `submitblock` all happen. All three lineages were run this way while this was
-written; a block found through a stock Convoy gateway paid the two-miner TIDES split on-chain
+candidates and `submitblock` all happen. `convoy`, `fte`, `iohzrd` and `startos` all pass it at
+the heads in the table above, each reaching handshake, configure and coinbaser against a real
+Knots regtest node. `startos-convoy` fails on purpose: its pin predates Convoy's ABW flag, so
+it rejects the configure and the script says so. Earlier,
+a block found through a stock Convoy gateway paid the two-miner TIDES split on-chain
 exactly as issued (65.6% / 34.4% after the 0.5% fee), and the block the Prime assembled from
 the gateway's transaction reply was byte-identical to the one the gateway submitted. With the
 complete list, a Convoy-found block's coinbase carried the miner's 12.4375 and the pool's
@@ -270,9 +318,35 @@ Doing this by hand first surfaced three bugs, all fixed:
   block candidate from any session reaches every other gateway immediately.
 * Idle gateways get a zero-length INFO frame every 20 s (the client's global timeout is 60 s);
   a gateway silent for 300 s is dropped. Handshake must complete in 15 s.
-* Duplicate shares are caught per job by hash; a job's set is cleared when the gateway moves
-  the slot to a new job. Shares one height behind are accepted for `stale-grace-secs` after the
-  tip moved, matching template refresh latency.
+* Duplicate shares are caught by hash in one set shared by every session and keyed by block
+  height. The hash commits to the job (prev, merkle, nBits, txcount, version) and the miner's
+  nonces, so it is unique per height and needs no per-job scoping; nothing a gateway sends —
+  a re-sent job section, a reconnect, a new key — can empty it. Housekeeping prunes heights
+  below what the stale check still accepts, and at a hard cap new work is refused rather than
+  old work forgotten. (Before 2026-09-06 the set was per session and per job and was cleared
+  whenever the job section changed, which let one share be credited without limit.) Shares one
+  height behind are accepted for `stale-grace-secs` after the tip moved, matching template
+  refresh latency.
+* The coinbase check bounds miner outputs from both sides. An issued output may not be paid
+  *less* than its share (scaled down when the template is worth less than the split assumed)
+  and may not be paid *more* than Prime issued against its script (scaled up by the same ratio
+  when the template is worth more, which is how `lazarus-gateway` rescales). The upper bound
+  is what stops a gateway paying every miner exactly and sending the pool's remainder — fee,
+  rounding, unplaced dust — to an address of its own choosing; it is held per script, not per
+  identity, because two window identities may resolve to one scriptPubKey.
+* Identities are folded before interning: a bech32 address is lowercased (BIP 173 forbids mixed
+  case, so this is safe and idempotent), base58 and non-addresses are kept byte-exact. One
+  payout address is one TIDES row, however each rig's config cases it.
+* A gateway's txcount convention (does `txn_count` include the coinbase?) is learned from the
+  first share that verifies on a job and pinned for the slot, so `VerifiedShare::commitment`
+  is always the header the miner actually ground.
+* What a connection can make the Prime hold is bounded: `max-connections` (256) and
+  `max-connections-per-ip` (8) at accept; a coinbase section over 20 000 bytes or a ninth
+  coinbase id in a slot is refused; only the 16 most recently started job slots keep their
+  sections; and `session-coinbase-budget` (4 MiB) caps the total. Coinbaser requests are
+  token-bucketed (32, refilled one per second) because each one is a full split over the
+  window under the ledger lock, and a session with 2 000 rejects or malformed messages in
+  10 s is dropped. Release builds keep `overflow-checks` on.
 * The Prime submits every candidate block to its own node as well as trusting the gateway to.
   `duplicate` from `submitblock` is the expected outcome and is recorded as such;
   `inconclusive` means a valid block that is not (yet) the best tip. Records settle when the

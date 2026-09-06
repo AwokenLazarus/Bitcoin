@@ -123,7 +123,9 @@ pub fn compute(
             payees.push(Payee { identity: m.identity, work: m.work, sats, script });
         }
     }
-    Split { value, fee_sats, total_work, payees, unpaid, pool_sats: value - paid }
+    // `paid` cannot exceed `value` (each payee is a proper fraction of it), but the pool's
+    // remainder must never wrap to a 2^64 output if that invariant is ever broken upstream.
+    Split { value, fee_sats, total_work, payees, unpaid, pool_sats: value.saturating_sub(paid) }
 }
 
 mod hex_bytes {

@@ -82,6 +82,18 @@ pub struct Config {
     /// Shown in stats.
     #[serde(default = "d_headline")]
     pub headline: String,
+    /// Most DATUM sessions held open at once. A session buffers job and coinbase state on
+    /// the gateway's behalf, so this bounds what an unknown key can make the pool hold.
+    #[serde(default = "d_max_connections")]
+    pub max_connections: u32,
+    /// Most sessions from one remote address. A gateway is one connection; a farm is a few.
+    #[serde(default = "d_max_connections_per_ip")]
+    pub max_connections_per_ip: u32,
+    /// Coinbase section bytes one session may have Prime hold across all of its job slots.
+    /// A stock gateway's eight slots of seven ~16 KiB coinbase classes is under 1 MiB; the
+    /// sixteen live slots Prime keeps at eight 20 000-byte sections each is 2.5 MiB.
+    #[serde(default = "d_session_coinbase_budget")]
+    pub session_coinbase_budget: usize,
 
     // Keys the previous Prime used. Accepted so an existing config starts unchanged;
     // `load` reports each one it saw.
@@ -135,6 +147,15 @@ fn d_headline() -> String {
 fn d_true() -> bool {
     true
 }
+fn d_max_connections() -> u32 {
+    256
+}
+fn d_max_connections_per_ip() -> u32 {
+    8
+}
+fn d_session_coinbase_budget() -> usize {
+    4 << 20
+}
 
 impl Config {
     pub fn load(path: &Path) -> Result<Self, String> {
@@ -163,6 +184,12 @@ impl Config {
         }
         if c.coinbase_tag.len() > 32 {
             return Err("coinbase-tag is too long (32 bytes max)".into());
+        }
+        if c.max_connections == 0 || c.max_connections_per_ip == 0 {
+            return Err("max-connections and max-connections-per-ip must be at least 1".into());
+        }
+        if c.session_coinbase_budget < 64 * 1024 {
+            return Err("session-coinbase-budget must be at least 65536 bytes (one huge coinbase class)".into());
         }
         if c.key_file.is_none() {
             // A data dir left by lazarus-prime keeps its identity: same key file, same pubkey.

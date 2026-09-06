@@ -96,6 +96,10 @@ pub fn build(shared: &Shared) -> Value {
     };
 
     let t = &shared.totals;
+    let (seen_shares, seen_heights) = {
+        let s = shared.seen.lock().unwrap();
+        (s.len(), s.heights())
+    };
     let (host, port) = shared
         .cfg
         .advertise_address
@@ -150,10 +154,14 @@ pub fn build(shared: &Shared) -> Value {
             "block_candidates": t.block_candidates.load(Ordering::Relaxed),
             "blocks_submitted": t.blocks_submitted.load(Ordering::Relaxed),
             "connections": t.connections.load(Ordering::Relaxed),
+            "connections_refused": t.connections_refused.load(Ordering::Relaxed),
             "handshake_failures": t.handshake_failures.load(Ordering::Relaxed),
+            "seen_shares": seen_shares,
+            "seen_heights": seen_heights,
         },
         "clients": clients,
         "gateways": clients.len(),
+        "connections_open": shared.connections.lock().unwrap().total(),
         "owed": owed,
         "blocks": blocks,
     })
@@ -233,6 +241,12 @@ pub async fn housekeeping(shared: Arc<Shared>) {
             if let Err(e) = r {
                 log::error!("ledger flush failed: {e}");
             }
+        }
+        // The share dedup set is keyed by height; anything below what the stale check can
+        // still accept (tip height, under the grace period) can go. Keep one extra for
+        // the case where the tip is briefly ahead of the height gateways are on.
+        if let Some(tip) = shared.tip_snapshot() {
+            shared.seen.lock().unwrap().prune_below(tip.height.saturating_sub(2));
         }
         let dir = shared.cfg.data_dir.clone();
         let stats = build(&shared).to_string();

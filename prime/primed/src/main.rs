@@ -261,6 +261,8 @@ fn run(cfg: Config) -> i32 {
         blocks: Mutex::new(blocks),
         block_log,
         clients: Mutex::new(Default::default()),
+        seen: Mutex::new(Default::default()),
+        connections: Mutex::new(Default::default()),
         tip_tx,
         tip,
         notify,
@@ -298,11 +300,31 @@ fn run(cfg: Config) -> i32 {
         let accept = {
             let shared = shared.clone();
             async move {
+                let mut refused_warned = Instant::now() - std::time::Duration::from_secs(60);
                 loop {
                     match listener.accept().await {
                         Ok((stream, remote)) => {
+                            // Admit before spawning: a session holds job and coinbase state
+                            // for its gateway, so the count of them is the memory bound.
+                            let admitted = shared.connections.lock().unwrap().admit(
+                                remote.ip(),
+                                shared.cfg.max_connections,
+                                shared.cfg.max_connections_per_ip,
+                            );
+                            if let Err(why) = admitted {
+                                shared.totals.add(&shared.totals.connections_refused, 1);
+                                if refused_warned.elapsed() >= std::time::Duration::from_secs(10) {
+                                    refused_warned = Instant::now();
+                                    log::warn!("{remote} refused: {why}");
+                                }
+                                drop(stream);
+                                continue;
+                            }
                             let shared = shared.clone();
                             tokio::spawn(async move {
+                                // Released on drop, so a panicking session (tokio catches
+                                // it) still gives its slot back.
+                                let _slot = ConnectionSlot { shared: shared.clone(), ip: remote.ip() };
                                 match session::run(shared.clone(), stream, remote).await {
                                     Ok(()) => log::info!("{remote} closed"),
                                     Err(session::SessionError::Io(e)) => log::info!("{remote} disconnected: {e}"),
@@ -332,6 +354,19 @@ fn run(cfg: Config) -> i32 {
         }
         0
     })
+}
+
+struct ConnectionSlot {
+    shared: Arc<Shared>,
+    ip: std::net::IpAddr,
+}
+
+impl Drop for ConnectionSlot {
+    fn drop(&mut self) {
+        if let Ok(mut c) = self.shared.connections.lock() {
+            c.release(self.ip);
+        }
+    }
 }
 
 /// If the last `stats.json` (written by the previous process) disagrees with the

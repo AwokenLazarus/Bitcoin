@@ -32,3 +32,5 @@ thiserror = "1"
 lto = "thin"
 codegen-units = 1
 opt-level = 3
+# Money arithmetic: a wrapped u64 is a wrong payout, a panic is a restart. Keep the checks.
+overflow-checks = true

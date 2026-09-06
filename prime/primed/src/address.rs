@@ -124,6 +124,19 @@ pub fn identity_of(username: &str) -> &str {
     &u[..end]
 }
 
+/// The form an identity is interned and paid under. Bech32 is case-insensitive, so `BC1Q…`
+/// and `bc1q…` are one payout address and must be one TIDES row: split as two they can each
+/// fall under `min-payout` and be paid nothing, and when they do pay they burn two coinbase
+/// outputs. BIP 173 forbids mixed case, so anything the decoder accepts is already one case
+/// and lowercasing it is safe and idempotent. Base58 is case-sensitive and is kept byte-exact;
+/// so is anything that is not an address at all.
+pub fn canonical_identity(ident: &str) -> String {
+    if bech32::segwit::decode(ident).is_ok() {
+        return ident.to_ascii_lowercase();
+    }
+    ident.to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -170,5 +183,26 @@ mod tests {
         assert_eq!(identity_of("bc1qabc~x.rig1"), "bc1qabc");
         assert_eq!(identity_of("bc1qabc.rig1~x"), "bc1qabc");
         assert_eq!(identity_of("~x"), "");
+    }
+
+    #[test]
+    fn bech32_identities_fold_to_one_case_and_the_same_script() {
+        let lower = "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4";
+        let upper = lower.to_ascii_uppercase();
+        assert_eq!(canonical_identity(&upper), lower);
+        assert_eq!(canonical_identity(lower), lower);
+        assert_eq!(canonical_identity(&canonical_identity(&upper)), lower, "idempotent");
+        assert_eq!(to_script(&upper, Network::Mainnet), to_script(lower, Network::Mainnet));
+        let taproot = "bc1p0xlxvlhemja6c4dqv22uapctqupfhlxm9h8z3k2e72q4k9hcz7vqzk5jj0";
+        assert_eq!(canonical_identity(&taproot.to_ascii_uppercase()), taproot);
+        // base58 stays byte-exact: changing case changes the address
+        let legacy = "1BvBMSEYstWetqTFn5Au4m4GFg7xJaNVN2";
+        assert_eq!(canonical_identity(legacy), legacy);
+        assert_eq!(canonical_identity(&legacy.to_ascii_lowercase()), legacy.to_ascii_lowercase());
+        // a mixed-case bech32 string is not an address and is not folded
+        let mixed = "bc1QW508D6QEJXTDG4Y5R3ZARVARY0C5XW7KV8F3T4";
+        assert_eq!(canonical_identity(mixed), mixed);
+        assert_eq!(canonical_identity("worker1"), "worker1");
+        assert_eq!(canonical_identity("BC1QNOTREALLYANADDRESS"), "BC1QNOTREALLYANADDRESS");
     }
 }

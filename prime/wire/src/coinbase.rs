@@ -44,13 +44,15 @@ pub struct Coinbase {
 }
 
 impl Coinbase {
+    /// Saturating: the bytes are the gateway's, and a sum past `u64::MAX` must classify as
+    /// nonsense, not panic the session.
     pub fn total_output_value(&self) -> u64 {
-        self.outputs.iter().map(|o| o.value).sum()
+        self.outputs.iter().fold(0u64, |a, o| a.saturating_add(o.value))
     }
 
-    /// Sum paid to a specific scriptPubKey.
+    /// Sum paid to a specific scriptPubKey (saturating, as above).
     pub fn paid_to(&self, script: &[u8]) -> u64 {
-        self.outputs.iter().filter(|o| o.script == script).map(|o| o.value).sum()
+        self.outputs.iter().filter(|o| o.script == script).fold(0u64, |a, o| a.saturating_add(o.value))
     }
 }
 
