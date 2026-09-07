@@ -156,6 +156,27 @@ struct Session {
     /// subsidy-only job and should not be happening.
     pool_only_full_jobs: u64,
     pool_only_warned: Option<Instant>,
+    /// Work seen per share username on this session; the dominant identity is the
+    /// gateway's payout for the script-flip.
+    identity_work: HashMap<String, u64>,
+    gateway_script: Option<Vec<u8>>,
+    gateway_identity: Option<String>,
+    /// When to send configure(gateway) — only while this tip has no split yet
+    /// (just learned the identity). Once a coinbaser lands they stay on pool.
+    restore_script_at: Option<tokio::time::Instant>,
+    configured_as_gateway: bool,
+    /// This tip already has a coinbaser reply, so jobs should be pool/split.
+    split_ready: bool,
+    /// `prev_hash` of the last flushed coinbaser (hex), i.e. the tip that split is for.
+    last_split_prev: Option<String>,
+    /// Convoy configure v3 resume token; reused for every mid-session configure so the
+    /// gateway does not drop its share queue.
+    resume_token: [u8; mining::RESUME_TOKEN_LEN],
+    /// Test hook: a computed coinbaser sitting until `coinbaser_send_at`. The session
+    /// keeps reading shares while it waits; a sleep on this task would starve receipts
+    /// and make a stock gateway reconnect.
+    pending_coinbaser: Option<(u64, Vec<u8>, [u8; 32])>,
+    coinbaser_send_at: Option<tokio::time::Instant>,
 }
 
 /// Which of the two gateway-side faults produced a pool-only coinbase, read off the share rather
@@ -222,6 +243,8 @@ pub async fn run(shared: Arc<Shared>, mut stream: TcpStream, remote: SocketAddr)
     write_frame(&mut stream, &h, &reply, &mut send_keys).await?;
 
     let gateway_hex = hex::encode(&hello.identity_sign_pk[..8]);
+    let gateway_key = hex::encode(hello.identity_sign_pk);
+    let known_script = shared.lookup_gateway_script(&gateway_key);
     let fee_path = if house_stratum(&shared.cfg, remote, &gateway_hex) { "stratum" } else { "datum" };
     log::info!(
         "[{id}] {remote} hello ua={:?} gateway={gateway_hex} gen={:?} fee={fee_path}{}",
@@ -275,6 +298,20 @@ pub async fn run(shared: Arc<Shared>, mut stream: TcpStream, remote: SocketAddr)
         pool_only_shares: 0,
         pool_only_full_jobs: 0,
         pool_only_warned: None,
+        identity_work: HashMap::new(),
+        gateway_script: known_script,
+        gateway_identity: None,
+        restore_script_at: None,
+        configured_as_gateway: false,
+        split_ready: false,
+        last_split_prev: None,
+        resume_token: {
+            let mut t = [0u8; mining::RESUME_TOKEN_LEN];
+            OsRng.fill_bytes(&mut t);
+            t
+        },
+        pending_coinbaser: None,
+        coinbaser_send_at: None,
     };
     s.serve().await
 }
@@ -322,6 +359,8 @@ impl Session {
         let mut inbuf = InBuf::default();
         let mut pending: Option<Header> = None;
         loop {
+            let restore = self.restore_script_at;
+            let cb_at = self.coinbaser_send_at;
             inbuf.make_room();
             tokio::select! {
                 n = self.stream.read_buf(&mut inbuf.data) => {
@@ -350,8 +389,18 @@ impl Session {
                 }
                 n = notify.recv() => {
                     match n {
-                        Ok(_) => self.send_mining(&mining::block_notify(), false).await?,
-                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                        // A find (nonzero id): next work is empty on a new tip — solo.
+                        // Node tip (0) or lagged: solo only if this tip has no split yet.
+                        // A second notify after we already answered the coinbaser must
+                        // not flip them back to gateway.
+                        Ok(0) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                            if !self.has_split_for_tip() {
+                                self.solo_until_split().await?;
+                            }
+                            self.send_mining(&mining::block_notify(), false).await?;
+                        }
+                        Ok(_) => {
+                            self.solo_until_split().await?;
                             self.send_mining(&mining::block_notify(), false).await?;
                         }
                         Err(_) => {}
@@ -373,29 +422,122 @@ impl Session {
                         !v.is_empty()
                     });
                 }
+                _ = async {
+                    if let Some(at) = restore {
+                        tokio::time::sleep_until(at).await;
+                    } else {
+                        std::future::pending::<()>().await;
+                    }
+                } => {
+                    if let Some(script) = self.gateway_script.clone() {
+                        self.send_configure_script(&script, true).await?;
+                    }
+                    self.restore_script_at = None;
+                }
+                _ = async {
+                    if let Some(at) = cb_at {
+                        tokio::time::sleep_until(at).await;
+                    } else {
+                        std::future::pending::<()>().await;
+                    }
+                } => {
+                    self.coinbaser_send_at = None;
+                    if let Some((value, encoded, prev)) = self.pending_coinbaser.take() {
+                        self.flush_coinbaser_reply(value, &encoded, prev).await?;
+                    }
+                }
             }
         }
     }
 
-    async fn send_configure(&mut self) -> Result<(), SessionError> {
+    fn solo_tag(&self) -> String {
+        let base = self.shared.cfg.coinbase_tag.as_str();
+        if base.ends_with("/solo") {
+            base.to_string()
+        } else {
+            format!("{base}/solo")
+        }
+    }
+
+    fn configure_body(&self, script: &[u8], tag: &str) -> Vec<u8> {
         let cfg = &self.shared.cfg;
-        let body = match self.hello.generation {
-            Generation::Ocean => {
-                mining::configure_v1(&self.shared.pool_script, cfg.prime_id, &cfg.coinbase_tag, cfg.min_diff)
-            }
+        match self.hello.generation {
+            Generation::Ocean => mining::configure_v1(script, cfg.prime_id, tag, cfg.min_diff),
             Generation::Convoy => {
-                let mut token = [0u8; mining::RESUME_TOKEN_LEN];
-                OsRng.fill_bytes(&mut token);
-                mining::configure_v3(
-                    &self.shared.pool_script,
-                    u64::from(cfg.prime_id),
-                    &token,
-                    &cfg.coinbase_tag,
-                    cfg.min_diff,
-                )
+                mining::configure_v3(script, u64::from(cfg.prime_id), &self.resume_token, tag, cfg.min_diff)
             }
+        }
+    }
+
+    async fn send_configure_script(&mut self, script: &[u8], gateway: bool) -> Result<(), SessionError> {
+        let tag = if gateway { self.solo_tag() } else { self.shared.cfg.coinbase_tag.clone() };
+        let body = self.configure_body(script, &tag);
+        self.send_mining(&body, true).await?;
+        self.configured_as_gateway = gateway;
+        log::debug!(
+            "[{}] configure {} tag={tag} script={}",
+            self.id,
+            if gateway { "gateway" } else { "pool" },
+            hex::encode(&script[..script.len().min(8)]),
+        );
+        Ok(())
+    }
+
+    async fn send_configure(&mut self) -> Result<(), SessionError> {
+        if let Some(script) = self.gateway_script.clone() {
+            self.send_configure_script(&script, true).await
+        } else {
+            let pool = self.shared.pool_script.clone();
+            self.send_configure_script(&pool, false).await
+        }
+    }
+
+    fn stay_on_gateway(&self) -> bool {
+        self.shared.cfg.stock_full_pool_only == "gateway-solo" && self.pool_only_full_jobs > 0
+    }
+
+    fn gateway_key_hex(&self) -> String {
+        hex::encode(self.hello.identity_sign_pk)
+    }
+
+    fn note_identity(&mut self, identity: &str, work: u64) {
+        *self.identity_work.entry(identity.to_string()).or_insert(0) += work;
+        let Some((dom, _)) = self.identity_work.iter().max_by_key(|(_, w)| *w) else {
+            return;
         };
-        self.send_mining(&body, true).await
+        let dom = dom.clone();
+        let Some(script) = address::to_script(&dom, self.shared.network) else {
+            return;
+        };
+        if script == self.shared.pool_script {
+            return;
+        }
+        let changed = self.gateway_script.as_deref() != Some(script.as_slice());
+        self.gateway_script = Some(script.clone());
+        self.gateway_identity = Some(dom.clone());
+        self.shared.remember_gateway(&self.gateway_key_hex(), &dom, &script);
+        if changed && !self.split_ready && !self.configured_as_gateway && self.restore_script_at.is_none() {
+            self.restore_script_at = Some(tokio::time::Instant::now());
+        }
+    }
+
+    /// No split on this tip yet. Known gateways go solo so empty / late jobs
+    /// pay them. Unknown ones stay on the pool script until the first share.
+    fn has_split_for_tip(&self) -> bool {
+        let Some(tip) = self.shared.tip_snapshot() else {
+            return false;
+        };
+        self.split_ready && self.last_split_prev.as_deref() == Some(tip.hash.as_str())
+    }
+
+    async fn solo_until_split(&mut self) -> Result<(), SessionError> {
+        self.split_ready = false;
+        self.last_split_prev = None;
+        self.restore_script_at = None;
+        if let Some(script) = self.gateway_script.clone() {
+            self.send_configure_script(&script, true).await?;
+        }
+        Ok(())
     }
 
     /// Encrypt (and optionally sign with the session key) a mining payload and send it.
@@ -495,7 +637,7 @@ impl Session {
                 if let Some(repeat) = repeat {
                     log::debug!("[{}] coinbaser over rate; repeating #{prev_id} for value={value}", self.id);
                     self.shared.totals.add(&self.shared.totals.coinbasers_repeated, 1);
-                    self.send_mining(&mining::coinbaser_reply(value, &repeat), false).await?;
+                    self.send_coinbaser_reply(value, &repeat, prev_hash).await?;
                     return self.note_coinbaser_latency(started, Some(prev_id));
                 }
                 self.shared.totals.add(&self.shared.totals.coinbasers_over_rate, 1);
@@ -531,7 +673,7 @@ impl Session {
             outputs.push(Output { sats: split.pool_sats.max(1), script: self.shared.pool_script.clone() });
         }
         let encoded = coinbaser::encode_v2(id, &outputs);
-        self.send_mining(&mining::coinbaser_reply(value, &encoded), false).await?;
+        self.send_coinbaser_reply(value, &encoded, prev_hash).await?;
 
         let mut ph = prev_hash;
         ph.reverse();
@@ -551,6 +693,48 @@ impl Session {
         self.shared.totals.add(&self.shared.totals.coinbasers, 1);
         self.shared.client_update(self.id, |c| c.coinbasers += 1);
         self.note_coinbaser_latency(started, Some(id))
+    }
+
+    /// `configure(pool)` then the coinbaser reply. Stay on the pool script after
+    /// that — they can mine a split now. Solo returns only on the next tip
+    /// (empty work, no coinbaser yet). A test delay, if set, is scheduled on
+    /// the session loop so shares and keepalives still flow; the 5 s fetch
+    /// then times out still holding the gateway script.
+    async fn send_coinbaser_reply(
+        &mut self,
+        value: u64,
+        encoded: &[u8],
+        prev_hash: [u8; 32],
+    ) -> Result<(), SessionError> {
+        let delay = Duration::from_millis(self.shared.cfg.coinbaser_delay_ms);
+        if !delay.is_zero() {
+            log::info!("[{}] delaying coinbaser reply {} ms (test hook)", self.id, delay.as_millis());
+            self.pending_coinbaser = Some((value, encoded.to_vec(), prev_hash));
+            if self.coinbaser_send_at.is_none() {
+                self.coinbaser_send_at = Some(tokio::time::Instant::now() + delay);
+            }
+            return Ok(());
+        }
+        self.flush_coinbaser_reply(value, encoded, prev_hash).await
+    }
+
+    async fn flush_coinbaser_reply(
+        &mut self,
+        value: u64,
+        encoded: &[u8],
+        prev_hash: [u8; 32],
+    ) -> Result<(), SessionError> {
+        self.restore_script_at = None;
+        if !self.stay_on_gateway() {
+            let pool = self.shared.pool_script.clone();
+            self.send_configure_script(&pool, false).await?;
+        }
+        self.send_mining(&mining::coinbaser_reply(value, encoded), false).await?;
+        self.split_ready = true;
+        let mut ph = prev_hash;
+        ph.reverse();
+        self.last_split_prev = Some(hex::encode(ph));
+        Ok(())
     }
 
     /// Record how long a coinbaser reply took to reach the wire, and say so if it came close
@@ -671,12 +855,15 @@ impl Session {
 
         let issued_outputs = self.issued(coinbaser_id).map(|c| c.outputs.clone());
         let pool_script = self.shared.pool_script.clone();
+        let gateway_script = self.gateway_script.clone();
         let policy = Policy {
             pool_script: &pool_script,
             issued: issued_outputs.as_deref(),
             tolerance: self.shared.cfg.split_tolerance,
             now: now() as u32,
             min_pot: self.shared.cfg.min_pot(),
+            gateway_script: gateway_script.as_deref(),
+            empty_solo_fee_bps: self.shared.cfg.empty_solo_fee_bps,
         };
         let v = match verify::verify(&mut self.slots[job_id], &s, &policy) {
             Ok(v) => v,
@@ -698,9 +885,13 @@ impl Session {
             }
         }
 
-        // credit
+        // credit — empty-solo and gateway-solo are accepted work but not window work.
+        self.note_identity(&identity, v.work);
         let ts = now();
-        let credited = {
+        let solo = matches!(v.coinbase_kind, CoinbaseKind::EmptySolo | CoinbaseKind::GatewaySolo);
+        let credited = if solo {
+            true
+        } else {
             let mut ledger = self.shared.ledger.lock().unwrap();
             let table_full =
                 ledger.window.identities().len() >= MAX_IDENTITIES && ledger.window.work_of(&identity) == 0;
@@ -718,10 +909,44 @@ impl Session {
             return self.reject(&s, mining::REJECT_BAD_USERNAME).await;
         }
         self.shared.totals.add(&self.shared.totals.accepted, 1);
-        self.shared.totals.add(&self.shared.totals.work, v.work);
+        if solo {
+            match v.coinbase_kind {
+                CoinbaseKind::EmptySolo => {
+                    self.shared.totals.add(&self.shared.totals.solo_empty_shares, 1);
+                    self.shared.totals.add(&self.shared.totals.solo_empty_work, v.work);
+                    self.shared.client_update(self.id, |c| {
+                        c.solo_empty_shares += 1;
+                        c.solo_empty_work += v.work;
+                    });
+                }
+                CoinbaseKind::GatewaySolo => {
+                    self.shared.totals.add(&self.shared.totals.solo_full_shares, 1);
+                    self.shared.totals.add(&self.shared.totals.solo_full_work, v.work);
+                    self.shared.client_update(self.id, |c| {
+                        c.solo_full_shares += 1;
+                        c.solo_full_work += v.work;
+                    });
+                }
+                _ => {}
+            }
+        } else {
+            self.shared.totals.add(&self.shared.totals.work, v.work);
+            if let (CoinbaseKind::Split, Some(gw)) = (&v.coinbase_kind, gateway_script.as_deref()) {
+                let paid_gw = v.coinbase.paid_to(gw);
+                let issued_gw: u64 = issued_outputs
+                    .as_ref()
+                    .map(|o| o.iter().filter(|x| x.script == gw).map(|x| x.sats).sum())
+                    .unwrap_or(0);
+                if paid_gw > issued_gw {
+                    self.shared.totals.add(&self.shared.totals.remainder_to_gateway_sats, paid_gw - issued_gw);
+                }
+            }
+        }
         self.shared.client_update(self.id, |c| {
             c.accepted += 1;
-            c.work += v.work;
+            if !solo {
+                c.work += v.work;
+            }
             c.last_share_ts = ts;
             c.identity = identity.clone();
         });
@@ -878,6 +1103,7 @@ impl Session {
                 let owed = sp.paid_sats();
                 ("pool-only", owed, sp.payees.iter().map(|p| (p.identity.clone(), p.sats)).collect())
             }
+            (CoinbaseKind::EmptySolo, _) | (CoinbaseKind::GatewaySolo, _) => ("solo", 0, vec![]),
             (CoinbaseKind::Partial(_), None) | (CoinbaseKind::Foreign, _) => ("unknown", 0, vec![]),
         };
         let _ = fee;

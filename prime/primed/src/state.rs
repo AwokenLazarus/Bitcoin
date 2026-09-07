@@ -64,6 +64,12 @@ pub struct ClientInfo {
     /// Of those, the ones on a job that carried transactions. Stock DATUM's per-height
     /// subsidy-only job is expected and unavoidable; this is the count that should be zero.
     pub pool_only_full_jobs: u64,
+    /// Accepted shares on an empty-solo job (gateway-paid, 0-tx). Not in the window.
+    pub solo_empty_shares: u64,
+    pub solo_empty_work: u64,
+    /// Accepted shares on a full job paying only the gateway. Not in the window.
+    pub solo_full_shares: u64,
+    pub solo_full_work: u64,
 }
 
 #[derive(Default)]
@@ -96,6 +102,12 @@ pub struct Totals {
     pub pool_only_shares: AtomicU64,
     /// Of those, the ones on a job that carried transactions — the kind that should be zero.
     pub pool_only_full_jobs: AtomicU64,
+    pub solo_empty_shares: AtomicU64,
+    pub solo_empty_work: AtomicU64,
+    pub solo_full_shares: AtomicU64,
+    pub solo_full_work: AtomicU64,
+    /// Sats a split coinbase sent to the gateway script instead of the pool remainder.
+    pub remainder_to_gateway_sats: AtomicU64,
 }
 
 impl Totals {
@@ -261,6 +273,16 @@ pub struct Shared {
     pub next_client_id: AtomicU64,
     /// Shared window snapshot behind coinbaser replies; see [`Shared::coinbaser_base`].
     pub coinbaser_base: Mutex<Option<Arc<CoinbaserBase>>>,
+    /// Last known payout script per gateway signing key (64 hex chars). Survives reconnect
+    /// so the first empty job of a returning gateway already pays them.
+    pub gateway_payouts: Mutex<HashMap<String, GatewayPayout>>,
+}
+
+/// What Prime last learned as a gateway's own payout, persisted in `gateway-scripts.json`.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct GatewayPayout {
+    pub identity: String,
+    pub script_hex: String,
 }
 
 impl Shared {
@@ -303,6 +325,38 @@ impl Shared {
     }
 
     /// Target work for the TIDES window from the current network difficulty.
+    pub fn gateway_scripts_path(&self) -> std::path::PathBuf {
+        self.cfg.data_dir.join("gateway-scripts.json")
+    }
+
+    pub fn lookup_gateway_script(&self, key_hex: &str) -> Option<Vec<u8>> {
+        let map = self.gateway_payouts.lock().unwrap_or_else(|e| e.into_inner());
+        map.get(key_hex).and_then(|p| hex::decode(&p.script_hex).ok())
+    }
+
+    /// Remember this gateway's dominant payout and persist it. No-op if unchanged.
+    pub fn remember_gateway(&self, key_hex: &str, identity: &str, script: &[u8]) {
+        let hex_script = hex::encode(script);
+        let mut map = self.gateway_payouts.lock().unwrap_or_else(|e| e.into_inner());
+        if map.get(key_hex).is_some_and(|p| p.identity == identity && p.script_hex == hex_script) {
+            return;
+        }
+        map.insert(key_hex.to_string(), GatewayPayout { identity: identity.to_string(), script_hex: hex_script });
+        let text = serde_json::to_string_pretty(&*map).unwrap_or_else(|_| "{}".into());
+        drop(map);
+        if let Err(e) = std::fs::write(self.gateway_scripts_path(), text) {
+            log::warn!("gateway-scripts.json write failed: {e}");
+        }
+    }
+
+    pub fn load_gateway_payouts(dir: &std::path::Path) -> HashMap<String, GatewayPayout> {
+        let p = dir.join("gateway-scripts.json");
+        std::fs::read_to_string(p)
+            .ok()
+            .and_then(|t| serde_json::from_str(&t).ok())
+            .unwrap_or_default()
+    }
+
     pub fn window_target(&self, difficulty: f64) -> u64 {
         let t = (difficulty * f64::from(self.cfg.window)).round().max(1.0) as u64;
         t.max(self.cfg.window_min_work)

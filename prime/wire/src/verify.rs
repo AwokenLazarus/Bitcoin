@@ -156,6 +156,13 @@ pub enum CoinbaseKind {
     /// coinbase used until a coinbaser reply arrives, or its smallest size class. The pool
     /// keeps 100% and owes the window if this finds a block.
     PoolOnly,
+    /// A 0-tx subsidy-only job paying the gateway (and optionally a configured pool fee).
+    /// Accepted as work, not credited to the TIDES window; a find is solo with no debt.
+    EmptySolo,
+    /// A full template paying only the gateway script. The late-coinbaser / type-0 path
+    /// after Prime has handed that gateway its own script as the configure remainder.
+    /// Same accounting as EmptySolo: accepted, not credited, find is solo with no debt.
+    GatewaySolo,
     /// Pays somewhere Prime did not sanction.
     Foreign,
 }
@@ -191,10 +198,40 @@ pub struct Policy<'a> {
     pub now: u32,
     /// Smallest power-of-two difficulty the pool accepts.
     pub min_pot: u8,
+    /// Script this gateway is allowed to take on an empty-solo or late-solo coinbase.
+    /// Prime handed it over in configure; a coinbase paying only this is not Foreign.
+    pub gateway_script: Option<&'a [u8]>,
+    /// Fee on an upgraded empty-solo coinbase (gateway + pool), in basis points. 0 means
+    /// a stock 0%-fee coinbase (gateway only) is the only EmptySolo shape accepted.
+    pub empty_solo_fee_bps: u32,
 }
 
-pub fn classify_coinbase(cb: &Coinbase, pool_script: &[u8], issued: Option<&[Output]>, tolerance: u64) -> CoinbaseKind {
+fn fee_sats(value: u64, bps: u32) -> u64 {
+    ((u128::from(value) * u128::from(bps)) / 10_000) as u64
+}
+
+fn is_gateway(script: &[u8], gateway: Option<&[u8]>) -> bool {
+    gateway.is_some_and(|g| g == script)
+}
+
+/// `job.txn_count == 0` is the spec; some gateways already count the coinbase as 1 and
+/// still send an empty merkle tree. Either is an empty job.
+fn empty_job(job_txn_count: u32, merkle_empty: bool) -> bool {
+    merkle_empty && job_txn_count <= 1
+}
+
+pub fn classify_coinbase(
+    cb: &Coinbase,
+    p: &Policy,
+    subsidy_only: bool,
+    job_txn_count: u32,
+    merkle_empty: bool,
+) -> CoinbaseKind {
+    let pool_script = p.pool_script;
+    let issued = p.issued;
+    let tolerance = p.tolerance;
     let mut pool_paid = false;
+    let mut gateway_paid = false;
     let mut foreign = 0u64;
     for o in &cb.outputs {
         if o.is_op_return() {
@@ -202,6 +239,10 @@ pub fn classify_coinbase(cb: &Coinbase, pool_script: &[u8], issued: Option<&[Out
         }
         if o.script == pool_script {
             pool_paid = true;
+            continue;
+        }
+        if is_gateway(&o.script, p.gateway_script) {
+            gateway_paid = true;
             continue;
         }
         let sanctioned = issued.is_some_and(|iss| iss.iter().any(|i| i.script == o.script));
@@ -268,7 +309,7 @@ pub fn classify_coinbase(cb: &Coinbase, pool_script: &[u8], issued: Option<&[Out
             }
         }
         if !shorted {
-            if usize::from(present) == miners.len() && (pool_paid || !miners.is_empty()) {
+            if usize::from(present) == miners.len() && (pool_paid || gateway_paid || !miners.is_empty()) {
                 return CoinbaseKind::Split;
             }
             if present > 0 {
@@ -279,6 +320,30 @@ pub fn classify_coinbase(cb: &Coinbase, pool_script: &[u8], issued: Option<&[Out
     let only_pool = cb.outputs.iter().all(|o| o.is_op_return() || o.script == pool_script);
     if pool_paid && only_pool {
         return CoinbaseKind::PoolOnly;
+    }
+    let gw = p.gateway_script.unwrap_or(&[]);
+    let only_gateway =
+        gateway_paid && !gw.is_empty() && cb.outputs.iter().all(|o| o.is_op_return() || o.script == gw);
+    if only_gateway {
+        if subsidy_only && empty_job(job_txn_count, merkle_empty) {
+            return CoinbaseKind::EmptySolo;
+        }
+        if !subsidy_only {
+            return CoinbaseKind::GatewaySolo;
+        }
+        return CoinbaseKind::Foreign;
+    }
+    let gateway_and_pool = gateway_paid
+        && pool_paid
+        && !gw.is_empty()
+        && cb.outputs.iter().all(|o| o.is_op_return() || o.script == gw || o.script == pool_script);
+    if gateway_and_pool && p.empty_solo_fee_bps > 0 && subsidy_only && empty_job(job_txn_count, merkle_empty) {
+        let value = cb.total_output_value();
+        let want = fee_sats(value, p.empty_solo_fee_bps);
+        let got = cb.paid_to(pool_script);
+        if got.abs_diff(want) <= tolerance {
+            return CoinbaseKind::EmptySolo;
+        }
     }
     CoinbaseKind::Foreign
 }
@@ -325,7 +390,8 @@ pub fn verify_with_target(
         slot.cb_cache.insert(cb_key, (legacy, parsed));
     }
     let (legacy, parsed) = slot.cb_cache.get(&cb_key).unwrap();
-    let coinbase_kind = classify_coinbase(parsed, p.pool_script, p.issued, p.tolerance);
+    let merkle_empty = job.merkle_branches.is_empty();
+    let coinbase_kind = classify_coinbase(parsed, p, s.subsidy_only(), job.txn_count, merkle_empty);
     if coinbase_kind == CoinbaseKind::Foreign {
         return Err(mining::REJECT_BAD_COINBASE_OUTPUTS);
     }
@@ -587,7 +653,15 @@ mod tests {
     use crate::coinbase::TxOut;
 
     fn policy<'a>(issued: &'a [Output], pool: &'a [u8]) -> Policy<'a> {
-        Policy { pool_script: pool, issued: Some(issued), tolerance: 2, now: NOW, min_pot: 0 }
+        Policy {
+            pool_script: pool,
+            issued: Some(issued),
+            tolerance: 2,
+            now: NOW,
+            min_pot: 0,
+            gateway_script: None,
+            empty_solo_fee_bps: 250,
+        }
     }
 
     fn check(slot: &mut JobSlot, s: &PowSubmit, p: &Policy) -> Result<VerifiedShare, u16> {
@@ -1035,7 +1109,15 @@ mod tests {
         let mut slot = JobSlot::default();
         let mut s = share(0, 0, 0, &outs, &txids(0), 1, [0; 8], [0; 8]);
         grind(&mut slot, &mut s);
-        let p = Policy { pool_script: &pool, issued: None, tolerance: 0, now: NOW, min_pot: 0 };
+        let p = Policy {
+            pool_script: &pool,
+            issued: None,
+            tolerance: 0,
+            now: NOW,
+            min_pot: 0,
+            gateway_script: None,
+            empty_solo_fee_bps: 250,
+        };
         let v = check(&mut slot, &s, &p).expect("pool-only is valid work");
         assert_eq!(v.coinbase_kind, CoinbaseKind::PoolOnly);
         assert_eq!(v.paid_to_pool, VALUE);
@@ -1140,5 +1222,156 @@ mod tests {
         assert_eq!(&block[4..36], &[0x77; 32]);
         assert_eq!(&block[36..68], &v.commitment.merkle_root);
         assert_eq!(&block[block.len() - 60..], &raw[1][..]);
+    }
+
+    fn gw_script() -> Vec<u8> {
+        p2wpkh(0xaa)
+    }
+
+    fn empty_solo_share(outs: &[TxOut]) -> PowSubmit {
+        let mut s = share(0, 0xff, 0, outs, &[], 1, [0; 8], [0; 8]);
+        s.flags |= mining::FLAG_SUBSIDY_ONLY;
+        s
+    }
+
+    fn solo_policy<'a>(pool: &'a [u8], gw: &'a [u8]) -> Policy<'a> {
+        Policy {
+            pool_script: pool,
+            issued: None,
+            tolerance: 2,
+            now: NOW,
+            min_pot: 0,
+            gateway_script: Some(gw),
+            empty_solo_fee_bps: 250,
+        }
+    }
+
+    #[test]
+    fn empty_solo_gateway_only_is_accepted() {
+        let pool = pool_script();
+        let gw = gw_script();
+        let outs = gateway_outputs(&[], &gw, VALUE);
+        let mut slot = JobSlot::default();
+        let mut s = empty_solo_share(&outs);
+        grind(&mut slot, &mut s);
+        let v = check(&mut slot, &s, &solo_policy(&pool, &gw)).expect("empty-solo");
+        assert_eq!(v.coinbase_kind, CoinbaseKind::EmptySolo);
+        assert_eq!(v.commitment.txcount, 1);
+        assert_eq!(v.paid_to_pool, 0);
+    }
+
+    #[test]
+    fn empty_solo_gateway_plus_fee_is_accepted() {
+        let pool = pool_script();
+        let gw = gw_script();
+        let fee = fee_sats(VALUE, 250);
+        let outs = vec![
+            crate::coinbase::TxOut { value: VALUE - fee, script: gw.clone() },
+            crate::coinbase::TxOut { value: fee, script: pool.clone() },
+            crate::coinbase::TxOut { value: 0, script: {
+                let mut wc = vec![0x6a, 0x24, 0xaa, 0x21, 0xa9, 0xed];
+                wc.extend_from_slice(&[0x76; 32]);
+                wc
+            } },
+        ];
+        let mut slot = JobSlot::default();
+        let mut s = empty_solo_share(&outs);
+        grind(&mut slot, &mut s);
+        let v = check(&mut slot, &s, &solo_policy(&pool, &gw)).expect("empty-solo + fee");
+        assert_eq!(v.coinbase_kind, CoinbaseKind::EmptySolo);
+        assert_eq!(v.paid_to_pool, fee);
+    }
+
+    #[test]
+    fn empty_solo_wrong_fee_is_foreign() {
+        let pool = pool_script();
+        let gw = gw_script();
+        let fee = fee_sats(VALUE, 50); // TIDES fee, not the 250 bps solo fee
+        let outs = vec![
+            crate::coinbase::TxOut { value: VALUE - fee, script: gw.clone() },
+            crate::coinbase::TxOut { value: fee, script: pool.clone() },
+            crate::coinbase::TxOut { value: 0, script: {
+                let mut wc = vec![0x6a, 0x24, 0xaa, 0x21, 0xa9, 0xed];
+                wc.extend_from_slice(&[0x76; 32]);
+                wc
+            } },
+        ];
+        let mut slot = JobSlot::default();
+        let mut s = empty_solo_share(&outs);
+        grind(&mut slot, &mut s);
+        assert_eq!(check(&mut slot, &s, &solo_policy(&pool, &gw)), Err(mining::REJECT_BAD_COINBASE_OUTPUTS));
+    }
+
+    #[test]
+    fn gateway_script_on_a_full_job_is_gateway_solo() {
+        let pool = pool_script();
+        let gw = gw_script();
+        let outs = gateway_outputs(&[], &gw, VALUE);
+        let mut slot = JobSlot::default();
+        let mut s = share(0, 0, 0, &outs, &txids(3), 1, [0; 8], [0; 8]);
+        grind(&mut slot, &mut s);
+        let v = check(&mut slot, &s, &solo_policy(&pool, &gw)).expect("gateway-solo full");
+        assert_eq!(v.coinbase_kind, CoinbaseKind::GatewaySolo);
+        assert!(v.commitment.txcount > 1);
+    }
+
+    #[test]
+    fn unupgraded_empty_pool_only_stays_pool_only() {
+        let pool = pool_script();
+        let gw = gw_script();
+        let outs = gateway_outputs(&[], &pool, VALUE);
+        let mut slot = JobSlot::default();
+        let mut s = empty_solo_share(&outs);
+        grind(&mut slot, &mut s);
+        let v = check(&mut slot, &s, &solo_policy(&pool, &gw)).expect("unupgraded empty");
+        assert_eq!(v.coinbase_kind, CoinbaseKind::PoolOnly);
+        assert_eq!(v.paid_to_pool, VALUE);
+    }
+
+    #[test]
+    fn full_pool_only_stays_pool_only_the_968440_invariant() {
+        let pool = pool_script();
+        let gw = gw_script();
+        let outs = gateway_outputs(&[], &pool, VALUE);
+        let mut slot = JobSlot::default();
+        let mut s = share(0, 0, 0, &outs, &txids(4), 1, [0; 8], [0; 8]);
+        grind(&mut slot, &mut s);
+        let v = check(&mut slot, &s, &solo_policy(&pool, &gw)).expect("full pool-only");
+        assert_eq!(v.coinbase_kind, CoinbaseKind::PoolOnly);
+        assert!(v.commitment.txcount > 1);
+    }
+
+    #[test]
+    fn unknown_script_on_empty_is_still_foreign() {
+        let pool = pool_script();
+        let gw = gw_script();
+        let stranger = p2wpkh(0xee);
+        let outs = gateway_outputs(&[], &stranger, VALUE);
+        let mut slot = JobSlot::default();
+        let mut s = empty_solo_share(&outs);
+        grind(&mut slot, &mut s);
+        assert_eq!(check(&mut slot, &s, &solo_policy(&pool, &gw)), Err(mining::REJECT_BAD_COINBASE_OUTPUTS));
+    }
+
+    #[test]
+    fn split_with_remainder_on_gateway_is_still_split() {
+        let pool = pool_script();
+        let gw = gw_script();
+        let iss = split();
+        let paid: u64 = iss.iter().map(|o| o.sats).sum();
+        let mut outs: Vec<crate::coinbase::TxOut> =
+            iss.iter().map(|o| crate::coinbase::TxOut { value: o.sats, script: o.script.clone() }).collect();
+        outs.push(crate::coinbase::TxOut { value: VALUE - paid, script: gw.clone() });
+        let mut wc = vec![0x6a, 0x24, 0xaa, 0x21, 0xa9, 0xed];
+        wc.extend_from_slice(&[0x76; 32]);
+        outs.push(crate::coinbase::TxOut { value: 0, script: wc });
+        let mut slot = JobSlot::default();
+        let mut s = share(0, 4, 1, &outs, &txids(2), 1, [0; 8], [0; 8]);
+        grind(&mut slot, &mut s);
+        let mut p = policy(&iss, &pool);
+        p.gateway_script = Some(&gw);
+        let v = check(&mut slot, &s, &p).expect("remainder to gateway");
+        assert_eq!(v.coinbase_kind, CoinbaseKind::Split);
+        assert_eq!(v.paid_to_pool, 0);
     }
 }

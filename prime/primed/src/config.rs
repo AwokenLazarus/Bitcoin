@@ -43,6 +43,21 @@ pub struct Config {
     pub min_payout: u64,
     #[serde(default)]
     pub fee_bps: u32,
+    /// Fee on an upgraded empty-solo coinbase (gateway + pool), basis points. Default 250
+    /// (2.50%), matching the dedicated solo ports. Stock gateways without a fee output
+    /// still classify as EmptySolo at 0% via the script-flip path.
+    #[serde(default = "d_empty_solo_fee")]
+    pub empty_solo_fee_bps: u32,
+    /// How a stock gateway's *full* pool-only job is treated after Prime has seen one.
+    /// `owe` (default): configure(pool) with each coinbaser so they pool-mine the split
+    /// until the next tip. `gateway-solo`: leave them on their own script so those jobs
+    /// become gateway-solo with no debt.
+    #[serde(default = "d_owe")]
+    pub stock_full_pool_only: String,
+    /// Test hook: sleep this long before answering a coinbaser, so a stock gateway's
+    /// 5 s fetch times out. 0 (default) is production.
+    #[serde(default)]
+    pub coinbaser_delay_ms: u64,
     /// Public house-stratum fee. 0 means use `fee_bps` (same rate for everyone).
     #[serde(default)]
     pub stratum_fee_bps: u32,
@@ -156,6 +171,12 @@ fn d_max_connections_per_ip() -> u32 {
 fn d_session_coinbase_budget() -> usize {
     4 << 20
 }
+fn d_empty_solo_fee() -> u32 {
+    250
+}
+fn d_owe() -> String {
+    "owe".into()
+}
 
 impl Config {
     pub fn load(path: &Path) -> Result<Self, String> {
@@ -190,6 +211,13 @@ impl Config {
         }
         if c.session_coinbase_budget < 64 * 1024 {
             return Err("session-coinbase-budget must be at least 65536 bytes (one huge coinbase class)".into());
+        }
+        if c.empty_solo_fee_bps > 10_000 {
+            return Err("empty-solo-fee-bps cannot exceed 10000".into());
+        }
+        match c.stock_full_pool_only.as_str() {
+            "owe" | "gateway-solo" => {}
+            other => return Err(format!("stock-full-pool-only must be owe or gateway-solo, not {other:?}")),
         }
         if c.key_file.is_none() {
             // A data dir left by lazarus-prime keeps its identity: same key file, same pubkey.

@@ -210,6 +210,11 @@ pub fn build(shared: &Shared) -> Value {
             // expected; `pool_only_full_jobs` is the one that should be zero.
             "pool_only_shares": t.pool_only_shares.load(Ordering::Relaxed),
             "pool_only_full_jobs": t.pool_only_full_jobs.load(Ordering::Relaxed),
+            "solo_empty_shares": t.solo_empty_shares.load(Ordering::Relaxed),
+            "solo_empty_work": t.solo_empty_work.load(Ordering::Relaxed),
+            "solo_full_shares": t.solo_full_shares.load(Ordering::Relaxed),
+            "solo_full_work": t.solo_full_work.load(Ordering::Relaxed),
+            "remainder_to_gateway_sats": t.remainder_to_gateway_sats.load(Ordering::Relaxed),
             "block_candidates": found_total,
             "blocks_submitted": t.blocks_submitted.load(Ordering::Relaxed),
             "connections": t.connections.load(Ordering::Relaxed),

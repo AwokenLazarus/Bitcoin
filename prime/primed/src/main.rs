@@ -272,6 +272,7 @@ fn run(cfg: Config) -> i32 {
         started_ts: now(),
         next_client_id: AtomicU64::new(1),
         coinbaser_base: Mutex::new(None),
+        gateway_payouts: Mutex::new(Shared::load_gateway_payouts(&cfg.data_dir)),
         cfg,
     });
     log::info!("pool pubkey {}", shared.pool.public_hex());
