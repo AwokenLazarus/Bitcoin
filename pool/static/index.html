@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Lazarus Pool — Bitcoin mining, paid in the coinbase</title>
-<meta name="description" content="Lazarus Pool mines Bitcoin. Every block pays miners directly in its coinbase by TIDES window share. 0.5% fee through your own DATUM gateway, 2% on the public stratum.">
+<meta name="description" content="Lazarus Pool mines Bitcoin. Every block pays miners directly in its coinbase by TIDES window share. 0% fee through your own DATUM gateway, 2% on the public stratum.">
 <meta name="theme-color" content="#16130f">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -50,7 +50,7 @@
       <div class="hero-copy">
         <p class="eyebrow">Bitcoin · TIDES · <i>Proverbs 11:1</i></p>
         <h1 id="hero-title">Mine Bitcoin.<br><em>Get paid in the block itself.</em></h1>
-        <p class="hero-lede">No pool balance, no withdrawals. When a block is found, its coinbase pays every miner in the TIDES window directly — <span id="lede-fee-datum">0.5%</span> through your own DATUM gateway, <span id="lede-fee-stratum">2%</span> on the public stratum. The cheaper fee is the one we want you on.</p>
+        <p class="hero-lede">No pool balance, no withdrawals, direct to you on chain. Build your own blocks and pay 0% fees with DATUM.</p>
         <div class="hero-actions">
           <a class="btn" href="#connect">Connect a miner</a>
           <a class="btn ghost" href="#dashboard">Look up your stats</a>
@@ -75,7 +75,7 @@
         <div class="fee-lede-rates">
           <a class="fee-lede-rate reco" href="#connect">
             <small>Your DATUM gateway</small>
-            <b id="top-fee-datum">0.5%</b>
+            <b id="top-fee-datum">0%</b>
             <span>Keep 99.5% · you pick the transactions</span>
           </a>
           <a class="fee-lede-rate" href="#connect">
@@ -199,7 +199,7 @@
         <div class="fee-card reco" data-tab="tab-datum" role="button" tabindex="0">
           <p class="fee-kicker">Recommended · lowest fee</p>
           <p class="fee-title">Your own DATUM gateway</p>
-          <p class="fee-rate"><span id="fee-datum">0.5%</span></p>
+          <p class="fee-rate"><span id="fee-datum">0%</span></p>
           <p class="fee-copy">Your node builds the block and picks the transactions. Lazarus only dictates the coinbase split and verifies your shares.</p>
           <p class="fee-cta">Setup below</p>
         </div>
@@ -255,7 +255,7 @@
             <span class="tab-sub">Point and go · our node builds the block</span>
           </button>
           <button class="tab" role="tab" type="button" id="tab-datum" aria-controls="pane-datum" aria-selected="false">
-            <span class="tab-title">Your own DATUM gateway <span class="tab-fee reco" id="tab-fee-datum">0.5%</span></span>
+            <span class="tab-title">Your own DATUM gateway <span class="tab-fee reco" id="tab-fee-datum">0%</span></span>
             <span class="tab-sub">Your node builds the block · we only split the coinbase</span>
           </button>
           <button class="tab" role="tab" type="button" id="tab-solo" aria-controls="pane-solo" aria-selected="false" hidden>
@@ -286,7 +286,7 @@
             <dd class="copyable"><span class="mono" id="datum-port">28915</span><button type="button" class="copy-btn" data-copy-from="datum-port" aria-label="Copy DATUM port" title="Copy"></button></dd>
             <dt>Pubkey</dt>
             <dd class="copyable"><span class="mono pubkey" id="datum-pubkey">—</span><button type="button" class="copy-btn" data-copy-from="datum-pubkey" aria-label="Copy pool pubkey" title="Copy"></button></dd>
-            <dt>Fee</dt><dd><span id="datum-fee-line">0.5%</span> of your window share — <span id="fee-ratio">four times</span> lower than the public stratum</dd>
+            <dt>Fee</dt><dd><span id="datum-fee-line">0%</span> of your window share — <span id="fee-ratio">no cut versus</span> the public stratum</dd>
           </dl>
           <div class="section-head fold-head">
             <h3 class="kicker"><code>stratum</code> + <code>datum</code> sections of <code>datum_gateway_config.json</code></h3>
@@ -571,6 +571,6 @@
   </div>
 </footer>
 
-<script src="/static/pool.js?v=ui3"></script>
+<script src="/static/pool.js?v=kpi1"></script>
 </body>
 </html>

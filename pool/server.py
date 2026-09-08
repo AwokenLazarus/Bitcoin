@@ -393,7 +393,7 @@ def fetch_prime_window():
         if not by[ident]["fee_path"]:
             by[ident]["fee_path"] = "stratum" if by[ident]["stratum_work"] * 2 > work else "datum"
     try:
-        stratum_fee_bps = int(pool.get("stratum_fee_bps") or pool.get("fee_bps") or 0)
+        stratum_fee_bps = _bps_or(pool.get("stratum_fee_bps"), _bps_or(pool.get("fee_bps"), 0))
     except (TypeError, ValueError):
         stratum_fee_bps = 0
     meta = {
@@ -740,14 +740,21 @@ def persist_prime_miners(by, ts):
         )
 
 
+def _bps_or(val, fallback):
+    """Basis points from primed. 0 is a real fee (free), not 'missing'."""
+    if val is None or val == "":
+        return int(round(fallback))
+    return int(val)
+
+
 def _fee_percent_for_path(fee_path):
     """Fee rate (percent) primed applies to work that arrived on `fee_path`."""
     pool = prime_doc().get("pool") or {}
     stratum = str(fee_path or "").lower() == "stratum"
     try:
         if stratum:
-            return int(pool.get("stratum_fee_bps") or pool.get("fee_bps") or round(STRATUM_FEE * 100)) / 100.0
-        return int(pool.get("fee_bps") or round(POOL_FEE * 100)) / 100.0
+            return _bps_or(pool.get("stratum_fee_bps"), _bps_or(pool.get("fee_bps"), STRATUM_FEE * 100)) / 100.0
+        return _bps_or(pool.get("fee_bps"), POOL_FEE * 100) / 100.0
     except (TypeError, ValueError):
         return STRATUM_FEE if stratum else POOL_FEE
 
@@ -1602,18 +1609,50 @@ def pool_output_parts(pool_addr, on_chain_btc, pb, reward_btc=None):
     return 0.0, total
 
 
+_cb_split_table = {"ok": False}
+
+
+def _init_cb_splits_table():
+    if _cb_split_table["ok"] or NO_WRITE:
+        return
+    try:
+        db(
+            "CREATE TABLE IF NOT EXISTS coinbase_splits (hash TEXT, address TEXT, btc REAL, PRIMARY KEY (hash, address))",
+            write=True,
+        )
+        _cb_split_table["ok"] = True
+    except Exception as e:
+        print("coinbase_splits table", e, flush=True)
+
+
 def coinbase_splits(blockhash):
-    """Address -> BTC actually paid in that block's coinbase."""
+    """Address -> BTC actually paid in that block's coinbase.
+
+    A coinbase never changes, so the split is kept in sqlite once fetched: a miner's
+    lifetime Paid/Immature walks every block the pool found, which would otherwise be one
+    getblock per block per restart."""
     if not blockhash:
         return None
     if blockhash in _cb_split_cache:
         return _cb_split_cache[blockhash]
+    _init_cb_splits_table()
+    try:  # read-only replicas share the writer's table
+        rows = db("SELECT address, btc FROM coinbase_splits WHERE hash=?", (blockhash,)) or []
+    except Exception:
+        rows = []
+    if rows:
+        by = {r["address"]: float(r["btc"] or 0) for r in rows}
+        _cb_split_cache[blockhash] = by
+        return by
     blk = rpc("getblock", [blockhash, 2])
     if not blk:
         return None
     tx0 = (blk.get("tx") or [None])[0] or {}
     by = splits_from_vouts(tx0.get("vout"))
     _cb_split_cache[blockhash] = by
+    if _cb_split_table["ok"] and by and int(blk.get("confirmations") or 0) >= 6:
+        for addr, amt in by.items():
+            db("INSERT OR REPLACE INTO coinbase_splits(hash,address,btc) VALUES(?,?,?)", (blockhash, addr, float(amt)), write=True)
     return by
 
 
@@ -2077,9 +2116,28 @@ def loop():
             mature_rounds()
             refresh_gateway_identities()
             learn_gateway_tags()
+            warm_coinbase_splits()
         except Exception as e:
             print("scan", e, flush=True)
         time.sleep(max(0.5, 10 - (time.time() - t0)))
+
+
+def warm_coinbase_splits(budget=8):
+    """Fetch (and persist) the coinbase split of a few found blocks per pass, so a miner's
+    lifetime Paid/Immature never has to walk the whole list against the node on demand."""
+    if NO_WRITE:
+        return
+    rows = db("SELECT hash FROM found_blocks ORDER BY height DESC") or []
+    n = 0
+    for r in rows:
+        h = r["hash"]
+        if not h or h in _cb_split_cache:
+            continue
+        if coinbase_splits(h) is None:
+            break
+        n += 1
+        if n >= budget:
+            break
 
 
 _node_info_cache = {"ts": 0.0, "doc": None}
@@ -2129,6 +2187,7 @@ def mempool_blocks():
 # embeds however fast those blocks arrived. Mixing that nethash with a 600s target
 # spacing double-counts a hot network: TTF comes out too long and luck too high.
 POW2_32 = float(1 << 32)
+RETARGET_BLOCKS = 2016
 _luck_cache = {
     "ts": 0.0,
     "expected": None,
@@ -2136,8 +2195,13 @@ _luck_cache = {
     "full_ts": 0.0,
     "last_ts": 0,
     "last_hs": 0.0,
-    "hashes": 0.0,
+    "sum_expected": 0.0,
+    "since_ts": 0,
+    "epoch_sig": None,
 }
+# Difficulty at each retarget height, from the node's block headers. Immutable once a
+# boundary is buried, so it is kept for the life of the process.
+_epoch_cache = {"by_height": {}, "list": [], "list_ts": 0.0, "list_first": None, "list_tip_epoch": None}
 
 
 def hashes_per_block(difficulty):
@@ -2148,59 +2212,148 @@ def hashes_per_block(difficulty):
     return d * POW2_32 if d > 0 else 0.0
 
 
-def _luck_add_rows(rows, last_ts, last_hs, hashes):
+def _epoch_header(height):
+    """(time, difficulty) of the block at `height`, or None when the node cannot answer."""
+    hit = _epoch_cache["by_height"].get(height)
+    if hit:
+        return hit
+    h = rpc("getblockhash", [int(height)])
+    if not h:
+        return None
+    bh = rpc("getblockheader", [h])
+    if not bh or bh.get("difficulty") is None:
+        return None
+    out = (int(bh.get("time") or 0), float(bh["difficulty"]))
+    _epoch_cache["by_height"][height] = out
+    return out
+
+
+def difficulty_epochs(first_ts, tip_height):
+    """Sorted [(start_ts, difficulty)] for every retarget epoch from the one containing
+    `first_ts` to the tip. Empty when the node is unreachable (caller falls back to the
+    current difficulty for everything).
+
+    Difficulty on this chain has moved by whole multiples between retargets (the fork
+    reset it and it has been climbing 4× a step since), so charging a week-old hash at
+    today's difficulty understates expected blocks by an order of magnitude.
+    """
+    try:
+        tip = int(tip_height or 0)
+    except (TypeError, ValueError):
+        tip = 0
+    if tip <= 0:
+        return _epoch_cache["list"]
+    tip_epoch = tip // RETARGET_BLOCKS
+    now = time.time()
+    if (
+        _epoch_cache["list"]
+        and _epoch_cache["list_tip_epoch"] == tip_epoch
+        and _epoch_cache["list_first"] is not None
+        and _epoch_cache["list_first"] <= int(first_ts or 0)
+        and now - _epoch_cache["list_ts"] < 300
+    ):
+        return _epoch_cache["list"]
+    epochs = []
+    h = tip_epoch * RETARGET_BLOCKS
+    while h >= 0:
+        hdr = _epoch_header(h)
+        if hdr is None:
+            return _epoch_cache["list"]  # node hiccup: keep whatever we had
+        epochs.append((hdr[0], hdr[1]))
+        # Stop once this epoch started before the first sample; it covers the rest.
+        if hdr[0] <= int(first_ts or 0) or h == 0:
+            break
+        h -= RETARGET_BLOCKS
+    epochs.sort()
+    _epoch_cache.update({"list": epochs, "list_ts": now, "list_first": int(first_ts or 0), "list_tip_epoch": tip_epoch})
+    return epochs
+
+
+def _difficulty_at(epochs, ts, fallback):
+    d = None
+    for start, diff in epochs:
+        if ts >= start:
+            d = diff
+        else:
+            break
+    return d if d is not None else fallback
+
+
+def _luck_add_rows(rows, last_ts, last_hs, total, epochs, fallback_diff):
+    """Accumulate expected blocks: Σ hashrate·dt / (difficulty(t)·2^32), difficulty
+    taken from the retarget epoch each interval fell in."""
     for r in rows or []:
         ts = int(r["ts"] or 0)
         hs = float(r["hr_ghs"] or 0) * 1e9
         if last_ts:
             dt = ts - last_ts
             if 0 < dt < 3600:
-                hashes += last_hs * dt
+                need = hashes_per_block(_difficulty_at(epochs, last_ts, fallback_diff))
+                if need > 0:
+                    total += last_hs * dt / need
         last_ts, last_hs = ts, hs
-    return last_ts, last_hs, hashes
+    return last_ts, last_hs, total
 
 
-def expected_blocks_from_samples(difficulty):
-    """∫ pool_hashrate dt / (difficulty × 2^32) over pool_samples.
+def expected_blocks_from_samples(difficulty, tip_height=None):
+    """Expected pool blocks over pool_samples: ∫ pool_hashrate dt / (difficulty(t) × 2^32),
+    with difficulty(t) from the chain's retarget history, not just today's value.
 
-    Uses current difficulty for the whole series (a few retargets on this
-    chain). Incremental after the first full pass; a full rescan once an hour
-    so pruned samples cannot inflate luck forever.
+    Returns (expected, since_ts): since_ts is the first sample integrated, so the caller
+    can count found blocks over the same span. Incremental after the first full pass; a
+    full rescan once an hour (samples are pruned at 7 days, so luck is a rolling week).
     """
     need = hashes_per_block(difficulty)
     if need <= 0:
-        return None
+        return None, 0
     now = time.time()
     if now - _luck_cache["ts"] < 30 and _luck_cache["expected"] is not None:
-        return _luck_cache["expected"]
+        return _luck_cache["expected"], _luck_cache["since_ts"]
+    first = db("SELECT MIN(ts) AS t FROM pool_samples", one=True)
+    since_ts = int(first["t"]) if first and first["t"] else 0
+    if since_ts <= 0:
+        return None, 0
+    epochs = difficulty_epochs(since_ts, tip_height)
+    sig = (len(epochs), epochs[0] if epochs else None)
     last_ts = int(_luck_cache.get("last_ts") or 0)
     last_hs = float(_luck_cache.get("last_hs") or 0)
-    hashes = float(_luck_cache.get("hashes") or 0)
+    total = float(_luck_cache.get("sum_expected") or 0)
     full_age = now - float(_luck_cache.get("full_ts") or 0)
-    if last_ts <= 0 or full_age > 3600:
-        last_ts, last_hs, hashes = _luck_add_rows(
-            db("SELECT ts, hr_ghs FROM pool_samples ORDER BY ts") or [], 0, 0.0, 0.0
+    # A fresh epoch list can re-price old intervals (first successful RPC after a start
+    # with the node down), so any change in it forces a full pass.
+    if last_ts <= 0 or full_age > 3600 or sig != _luck_cache.get("epoch_sig") or since_ts != _luck_cache.get("since_ts"):
+        last_ts, last_hs, total = _luck_add_rows(
+            db("SELECT ts, hr_ghs FROM pool_samples ORDER BY ts") or [], 0, 0.0, 0.0, epochs, difficulty
         )
         _luck_cache["full_ts"] = now
     else:
-        last_ts, last_hs, hashes = _luck_add_rows(
+        last_ts, last_hs, total = _luck_add_rows(
             db("SELECT ts, hr_ghs FROM pool_samples WHERE ts > ? ORDER BY ts", (last_ts,)) or [],
             last_ts,
             last_hs,
-            hashes,
+            total,
+            epochs,
+            difficulty,
         )
     if last_ts <= 0:
-        return None
-    expected = hashes / need if need else None
-    _luck_cache["ts"] = now
-    _luck_cache["expected"] = expected
-    _luck_cache["last_ts"] = last_ts
-    _luck_cache["last_hs"] = last_hs
-    _luck_cache["hashes"] = hashes
-    return expected
+        return None, 0
+    _luck_cache.update({
+        "ts": now,
+        "expected": total,
+        "last_ts": last_ts,
+        "last_hs": last_hs,
+        "sum_expected": total,
+        "since_ts": since_ts,
+        "epoch_sig": sig,
+    })
+    return total, since_ts
 
 
-def luck_and_ttf(pool_hr_ghs, net_hs, difficulty, first_ts=None):
+def luck_and_ttf(pool_hr_ghs, net_hs, difficulty, first_ts=None, tip_height=None):
+    """(share, ttf_s, nfound, expected, luck, interval, luck_found, luck_since_ts).
+
+    nfound is every block the pool has found; luck compares only the blocks found
+    inside the span the expected figure integrates (luck_found since luck_since_ts)."""
     pool_hs = float(pool_hr_ghs or 0) * 1e9
     need = hashes_per_block(difficulty)
     net_hs = float(net_hs or 0)
@@ -2211,13 +2364,19 @@ def luck_and_ttf(pool_hr_ghs, net_hs, difficulty, first_ts=None):
     ttf_s = (need / pool_hs) if pool_hs > 0 and need > 0 else None
     found = db("SELECT COUNT(*) AS n FROM found_blocks", one=True)
     nfound = int(found["n"]) if found else 0
-    expected = expected_blocks_from_samples(difficulty)
+    expected, since_ts = expected_blocks_from_samples(difficulty, tip_height)
     if expected is None:
-        elapsed = max(0, int(time.time()) - int(first_ts or time.time()))
+        since_ts = int(first_ts or time.time())
+        elapsed = max(0, int(time.time()) - since_ts)
         expected = (elapsed * pool_hs / need) if need > 0 and pool_hs > 0 else 0.0
-    luck = (nfound / expected * 100.0) if expected and expected > 0.01 else None
+    if since_ts:
+        in_span = db("SELECT COUNT(*) AS n FROM found_blocks WHERE ts >= ?", (since_ts,), one=True)
+        luck_found = int(in_span["n"]) if in_span else nfound
+    else:
+        luck_found = nfound
+    luck = (luck_found / expected * 100.0) if expected and expected > 0.01 else None
     interval = (need / net_hs) if net_hs > 0 and need > 0 else None
-    return share, ttf_s, nfound, expected, luck, interval
+    return share, ttf_s, nfound, expected, luck, interval, luck_found, since_ts
 
 
 OWN_GATEWAY_UA_PREFIX = "lazarus-gateway/"
@@ -2313,7 +2472,7 @@ def prime_summary():
         b["miner_to_pool_sats"] = miner_to_pool
         b["fee_sats"] = max(0, int(b.get("pool_sats") or 0) - miner_to_pool)
     try:
-        fee_bps = int(pool.get("fee_bps") or round(POOL_FEE * 100))
+        fee_bps = _bps_or(pool.get("fee_bps"), POOL_FEE * 100)
     except (TypeError, ValueError):
         fee_bps = int(round(POOL_FEE * 100))
     return {
@@ -2327,7 +2486,7 @@ def prime_summary():
         "tag": pool.get("tag") or COINBASE_TAG,
         "address": pool.get("address") or "",
         "fee_bps": fee_bps,
-        "stratum_fee_bps": int(meta.get("stratum_fee_bps") or fee_bps),
+        "stratum_fee_bps": _bps_or(meta.get("stratum_fee_bps"), fee_bps),
         "min_payout_sats": int(pool.get("min_payout") or 0),
         "advertise": pool.get("advertise") or "",
         "hashrate_ghs": meta.get("hashrate_ghs") or 0,
@@ -2444,7 +2603,7 @@ def pool_payload():
     pool_hr = 0.0
     for m in miners:
         a = m.get("address") or ""
-        if a in seen_addr:
+        if not a or a in seen_addr:
             continue
         seen_addr.add(a)
         credited = float(m.get("credited_hr_ghs") or 0)
@@ -2458,8 +2617,18 @@ def pool_payload():
     net = float(node.get("networkhashps") or 0)
     first = db("SELECT MIN(first_ts) AS t FROM miners", one=True)
     first_ts = first["t"] if first and first["t"] else state.get("ts")
-    share, ttf_s, nfound, expected, luck, interval = luck_and_ttf(
-        pool_hr, net, node.get("difficulty"), first_ts
+    share, ttf_s, nfound, expected, luck, interval, luck_found, luck_since = luck_and_ttf(
+        pool_hr, net, node.get("difficulty"), first_ts, node.get("height")
+    )
+    # Sessions (rigs) vs. distinct payout addresses: the ticker names both. Every public
+    # stratum session is one worker; an address seen only through its own gateway is one
+    # worker too, since Prime cannot see behind that gateway.
+    # Sessions that have not authorized an address yet are not counted (the miners table
+    # skips them too), so this agrees with the rows below it.
+    named = [m for m in miners if m.get("address")]
+    stratum_addrs = {m.get("address") for m in named if (m.get("via") or "stratum") == "stratum"}
+    workers = sum(1 for m in named if (m.get("via") or "stratum") == "stratum") + len(
+        {m.get("address") for m in named if (m.get("via") or "stratum") != "stratum"} - stratum_addrs
     )
     # Daily estimate at the current target (same work units as TTF), not 144 × share.
     # 144 assumes 10-minute blocks; this chain has been running much faster than that.
@@ -2506,7 +2675,7 @@ def pool_payload():
         "port": STRATUM_PORT,
         "pool_hr_ghs": pool_hr,
         "miners_online": online,
-        "workers_online": online,
+        "workers_online": max(workers, online),
         "miners_seen": int(known["n"]) if known else online,
         "shares_accepted": pool_share_totals()[0] or (state.get("shares_acc") or 0),
         "shares_session": state.get("shares_acc") or 0,
@@ -2529,7 +2698,11 @@ def pool_payload():
         "block_interval_seconds": interval,
         "blocks_found": nfound,
         "blocks_expected": expected,
+        # Luck is found / expected over the span the hashrate samples cover (they are kept
+        # for a week), at the difficulty in force when each hash was done.
         "luck_percent": luck,
+        "luck_blocks_found": luck_found,
+        "luck_since_ts": luck_since,
         "subsidy_btc": SUBSIDY,
         "finder_payout_btc": SUBSIDY * (1 - POOL_FEE / 100.0),
         "payout": payout,
@@ -2622,7 +2795,14 @@ def miner_payload(address):
     share = (hr / net_ghs) if net_ghs else 0
     miner_need = hashes_per_block(node.get("difficulty"))
     miner_hs = float(hr or 0) * 1e9
-    est = ((miner_hs * 86400.0 / miner_need) * SUBSIDY * (1 - POOL_FEE / 100.0)) if miner_need and miner_hs else 0.0
+    # Billed at the rate for the path this address's window work is on (2% public
+    # stratum, 0.5% own gateway), not the DATUM rate for everyone.
+    path_fee = _fee_percent_for_path(
+        pinfo.get("fee_path") or ("stratum" if any((m.get("via") or "stratum") == "stratum" for m in recs) else "datum")
+    )
+    est = ((miner_hs * 86400.0 / miner_need) * SUBSIDY * (1 - path_fee / 100.0)) if miner_need and miner_hs else 0.0
+    # Same denominator as the headline hashrate (Prime's pool_ghs), so "% of pool"
+    # agrees with the ticker instead of a second sum over online sessions.
     pool_hr = 0.0
     _seen = set()
     for m in online_miners():
@@ -2633,10 +2813,15 @@ def miner_payload(address):
         g = float((state.get("gateway_hr") or {}).get(a) or 0)
         c = float(m.get("credited_hr_ghs") or 0)
         pool_hr += c if c > 1e-6 else (g if g > 1e-6 else float(m.get("hr_ghs") or 0))
+    _lby2, _lpool2 = _ledger_hashrate()
+    if _lpool2 > 1e-9:
+        pool_hr = _lpool2
     pool_hr = pool_hr or 1e-9
-    contrib = hr / pool_hr if pool_hr else 0
+    contrib = min(1.0, hr / pool_hr) if pool_hr else 0
     tip = rpc("getblockcount") or 0
-    fb_rows = db("SELECT height, hash, ts FROM found_blocks ORDER BY height DESC LIMIT 50") or []
+    # Every block the pool has found: Paid / Immature are lifetime totals. The list
+    # itself is trimmed to the most recent 50 below.
+    fb_rows = db("SELECT height, hash, ts FROM found_blocks ORDER BY height DESC") or []
     payouts = []
     paid_btc = 0.0
     immature_btc = 0.0
@@ -2676,6 +2861,8 @@ def miner_payload(address):
             immature_btc += amt
         else:
             paid_btc += amt
+    if used_chain and payouts is not None:
+        payouts = payouts[:50]
     if not used_chain:
         payouts = db(
             "SELECT r.height, r.hash, r.closed_ts AS ts, p.amount_btc AS miner_btc, p.share, p.work, p.status, r.status AS round_status "
@@ -2773,9 +2960,10 @@ def miner_payload(address):
         "ttf_seconds": ttf_s,
         # The exact output primed would put in the next coinbase for this address, when it
         # has one; otherwise the proportional estimate.
-        "block_payout_btc": (int(pinfo.get("window_sats") or 0) / 1e8) if pinfo.get("window_sats") else SUBSIDY * (1 - POOL_FEE / 100.0) * round_share,
+        "block_payout_btc": (int(pinfo.get("window_sats") or 0) / 1e8) if pinfo.get("window_sats") else SUBSIDY * (1 - path_fee / 100.0) * round_share,
         "fee_path": pinfo.get("fee_path") or "",
-        "fee_percent_path": _fee_percent_for_path(pinfo.get("fee_path")),
+        "fee_percent_path": path_fee,
+        "est_fee_percent": path_fee,
         "gateway_name": "",
         "paid_btc": paid_btc,
         "unpaid_btc": 0.0,

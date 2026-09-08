@@ -87,7 +87,7 @@
 
   // Fee schedule as primed reports it: one rate for work through a miner's own DATUM
   // gateway, another for our public stratum. Filled from /api/pool on every refresh.
-  const fees = { datum: 0.5, stratum: 2.0 };
+  const fees = { datum: 0, stratum: 2.0 };
   const feePct = (x) => (Number.isFinite(Number(x)) ? Number(x).toLocaleString(undefined, { maximumFractionDigits: 2 }) + "%" : "\u2014");
   const feeForPath = (path) => (String(path || "").toLowerCase() === "stratum" ? fees.stratum : fees.datum);
   // Which fee schedule an address is on, as a small labelled pill.
@@ -331,9 +331,11 @@
       if (Number.isFinite(Number(p.fees.stratum_percent))) fees.stratum = Number(p.fees.stratum_percent);
     }
     const setText = (id, t) => { const e = $(id); if (e) e.textContent = t; };
-    for (const id of ["fee-datum", "tab-fee-datum", "datum-fee-line", "top-fee-datum", "lede-fee-datum"]) setText(id, feePct(fees.datum));
-    for (const id of ["fee-stratum", "tab-fee-stratum", "stratum-fee-line", "pillar-stratum-fee", "top-fee-stratum", "lede-fee-stratum"]) setText(id, feePct(fees.stratum));
-    if (fees.datum > 0 && fees.stratum > fees.datum) {
+    for (const id of ["fee-datum", "tab-fee-datum", "datum-fee-line", "top-fee-datum"]) setText(id, feePct(fees.datum));
+    for (const id of ["fee-stratum", "tab-fee-stratum", "stratum-fee-line", "pillar-stratum-fee", "top-fee-stratum"]) setText(id, feePct(fees.stratum));
+    if (fees.datum === 0 && fees.stratum > 0) {
+      setText("fee-ratio", "no cut versus");
+    } else if (fees.datum > 0 && fees.stratum > fees.datum) {
       const r = fees.stratum / fees.datum;
       const words = { 2: "twice", 4: "four times", 5: "five times", 10: "ten times" }[r] || (Number.isInteger(r) ? r + " times" : r.toFixed(1) + "×");
       setText("fee-ratio", words);
@@ -345,9 +347,13 @@
     const net = p.network_hr_hs ? (p.network_hr_hs / 1e15).toFixed(2) + " PH/s" : "\u2014";
     const luck = p.luck_percent == null ? "\u2014" : p.luck_percent.toFixed(0) + "%";
     const expected = Number(p.blocks_expected);
+    // Luck is measured over the span the hashrate samples cover (a rolling week), at the
+    // difficulty in force when each hash was done; the headline count is all-time.
+    const luckFound = Number.isFinite(Number(p.luck_blocks_found)) ? Number(p.luck_blocks_found) : (p.blocks_found ?? 0);
+    const luckSince = Number(p.luck_since_ts) > 0 ? new Date(Number(p.luck_since_ts) * 1000).toLocaleDateString([], { month: "short", day: "numeric" }) : "";
     const luckSub = p.luck_percent == null
       ? "luck pending"
-      : luck + " luck" + (Number.isFinite(expected) && expected > 0 ? " · " + (p.blocks_found ?? 0) + " / " + expected.toFixed(1) + " expected" : "");
+      : luck + " luck" + (Number.isFinite(expected) && expected > 0 ? " · " + luckFound + " / " + expected.toFixed(1) + " expected" + (luckSince && luckFound !== (p.blocks_found ?? 0) ? " since " + luckSince : "") : "");
     const shareSub = expPct((p.pool_share || 0) * 100) + "% of live hashrate"
       + (p.block_interval_seconds ? " · ~" + dur(p.block_interval_seconds) + " blocks" : "");
     const nblocks = Number(p.window_multiple) || 8;
@@ -359,11 +365,25 @@
     const remote = Number(pr.gateways_remote) || 0;
     const thsDatum = thsDay(p, fees.datum);
     const thsStratum = thsDay(p, fees.stratum);
+    // Rigs (stratum sessions, plus one per own-gateway address) vs. distinct payout addresses.
+    const workers = Number(p.workers_online) || Number(p.miners_online) || 0;
+    const addrs = Number(p.miners_online) || 0;
+    const hrSub = workers + " worker" + (workers === 1 ? "" : "s") + (addrs && addrs !== workers ? " · " + addrs + " address" + (addrs === 1 ? "" : "es") : "") + " online";
+    // Lifetime accepted shares survive Prime restarts; the per-run count is what the reject
+    // rate is measured on.
+    const life = Number(tot.lifetime_shares) || 0;
+    const run = Number(tot.shares_accepted) || 0;
+    const sharesMain = life > run ? life : run;
+    const sharesSub = !pr.reachable
+      ? "Prime unreachable"
+      : life > run
+        ? "accepted, lifetime · " + num(run) + " this Prime run · " + rejPct
+        : "verified by Prime since it started · " + rejPct;
     const cells = [
-      ["1 TH/s yields (est.)", thsDatum != null ? btc(thsDatum) + " BTC/Day" + money(thsDatum) : "\u2014", "estimate vs current network · DATUM " + feePct(fees.datum) + " · " + (thsStratum != null ? btc(thsStratum) + " BTC/Day" + money(thsStratum) : "\u2014") + " on stratum"],
-      ["Hashrate", fmtHr(p.pool_hr_ghs), (p.miners_online || 0) + " worker" + (p.miners_online === 1 ? "" : "s") + " online"],
+      ["1 TH/s yields (est.)", thsDatum != null ? btc(thsDatum) + " BTC/Day" + money(thsDatum) : "\u2014", "at current difficulty, base subsidy · DATUM " + feePct(fees.datum) + " · " + (thsStratum != null ? btc(thsStratum) + " BTC/Day" + money(thsStratum) : "\u2014") + " on stratum"],
+      ["Hashrate", fmtHr(p.pool_hr_ghs), hrSub],
       ["Miners", String(inWindow || p.miners_online || 0), inWindow ? "holding work in the window · " + (p.miners_seen ?? "\u2014") + " ever" : (p.miners_seen ?? "\u2014") + " ever"],
-      ["Shares", num(tot.shares_accepted), pr.reachable ? "verified by Prime since start · " + rejPct : "Prime unreachable"],
+      ["Shares", num(sharesMain), sharesSub],
       ["Window", fillTxt + " full", nblocks + " network-blocks of work"],
       ["Gateways", String(gws), gws ? (remote ? remote + " remote + our stratum" : "our public stratum") + " · Prime up " + dur(pr.uptime_s) : "none connected"],
       ["To block", dur(p.ttf_seconds), shareSub],
@@ -1301,7 +1321,7 @@
           <div><dt>This session</dt><dd>${sessCell(m.via, m.shares_session)}<small>${isPrimePath(m.via) ? "own gateway · Prime credits the window directly" : "public stratum only · resets on reconnect"}</small></dd></div>
           <div><dt>This window</dt><dd>${winShareCell(m)}<small>${Number(m.window_shares) > 0 ? num(m.window_work) + " work still in the TIDES window" : "no accepted shares in the current window"}</small></dd></div>
           <div><dt>Payout window</dt><dd>${wp.toFixed(1)}%<small>${num(m.window_work)} work · what the next block pays</small></dd></div>
-          <div><dt>Est. / day</dt><dd>${btc(m.est_btc_day)}${money(m.est_btc_day)}<small>if the window already matched this hashrate</small></dd></div>
+          <div><dt>Est. / day</dt><dd>${btc(m.est_btc_day)}${money(m.est_btc_day)}<small>at current difficulty, after the ${feePct(m.est_fee_percent != null ? m.est_fee_percent : (m.fee_percent_path != null ? m.fee_percent_path : feeForPath(m.fee_path)))} fee · once the window matches this hashrate</small></dd></div>
           <div><dt>Next block</dt><dd>${btc(m.block_payout_btc)}${money(m.block_payout_btc)}<small>your output in the coinbase Prime dictates now${m.fee_path ? " · your window work is on the " + feePct(m.fee_percent_path != null ? m.fee_percent_path : feeForPath(m.fee_path)) + " " + (m.fee_path === "stratum" ? "public-stratum" : "own-gateway") + " rate" : ""}</small></dd></div>
           <div><dt>Immature</dt><dd>${btc(m.immature_btc)}${money(m.immature_btc)}<small>in a coinbase, under 100 confs</small></dd></div>
           <div><dt>Paid</dt><dd>${btc(m.paid_btc)}${money(m.paid_btc)}<small>in a coinbase, 100+ confs</small></dd></div>
@@ -1364,7 +1384,7 @@
         ["Address", "Worker", "Path · fee", "Hashrate", "Session", "Accepted", "Window shares", "Window %", "Next block", "Last share"],
         online.map((m, i) => [
           `<a href="#${esc(m.address)}">${short(m.address)}</a>`,
-          m.worker === "window" ? '<span class="faint">via gateway</span>' : esc(m.worker || "\u2014"),
+          m.worker === "window" ? '<span class="faint">via gateway</span>' : (Number(m.sessions) > 1 ? `${num(m.sessions)} workers` : esc(m.worker || "\u2014")),
           pathPill(m.fee_path, m.via, m.gateway_name),
           fmtHr(firstOf(m, i) ? (m.credited_hr_ghs || m.hr_ghs) : m.hr_ghs),
           sessCell(m.via, m.shares_session),
@@ -1400,7 +1420,9 @@
         "Every address we have seen is hashing right now"
       );
       relayedTable(miners.relayed, miners.overflow);
-      if ($("online-count")) $("online-count").textContent = online.length ? `${onlineAddrs.size} address${onlineAddrs.size === 1 ? "" : "es"} · ${online.length} worker${online.length === 1 ? "" : "s"}` : "";
+      // Rows are one per address; each carries how many sessions (rigs) it rolled up.
+      const onlineWorkers = online.reduce((a, m) => a + (Number(m.sessions) || 1), 0);
+      if ($("online-count")) $("online-count").textContent = online.length ? `${onlineAddrs.size} address${onlineAddrs.size === 1 ? "" : "es"} · ${onlineWorkers} worker${onlineWorkers === 1 ? "" : "s"}` : "";
       if ($("seen-count")) {
         const holding = seenAll.filter((m) => m.window_sats > 0).length;
         $("seen-count").textContent = seenAll.length
