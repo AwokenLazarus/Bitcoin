@@ -57,6 +57,11 @@ pub struct ClientInfo {
     pub coinbasers: u64,
     pub block_candidates: u64,
     pub last_reject: Option<&'static str>,
+    /// Operator name from the DATUM secondary coinbase tag (`mining.pool_tag_secondary`),
+    /// learned from a verified share. Empty until a share carries one, and for the house
+    /// gateway which leaves it blank.
+    #[serde(default)]
+    pub secondary_tag: String,
     /// Accepted shares whose coinbase paid only the pool script. Work the window earns
     /// nothing from if it finds a block, so a gateway sitting above zero here is publishing
     /// jobs without the split and wants looking at before it gets lucky.

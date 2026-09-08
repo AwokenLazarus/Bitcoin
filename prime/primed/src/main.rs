@@ -1,8 +1,8 @@
 //! `primed` — the Lazarus DATUM Prime.
 //!
-//! Accepts stock DATUM gateways, tells them the TIDES coinbase split for every template
-//! they build, verifies the BLAKE2b work they send back, credits the window, and relays
-//! found blocks to the node.
+//! Accepts split-only DATUM gateways (`lazarus-gateway*` or UA containing `lazarus-split`),
+//! tells them the TIDES coinbase split for every template they build, verifies the BLAKE2b
+//! work they send back, credits the window, and relays found blocks to the node.
 
 mod address;
 mod config;

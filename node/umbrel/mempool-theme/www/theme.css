@@ -176,6 +176,31 @@ h1, h2, h3, h4, .h1, .h2, .h3 { text-wrap: balance; }
 .navbar-brand .connection-badge { top: -8px; }
 
 /* Nav items: quiet by default, brass underline on hover, brass wash when active. */
+.lz-btc-price-item {
+  display: flex;
+  align-items: center;
+  align-self: stretch;
+  /* .navbar-nav .nav-item already has a 2px bottom border; pair it so the
+     price does not sit a pixel above the wordmark / other tabs. */
+  border-top: 2px solid transparent;
+}
+.lz-btc-price-item .lz-btc-price {
+  display: flex !important;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  line-height: 1;
+  padding-top: 0.12em;
+  font-family: var(--lz-mono);
+  font-variant-numeric: tabular-nums;
+  color: var(--lz-brass) !important;
+  white-space: nowrap;
+}
+.lz-btc-price-item .lz-btc-price::after { content: none; }
+@media (max-width: 520px) {
+  .lz-btc-price-item .lz-btc-price { font-size: 0.85em; }
+}
+
 .navbar-nav .nav-item { border-bottom: 2px solid transparent; transition: border-color 140ms, background-color 140ms; }
 .navbar-nav .nav-item:hover { border-bottom-color: var(--lz-brass); }
 .navbar-nav li.nav-item.active { background-color: var(--lz-brass-wash) !important; border-bottom-color: var(--lz-brass); }
@@ -183,13 +208,24 @@ h1, h2, h3, h4, .h1, .h2, .h3 { text-wrap: balance; }
 .navbar-nav .nav-item.active .nav-link, .navbar-nav .nav-item:hover .nav-link { color: var(--lz-ink) !important; }
 .navbar-nav .nav-link svg { fill: currentColor; }
 
-/* Injected "Lazarus Pool" nav link (theme.js) */
-.lz-pool-item .nav-link {
+/* Injected "Lazarus Pool" / Discord nav links (theme.js) */
+.lz-pool-item,
+.lz-discord-item,
+.lz-neoxa-item {
+  display: flex;
+  align-items: center;
+  align-self: stretch;
+  border-top: 2px solid transparent;
+}
+.lz-pool-item .nav-link,
+.lz-discord-item .nav-link,
+.lz-neoxa-item .nav-link {
   display: flex !important;
   align-items: center;
   justify-content: center;
   gap: 0.45rem;
   height: 100%;
+  line-height: 1;
   padding-inline: 0.7rem !important;
 }
 .lz-pool-item .lz-mark {
@@ -201,19 +237,26 @@ h1, h2, h3, h4, .h1, .h2, .h3 { text-wrap: balance; }
   mask: var(--lz-chi-rho) center / contain no-repeat;
   transition: background-color 140ms;
 }
-.lz-pool-item .lz-label {
+.lz-pool-item .lz-label,
+.lz-discord-item .lz-label,
+.lz-neoxa-item .lz-label {
   font-family: var(--lz-mono);
   font-size: 0.72rem;
   letter-spacing: 0.04em;
   text-transform: uppercase;
   white-space: nowrap;
+  line-height: 1;
 }
-.lz-pool-item .lz-label::after { content: " ↗"; color: var(--lz-faint); }
+.lz-pool-item .lz-label::after,
+.lz-discord-item .lz-label::after,
+.lz-neoxa-item .lz-label::after { content: " ↗"; color: var(--lz-faint); }
 .lz-pool-item:hover .lz-mark { background: var(--lz-brass); }
 @media (max-width: 991.98px) {
   /* Bottom tab bar on small screens: icon only, like the stock items. */
   .lz-pool-item .lz-label { display: none; }
   .lz-pool-item .nav-link { padding: 12px 0 !important; }
+  .lz-discord-item,
+  .lz-neoxa-item { display: none; }
 }
 
 /* Search */
@@ -397,24 +440,6 @@ footer .lz-footer-note { font-size: 0.74rem; color: var(--lz-faint) !important; 
   -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M3 8.5 6.5 12 13 4' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") center / contain no-repeat;
   mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M3 8.5 6.5 12 13 4' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") center / contain no-repeat;
 }
-
-/* Address balance / UTXO charts (injected: stock widgets need an esplora backend) */
-.lz-addr-charts { margin: 0 0 0.4rem; }
-.lz-addr-block { margin: 1.15rem 0 0; }
-.lz-chart-box { position: relative; padding: 0.4rem 0.6rem 0.2rem; }
-.lz-chart-slot { width: 100%; }
-.lz-area, .lz-bubbles { display: block; width: 100%; height: auto; }
-.lz-area { min-height: 200px; }
-.lz-bubbles { min-height: 260px; }
-.lz-grid { stroke: var(--lz-line); stroke-width: 1; }
-.lz-axis { fill: var(--lz-muted); font: 500 10px var(--lz-mono); }
-.lz-dot-pt { fill: #FDD835; }
-.lz-dot-pt:hover { fill: var(--lz-ink); }
-.lz-bubbles a:hover circle { stroke: var(--lz-ink); stroke-width: 1.4; }
-.lz-period { position: absolute; top: 0.45rem; right: 0.8rem; z-index: 2; font-size: 12px; }
-.lz-period .toggler-option { color: var(--lz-brass); text-decoration: none; }
-.lz-period .toggler-option.inactive { color: var(--lz-faint); }
-.lz-period-bar { color: var(--lz-faint); font-size: 8px; }
 
 /* Angular Material / ng-bootstrap bits that show up on tx pages */
 .modal-content { background-color: var(--lz-bg-raised) !important; border: 1px solid var(--lz-line-strong) !important; color: var(--lz-ink); border-radius: 2px; }

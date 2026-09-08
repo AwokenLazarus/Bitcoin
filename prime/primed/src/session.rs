@@ -10,6 +10,7 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use datum_wire::coinbase;
 use datum_wire::coinbaser::{self, Output};
 use datum_wire::crypto::{self, Channel, Identity};
 use datum_wire::frame::{Header, KeyStream, CLIENT_INITIAL_KEY};
@@ -231,6 +232,13 @@ pub async fn run(shared: Arc<Shared>, mut stream: TcpStream, remote: SocketAddr)
         return Err(SessionError::Bad("first frame is not a sealed, signed hello"));
     }
     let hello = handshake::parse_client_hello(&shared.pool, &payload)?;
+    if shared.cfg.require_split_gateway && !handshake::is_split_gateway(&hello.user_agent) {
+        log::warn!(
+            "[{id}] {remote} refused ua={:?}: require-split-gateway (need lazarus-gateway or +lazarus-split)",
+            hello.user_agent
+        );
+        return Err(SessionError::Bad("split-only gateway required"));
+    }
     let session_key = Identity::generate();
     let (recv_keys, mut send_keys) = KeyStream::from_seed(hello.seed);
     let (send_nonce, recv_nonce) = crypto::session_nonces(hello.seed, &hello.session_sign_pk);
@@ -949,6 +957,12 @@ impl Session {
             }
             c.last_share_ts = ts;
             c.identity = identity.clone();
+            if !self.is_house_stratum() {
+                let tag = coinbase::secondary_tag(&v.coinbase.script_sig);
+                if !tag.is_empty() {
+                    c.secondary_tag = tag;
+                }
+            }
         });
         let status = if matches!(v.coinbase_kind, CoinbaseKind::Split) {
             mining::ACCEPTED

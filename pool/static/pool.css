@@ -256,6 +256,8 @@
     color: var(--muted);
     white-space: nowrap;
   }
+  a.chip { text-decoration: none; color: var(--muted); }
+  a.chip:hover { border-color: var(--brass); color: var(--ink); }
   .chip b { color: var(--ink); font-weight: 500; }
   .chip.stale[data-live]::before { background: var(--bad); box-shadow: 0 0 0 3px color-mix(in oklch, var(--bad) 20%, transparent); }
   .chip[data-live]::before {
@@ -797,6 +799,143 @@
     margin-top: 0.7rem;
     color: var(--muted);
     font-size: 0.86rem;
+  }
+
+  /* Masthead fee card: rates first, then why, then which gateway. */
+  .fee-lede {
+    display: grid;
+    gap: 0.85rem;
+    padding: 1rem 1.1rem 1.05rem;
+    border: 1px solid var(--line-strong);
+    background:
+      radial-gradient(90% 80% at 0% 0%, color-mix(in oklch, var(--brass) 12%, transparent), transparent 55%),
+      var(--bg-raised);
+  }
+  .fee-lede-head {
+    display: grid;
+    gap: 0.3rem;
+    max-width: 42rem;
+  }
+  .fee-lede-head h2 {
+    font-size: 0.68rem;
+    font-weight: 600;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--brass);
+  }
+  .fee-lede-head p {
+    font-family: var(--serif);
+    font-size: 1.08rem;
+    font-weight: 500;
+    line-height: 1.4;
+    color: var(--ink);
+  }
+  .fee-lede-rates {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 0.55rem;
+  }
+  @container (max-width: 36rem) {
+    .fee-lede-rates { grid-template-columns: 1fr; }
+  }
+  .fee-lede-rate {
+    display: grid;
+    gap: 0.12rem;
+    padding: 0.7rem 0.85rem 0.75rem;
+    border: 1px solid var(--line);
+    background: var(--bg-inset);
+    text-decoration: none;
+    color: inherit;
+    transition: border-color 140ms var(--ease);
+  }
+  .fee-lede-rate:hover { border-color: var(--line-strong); }
+  .fee-lede-rate.reco {
+    border-color: color-mix(in oklch, var(--brass) 55%, var(--line));
+    background: color-mix(in oklch, var(--brass) 8%, var(--bg-inset));
+  }
+  .fee-lede-rate.reco:hover { border-color: var(--brass); }
+  .fee-lede-rate small {
+    font-size: 0.66rem;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--faint);
+  }
+  .fee-lede-rate.reco small { color: var(--brass); }
+  .fee-lede-rate b {
+    font-family: var(--mono);
+    font-size: clamp(1.7rem, 1.3rem + 1.4vw, 2.25rem);
+    font-weight: 500;
+    letter-spacing: -0.03em;
+    font-variant-numeric: tabular-nums;
+    color: var(--muted);
+    line-height: 1.05;
+  }
+  .fee-lede-rate.reco b { color: var(--brass); }
+  .fee-lede-rate span {
+    color: var(--muted);
+    font-size: 0.8rem;
+    line-height: 1.35;
+  }
+  .fee-lede-cta {
+    color: var(--muted);
+    font-size: 0.92rem;
+    line-height: 1.45;
+  }
+  .fee-lede-cta strong { color: var(--ink); font-weight: 600; }
+  .fee-lede-setup { white-space: nowrap; }
+  .fee-lede-setup::after { content: " \2193"; color: var(--brass-dim); }
+
+  .gw-pick { margin: 0 0 1.2rem; scroll-margin-top: 6.2rem; }
+  .gw-pick .kicker { margin: 0; }
+  .gw-pick > .note { margin-top: 0.35rem; max-width: 42rem; }
+  .gw-rank {
+    list-style: none;
+    margin: 0.65rem 0 0;
+    padding: 0;
+    display: grid;
+    gap: 0.45rem;
+  }
+  .gw-rank li {
+    display: grid;
+    grid-template-columns: 1.55rem minmax(0, 1fr);
+    gap: 0.15rem 0.7rem;
+    align-items: start;
+    padding: 0.7rem 0.85rem;
+    border: 1px solid var(--line);
+    background: var(--bg-inset);
+  }
+  .gw-rank li.reco {
+    border-color: color-mix(in oklch, var(--brass) 55%, var(--line));
+    background: color-mix(in oklch, var(--brass) 8%, var(--bg-inset));
+  }
+  .gw-rank .n {
+    font-family: var(--mono);
+    font-size: 0.9rem;
+    font-weight: 500;
+    color: var(--brass-dim);
+    padding-top: 0.18rem;
+  }
+  .gw-rank li.reco .n { color: var(--brass); }
+  .gw-rank .tag {
+    display: block;
+    font-size: 0.62rem;
+    font-weight: 600;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--brass);
+    margin-bottom: 0.12rem;
+  }
+  .gw-rank strong {
+    display: block;
+    font-weight: 600;
+    font-size: 0.98rem;
+  }
+  .gw-rank small {
+    display: block;
+    margin-top: 0.18rem;
+    color: var(--muted);
+    font-size: 0.88rem;
+    line-height: 1.4;
   }
 
   /* Three plain-language promises under the ticker, for people who have never pool-mined. */

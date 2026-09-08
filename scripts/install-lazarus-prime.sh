@@ -25,14 +25,19 @@ payout-address = "$ADDR"
 coinbase-tag = "Lazarus"
 prime-id = 1
 window = 8
-min-payout = 546
+min-payout = 100000
+max-connections = 512
+max-connections-per-ip = 32
 fee-bps = 50
+stratum-fee-bps = 250
+house-gateways = ["9d992e5cfec05102", "7d47140acf6da33b"]
 activation-height = 961640
 headline = "Lazarus"
 rpc = "http://127.0.0.1:9332"
 rpc-cookie = "$COOKIE"
 poll = 0.5
-verify-shares = "${VERIFY:-log}"
+verify-shares = "${VERIFY:-enforce}"
+require-split-gateway = false
 EOF
 chmod 600 "$CONF"
 echo "wrote $CONF (payout address omitted from this log)"

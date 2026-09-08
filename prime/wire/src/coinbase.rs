@@ -101,6 +101,56 @@ pub fn write_varint(out: &mut Vec<u8>, n: u64) {
     }
 }
 
+/// The gateway operator's own name from a DATUM coinbase scriptSig, or empty if none.
+///
+/// Stock `datum_gateway` writes the first push after the BIP34 height as
+/// `<primary> 0x0F <secondary> 0x00`. The pool sets the primary ("Lazarus"); the operator
+/// sets the secondary. Both sides must be non-empty printable ASCII.
+pub fn secondary_tag(script_sig: &[u8]) -> String {
+    let Some((&n, rest)) = script_sig.split_first() else {
+        return String::new();
+    };
+    let height_len = match n {
+        1..=8 => n as usize,
+        0x51..=0x60 => 0, // OP_1..OP_16: height is the opcode, no extra bytes
+        _ => return String::new(),
+    };
+    let after_height = match rest.get(height_len..) {
+        Some(s) => s,
+        None => return String::new(),
+    };
+    let Some((&first, rest)) = after_height.split_first() else {
+        return String::new();
+    };
+    let (push_len, tags) = if first == 0x4c {
+        // OP_PUSHDATA1
+        let Some((&len, rest)) = rest.split_first() else {
+            return String::new();
+        };
+        (len as usize, rest)
+    } else if (1..=75).contains(&first) {
+        (first as usize, rest)
+    } else {
+        return String::new();
+    };
+    let Some(tags) = tags.get(..push_len) else {
+        return String::new();
+    };
+    let Some(sep) = tags.iter().position(|&b| b == 0x0f) else {
+        return String::new();
+    };
+    if sep == 0 {
+        return String::new();
+    }
+    let after = &tags[sep + 1..];
+    let end = after.iter().position(|&b| b == 0).unwrap_or(after.len());
+    let tag = &after[..end];
+    if tag.is_empty() || !tag.iter().all(|&b| (32..127).contains(&b)) {
+        return String::new();
+    }
+    String::from_utf8_lossy(tag).chars().take(40).collect()
+}
+
 fn bip34_height(script_sig: &[u8]) -> Option<u32> {
     let (&n, rest) = script_sig.split_first()?;
     match n {
@@ -270,6 +320,18 @@ mod tests {
         let mut more = cb.clone();
         more.push(0);
         assert!(parse(&more).is_err());
+    }
+
+    #[test]
+    fn secondary_tag_from_datum_script_sig() {
+        // BIP34 height 3 bytes, then a push of "Lazarus\x0fAlphaPool\x00" plus a target byte.
+        let mut sig = vec![3, 0x7b, 0xbe, 0x0e];
+        let tags = b"Lazarus\x0fAlphaPool\x00\xff";
+        sig.push(tags.len() as u8);
+        sig.extend_from_slice(tags);
+        assert_eq!(secondary_tag(&sig), "AlphaPool");
+        assert_eq!(secondary_tag(&[3, 1, 2, 3, 7, b'L', b'a', b'z', 0x0f, 0x00, 0xff]), "");
+        assert_eq!(secondary_tag(&[]), "");
     }
 
     #[test]

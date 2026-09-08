@@ -192,8 +192,382 @@
   'use strict';
   var POOL = 'https://pool.awokenlazarus.xyz';
   var REPO = 'https://github.com/AwokenLazarus/Bitcoin';
+  var DISCORD = 'https://discord.gg/fD33dJXnzz';
+  var NEOXA = 'https://neoxa.exchange/register?ref=NEXB9423E49';
   var POOL_SLUG = 'lazarus';
   var ELECTRUM = 'electrum.awokenlazarus.xyz:50002';
+
+  /* BLAKE2b BTC price (BTCB2): volume-weighted Neoxa + NonKYC, from the pool API.
+   * Stock mempool still pulls SHA CoinGecko over REST and the websocket. Rewrite both
+   * so every sats→fiat figure on this explorer is this chain, not the other one. */
+  var blakeConv = null;
+  function convFromPrice(d) {
+    if (!d || !isFinite(Number(d.USD))) return null;
+    var out = { USD: Number(d.USD), time: d.time || Math.floor(Date.now() / 1000) };
+    Object.keys(d).forEach(function (k) {
+      if (k === 'USD' || k === 'time' || k === 'stale' || k === 'pair' || k === 'sources' || k === 'average_of' || k === 'method') return;
+      if (typeof d[k] === 'number' && isFinite(d[k])) out[k] = d[k];
+    });
+    return out;
+  }
+  function rewritePriceJson(stock) {
+    if (!blakeConv) return stock;
+    var out = Object.assign({}, stock && typeof stock === 'object' ? stock : {}, blakeConv);
+    return out;
+  }
+  // Block / tx fiat uses /api/v1/historical-price (SHA prints in the DB, ~$80k).
+  // Scale the series so the newest point matches live BTCB2. Skip if already small.
+  function scaleHistorical(stock) {
+    if (!stock || !blakeConv || !(blakeConv.USD > 0) || !stock.prices || !stock.prices.length) return stock;
+    var latest = stock.prices[0], i, p, k, sha, f, q, out;
+    for (i = 0; i < stock.prices.length; i++) {
+      if ((stock.prices[i].time || 0) >= (latest.time || 0)) latest = stock.prices[i];
+    }
+    sha = Number(latest.USD);
+    if (!(sha > 20000)) return stock;
+    f = blakeConv.USD / sha;
+    out = Object.assign({}, stock, { prices: stock.prices.map(function (row) {
+      q = Object.assign({}, row);
+      for (k in q) {
+        if (!Object.prototype.hasOwnProperty.call(q, k) || k === 'time') continue;
+        if (typeof q[k] === 'number' && q[k] > 0) q[k] = Math.round(q[k] * f * 100) / 100;
+      }
+      return q;
+    })});
+    return out;
+  }
+  function rewriteByUrl(url, stock) {
+    if (/historical-price/.test(url)) return scaleHistorical(stock);
+    if (/\/api\/v1\/prices(?:\?|$|\/)/.test(url)) return rewritePriceJson(stock);
+    return stock;
+  }
+  function rewriteMessageEvent(ev) {
+    if (!ev || typeof ev.data !== 'string') return ev;
+    try {
+      var data = JSON.parse(ev.data);
+      if (!data || typeof data !== 'object') return ev;
+      var touched = false;
+      // The websocket's opening frame carries the backend name, and the address page mounts
+      // Balance History and Unspent Outputs only when it reads "esplora". This node answers
+      // the Esplora REST routes both charts read, so report esplora and fill the two gaps
+      // the Electrum backend leaves behind (see the address data section below).
+      if (typeof data.backend === 'string' && data.backend !== 'esplora') {
+        data.backend = 'esplora';
+        touched = true;
+      }
+      if (data.conversions && blakeConv) {
+        data.conversions = Object.assign({}, data.conversions, blakeConv);
+        touched = true;
+      }
+      if (!touched) return ev;
+      return new MessageEvent(ev.type, { data: JSON.stringify(data), origin: ev.origin, lastEventId: ev.lastEventId });
+    } catch (e) { return ev; }
+  }
+  function deliverWs(fn, ev, ctx) {
+    var data;
+    try { data = JSON.parse(ev.data); } catch (e) { return fn.call(ctx, ev); }
+    if (data && data.conversions && !blakeConv) {
+      var tries = 0;
+      var t = setInterval(function () {
+        tries += 1;
+        if (blakeConv || tries > 40) {
+          clearInterval(t);
+          fn.call(ctx, rewriteMessageEvent(ev));
+        }
+      }, 100);
+      return;
+    }
+    return fn.call(ctx, rewriteMessageEvent(ev));
+  }
+  (function hookPriceIO() {
+    var ofetch = window.fetch;
+
+    /* Electrum answers /address/:id, /txs and /utxo, but leaves two holes the stock
+     * address-page charts need: (1) /txs/summary is 405, (2) funded_txo_count stays 0
+     * so chainStats.utxos is 0 and the bubble chart never fetches. Fill both here so
+     * app-address-graph and app-utxo-graph can mount as they do on mempool.guide. */
+    function parseAddrApi(url) {
+      var m = /\/api\/(address|scripthash)\/([^/?#]+)(\/[^?#]*)?/.exec(String(url || ''));
+      if (!m) return null;
+      var rest = m[3] || '';
+      return {
+        kind: m[1],
+        id: decodeURIComponent(m[2]),
+        rest: rest,
+        isSummary: rest.indexOf('/txs/summary') === 0,
+        isExact: rest === '' || rest === '/'
+      };
+    }
+    function apiUrl(kind, id, suffix) {
+      return '/api/' + kind + '/' + encodeURIComponent(id) + suffix;
+    }
+    function fetchJson(url) {
+      return ofetch(url).then(function (r) {
+        if (!r.ok) throw new Error(String(r.status));
+        return r.json();
+      });
+    }
+    function txNet(tx, addr) {
+      if (!addr) return 0;
+      var inn = 0, out = 0, i, v, p;
+      var vin = tx.vin || [];
+      for (i = 0; i < vin.length; i++) {
+        p = vin[i].prevout || {};
+        if (p.scriptpubkey_address === addr) inn += Number(p.value) || 0;
+      }
+      var vout = tx.vout || [];
+      for (i = 0; i < vout.length; i++) {
+        v = vout[i];
+        if (v.scriptpubkey_address === addr) out += Number(v.value) || 0;
+      }
+      return out - inn;
+    }
+    function fetchAllTxs(kind, id) {
+      var out = [];
+      function page(after) {
+        var url = apiUrl(kind, id, '/txs') + (after ? '?after_txid=' + encodeURIComponent(after) : '');
+        return fetchJson(url).catch(function () { return []; }).then(function (batch) {
+          if (!batch || !batch.length) return out;
+          out = out.concat(batch);
+          if (out.length >= 500 || batch.length < 10) return out;
+          return page(batch[batch.length - 1].txid);
+        });
+      }
+      return page(null);
+    }
+    function txsToSummary(txs, addr) {
+      return (txs || []).map(function (tx) {
+        var s = tx.status || {};
+        return {
+          txid: tx.txid,
+          time: s.confirmed && s.block_time ? s.block_time : Math.floor(Date.now() / 1000),
+          value: txNet(tx, addr)
+        };
+      });
+    }
+    function patchCounts(info, utxos) {
+      if (!info || typeof info !== 'object') return info;
+      var n = Array.isArray(utxos) ? utxos.length : 0;
+      var cs = info.chain_stats || {};
+      var funded = Number(cs.funded_txo_count) || 0;
+      var spent = Number(cs.spent_txo_count) || 0;
+      if (funded - spent === n) return info;
+      return Object.assign({}, info, {
+        chain_stats: Object.assign({}, cs, { funded_txo_count: n + spent })
+      });
+    }
+    function jsonResponse(body) {
+      return new Response(JSON.stringify(body), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' }
+      });
+    }
+    function fulfillXhr(xhr, status, body) {
+      try {
+        Object.defineProperty(xhr, 'readyState', { configurable: true, get: function () { return 4; } });
+        Object.defineProperty(xhr, 'status', { configurable: true, get: function () { return status; } });
+        Object.defineProperty(xhr, 'statusText', { configurable: true, get: function () { return status === 200 ? 'OK' : 'Error'; } });
+        Object.defineProperty(xhr, 'responseText', { configurable: true, get: function () { return body; } });
+        Object.defineProperty(xhr, 'response', { configurable: true, get: function () { return body; } });
+      } catch (e) { /* leave native fields */ }
+      try { if (typeof xhr.onreadystatechange === 'function') xhr.onreadystatechange(); } catch (e) { /* */ }
+      try { xhr.dispatchEvent(new Event('readystatechange')); } catch (e) { /* */ }
+      try { xhr.dispatchEvent(new ProgressEvent('load')); } catch (e) {
+        try { xhr.dispatchEvent(new Event('load')); } catch (e2) { /* */ }
+      }
+      try { xhr.dispatchEvent(new ProgressEvent('loadend')); } catch (e) {
+        try { xhr.dispatchEvent(new Event('loadend')); } catch (e2) { /* */ }
+      }
+    }
+    function rewriteAddress(url) {
+      var p = parseAddrApi(url);
+      if (!p) return null;
+      if (p.isSummary) {
+        return fetchAllTxs(p.kind, p.id).then(function (txs) {
+          return txsToSummary(txs, p.kind === 'address' ? p.id : '');
+        });
+      }
+      if (p.isExact) {
+        return Promise.all([
+          fetchJson(apiUrl(p.kind, p.id, '')),
+          fetchJson(apiUrl(p.kind, p.id, '/utxo')).catch(function () { return []; })
+        ]).then(function (pair) { return patchCounts(pair[0], pair[1]); });
+      }
+      return null;
+    }
+    function addressShim(xhr, url) {
+      var pending = rewriteAddress(url);
+      if (!pending) return false;
+      pending.then(function (body) {
+        fulfillXhr(xhr, 200, JSON.stringify(body));
+      }).catch(function () {
+        fulfillXhr(xhr, 502, '{"error":"address shim failed"}');
+      });
+      return true;
+    }
+
+    if (typeof ofetch === 'function') {
+      window.fetch = function (input, init) {
+        var url = '';
+        try { url = typeof input === 'string' ? input : (input && input.url) || ''; } catch (e) { url = ''; }
+        var addr = rewriteAddress(url);
+        if (addr) {
+          return addr.then(jsonResponse).catch(function () {
+            return ofetch.apply(window, arguments);
+          });
+        }
+        var p = ofetch.apply(this, arguments);
+        if (!/\/api\/v1\/prices(?:\?|$|\/)|historical-price/.test(url)) return p;
+        return p.then(function (resp) {
+          return resp.clone().json().then(function (stock) {
+            return jsonResponse(rewriteByUrl(url, stock));
+          }).catch(function () { return resp; });
+        });
+      };
+    }
+    // Angular HttpClient in this build uses XHR, not fetch, for REST.
+    var xhrProto = window.XMLHttpRequest && XMLHttpRequest.prototype;
+    if (xhrProto && !xhrProto._lzPrice) {
+      xhrProto._lzPrice = true;
+      var xopen = xhrProto.open;
+      var xsend = xhrProto.send;
+      xhrProto.open = function (method, url) {
+        this._lzUrl = String(url || '');
+        this._lzMethod = String(method || 'GET').toUpperCase();
+        return xopen.apply(this, arguments);
+      };
+      xhrProto.send = function () {
+        var xhr = this;
+        if (xhr._lzMethod === 'GET' && addressShim(xhr, xhr._lzUrl || '')) return;
+        if (/\/api\/v1\/prices(?:\?|$|\/)|historical-price/.test(xhr._lzUrl || '')) {
+          xhr.addEventListener('readystatechange', function () {
+            if (xhr.readyState !== 4 || xhr.status < 200 || xhr.status >= 300) return;
+            try {
+              var stock = JSON.parse(xhr.responseText);
+              var body = JSON.stringify(rewriteByUrl(xhr._lzUrl, stock));
+              Object.defineProperty(xhr, 'responseText', { configurable: true, value: body });
+              Object.defineProperty(xhr, 'response', { configurable: true, value: body });
+            } catch (e) { /* leave stock body */ }
+          }, true);
+        }
+        return xsend.apply(this, arguments);
+      };
+    }
+    function wrapSock(ws) {
+      if (!ws || ws._lzWrapped) return ws;
+      ws._lzWrapped = true;
+      var add = ws.addEventListener;
+      if (typeof add === 'function') {
+        ws.addEventListener = function (type, fn, opt) {
+          if (type === 'message' && typeof fn === 'function') {
+            return add.call(this, type, function (ev) { return deliverWs(fn, ev, this); }, opt);
+          }
+          return add.call(this, type, fn, opt);
+        };
+      }
+      return ws;
+    }
+    function installWsCtor() {
+      var Native = window.WebSocket;
+      if (!Native || Native._lzHooked) return;
+      function Hooked(url, protocols) {
+        var ws = protocols !== undefined ? new Native(url, protocols) : new Native(url);
+        return wrapSock(ws);
+      }
+      Hooked.prototype = Native.prototype;
+      Hooked.CONNECTING = Native.CONNECTING;
+      Hooked.OPEN = Native.OPEN;
+      Hooked.CLOSING = Native.CLOSING;
+      Hooked.CLOSED = Native.CLOSED;
+      Hooked._lzHooked = true;
+      window.WebSocket = Hooked;
+    }
+    var proto = window.WebSocket && WebSocket.prototype;
+    if (proto && !proto._lzPrice) {
+      proto._lzPrice = true;
+      var add = proto.addEventListener;
+      if (typeof add === 'function') {
+        proto.addEventListener = function (type, fn, opt) {
+          if (type === 'message' && typeof fn === 'function') {
+            return add.call(this, type, function (ev) { return deliverWs(fn, ev, this); }, opt);
+          }
+          return add.call(this, type, fn, opt);
+        };
+      }
+      var desc = Object.getOwnPropertyDescriptor(proto, 'onmessage');
+      if (desc && desc.set) {
+        Object.defineProperty(proto, 'onmessage', {
+          configurable: true,
+          enumerable: !!desc.enumerable,
+          get: function () { return this._lzOnMsg; },
+          set: function (fn) {
+            this._lzOnMsg = fn;
+            desc.set.call(this, typeof fn === 'function' ? function (ev) { return deliverWs(fn, ev, this); } : fn);
+          }
+        });
+      }
+    }
+    installWsCtor();
+    window.addEventListener('load', installWsCtor);
+  })();
+  function fmtUsd(n) {
+    n = Number(n);
+    if (!isFinite(n)) return '—';
+    return '$' + n.toLocaleString(undefined, { maximumFractionDigits: n >= 100 ? 0 : 2 });
+  }
+  function paintFiatChip() {
+    var node = document.getElementById('lz-btc-price');
+    if (!node || !blakeConv) return;
+    node.textContent = fmtUsd(blakeConv.USD);
+  }
+  // Clock /mempool/:n Price is app-fiat(value=1e8) on websocket conversions$.
+  // If the socket still carries SHA (~$80k), rewrite the rendered 1-BTC figure.
+  function paintClockFiat() {
+    if (!blakeConv || !(blakeConv.USD > 0)) return;
+    var root = document.querySelector('app-clock');
+    if (!root) return;
+    var usd = blakeConv.USD;
+    var formatted = usd.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    var nodes = root.querySelectorAll('app-fiat span');
+    for (var i = 0; i < nodes.length; i++) {
+      var span = nodes[i];
+      var t = span.textContent || '';
+      var m = t.match(/([\d,]+(?:\.\d+)?)/);
+      if (!m) continue;
+      var n = Number(m[1].replace(/,/g, ''));
+      if (!(n > 20000)) continue;
+      span.textContent = t.replace(m[1], formatted);
+    }
+  }
+  function pullBlakePrice() {
+    fetch(POOL + '/api/price', { mode: 'cors' }).then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (d) {
+        var c = convFromPrice(d);
+        if (c) { blakeConv = c; paintFiatChip(); paintClockFiat(); }
+      })
+      .catch(function () { /* keep last */ });
+  }
+  pullBlakePrice();
+  setInterval(pullBlakePrice, 60000);
+
+  function fiatChip() {
+    var ul = document.querySelector('header ul.navbar-nav');
+    if (!ul || ul.querySelector('.lz-btc-price-item')) {
+      paintFiatChip();
+      return;
+    }
+    var li = el('li', { class: 'nav-item lz-btc-price-item' });
+    var a = el('a', {
+      id: 'lz-btc-price',
+      class: 'nav-link lz-btc-price',
+      href: 'https://neoxa.exchange/trade/BTCB2_USDC',
+      target: '_blank',
+      rel: 'noopener',
+      title: 'BLAKE2b BTC (BTCB2) · volume-weighted Neoxa BTCB2/USDC and NonKYC BTCB2/USDT'
+    }, blakeConv ? fmtUsd(blakeConv.USD) : '…');
+    li.appendChild(a);
+    ul.insertBefore(li, ul.firstChild);
+  }
 
   function el(tag, attrs, html) {
     var e = document.createElement(tag);
@@ -273,7 +647,7 @@
               '<p class="lz-kicker">Miners</p>' +
               '<p class="lz-head">Mine with Lazarus Pool, paid in the block itself</p>' +
               '<p class="lz-stats" id="lz-pool-stats"><span class="lz-dot" aria-hidden="true"></span><span class="lz-stats-text">Loading pool status…</span></p>' +
-              '<p class="lz-copy" id="lz-pool-copy">Every block found pays each miner directly in its coinbase by TIDES window share. 0.5% fee through your own DATUM gateway, 2.5% on the public stratum.</p>' +
+              '<p class="lz-copy" id="lz-pool-copy">Every block found pays each miner directly in its coinbase by TIDES window share. 0.5% fee through your own DATUM gateway, 1% on the public stratum.</p>' +
               '<p class="lz-actions">' +
                 '<a class="btn btn-primary btn-sm" href="' + POOL + '" target="_blank" rel="noopener">Open Lazarus Pool ↗</a>' +
                 '<a class="btn btn-secondary btn-sm" href="/mining/pool/' + POOL_SLUG + '">Blocks found by Lazarus</a>' +
@@ -301,20 +675,37 @@
     });
   }
 
-  function nav() {
-    var ul = document.querySelector('header ul.navbar-nav');
-    if (!ul || ul.querySelector('.lz-pool-item')) return;
-    var li = el('li', { class: 'nav-item lz-pool-item', id: 'btn-lazarus-pool' });
+  function navOut(ul, cls, href, label, title) {
+    if (ul.querySelector('.' + cls)) return;
+    var li = el('li', { class: 'nav-item ' + cls });
     var a = el('a', {
-      class: 'nav-link', href: POOL, target: '_blank', rel: 'noopener',
-      title: 'Lazarus Pool: TIDES payouts in the coinbase, bring your own DATUM gateway',
-      'aria-label': 'Lazarus Pool (opens in a new tab)'
+      class: 'nav-link', href: href, target: '_blank', rel: 'noopener',
+      title: title,
+      'aria-label': label + ' (opens in a new tab)'
     });
-    // Empty: theme.css masks the Chi Rho onto this span.
-    a.appendChild(el('span', { class: 'lz-mark', 'aria-hidden': 'true' }));
-    a.appendChild(el('span', { class: 'lz-label' }, 'Lazarus Pool'));
+    a.appendChild(el('span', { class: 'lz-label' }, label));
     li.appendChild(a);
     ul.appendChild(li);
+  }
+
+  function nav() {
+    var ul = document.querySelector('header ul.navbar-nav');
+    if (!ul) return;
+    if (!ul.querySelector('.lz-pool-item')) {
+      var li = el('li', { class: 'nav-item lz-pool-item', id: 'btn-lazarus-pool' });
+      var a = el('a', {
+        class: 'nav-link', href: POOL, target: '_blank', rel: 'noopener',
+        title: 'Lazarus Pool: TIDES payouts in the coinbase, bring your own DATUM gateway',
+        'aria-label': 'Lazarus Pool (opens in a new tab)'
+      });
+      // Empty: theme.css masks the Chi Rho onto this span.
+      a.appendChild(el('span', { class: 'lz-mark', 'aria-hidden': 'true' }));
+      a.appendChild(el('span', { class: 'lz-label' }, 'Lazarus Pool'));
+      li.appendChild(a);
+      ul.appendChild(li);
+    }
+    navOut(ul, 'lz-discord-item', DISCORD, 'Discord', 'Lazarus Discord');
+    navOut(ul, 'lz-neoxa-item', NEOXA, 'Exchange', 'Sign up on Neoxa Exchange to trade BLAKE2b BTC (BTCB2)');
   }
 
   function footer() {
@@ -327,6 +718,8 @@
       [POOL + '/#payout', 'What the next block pays'],
       ['/mining/pool/' + POOL_SLUG, 'Blocks found by the pool'],
       [POOL + '/#connect', 'Connect a miner or DATUM gateway'],
+      [DISCORD, 'Discord'],
+      [NEOXA, 'Exchange'],
       [REPO, 'Source on GitHub']
     ];
     links.forEach(function (l) {
@@ -372,251 +765,15 @@
     }
   }
 
-  /* Address charts. Stock mempool only mounts Balance History + Unspent Outputs when
-   * backend$ === 'esplora'. We run Electrum (header-v2 electrs), so the Angular widgets
-   * stay hidden even though /api/address/:addr/txs and /utxo work. These two boxes are
-   * the same views, drawn here from that data so a backend upgrade is not required. */
-  var addrState = { key: '', loading: false, data: null };
-
-  function addrFromPath() {
-    var m = /^\/address\/([^/?#]+)/.exec(location.pathname || '');
-    return m ? decodeURIComponent(m[1]) : '';
-  }
-  function fmtBtc(sats) {
-    var x = Number(sats) / 1e8;
-    if (!isFinite(x)) return '—';
-    var n = Math.abs(x) >= 1 ? 4 : Math.abs(x) >= 0.01 ? 6 : 8;
-    return (x < 0 ? '−' : '') + Math.abs(x).toFixed(n).replace(/0+$/, '').replace(/\.$/, '') + ' BTC';
-  }
-  function txTime(tx) {
-    var s = tx && tx.status;
-    if (s && s.confirmed && s.block_time) return s.block_time;
-    return Math.floor(Date.now() / 1000);
-  }
-  function txNet(tx, addr) {
-    var inn = 0, out = 0, i, v, p;
-    var vin = tx.vin || [];
-    for (i = 0; i < vin.length; i++) {
-      p = vin[i].prevout || {};
-      if (p.scriptpubkey_address === addr) inn += Number(p.value) || 0;
-    }
-    var vout = tx.vout || [];
-    for (i = 0; i < vout.length; i++) {
-      v = vout[i];
-      if (v.scriptpubkey_address === addr) out += Number(v.value) || 0;
-    }
-    return out - inn;
-  }
-  function fetchAllTxs(addr) {
-    var out = [];
-    function page(after) {
-      var url = '/api/address/' + encodeURIComponent(addr) + '/txs' + (after ? '?after_txid=' + after : '');
-      return fetch(url).then(function (r) { return r.ok ? r.json() : []; }).then(function (batch) {
-        if (!batch || !batch.length) return out;
-        out = out.concat(batch);
-        if (out.length >= 500 || batch.length < 10) return out;
-        return page(batch[batch.length - 1].txid);
-      });
-    }
-    return page(null);
-  }
-  function niceTicks(min, max, n) {
-    if (!(max > min)) max = min + 1;
-    var span = max - min, step = Math.pow(10, Math.floor(Math.log10(span / n)));
-    var err = n / (span / step);
-    if (err <= 0.15) step *= 10;
-    else if (err <= 0.35) step *= 5;
-    else if (err <= 0.75) step *= 2;
-    var start = Math.ceil(min / step) * step, ticks = [];
-    for (var v = start; v <= max + step * 0.01; v += step) ticks.push(v);
-    if (!ticks.length) ticks.push(min);
-    return ticks;
-  }
-  function areaSvg(points, period) {
-    var W = 720, H = 200, L = 72, R = 16, T = 12, B = 28;
-    var now = Date.now();
-    var lo = period === '1m' ? now - 30 * 86400 * 1000 : points[0].t;
-    var vis = points.filter(function (p) { return p.t >= lo; });
-    if (!vis.length) vis = points.slice(-2);
-    var startBal = vis[0].bal;
-    for (var i = 0; i < points.length; i++) {
-      if (points[i].t <= lo) startBal = points[i].bal;
-    }
-    if (vis[0].t > lo) vis = [{ t: lo, bal: startBal, txid: '' }].concat(vis);
-    vis = vis.concat([{ t: now, bal: points[points.length - 1].bal, txid: '' }]);
-    var ymin = vis.reduce(function (a, p) { return Math.min(a, p.bal); }, vis[0].bal);
-    var ymax = vis.reduce(function (a, p) { return Math.max(a, p.bal); }, vis[0].bal);
-    if (ymax === ymin) { ymax += 1e6; ymin = Math.max(0, ymin - 1e6); }
-    var pad = (ymax - ymin) * 0.08;
-    ymin -= pad; ymax += pad;
-    if (ymin < 0 && vis.every(function (p) { return p.bal >= 0; })) ymin = 0;
-    function x(t) { return L + (W - L - R) * (t - lo) / Math.max(1, now - lo); }
-    function y(b) { return T + (H - T - B) * (1 - (b - ymin) / (ymax - ymin)); }
-    var d = '';
-    vis.forEach(function (p, i) { d += (i ? 'L' : 'M') + x(p.t).toFixed(1) + ',' + y(p.bal).toFixed(1); });
-    var area = d + 'L' + x(vis[vis.length - 1].t).toFixed(1) + ',' + (H - B) + 'L' + x(vis[0].t).toFixed(1) + ',' + (H - B) + 'Z';
-    var ticks = niceTicks(ymin, ymax, 4);
-    var yaxis = ticks.map(function (v) {
-      var yy = y(v);
-      return '<line x1="' + L + '" x2="' + (W - R) + '" y1="' + yy + '" y2="' + yy + '" class="lz-grid"/>' +
-        '<text x="' + (L - 8) + '" y="' + (yy + 4) + '" class="lz-axis" text-anchor="end">' + esc(fmtBtc(v)) + '</text>';
-    }).join('');
-    var dots = vis.filter(function (p) { return p.txid; }).map(function (p) {
-      return '<a href="/tx/' + encodeURIComponent(p.txid) + '"><circle class="lz-dot-pt" cx="' + x(p.t).toFixed(1) + '" cy="' + y(p.bal).toFixed(1) + '" r="3.2">' +
-        '<title>' + esc(fmtBtc(p.bal) + (p.delta ? '  (' + (p.delta > 0 ? '+' : '') + fmtBtc(p.delta) + ')' : '')) + '</title></circle></a>';
-    }).join('');
-    return '<svg class="lz-area" viewBox="0 0 ' + W + ' ' + H + '" preserveAspectRatio="none" role="img" aria-label="Balance history">' +
-      '<defs><linearGradient id="lzBalFill" x1="0" y1="0" x2="0" y2="1">' +
-      '<stop offset="0" stop-color="#FDD835" stop-opacity="0.45"/><stop offset="1" stop-color="#FB8C00" stop-opacity="0.04"/>' +
-      '</linearGradient><linearGradient id="lzBalStroke" x1="0" y1="0" x2="0" y2="1">' +
-      '<stop offset="0" stop-color="#FDD835"/><stop offset="1" stop-color="#FB8C00"/></linearGradient></defs>' +
-      yaxis +
-      '<path class="lz-area-fill" d="' + area + '" fill="url(#lzBalFill)"/>' +
-      '<path class="lz-area-line" d="' + d + '" fill="none" stroke="url(#lzBalStroke)" stroke-width="2" vector-effect="non-scaling-stroke"/>' +
-      dots + '</svg>';
-  }
-  function packBubbles(utxos, W, H) {
-    var items = utxos.slice().sort(function (a, b) { return (b.value || 0) - (a.value || 0); }).slice(0, 500);
-    if (!items.length) return [];
-    var max = items[0].value || 1;
-    var i, t, ok, p, dx, dy;
-    for (i = 0; i < items.length; i++) {
-      items[i].r = 6 + 42 * Math.sqrt((items[i].value || 0) / max);
-    }
-    items[0].x = 0; items[0].y = 0;
-    for (i = 1; i < items.length; i++) {
-      var c = items[i], placed = false, ang = 0, dist = items[0].r;
-      for (t = 0; t < 900 && !placed; t++) {
-        ang += 0.37;
-        dist += c.r * 0.045;
-        c.x = Math.cos(ang) * dist;
-        c.y = Math.sin(ang) * dist * 0.72;
-        ok = true;
-        for (p = 0; p < i; p++) {
-          dx = c.x - items[p].x; dy = c.y - items[p].y;
-          if (dx * dx + dy * dy < (c.r + items[p].r) * (c.r + items[p].r) * 0.92) { ok = false; break; }
-        }
-        placed = ok;
-      }
-    }
-    var minx = Infinity, maxx = -Infinity, miny = Infinity, maxy = -Infinity;
-    for (i = 0; i < items.length; i++) {
-      minx = Math.min(minx, items[i].x - items[i].r);
-      maxx = Math.max(maxx, items[i].x + items[i].r);
-      miny = Math.min(miny, items[i].y - items[i].r);
-      maxy = Math.max(maxy, items[i].y + items[i].r);
-    }
-    var sx = (W - 24) / Math.max(1, maxx - minx);
-    var sy = (H - 24) / Math.max(1, maxy - miny);
-    var s = Math.min(sx, sy);
-    for (i = 0; i < items.length; i++) {
-      items[i].x = 12 + (items[i].x - minx) * s;
-      items[i].y = 12 + (items[i].y - miny) * s;
-      items[i].r *= s;
-    }
-    return items;
-  }
-  function mixHex(a, b, t) {
-    function hex(h) { return [parseInt(h.slice(0, 2), 16), parseInt(h.slice(2, 4), 16), parseInt(h.slice(4, 6), 16)]; }
-    var A = hex(a), B = hex(b), o = '#';
-    for (var i = 0; i < 3; i++) o += ('0' + Math.round(A[i] + (B[i] - A[i]) * t).toString(16)).slice(-2);
-    return o;
-  }
-  function bubbleSvg(utxos) {
-    var W = 720, H = 260;
-    var now = Math.floor(Date.now() / 1000);
-    var times = utxos.map(function (u) { return (u.status && u.status.block_time) || now; });
-    var tmin = Math.min.apply(null, times), tmax = Math.max.apply(null, times);
-    var packed = packBubbles(utxos, W, H);
-    var circles = packed.map(function (u) {
-      var t = (u.status && u.status.block_time) || now;
-      var age = tmax === tmin ? 0 : (t - tmin) / (tmax - tmin);
-      var fill = u.status && u.status.confirmed ? mixHex('3C39F4', '1BF4AF', age) : '#eba814';
-      var href = '/tx/' + encodeURIComponent(u.txid);
-      return '<a href="' + href + '"><circle cx="' + u.x.toFixed(1) + '" cy="' + u.y.toFixed(1) + '" r="' + Math.max(2, u.r).toFixed(1) + '" fill="' + fill + '" fill-opacity="0.88" stroke="#00000033" stroke-width="0.6">' +
-        '<title>' + esc(fmtBtc(u.value) + (u.status && u.status.block_height ? ' · block ' + u.status.block_height : ' · unconfirmed')) + '</title></circle></a>';
-    }).join('');
-    return '<svg class="lz-bubbles" viewBox="0 0 ' + W + ' ' + H + '" role="img" aria-label="Unspent outputs">' + circles + '</svg>';
-  }
-  function renderAddrCharts(host, addr, data) {
-    var txs = data.txs || [], utxos = data.utxos || [];
-    var chronological = txs.slice().sort(function (a, b) { return txTime(a) - txTime(b); });
-    var bal = 0, points = [];
-    chronological.forEach(function (tx) {
-      var delta = txNet(tx, addr);
-      bal += delta;
-      points.push({ t: txTime(tx) * 1000, bal: bal, delta: delta, txid: tx.txid });
-    });
-    var newest = chronological.length ? txTime(chronological[chronological.length - 1]) : 0;
-    var showPeriod = newest > Date.now() / 1000 - 30 * 86400;
-    var wrap = el('div', { class: 'lz-addr-charts', 'data-lz-addr': addr });
-    if (points.length > 2) {
-      var hist = el('div', { class: 'lz-addr-block' });
-      hist.innerHTML = '<div class="title-tx"><h2 class="text-left">Balance History</h2></div>' +
-        '<div class="box lz-chart-box">' +
-          (showPeriod ? '<div class="widget-toggler lz-period">' +
-            '<a href="#" class="toggler-option" data-period="all"><small>all</small></a>' +
-            '<span class="lz-period-bar"> | </span>' +
-            '<a href="#" class="toggler-option inactive" data-period="1m"><small>recent</small></a></div>' : '') +
-          '<div class="lz-chart-slot" data-slot="area"></div></div>';
-      var slot = hist.querySelector('[data-slot="area"]');
-      slot.innerHTML = areaSvg(points, 'all');
-      if (showPeriod) {
-        hist.addEventListener('click', function (ev) {
-          var a = ev.target.closest('[data-period]');
-          if (!a) return;
-          ev.preventDefault();
-          hist.querySelectorAll('[data-period]').forEach(function (x) { x.classList.toggle('inactive', x !== a); });
-          slot.innerHTML = areaSvg(points, a.getAttribute('data-period'));
-        });
-      }
-      wrap.appendChild(hist);
-    }
-    if (utxos.length > 2) {
-      var uns = el('div', { class: 'lz-addr-block' });
-      uns.innerHTML = '<div class="title-tx"><h2 class="text-left">Unspent Outputs</h2></div>' +
-        '<div class="box lz-chart-box"><div class="lz-chart-slot">' + bubbleSvg(utxos) + '</div></div>';
-      wrap.appendChild(uns);
-    }
-    var old = host.querySelector('.lz-addr-charts');
-    if (old) old.replaceWith(wrap);
-    else {
-      var txTitle = host.querySelector('.title-tx');
-      if (txTitle) host.insertBefore(wrap, txTitle);
-      else host.appendChild(wrap);
-    }
-  }
-  function addressCharts() {
-    var addr = addrFromPath();
-    var host = document.querySelector('app-address');
-    if (!addr || !host) return;
-    var existing = host.querySelector('.lz-addr-charts');
-    if (existing && existing.getAttribute('data-lz-addr') === addr) return;
-    if (addrState.data && addrState.key === addr) {
-      renderAddrCharts(host, addr, addrState.data);
-      return;
-    }
-    if (addrState.loading === addr) return;
-    addrState.loading = addr;
-    Promise.all([
-      fetchAllTxs(addr),
-      fetch('/api/address/' + encodeURIComponent(addr) + '/utxo').then(function (r) { return r.ok ? r.json() : []; })
-    ]).then(function (pair) {
-      if (addrFromPath() !== addr) { addrState.loading = false; return; }
-      addrState = { key: addr, loading: false, data: { txs: pair[0], utxos: pair[1] } };
-      var live = document.querySelector('app-address');
-      if (live) renderAddrCharts(live, addr, addrState.data);
-    }).catch(function () { addrState.loading = false; });
-  }
-
   var scheduled = false;
   function apply() {
     scheduled = false;
     try { nav(); } catch (e) { /* never break the explorer */ }
+    try { fiatChip(); } catch (e) { /* never break the explorer */ }
     try { footer(); } catch (e) { /* never break the explorer */ }
     try { dashboard(); } catch (e) { /* never break the explorer */ }
     try { minerBadges(); } catch (e) { /* never break the explorer */ }
-    try { addressCharts(); } catch (e) { /* never break the explorer */ }
+    try { paintClockFiat(); } catch (e) { /* never break the explorer */ }
   }
   function schedule() {
     if (scheduled) return;
@@ -624,22 +781,8 @@
     (window.requestAnimationFrame || setTimeout)(apply);
   }
 
-  function lazChat() {
-    if (window.__lazChatBooted) return;
-    window.__lazChatBooted = true;
-    window.LAZ_CHAT_SOURCE = 'mempool';
-    window.LAZ_CHAT_URL = 'https://pool.awokenlazarus.xyz/api/laz/chat';
-    if (!document.getElementById('laz-chat-css')) {
-      var link = el('link', { id: 'laz-chat-css', rel: 'stylesheet', href: '/lazarus/laz-chat.css' });
-      document.head.appendChild(link);
-    }
-    var s = el('script', { src: '/lazarus/laz-chat.js' });
-    document.body.appendChild(s);
-  }
-
   function start() {
     apply();
-    try { lazChat(); } catch (e) { /* never break the explorer */ }
     new MutationObserver(schedule).observe(document.body, { childList: true, subtree: true });
   }
   if (document.body) start(); else document.addEventListener('DOMContentLoaded', start);

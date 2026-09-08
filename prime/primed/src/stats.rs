@@ -137,6 +137,7 @@ pub fn build(shared: &Shared) -> Value {
                 "last_reject": Value::Null,
                 "offline": true,
                 "own": own,
+                "secondary_tag": "",
             }));
         }
         rows

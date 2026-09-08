@@ -28,8 +28,8 @@ if ! pgrep -f 'lazarus-gateway --config /home/umbrel/blake2b/etc/lazarus-asic.js
 fi
 # Pooled GPU gateway (:3333) retired -- pooled mining is stratum-only via lazarus-asic.json.
 #
-# Solo stratum: one instance per miner class, both paying the finder directly (97.5%) with
-# a 2.5% fee output. They hold no window state and never talk to Prime, so a solo restart
+# Solo stratum: one instance per miner class, both paying the finder directly (95%) with
+# a 5% fee output. They hold no window state and never talk to Prime, so a solo restart
 # cannot touch a pooled miner or a connected DATUM gateway.
 #   solo-asic :23335 (api 7154, vardiff 1024/4096/131072)
 #   solo-gpu  :3334  (api 7155, vardiff 1/1/131072)

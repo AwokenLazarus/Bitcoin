@@ -205,7 +205,7 @@ def pool_status(_args: dict) -> str:
                 "pool_share_percent": round(float(doc.get("pool_share") or 0) * 100, 4),
                 "miners_online": doc.get("miners_online"),
                 "workers_online": doc.get("workers_online"),
-                "fees": doc.get("fees") or {"datum_percent": 0.5, "stratum_percent": 2.5},
+                "fees": doc.get("fees") or {"datum_percent": 0.5, "stratum_percent": 1.0},
                 "stratum_asic": doc.get("stratum_asic") or doc.get("stratum"),
                 "stratum_prime": "stratum+tcp://stratum.awokenlazarus.xyz:28915",
                 "connect": "BLAKE2b miners only (Innosilicon S11 / header-v2). Not SHA-256d ASICs.",

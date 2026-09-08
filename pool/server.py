@@ -2,6 +2,7 @@
 """Lazarus public mining-pool dashboard. Scrapes DATUM + Knots; no admin UI exposed."""
 from __future__ import annotations
 
+import gzip
 import json
 import os
 import re
@@ -14,20 +15,16 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from collections import defaultdict, deque
 from urllib.parse import parse_qs, unquote, urlparse
-from urllib import error as urllib_error
-from urllib import request as urllib_request
 
 ROOT = Path(__file__).resolve().parent
 DB = Path(os.environ.get("POOL_DB") or (ROOT / "pool.sqlite"))
 STATIC = ROOT / "static"
 CONF = json.loads((ROOT / "config.json").read_text())
 NO_WRITE = os.environ.get("POOL_UI_NO_WRITE") == "1"
-# Read-only Laz chat (AgentLaz). POST /api/laz/chat is proxied; no write RPCs.
-LAZ_AGENT = os.environ.get("LAZ_AGENT_URL", "http://27.69.0.37:1921")
 
 POOL_FEE = float(CONF.get("pool_fee_percent", 0))
 # Public-stratum fee when primed is not answering; primed's stats.json is authoritative.
-STRATUM_FEE = float(CONF.get("stratum_fee_percent", 2.5))
+STRATUM_FEE = float(CONF.get("stratum_fee_percent", 1.0))
 STRATUM_HOST = CONF.get("stratum_host", "27.69.0.25")
 STRATUM_PORT = int(CONF.get("stratum_port", 23334))
 DATUM_URL = CONF.get("datum_url", "http://127.0.0.1:7152")
@@ -54,6 +51,49 @@ SOLO_APIS = CONF.get(
 SUBSIDY = 3.125
 
 PRIME_STATS = CONF.get("datum_prime_stats", "http://127.0.0.1:28916/stats.json")
+# Manual window make-goods: block hash → {txid, height}. The coinbase of a
+# pool-only block cannot be rewritten; once the pool spends it to pay the window,
+# record the payout here so the UI stops saying the window is still owed.
+OWED_SETTLEMENTS_PATH = Path(CONF.get("owed_settlements", str(ROOT / "owed-settlements.json")))
+_owed_settlements_cache = {"mtime": None, "doc": {}}
+
+
+def owed_settlements():
+    """block hash → {txid, height} for window debts paid after the fact."""
+    try:
+        mtime = OWED_SETTLEMENTS_PATH.stat().st_mtime
+    except OSError:
+        return {}
+    if _owed_settlements_cache["mtime"] == mtime:
+        return _owed_settlements_cache["doc"]
+    try:
+        raw = json.loads(OWED_SETTLEMENTS_PATH.read_text())
+    except Exception:
+        raw = {}
+    doc = {}
+    if isinstance(raw, dict):
+        for h, rec in raw.items():
+            if not isinstance(rec, dict) or not rec.get("txid"):
+                continue
+            doc[str(h).lower()] = {
+                "txid": str(rec["txid"]),
+                "height": rec.get("height"),
+            }
+    _owed_settlements_cache["mtime"] = mtime
+    _owed_settlements_cache["doc"] = doc
+    return doc
+
+
+def apply_owed_settlement(row):
+    """Attach the make-good tx, if we have one, to a Prime/payout block row."""
+    rec = owed_settlements().get(str(row.get("hash") or "").lower())
+    if rec:
+        row["owed_txid"] = rec["txid"]
+        row["owed_resolved"] = True
+    else:
+        row.setdefault("owed_txid", "")
+        row.setdefault("owed_resolved", False)
+    return row
 
 # primed's stats.json, fetched at most every few seconds and kept as the last good copy.
 # Everything the UI says about the Prime -- window, per-miner hashrate, gateways, blocks,
@@ -100,8 +140,26 @@ def datum_user_pass():
     return user, pw
 
 
-db_conn = sqlite3.connect(DB, check_same_thread=False)
+db_conn = sqlite3.connect(DB, check_same_thread=False, timeout=10)
 db_conn.row_factory = sqlite3.Row
+
+
+def _pragma(sql):
+    err = None
+    for _ in range(40):
+        try:
+            return db_conn.execute(sql)
+        except sqlite3.OperationalError as e:
+            err = e
+            time.sleep(0.25)
+    print("pragma", sql, err, flush=True)
+    return None
+
+
+# Three UI processes share this file; WAL lets the read replicas overlap the writer.
+_pragma("PRAGMA journal_mode=WAL")
+_pragma("PRAGMA busy_timeout=8000")
+_pragma("PRAGMA synchronous=NORMAL")
 db_conn.executescript(
     """
     CREATE TABLE IF NOT EXISTS samples (
@@ -170,6 +228,25 @@ db_conn.executescript(
     """
 )
 db_conn.commit()
+
+
+def _ensure_samples_ts_index():
+    if NO_WRITE:
+        return
+    err = None
+    for _ in range(40):
+        try:
+            db_conn.execute("CREATE INDEX IF NOT EXISTS idx_samples_ts ON samples(ts)")
+            db_conn.commit()
+            return
+        except sqlite3.OperationalError as e:
+            err = e
+            time.sleep(0.5)
+    if err:
+        print("idx_samples_ts", err, flush=True)
+
+
+threading.Thread(target=_ensure_samples_ts_index, daemon=True).start()
 
 
 def _ensure_column(table, col, decl):
@@ -300,6 +377,9 @@ def fetch_prime_window():
             "window_percent": float(m.get("share_percent") or 0),
             "window_sats": int(m.get("payout_sats") or 0),
             "payable": bool(m.get("payable")),
+            # Ledger writes one credit row per accepted share (no coalesce), so this
+            # is accepted shares still inside the TIDES window for this identity.
+            "window_shares": int(m.get("credits") or 0),
             "credits": int(m.get("credits") or 0),
             # primed measures these itself from the credit stream; no need to estimate.
             "hr_ghs": float(m.get("hashrate_ghs") or 0),
@@ -699,6 +779,7 @@ def prime_info_for(address):
         "window_work": 0,
         "window_percent": 0.0,
         "window_sats": 0,
+        "window_shares": 0,
         "payable": False,
         "window_peak": int(row["peak_work"] or 0),
         "window_last_ts": int(row["last_ts"] or 0),
@@ -737,6 +818,7 @@ def attach_share_fields(rec):
     rec["window_work"] = int(info.get("window_work") or 0)
     rec["window_percent"] = float(info.get("window_percent") or 0)
     rec["window_sats"] = int(info.get("window_sats") or 0)
+    rec["window_shares"] = int(info.get("window_shares") or info.get("credits") or 0)
     rec["fee_path"] = info.get("fee_path") or ""
     rec["via"] = rec.get("via") or ("prime" if rec.get("ua") in ("DATUM gateway", "Prime window") else "stratum")
     _led_by, _ = _ledger_hashrate()
@@ -775,6 +857,7 @@ def merge_prime_online(miners):
             m["window_work"] = int(info.get("window_work") or 0)
             m["window_percent"] = float(info.get("window_percent") or 0)
             m["window_sats"] = int(info.get("window_sats") or 0)
+            m["window_shares"] = int(info.get("window_shares") or info.get("credits") or 0)
         if addr in by:
             if m.get("ua") in ("DATUM gateway", "Prime window") or m.get("via") in ("gateway", "prime"):
                 if m.get("via") != "stratum":
@@ -810,6 +893,7 @@ def merge_prime_online(miners):
             "window_work": ww,
             "window_percent": float(info.get("window_percent") or 0),
             "window_sats": int(info.get("window_sats") or 0),
+            "window_shares": int(info.get("window_shares") or info.get("credits") or 0),
         }
         attach_share_fields(rec)
         rec["online"] = rec.get("online") or _prime_is_live(rec)
@@ -892,22 +976,62 @@ def rpc(method, params=None):
 _resp_cache = {}
 _resp_cache_lock = threading.Lock()
 _RESP_CACHE_MAX = 512
+_cache_compute_locks = {}
+_cache_refreshing = set()
+
+
+def _compute_lock(key):
+    with _resp_cache_lock:
+        lock = _cache_compute_locks.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            _cache_compute_locks[key] = lock
+        return lock
+
+
+def _cache_store(key, val):
+    now = time.time()
+    with _resp_cache_lock:
+        if len(_resp_cache) >= _RESP_CACHE_MAX:
+            for k in sorted(_resp_cache, key=lambda k: _resp_cache[k][0])[: _RESP_CACHE_MAX // 4]:
+                _resp_cache.pop(k, None)
+        _resp_cache[key] = (now, val)
+    return val
 
 
 def cached(key, ttl, fn):
+    """Fresh hit, else last good payload while one thread refreshes."""
     now = time.time()
     with _resp_cache_lock:
         hit = _resp_cache.get(key)
         if hit and now - hit[0] < ttl:
             return hit[1]
-    val = fn()
-    with _resp_cache_lock:
-        if len(_resp_cache) >= _RESP_CACHE_MAX:
-            # drop the oldest quarter rather than the whole thing
-            for k in sorted(_resp_cache, key=lambda k: _resp_cache[k][0])[: _RESP_CACHE_MAX // 4]:
-                _resp_cache.pop(k, None)
-        _resp_cache[key] = (now, val)
-    return val
+        stale = hit[1] if hit else None
+        refreshing = key in _cache_refreshing
+    if stale is not None:
+        if not refreshing:
+
+            def _bg():
+                try:
+                    _cache_store(key, fn())
+                except Exception as e:
+                    print("cache", key, e, flush=True)
+                finally:
+                    with _resp_cache_lock:
+                        _cache_refreshing.discard(key)
+
+            with _resp_cache_lock:
+                if key not in _cache_refreshing:
+                    _cache_refreshing.add(key)
+                    threading.Thread(target=_bg, daemon=True).start()
+        return stale
+    with _compute_lock(key):
+        now = time.time()
+        with _resp_cache_lock:
+            hit = _resp_cache.get(key)
+            if hit and now - hit[0] < ttl:
+                return hit[1]
+        return _cache_store(key, fn())
 
 
 # BLAKE2b BTC (ticker BTCB2) USD: volume-weighted average of the two live listings.
@@ -915,7 +1039,7 @@ def cached(key, ttl, fn):
 _NEOXA_BTCB2 = "https://neoxa.exchange/api/exchange/ticker/BTCB2_USDC"
 _NONKYC_BTCB2 = "https://api.nonkyc.io/api/v2/ticker/BTCB2_USDT"
 _price_lock = threading.Lock()
-_price_cache = {"doc": None, "ts": 0.0}
+_price_cache = {"doc": None, "ts": 0.0, "refreshing": False}
 
 
 def _pos_float(x):
@@ -988,14 +1112,28 @@ def _fiat_from_sha_basket(usd):
     return extras
 
 
-def price_payload():
+def _price_quotes():
+    box = {"neoxa": (None, None), "nonkyc": (None, None)}
+
+    def n():
+        box["neoxa"] = _neoxa_btcb2_quote()
+
+    def k():
+        box["nonkyc"] = _nonkyc_btcb2_quote()
+
+    t1 = threading.Thread(target=n, daemon=True)
+    t2 = threading.Thread(target=k, daemon=True)
+    t1.start()
+    t2.start()
+    t1.join(10)
+    t2.join(10)
+    return box["neoxa"], box["nonkyc"]
+
+
+def _price_compute():
     """BTCB2 USD plus mempool-shaped fiat keys. Last good print is kept if both books fail."""
     now = time.time()
-    with _price_lock:
-        if _price_cache["doc"] and now - _price_cache["ts"] < 45:
-            return _price_cache["doc"]
-    neoxa_last, neoxa_vol = _neoxa_btcb2_quote()
-    nonkyc_last, nonkyc_vol = _nonkyc_btcb2_quote()
+    (neoxa_last, neoxa_vol), (nonkyc_last, nonkyc_vol) = _price_quotes()
     usd, method = volume_weighted_usd(((neoxa_last, neoxa_vol), (nonkyc_last, nonkyc_vol)))
     n_quotes = sum(1 for v in (neoxa_last, nonkyc_last) if v is not None)
     if usd is not None:
@@ -1046,6 +1184,33 @@ def price_payload():
     }
 
 
+def _price_refresh_bg():
+    try:
+        _price_compute()
+    except Exception as e:
+        print("price", e, flush=True)
+    finally:
+        with _price_lock:
+            _price_cache["refreshing"] = False
+
+
+def price_payload():
+    now = time.time()
+    with _price_lock:
+        doc = _price_cache["doc"]
+        age = now - _price_cache["ts"]
+        if doc and age < 45:
+            return doc
+        if doc:
+            if not _price_cache["refreshing"]:
+                _price_cache["refreshing"] = True
+                threading.Thread(target=_price_refresh_bg, daemon=True).start()
+            stale = dict(doc)
+            stale["stale"] = True
+            return stale
+    return _price_compute()
+
+
 def mempool_prices_payload():
     """Same shape as stock mempool /api/v1/prices: {time, USD, EUR, …}."""
     p = price_payload()
@@ -1065,17 +1230,6 @@ def mempool_prices_payload():
 _ADDRESS_RE = re.compile(r"^[A-Za-z0-9._~-]{1,128}$")
 # Concurrent requests actually doing work; the rest get a fast 503 instead of a thread each.
 _inflight = threading.BoundedSemaphore(64)
-# The chat proxy holds a thread for up to 180 s per request, so it gets its own, smaller
-# budget: it must not be able to eat the whole request pool.
-_chat_inflight = threading.BoundedSemaphore(8)
-# Browsers may call the chat proxy cross-origin only from our own sites. The read-only
-# GET APIs stay world-readable; they are public pool statistics.
-_CHAT_ORIGIN_RE = re.compile(r"^https://([a-z0-9-]+\.)*awokenlazarus\.xyz$")
-
-
-def chat_origin(handler):
-    o = handler.headers.get("Origin") or ""
-    return o if _CHAT_ORIGIN_RE.match(o) else None
 
 
 def parse_hr(s):
@@ -1137,6 +1291,77 @@ def secondary_coinbase_tag(coinbase_hex):
         return ""
     tag = tags.split(b"\x0f", 1)[1].split(b"\x00", 1)[0]
     return "".join(chr(b) for b in tag if 32 <= b < 127).strip()[:40]
+
+
+def _fetch_overflow():
+    """Gateway overflow status and the sessions it is relaying to other pools.
+
+    The gateway answers `/proxied.json` with `{"overflow": {...}, "proxied": [...]}`; an
+    old gateway (or a solo one) has no such route and answers HTML, which is treated as
+    "no overflow feature"."""
+    try:
+        raw = curl(DATUM_URL + "/proxied.json", timeout=3)
+        doc = json.loads(raw)
+    except Exception:
+        return {"overflow": None, "proxied": []}
+    if not isinstance(doc, dict):
+        return {"overflow": None, "proxied": []}
+    rows = []
+    for p in doc.get("proxied") or []:
+        addr, worker = split_user(p.get("user") or "")
+        rows.append(
+            {
+                "address": p.get("identity") or addr,
+                "worker": p.get("worker") or worker,
+                "user": p.get("user") or "",
+                "host": p.get("host") or "",
+                "ua": p.get("ua") or "",
+                "upstream": p.get("upstream") or "",
+                "upstream_url": p.get("upstream_url") or "",
+                "miner_url": p.get("miner_url") or p.get("upstream_url") or "",
+                "connected_s": int(p.get("connected_s") or 0),
+                "submits": int(p.get("submits") or 0),
+                "accepted": int(p.get("accepted") or 0),
+                "via": "relayed",
+                "online": True,
+            }
+        )
+    ov = doc.get("overflow")
+    if isinstance(ov, dict):
+        ov = {
+            "mode": ov.get("mode"),
+            "active": bool(ov.get("active")),
+            "active_since_unix": ov.get("active_since_unix") or 0,
+            "share_pct": float(ov.get("share_pct") or 0),
+            "enter_pct": ov.get("enter_pct"),
+            "exit_pct": ov.get("exit_pct"),
+            "pool_hs": float(ov.get("pool_hs") or 0),
+            "stratum_hs": float(ov.get("stratum_hs") or 0),
+            "datum_hs": float(ov.get("datum_hs") or 0),
+            "net_hs": float(ov.get("net_hs") or 0),
+            "meter_ok": bool(ov.get("meter_ok")),
+            "meter_updated_unix": ov.get("meter_updated_unix") or 0,
+            "proxied_sessions": int(ov.get("proxied_sessions") or 0),
+            "proxied_total": int(ov.get("proxied_total") or 0),
+            "upstreams": [
+                {
+                    "name": u.get("name"),
+                    "url": u.get("url"),
+                    "host": u.get("host"),
+                    "port": u.get("port"),
+                    "healthy": bool(u.get("healthy")),
+                    "sessions": int(u.get("sessions") or 0),
+                }
+                for u in (ov.get("upstreams") or [])
+            ],
+        }
+    else:
+        ov = None
+    return {"overflow": ov, "proxied": rows}
+
+
+def overflow_doc():
+    return cached("overflow", 5.0, _fetch_overflow)
 
 
 def _scrape_datum_home(url):
@@ -1254,8 +1479,11 @@ def scrape():
         rec["shares_session"] = sess
         rec["shares_lifetime"] = life
         credit_round_work(rec["address"], rec["diff_acc"])
-    db("DELETE FROM samples WHERE ts < ?", (ts - 3 * 86400,), write=True)
-    db("DELETE FROM pool_samples WHERE ts < ?", (ts - 7 * 86400,), write=True)
+    last_prune = int(state.get("last_prune_ts") or 0)
+    if ts - last_prune >= 1800:
+        db("DELETE FROM samples WHERE ts < ?", (ts - 3 * 86400,), write=True)
+        db("DELETE FROM pool_samples WHERE ts < ?", (ts - 7 * 86400,), write=True)
+        state["last_prune_ts"] = ts
     prime_by, prime_meta = fetch_prime_window()
     persist_prime_miners(prime_by, ts)
     stratum_addrs = {m.get("address") for m in miners}
@@ -1547,27 +1775,41 @@ def learn_gateway_tags(budget=4):
 
 
 def refresh_gateway_identities():
-    """Keep each learned gateway's payout address current while it is connected."""
+    """Keep each learned gateway's payout address (and live secondary tag) current."""
     if NO_WRITE:
         return
+    ts = int(time.time())
     for c in (state.get("prime_meta") or {}).get("clients") or []:
         gw = str(c.get("gateway") or "")
         ident = str(c.get("identity") or "").strip()
-        if gw and ident and not str(c.get("user_agent") or "").startswith(OWN_GATEWAY_UA_PREFIX):
+        if not gw or str(c.get("user_agent") or "").startswith(OWN_GATEWAY_UA_PREFIX):
+            continue
+        tag = str(c.get("secondary_tag") or c.get("name") or "").strip()[:40]
+        if ident:
             db("UPDATE gateway_tags SET identity=? WHERE gateway=?", (ident, gw), write=True)
+        if tag:
+            db(
+                "INSERT INTO gateway_tags(gateway, tag, identity, height, ts) VALUES(?,?,?,?,?) "
+                "ON CONFLICT(gateway) DO UPDATE SET tag=excluded.tag, identity=excluded.identity, ts=excluded.ts",
+                (gw, tag, ident, 0, ts),
+                write=True,
+            )
 
 
 def gateway_names_by_address():
     """address -> {name, gateway, connected} for addresses running their own DATUM gateway.
 
-    `name` is the operator's secondary coinbase tag once one of their blocks has taught us it,
-    and "" until then; the caller decides what to show in its place.
+    `name` is the operator's `pool_tag_secondary`: from a live share when Prime has seen one,
+    otherwise from a block that gateway found. Empty until then; the caller decides what to show.
     """
     meta = state.get("prime_meta") or {}
     tags = {}
-    for r in db("SELECT gateway, tag, identity FROM gateway_tags") or []:
-        if r["identity"]:
-            tags[str(r["identity"])] = (str(r["gateway"]), str(r["tag"] or ""))
+    # Highest height last so a later find (or a live share written at height 0, then a
+    # real block) wins when the same payout address has used more than one gateway key.
+    for r in db("SELECT gateway, tag, identity, height FROM gateway_tags ORDER BY height ASC") or []:
+        ident = str(r["identity"] or "").strip()
+        if ident:
+            tags[ident] = (str(r["gateway"]), str(r["tag"] or "").strip())
     out = {}
     live = set()
     for c in meta.get("clients") or []:
@@ -1576,16 +1818,28 @@ def gateway_names_by_address():
             continue
         gw = str(c.get("gateway") or "")
         live.add(ident)
-        out[ident] = {
-            "name": tags.get(ident, ("", ""))[1] if tags.get(ident, ("", ""))[0] == gw else "",
-            "gateway": gw,
-            "connected": True,
-        }
-    # A gateway that dropped this minute still holds work in the window, so keep naming it.
+        live_tag = str(c.get("secondary_tag") or c.get("name") or "").strip()[:40]
+        db_gw, db_tag = tags.get(ident, ("", ""))
+        # Same payout address is the same operator even if they rotated the gateway key.
+        name = live_tag or db_tag
+        out[ident] = {"name": name, "gateway": gw or db_gw, "connected": True}
     for ident, (gw, tag) in tags.items():
         if ident not in live:
             out[ident] = {"name": tag, "gateway": gw, "connected": False}
     return out
+
+
+def stamp_gateway_names(rows, names=None):
+    """Attach `gateway_name` / `gateway` from `gateway_names_by_address` onto miner dicts."""
+    names = names if names is not None else gateway_names_by_address()
+    for rec in rows or []:
+        who = names.get(rec.get("address") or "")
+        if not who:
+            continue
+        rec["gateway_name"] = who.get("name") or ""
+        rec["gateway"] = who.get("gateway") or ""
+        rec["gateway_connected"] = bool(who.get("connected"))
+    return rows
 
 
 def solo_blocks_rows(limit=50):
@@ -1653,7 +1907,7 @@ def solo_payload():
     rows = sorted(miners.values(), key=lambda m: (-m["hashrate_ghs"], -m["work"]))
     return {
         "enabled": any(e["online"] for e in endpoints),
-        "fee_percent": next((e["fee_percent"] for e in endpoints if e["online"]), 2.5),
+        "fee_percent": next((e["fee_percent"] for e in endpoints if e["online"]), 5),
         "endpoints": endpoints,
         "hashrate_ghs": hashrate_ghs,
         "miners": rows,
@@ -1679,14 +1933,28 @@ def _solo_row(ident):
     }
 
 
+def _addr_key(addr):
+    """Bech32 is case-insensitive; base58 is not. Solo identities are already folded."""
+    a = (addr or "").strip()
+    if a.lower().startswith(("bc1", "tb1", "bcrt1")):
+        return a.lower()
+    return a
+
+
+def _solo_row_for(miners, addr):
+    key = _addr_key(addr)
+    return next((m for m in miners if _addr_key(m.get("address")) == key), None)
+
+
 def solo_miner_payload(addr):
     doc = solo_payload()
-    me = next((m for m in doc["miners"] if m["address"] == addr), None)
+    me = _solo_row_for(doc["miners"], addr)
+    key = _addr_key(addr)
     return {
         "address": addr,
         "found": me is not None,
         "solo": me or _solo_row(addr),
-        "blocks": [b for b in doc["blocks"] if b["finder"] == addr],
+        "blocks": [b for b in doc["blocks"] if _addr_key(b.get("finder")) == key],
         "endpoints": doc["endpoints"],
         "ts": doc["ts"],
     }
@@ -1814,15 +2082,24 @@ def loop():
         time.sleep(max(0.5, 10 - (time.time() - t0)))
 
 
+_node_info_cache = {"ts": 0.0, "doc": None}
+
+
 def node_info():
+    now = time.time()
+    if _node_info_cache["doc"] and now - _node_info_cache["ts"] < 5:
+        return _node_info_cache["doc"]
     mi = rpc("getmininginfo") or {}
     bi = rpc("getblockchaininfo") or {}
-    return {
+    doc = {
         "height": mi.get("blocks") or bi.get("blocks"),
         "difficulty": mi.get("difficulty"),
         "networkhashps": mi.get("networkhashps"),
         "chain": bi.get("chain"),
     }
+    _node_info_cache["ts"] = now
+    _node_info_cache["doc"] = doc
+    return doc
 
 
 def mempool_blocks():
@@ -1847,16 +2124,100 @@ def mempool_blocks():
         return []
 
 
-def luck_and_ttf(pool_hr_ghs, net_hs, first_ts):
-    net_ghs = (float(net_hs) / 1e9) if net_hs else 0
-    share = (pool_hr_ghs / net_ghs) if net_ghs else 0
-    ttf_s = (600.0 / share) if share else None
+# Bitcoin (and this BLAKE2b fork) measures block proof as difficulty × 2^32 hashes.
+# getmininginfo.networkhashps is work/time over the last 120 blocks, so it already
+# embeds however fast those blocks arrived. Mixing that nethash with a 600s target
+# spacing double-counts a hot network: TTF comes out too long and luck too high.
+POW2_32 = float(1 << 32)
+_luck_cache = {
+    "ts": 0.0,
+    "expected": None,
+    "nfound": 0,
+    "full_ts": 0.0,
+    "last_ts": 0,
+    "last_hs": 0.0,
+    "hashes": 0.0,
+}
+
+
+def hashes_per_block(difficulty):
+    try:
+        d = float(difficulty or 0)
+    except (TypeError, ValueError):
+        return 0.0
+    return d * POW2_32 if d > 0 else 0.0
+
+
+def _luck_add_rows(rows, last_ts, last_hs, hashes):
+    for r in rows or []:
+        ts = int(r["ts"] or 0)
+        hs = float(r["hr_ghs"] or 0) * 1e9
+        if last_ts:
+            dt = ts - last_ts
+            if 0 < dt < 3600:
+                hashes += last_hs * dt
+        last_ts, last_hs = ts, hs
+    return last_ts, last_hs, hashes
+
+
+def expected_blocks_from_samples(difficulty):
+    """∫ pool_hashrate dt / (difficulty × 2^32) over pool_samples.
+
+    Uses current difficulty for the whole series (a few retargets on this
+    chain). Incremental after the first full pass; a full rescan once an hour
+    so pruned samples cannot inflate luck forever.
+    """
+    need = hashes_per_block(difficulty)
+    if need <= 0:
+        return None
+    now = time.time()
+    if now - _luck_cache["ts"] < 30 and _luck_cache["expected"] is not None:
+        return _luck_cache["expected"]
+    last_ts = int(_luck_cache.get("last_ts") or 0)
+    last_hs = float(_luck_cache.get("last_hs") or 0)
+    hashes = float(_luck_cache.get("hashes") or 0)
+    full_age = now - float(_luck_cache.get("full_ts") or 0)
+    if last_ts <= 0 or full_age > 3600:
+        last_ts, last_hs, hashes = _luck_add_rows(
+            db("SELECT ts, hr_ghs FROM pool_samples ORDER BY ts") or [], 0, 0.0, 0.0
+        )
+        _luck_cache["full_ts"] = now
+    else:
+        last_ts, last_hs, hashes = _luck_add_rows(
+            db("SELECT ts, hr_ghs FROM pool_samples WHERE ts > ? ORDER BY ts", (last_ts,)) or [],
+            last_ts,
+            last_hs,
+            hashes,
+        )
+    if last_ts <= 0:
+        return None
+    expected = hashes / need if need else None
+    _luck_cache["ts"] = now
+    _luck_cache["expected"] = expected
+    _luck_cache["last_ts"] = last_ts
+    _luck_cache["last_hs"] = last_hs
+    _luck_cache["hashes"] = hashes
+    return expected
+
+
+def luck_and_ttf(pool_hr_ghs, net_hs, difficulty, first_ts=None):
+    pool_hs = float(pool_hr_ghs or 0) * 1e9
+    need = hashes_per_block(difficulty)
+    net_hs = float(net_hs or 0)
+    if net_hs <= 0 and need:
+        net_hs = need / 600.0
+    share = (pool_hs / net_hs) if net_hs else 0.0
+    # Mean time to a pool block at the current target, not 600 / share.
+    ttf_s = (need / pool_hs) if pool_hs > 0 and need > 0 else None
     found = db("SELECT COUNT(*) AS n FROM found_blocks", one=True)
     nfound = int(found["n"]) if found else 0
-    elapsed = max(0, int(time.time()) - int(first_ts or time.time()))
-    expected = (elapsed / 600.0) * share if share else 0
-    luck = (nfound / expected * 100.0) if expected > 0.01 else None
-    return share, ttf_s, nfound, expected, luck
+    expected = expected_blocks_from_samples(difficulty)
+    if expected is None:
+        elapsed = max(0, int(time.time()) - int(first_ts or time.time()))
+        expected = (elapsed * pool_hs / need) if need > 0 and pool_hs > 0 else 0.0
+    luck = (nfound / expected * 100.0) if expected and expected > 0.01 else None
+    interval = (need / net_hs) if net_hs > 0 and need > 0 else None
+    return share, ttf_s, nfound, expected, luck, interval
 
 
 OWN_GATEWAY_UA_PREFIX = "lazarus-gateway/"
@@ -1864,6 +2225,7 @@ OWN_GATEWAY_UA_PREFIX = "lazarus-gateway/"
 
 def _gateway_row(c):
     ua = str(c.get("user_agent") or "")
+    tag = str(c.get("secondary_tag") or c.get("name") or "").strip()[:40]
     return {
         "id": c.get("id"),
         "gateway": c.get("gateway"),
@@ -1873,6 +2235,8 @@ def _gateway_row(c):
         "own": ua.startswith(OWN_GATEWAY_UA_PREFIX),
         "fee_path": str(c.get("fee_path") or "").lower(),
         "identity": c.get("identity") or "",
+        "secondary_tag": tag,
+        "name": tag,
         "connected_s": int(c.get("connected_s") or 0),
         "accepted": int(c.get("accepted") or 0),
         "rejected": int(c.get("rejected") or 0),
@@ -1905,7 +2269,7 @@ def _block_row(b):
         status = "rejected"
     else:
         status = "pending"
-    return {
+    return apply_owed_settlement({
         "height": b.get("height"),
         "hash": b.get("hash"),
         "ts": b.get("ts"),
@@ -1919,7 +2283,7 @@ def _block_row(b):
         "owed_sats": int(b.get("owed_sats") or 0),
         "outputs": len(split),
         "split": [{"address": a, "sats": int(s)} for a, s in split if a],
-    }
+    })
 
 
 def prime_summary():
@@ -1929,6 +2293,18 @@ def prime_summary():
     totals = meta.get("totals") or {}
     clients = [_gateway_row(c) for c in meta.get("clients") or []]
     clients, log_found = _merge_persistent_gateway_finds(clients)
+    known_tags = {
+        str(r["gateway"]): str(r["tag"] or "").strip()
+        for r in db("SELECT gateway, tag FROM gateway_tags") or []
+        if r["tag"]
+    }
+    for g in clients:
+        if g.get("own") or g.get("secondary_tag"):
+            continue
+        tag = known_tags.get(str(g.get("gateway") or ""))
+        if tag:
+            g["secondary_tag"] = tag
+            g["name"] = tag
     blocks = [_block_row(b) for b in meta.get("blocks") or []]
     blocks.sort(key=lambda b: -(b["height"] or 0))
     pool_addr = pool.get("address") or ""
@@ -1981,7 +2357,11 @@ def prime_summary():
             "block_candidates": int(log_found or totals.get("block_candidates") or 0),
             "blocks_submitted": int(totals.get("blocks_submitted") or 0),
         },
-        "owed_sats": meta.get("owed_sats") or 0,
+        "owed_sats": max(
+            0,
+            int(meta.get("owed_sats") or 0)
+            - sum(int(b.get("owed_sats") or 0) for b in blocks if b.get("owed_resolved")),
+        ),
         "gateways": clients,
         "gateways_online": sum(1 for g in clients if not g.get("offline")),
         "gateways_remote": sum(1 for g in clients if not g["own"] and not g.get("offline")),
@@ -2004,6 +2384,7 @@ def prime_coinbaser_preview():
                 "sats": sats,
                 "share_percent": float(info.get("window_percent") or 0),
                 "work": int(info.get("window_work") or 0),
+                "window_shares": int(info.get("window_shares") or info.get("credits") or 0),
                 "fee_path": info.get("fee_path") or "",
                 "hr_ghs": float(info.get("hr_ghs") or 0),
                 "last_share_s": info.get("last_share_s"),
@@ -2018,18 +2399,19 @@ def prime_coinbaser_preview():
     pool_sats = int(meta.get("sample_pool_sats") or max(0, value - miner_sats))
     fee_sats = int(meta.get("sample_fee_sats") or 0)
     pool_addr = (meta.get("pool") or {}).get("address") or ""
-    # Who each output belongs to, for the donut's labels: an address on the DATUM path is running
-    # its own gateway, and once one of its blocks has taught us the operator's secondary coinbase
-    # tag we can name them rather than just abbreviate the address.
+    # Who each output belongs to, for the donut's labels: an address on the DATUM path is
+    # running its own gateway. The operator's secondary coinbase tag (pool_tag_secondary)
+    # comes from a live share when Prime has seen one, otherwise from a block they found.
     names = gateway_names_by_address()
     outputs = []
     for m in miners:
         o = dict(m, to="miner")
         who = names.get(m["address"])
         if who and m.get("fee_path") == "datum":
-            o["name"] = who["name"]
-            o["gateway"] = who["gateway"]
-            o["gateway_connected"] = who["connected"]
+            o["name"] = who.get("name") or ""
+            o["gateway_name"] = who.get("name") or ""
+            o["gateway"] = who.get("gateway") or ""
+            o["gateway_connected"] = bool(who.get("connected"))
         outputs.append(o)
     if pool_sats > 0:
         outputs.append({"address": pool_addr, "sats": pool_sats, "to": "pool"})
@@ -2076,13 +2458,22 @@ def pool_payload():
     net = float(node.get("networkhashps") or 0)
     first = db("SELECT MIN(first_ts) AS t FROM miners", one=True)
     first_ts = first["t"] if first and first["t"] else state.get("ts")
-    share, ttf_s, nfound, expected, luck = luck_and_ttf(pool_hr, net, first_ts)
-    est_btc_day = share * 144 * SUBSIDY * (1 - POOL_FEE / 100.0)
-    # 1 TH/s vs current network hashrate, 144 blocks/day, base subsidy (no tx fees).
-    ths_share = (1e12 / net) if net else 0.0
-    ths_btc_day = ths_share * 144 * SUBSIDY
+    share, ttf_s, nfound, expected, luck, interval = luck_and_ttf(
+        pool_hr, net, node.get("difficulty"), first_ts
+    )
+    # Daily estimate at the current target (same work units as TTF), not 144 × share.
+    # 144 assumes 10-minute blocks; this chain has been running much faster than that.
+    need = hashes_per_block(node.get("difficulty"))
+    blocks_per_day = (86400.0 / ttf_s) if ttf_s else 0.0
+    est_btc_day = blocks_per_day * SUBSIDY * (1 - POOL_FEE / 100.0)
+    ths_btc_day = ((1e12 * 86400.0 / need) * SUBSIDY) if need else 0.0
     known = db("SELECT COUNT(*) AS n FROM miners", one=True)
-    hist = db("SELECT ts, hr_ghs, miners FROM pool_samples WHERE ts > ? ORDER BY ts", (int(time.time()) - 86400,))
+    since = int(time.time()) - 86400
+    hist = db(
+        "SELECT (ts / 60) * 60 AS ts, AVG(hr_ghs) AS hr_ghs, AVG(miners) AS miners "
+        "FROM pool_samples WHERE ts > ? GROUP BY (ts / 60) ORDER BY 1",
+        (since,),
+    )
     win = tides_window_snapshot()
     prime = prime_summary()
     nblocks = int(win["window_multiple"] or 8)
@@ -2135,6 +2526,7 @@ def pool_payload():
         "ths_btc_day_datum": ths_btc_day * (1 - datum_fee / 100.0),
         "ths_btc_day_stratum": ths_btc_day * (1 - stratum_fee / 100.0),
         "ttf_seconds": ttf_s,
+        "block_interval_seconds": interval,
         "blocks_found": nfound,
         "blocks_expected": expected,
         "luck_percent": luck,
@@ -2151,10 +2543,20 @@ def pool_payload():
             "pooled_mining_only": True,
         },
         "prime": prime,
+        # Network-share valve on the house stratum: over the line, new miners are relayed
+        # to other BLAKE2b pools and paid there. Absent when the gateway lacks the feature.
+        "overflow": overflow_doc().get("overflow"),
         "payouts_onchain": True,
         "explorer": EXPLORER,
         "updated": state.get("ts") or int(time.time()),
-        "history": [{"ts": r["ts"], "hr_ghs": r["hr_ghs"], "miners": r["miners"]} for r in hist],
+        "history": [
+            {
+                "ts": int(r["ts"]),
+                "hr_ghs": round(float(r["hr_ghs"] or 0), 3),
+                "miners": int(round(float(r["miners"] or 0))),
+            }
+            for r in (hist or [])
+        ],
     }
 
 
@@ -2201,7 +2603,8 @@ def rollup_online_by_address(online):
 def miner_payload(address):
     recs = [m for m in online_miners() if m["address"] == address]
     hist = db(
-        "SELECT ts, SUM(hr_ghs) AS hr FROM samples WHERE address=? AND ts > ? GROUP BY ts ORDER BY ts",
+        "SELECT (ts / 60) * 60 AS ts, AVG(hr_ghs) AS hr FROM samples WHERE address=? AND ts > ? "
+        "GROUP BY (ts / 60) ORDER BY 1",
         (address, int(time.time()) - 86400),
     )
     stored = db("SELECT * FROM miners WHERE address=?", (address,), one=True)
@@ -2214,9 +2617,12 @@ def miner_payload(address):
     # under-counts once the TIDES window is full and trim lands in the same poll.
     hr = credited if credited > 1e-6 else (gwh if gwh > 1e-6 else firmware)
     node = node_info()
-    net_ghs = (float(node.get("networkhashps") or 0)) / 1e9
+    net_hs = float(node.get("networkhashps") or 0)
+    net_ghs = net_hs / 1e9
     share = (hr / net_ghs) if net_ghs else 0
-    est = share * 144 * SUBSIDY * (1 - POOL_FEE / 100.0)
+    miner_need = hashes_per_block(node.get("difficulty"))
+    miner_hs = float(hr or 0) * 1e9
+    est = ((miner_hs * 86400.0 / miner_need) * SUBSIDY * (1 - POOL_FEE / 100.0)) if miner_need and miner_hs else 0.0
     pool_hr = 0.0
     _seen = set()
     for m in online_miners():
@@ -2293,7 +2699,7 @@ def miner_payload(address):
     my_work = float(rw["work"]) if rw else 0.0
     tot_work = float(tw["s"]) if tw else 0.0
     round_share = (my_work / tot_work) if tot_work else 0.0
-    ttf_s = (600.0 / share) if share else None
+    ttf_s = (miner_need / miner_hs) if miner_need and miner_hs else None
     known = bool(stored or recs)
     life_a, life_r, sess_stored = address_share_totals(address) if address else (0, 0, 0)
     sess_live = sum(int(m.get("shares_session") or 0) for m in recs if (m.get("via") or "stratum") not in ("gateway", "prime")) if recs else 0
@@ -2317,10 +2723,18 @@ def miner_payload(address):
             "last_share_s": _share_age_s(pinfo.get("last_share_s"), missing=0.0),
             "ua": "Prime window", "via": "prime",
             "window_work": pinfo.get("window_work") or 0, "window_percent": pinfo.get("window_percent") or 0,
+            "window_shares": int(pinfo.get("window_shares") or pinfo.get("credits") or 0),
         }]
     else:
         via = ""
-    known = bool(stored or recs or pinfo.get("window_work") or life_a)
+    solo = _solo_for(address)
+    if solo:
+        shs = float(solo.get("hashrate_ghs") or 0) * 1e9
+        solo["ttf_seconds"] = (miner_need / shs) if miner_need and shs else None
+    # Sessions the gateway is relaying to another pool under this address. Not ours to
+    # credit, but the miner looking itself up here deserves to see where its work went.
+    relayed = [p for p in overflow_doc().get("proxied") or [] if _addr_key(p.get("address")) == _addr_key(address)]
+    known = bool(stored or recs or pinfo.get("window_work") or life_a or solo or relayed)
     last_s = min((_share_age_s(m.get("last_share_s")) for m in recs), default=1e9)
     if pinfo.get("last_share_s") is not None:
         last_s = min(last_s, _share_age_s(pinfo.get("last_share_s"), missing=0.0))
@@ -2328,12 +2742,12 @@ def miner_payload(address):
         float(m.get("hr_ghs") or 0) > 1e-6 and _share_age_s(m.get("last_share_s"), missing=0.0) < 180
         for m in recs
         if (m.get("via") or "") in ("stratum", "both", "prime", "gateway")
-    )
+    ) or bool(solo and float(solo.get("hashrate_ghs") or 0) > 1e-6)
     best = float(stored["best_hr_ghs"] if stored and stored["best_hr_ghs"] is not None else (hr or 0))
     if best >= _PRIME_HR_CAP_GHS:
         best = hr
     win = tides_window_snapshot()
-    return {
+    out = {
         "address": address if known else "",
         "known": known,
         "online": bool(is_online),
@@ -2347,6 +2761,7 @@ def miner_payload(address):
         "window_work": int(pinfo.get("window_work") or 0),
         "window_percent": float(pinfo.get("window_percent") or 0),
         "window_sats": int(pinfo.get("window_sats") or 0),
+        "window_shares": int(pinfo.get("window_shares") or pinfo.get("credits") or 0),
         "diff_acc": (recs[0].get("diff_acc", 0) if recs else 0) or (stored["diff_acc"] if stored and "diff_acc" in stored.keys() else 0),
         "first_seen": stored["first_ts"] if stored else None,
         "last_seen": stored["last_ts"] if stored else None,
@@ -2361,6 +2776,7 @@ def miner_payload(address):
         "block_payout_btc": (int(pinfo.get("window_sats") or 0) / 1e8) if pinfo.get("window_sats") else SUBSIDY * (1 - POOL_FEE / 100.0) * round_share,
         "fee_path": pinfo.get("fee_path") or "",
         "fee_percent_path": _fee_percent_for_path(pinfo.get("fee_path")),
+        "gateway_name": "",
         "paid_btc": paid_btc,
         "unpaid_btc": 0.0,
         "immature_btc": immature_btc,
@@ -2372,9 +2788,15 @@ def miner_payload(address):
         "fee_percent": POOL_FEE,
         # Solo is a separate book: none of it is in `window_work` above, and none of it is
         # owed. Present so one address that mines both ways sees both on one page.
-        "solo": _solo_for(address),
-        "history": [{"ts": r["ts"], "hr_ghs": r["hr"]} for r in hist],
+        "solo": solo,
+        "relayed": relayed,
+        "overflow": overflow_doc().get("overflow"),
+        "history": [{"ts": int(r["ts"]), "hr_ghs": round(float(r["hr"] or 0), 3)} for r in (hist or [])],
     }
+    names = gateway_names_by_address()
+    stamp_gateway_names([out], names)
+    stamp_gateway_names(out.get("workers") or [], names)
+    return out
 
 
 def _solo_for(address):
@@ -2383,8 +2805,9 @@ def _solo_for(address):
         doc = cached("solo", 3.0, solo_payload)
     except Exception:
         return None
-    me = next((m for m in doc["miners"] if m["address"] == address), None)
-    blocks = [b for b in doc["blocks"] if b["finder"] == address]
+    me = _solo_row_for(doc["miners"], address)
+    key = _addr_key(address)
+    blocks = [b for b in doc["blocks"] if _addr_key(b.get("finder")) == key]
     if not me and not blocks:
         return None
     row = dict(me or _solo_row(address))
@@ -2417,14 +2840,27 @@ class Handler(BaseHTTPRequestHandler):
         finally:
             _inflight.release()
 
-    def send_json(self, obj, code=200):
-        body = json.dumps(obj).encode()
+    def send_json(self, obj, code=200, cache_s=0):
+        body = json.dumps(obj, separators=(",", ":")).encode()
+        enc = (self.headers.get("Accept-Encoding") or "").lower()
+        use_gzip = code == 200 and "gzip" in enc and len(body) >= 400
+        if use_gzip:
+            body = gzip.compress(body, compresslevel=4)
         self.send_response(code)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
+        if use_gzip:
+            self.send_header("Content-Encoding", "gzip")
+            self.send_header("Vary", "Accept-Encoding")
         self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("X-Content-Type-Options", "nosniff")
-        self.send_header("Cache-Control", "no-store")
+        if cache_s > 0:
+            self.send_header(
+                "Cache-Control",
+                f"public, max-age=0, s-maxage={int(cache_s)}, stale-while-revalidate={int(cache_s) * 6}",
+            )
+        else:
+            self.send_header("Cache-Control", "no-store")
         self.end_headers()
         self.wfile.write(body)
 
@@ -2434,125 +2870,53 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(data)))
         self.send_header("X-Content-Type-Options", "nosniff")
-        self.send_header("Cache-Control", "no-store")
+        if Path(path).suffix.lower() in {".js", ".css", ".svg", ".png", ".ico", ".wasm", ".woff2"}:
+            self.send_header("Cache-Control", "public, max-age=600")
+        else:
+            self.send_header("Cache-Control", "no-store")
         self.end_headers()
         self.wfile.write(data)
-
-    def do_OPTIONS(self):
-        u = urlparse(self.path)
-        if unquote(u.path) != "/api/laz/chat":
-            self.send_json({"error": "not found"}, 404)
-            return
-        self.send_response(204)
-        origin = chat_origin(self)
-        if origin:
-            self.send_header("Access-Control-Allow-Origin", origin)
-            self.send_header("Vary", "Origin")
-            self.send_header("Access-Control-Allow-Methods", "POST, OPTIONS")
-            self.send_header("Access-Control-Allow-Headers", "Content-Type")
-        self.end_headers()
-
-    def do_POST(self):
-        u = urlparse(self.path)
-        if unquote(u.path) != "/api/laz/chat":
-            self.send_json({"error": "not found"}, 404)
-            return
-        try:
-            n = int(self.headers.get("Content-Length") or 0)
-        except ValueError:
-            self.send_json({"error": "bad content-length"}, 400)
-            return
-        if n < 0 or n > 8000:
-            self.send_json({"error": "payload too large"}, 413)
-            return
-        raw = self.rfile.read(n)
-        try:
-            json.loads(raw)
-        except Exception:
-            self.send_json({"error": "body must be JSON"}, 400)
-            return
-        if not _chat_inflight.acquire(blocking=False):
-            self.send_json({"error": "chat busy, try again shortly"}, 429)
-            return
-        try:
-            self._proxy_chat(raw)
-        finally:
-            _chat_inflight.release()
-
-    def _proxy_chat(self, raw):
-        req = urllib_request.Request(
-            f"{LAZ_AGENT.rstrip('/')}/chat",
-            data=raw,
-            headers={
-                "Content-Type": "application/json",
-                "X-Forwarded-For": self.client_address[0],
-            },
-            method="POST",
-        )
-        try:
-            with urllib_request.urlopen(req, timeout=180) as resp:
-                body = resp.read()
-                code = resp.status
-        except urllib_error.HTTPError as e:
-            body = e.read()
-            code = e.code
-        except Exception as e:
-            # Detail (internal host, socket errors) goes to stderr, not to the client.
-            print(f"laz chat upstream error: {type(e).__name__}: {e}", file=sys.stderr, flush=True)
-            self.send_json({"error": "Laz agent unreachable"}, 502)
-            return
-        self.send_response(code)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(body)))
-        origin = chat_origin(self)
-        if origin:
-            self.send_header("Access-Control-Allow-Origin", origin)
-            self.send_header("Vary", "Origin")
-        self.send_header("X-Content-Type-Options", "nosniff")
-        self.send_header("Cache-Control", "no-store")
-        self.end_headers()
-        self.wfile.write(body)
 
     def do_GET(self):
         u = urlparse(self.path)
         path = unquote(u.path)
         if path in ("/api/price", "/api/v1/prices"):
-            self.send_json(price_payload() if path == "/api/price" else mempool_prices_payload())
+            self.send_json(price_payload() if path == "/api/price" else mempool_prices_payload(), cache_s=15)
             return
         if path == "/api/pool":
-            self.send_json(cached("pool", 1.0, pool_payload))
+            self.send_json(cached("pool", 5.0, pool_payload), cache_s=5)
             return
         if path == "/api/miners":
-            self.send_json(cached("miners", 2.0, self._miners_payload))
+            self.send_json(cached("miners", 5.0, self._miners_payload), cache_s=5)
             return
         if path.startswith("/api/miner/"):
             addr = path.split("/api/miner/", 1)[1].strip("/")
             if not _ADDRESS_RE.match(addr):
                 self.send_json({"error": "not found"}, 404)
                 return
-            self.send_json(cached(("miner", addr), 3.0, lambda: miner_payload(addr)))
+            self.send_json(cached(("miner", addr), 5.0, lambda: miner_payload(addr)), cache_s=5)
             return
         if path == "/api/blocks":
-            self.send_json(cached("blocks", 10.0, lambda: {"blocks": mempool_blocks()}))
+            self.send_json(cached("blocks", 15.0, lambda: {"blocks": mempool_blocks()}), cache_s=15)
             return
         if path == "/api/coinbaser":
-            self.send_json(cached("coinbaser", 2.0, prime_coinbaser_preview))
+            self.send_json(cached("coinbaser", 5.0, prime_coinbaser_preview), cache_s=5)
             return
         if path == "/api/solo":
-            self.send_json(cached("solo", 3.0, solo_payload))
+            self.send_json(cached("solo", 5.0, solo_payload), cache_s=5)
             return
         if path.startswith("/api/solo/"):
             addr = path.split("/api/solo/", 1)[1].strip("/")
             if not _ADDRESS_RE.match(addr):
                 self.send_json({"error": "not found"}, 404)
                 return
-            self.send_json(cached(("solo", addr), 3.0, lambda: solo_miner_payload(addr)))
+            self.send_json(cached(("solo", addr), 5.0, lambda: solo_miner_payload(addr)), cache_s=5)
             return
         if path == "/api/gateways":
-            self.send_json(cached("gateways", 2.0, self._gateways_payload))
+            self.send_json(cached("gateways", 5.0, self._gateways_payload), cache_s=5)
             return
         if path == "/api/payouts":
-            self.send_json(cached("payouts", 5.0, self._payouts_payload))
+            self.send_json(cached("payouts", 10.0, self._payouts_payload), cache_s=10)
             return
         if path in ("/", "/index.html"):
             self.send_file(STATIC / "index.html", "text/html; charset=utf-8")
@@ -2583,11 +2947,27 @@ class Handler(BaseHTTPRequestHandler):
     def _miners_payload():
         online = online_miners()
         seen = db("SELECT * FROM miners ORDER BY last_ts DESC LIMIT 200")
+        addrs = [r["address"] for r in (seen or []) if r["address"]]
+        shares_by = {}
+        if addrs:
+            ph = ",".join("?" * len(addrs))
+            for row in (
+                db(
+                    f"SELECT address, COALESCE(SUM(lifetime_acc),0) AS a, COALESCE(SUM(lifetime_rej),0) AS r, "
+                    f"COALESCE(SUM(last_shares_acc),0) AS s FROM worker_shares WHERE address IN ({ph}) GROUP BY address",
+                    tuple(addrs),
+                )
+                or []
+            ):
+                shares_by[row["address"]] = (int(row["a"]), int(row["r"]), int(row["s"]))
+        stratum_online = {o.get("address") for o in online if o.get("via") == "stratum"}
+        prime_ids = state.get("prime") or {}
         seen_out = []
         for r in seen or []:
             d = dict(r)
-            life_a, life_r, sess = address_share_totals(d.get("address") or "")
-            info = prime_info_for(d.get("address") or "")
+            addr = d.get("address") or ""
+            life_a, life_r, sess = shares_by.get(addr, (0, 0, 0))
+            info = prime_info_for(addr)
             d["shares_lifetime"] = life_a or int(info.get("window_work") or d.get("shares_lifetime") or d.get("shares_acc") or 0)
             d["shares_session"] = int(sess or d.get("shares_session") or 0)
             d["shares_acc"] = d["shares_lifetime"]
@@ -2595,8 +2975,9 @@ class Handler(BaseHTTPRequestHandler):
             d["window_work"] = int(info.get("window_work") or 0)
             d["window_percent"] = float(info.get("window_percent") or 0)
             d["window_sats"] = int(info.get("window_sats") or 0)
+            d["window_shares"] = int(info.get("window_shares") or info.get("credits") or 0)
             d["fee_path"] = info.get("fee_path") or ""
-            d["via"] = "prime" if (d.get("address") in (state.get("prime") or {}) and not any(o.get("address")==d.get("address") and o.get("via") == "stratum" for o in online)) else d.get("via")
+            d["via"] = "prime" if (addr in prime_ids and addr not in stratum_online) else d.get("via")
             try:
                 if float(d.get("best_hr_ghs") or 0) > _PRIME_HR_CAP_GHS:
                     d["best_hr_ghs"] = _PRIME_HR_CAP_GHS
@@ -2604,7 +2985,11 @@ class Handler(BaseHTTPRequestHandler):
                 pass
             d["hr_ghs"] = float(info.get("hr_ghs") or 0)
             seen_out.append(d)
-        return {"online": rollup_online_by_address(online), "seen": seen_out}
+        names = gateway_names_by_address()
+        online = stamp_gateway_names(rollup_online_by_address(online), names)
+        stamp_gateway_names(seen_out, names)
+        ov = overflow_doc()
+        return {"online": online, "seen": seen_out, "relayed": ov.get("proxied") or [], "overflow": ov.get("overflow")}
 
     @staticmethod
     def _payouts_payload():
@@ -2667,8 +3052,12 @@ class Handler(BaseHTTPRequestHandler):
                 row["kind"] = pb["kind"] if pb else ""
                 row["block_status"] = pb["status"] if pb else ""
                 row["owed_sats"] = pb["owed_sats"] if pb else 0
+                row["owed_txid"] = (pb.get("owed_txid") if pb else "") or ""
+                row["owed_resolved"] = bool(pb.get("owed_resolved")) if pb else False
                 row["gateway"] = pb["gateway"] if pb else ""
                 row["found_by"] = pb["finder"] if pb else ""
+                if not row.get("owed_txid"):
+                    apply_owed_settlement(row)
                 if pool_addr and row.get("finder") == pool_addr:
                     miner_btc, fee_btc = pool_output_parts(pool_addr, row.get("miner_btc"), pb, row.get("reward_btc"))
                     reward = float(row.get("reward_btc") or 0) or 1.0

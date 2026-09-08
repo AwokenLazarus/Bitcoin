@@ -43,8 +43,8 @@ pub struct Config {
     pub min_payout: u64,
     #[serde(default)]
     pub fee_bps: u32,
-    /// Fee on an upgraded empty-solo coinbase (gateway + pool), basis points. Default 250
-    /// (2.50%), matching the dedicated solo ports. Stock gateways without a fee output
+    /// Fee on an upgraded empty-solo coinbase (gateway + pool), basis points. Default 500
+    /// (5%), matching the dedicated solo ports. Stock gateways without a fee output
     /// still classify as EmptySolo at 0% via the script-flip path.
     #[serde(default = "d_empty_solo_fee")]
     pub empty_solo_fee_bps: u32,
@@ -109,6 +109,13 @@ pub struct Config {
     /// sixteen live slots Prime keeps at eight 20 000-byte sections each is 2.5 MiB.
     #[serde(default = "d_session_coinbase_budget")]
     pub session_coinbase_budget: usize,
+    /// Refuse a hello whose user agent is not `lazarus-gateway*` and does not contain
+    /// `lazarus-split`. Stock OCEAN / FlyTheElephant empty-first jobs and Convoy size-class
+    /// prefixes cannot put a full TIDES split in the coinbase; closing the session is the
+    /// only pool-side way to stop them hashing those jobs as us. Default off; Lazarus sets
+    /// this true.
+    #[serde(default)]
+    pub require_split_gateway: bool,
 
     // Keys the previous Prime used. Accepted so an existing config starts unchanged;
     // `load` reports each one it saw.
@@ -116,8 +123,6 @@ pub struct Config {
     activation_height: Option<u32>,
     #[serde(default)]
     verify_shares: Option<String>,
-    #[serde(default)]
-    require_split_gateway: Option<bool>,
 }
 
 fn d_listen() -> SocketAddr {
@@ -172,7 +177,7 @@ fn d_session_coinbase_budget() -> usize {
     4 << 20
 }
 fn d_empty_solo_fee() -> u32 {
-    250
+    500
 }
 fn d_owe() -> String {
     "owe".into()
@@ -237,9 +242,6 @@ impl Config {
         if let Some(mode) = &self.verify_shares {
             v.push(format!("verify-shares = {mode:?} is ignored: shares are always verified and the coinbase is always checked against the issued TIDES split"));
         }
-        if self.require_split_gateway.is_some() {
-            v.push("require-split-gateway is ignored: stock DATUM gateways pay the split from the coinbaser reply, so none need a patched user agent".into());
-        }
         v
     }
 
@@ -294,7 +296,8 @@ require-split-gateway = true
         assert_eq!(c.window, 8);
         assert_eq!(c.key_file(), dir.join("prime.key"));
         assert_eq!(c.min_pot(), 0);
-        assert_eq!(c.legacy_notes().len(), 3);
+        assert_eq!(c.legacy_notes().len(), 2);
+        assert!(c.require_split_gateway);
         // a data dir the old Prime left behind keeps its key, hence its pubkey
         std::fs::write(dir.join("lazarus-prime.key"), "00").unwrap();
         let c = Config::load(&p).unwrap();

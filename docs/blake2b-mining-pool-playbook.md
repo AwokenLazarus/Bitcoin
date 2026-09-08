@@ -263,7 +263,7 @@ exec <PREFIX>/bin/datum_gateway -c <DATUM_JSON>
   "stratum": {
     "listen_addr": "0.0.0.0",
     "listen_port": 23334,
-    "vardiff_min": 1,
+    "vardiff_min": 4096,
     "vardiff_target_shares_min": 8
   },
   "api": {
@@ -342,6 +342,10 @@ pool's Prime:
 
 ```json
 {
+  "stratum": {
+    "vardiff_min": 4096,
+    "vardiff_target_shares_min": 8
+  },
   "datum": {
     "pool_host": "<STRATUM_HOST>",
     "pool_port": 28915,
@@ -352,6 +356,8 @@ pool's Prime:
   }
 }
 ```
+
+Stock DATUM’s default `stratum.vardiff_min` is **16384**. That value is both the start and the floor; Prime `min-diff` cannot lower it. Set 4096 on ASIC / remote DATUM so new sessions start there. Leave GPU DATUM at 1.
 
 Username up to the first `.` must be an address the node accepts (`BadUsername` / reason 14
 otherwise). `pool_pass_full_users: true` pays each miner separately.

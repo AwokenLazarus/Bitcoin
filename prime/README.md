@@ -2,13 +2,17 @@
 
 The pool side of the DATUM protocol for the BLAKE2b Bitcoin chain, written from scratch.
 
-Any stock `datum_gateway` — OCEAN, [CONVOY](https://github.com/CONVOYMining/datum_gateway),
-the BLAKE2b forks by [FlyTheElephant1](https://github.com/FlyTheElephant1/datum_gateway) and
-[iohzrd](https://github.com/iohzrd/datum_gateway), or the packaged
-[StartOS](https://github.com/Retropex/datum-gateway-startos/releases) build — points at this
-Prime, unpatched (see [Supported gateways](#supported-gateways)). The
-gateway's own node builds every block template. The Prime never sees or chooses transactions;
-it does three things:
+A split-only `datum_gateway` — house `lazarus-gateway`, or
+[FlyTheElephant1](https://github.com/FlyTheElephant1/datum_gateway) with
+[`../lazarus/patches/datum-gateway-split-only.patch`](../lazarus/patches/datum-gateway-split-only.patch)
+so the hello UA contains `lazarus-split` — points at this Prime (see
+[Supported gateways](#supported-gateways)). Stock OCEAN / Convoy / unpatched FlyTheElephant
+builds still speak the protocol; production Lazarus sets `require-split-gateway = true` and
+refuses their hellos, because empty-first and size-class jobs cannot put a full TIDES split
+in the coinbase. The upstream-facing job fix without the UA bump is
+[FlyTheElephant1#5](https://github.com/FlyTheElephant1/datum_gateway/pull/5); Prime still
+refuses that UA. The gateway's own node builds every block template. The Prime never sees or
+chooses transactions; it does three things:
 
 1. **Dictates the coinbase.** When a gateway asks for a coinbaser, the Prime answers with the
    current TIDES split of the window: one output per miner, proportional to work, after the pool
@@ -59,12 +63,15 @@ Logging is `RUST_LOG` (`info` default; `debug` prints each share decision).
 
 ### Taking over from `lazarus-prime`
 
-An existing `lazarus-prime.toml` loads unchanged (`activation-height`, `verify-shares` and
-`require-split-gateway` are accepted and reported as no longer applying). A data dir the old
-Prime left behind keeps its identity: `lazarus-prime.key` (its 160-byte layout) is read when
-there is no `prime.key`, so the pool pubkey every gateway operator pinned stays the same —
-`primed pubkey` prints it to confirm. Its `ledger.json` is the whole window; import it before
-the first `run`:
+An existing `lazarus-prime.toml` loads unchanged (`activation-height` and `verify-shares`
+are reported as no longer applying). A data dir the old Prime left behind keeps its identity:
+`lazarus-prime.key` (its 160-byte layout) is read when there is no `prime.key`, so the pool
+pubkey every gateway operator pinned stays the same — `primed pubkey` prints it to confirm.
+`require-split-gateway` is honoured: when true, a hello whose UA is not `lazarus-gateway*`
+and does not contain `lazarus-split` is refused. Lazarus production sets it true. Stock
+empty-first and size-class builds cannot put a full TIDES split in the coinbase; closing
+the session is the only pool-side way to stop them hashing those jobs as us. Its
+`ledger.json` is the whole window; import it before the first `run`:
 
 ```bash
 primed -c lazarus-prime.toml import-ledger /path/to/lazarus-prime/ledger.json
@@ -251,6 +258,14 @@ insists on type 0 still pays TIDES. Point an operator at that patch or at `lazar
 user-agent bump, filed upstream as
 [FlyTheElephant1#5](https://github.com/FlyTheElephant1/datum_gateway/pull/5);
 `docs/blake2b-unsplit-coinbase-advisory.md` is the plain-language write-up to hand to an operator.
+
+The pool cannot rewrite a job the gateway already handed its miners, and cannot stop the
+gateway's own node from broadcasting a find. Closing the session is the only pool-side
+mitigation. With `require-split-gateway = true` (Lazarus production), a hello whose UA is not
+`lazarus-gateway*` and does not contain `lazarus-split` is refused before `HELLO_REPLY`.
+Unpatched Convoy size-class prefixes and unpatched OCEAN/FTE type-0 full jobs therefore
+cannot hash as us. Capping the issued list at ~17 outputs would make Convoy finds look complete
+while dropping small miners from every split, including house finds — worse than make-good.
 
 How bad it is depends on the build, and there are two severities:
 

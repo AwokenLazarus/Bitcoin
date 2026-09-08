@@ -4,12 +4,11 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Lazarus Pool — BLAKE2b Bitcoin mining, paid in the coinbase</title>
-<meta name="description" content="Lazarus Pool mines BLAKE2b Bitcoin. Every block pays miners directly in its coinbase by TIDES window share. 0.5% fee through your own DATUM gateway, 2.5% on the public stratum.">
+<meta name="description" content="Lazarus Pool mines BLAKE2b Bitcoin. Every block pays miners directly in its coinbase by TIDES window share. 0.5% fee through your own DATUM gateway, 1% on the public stratum.">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;1,400&family=Newsreader:ital,opsz,wght@0,6..72,500;1,6..72,400;1,6..72,500&display=swap">
-<link rel="stylesheet" href="/static/pool.css?v=price1">
-<link rel="stylesheet" href="/static/laz-chat.css?v=2">
+<link rel="stylesheet" href="/static/pool.css?v=gw1">
 <link rel="icon" href="data:image/svg+xml,%3Csvg%20xmlns=%22http://www.w3.org/2000/svg%22%20viewBox=%220%200%2032%2032%22%3E%3Crect%20width=%2232%22%20height=%2232%22%20fill=%22%231c1914%22/%3E%3Cpath%20fill=%22%23dbb565%22%20d=%22M21.64%204.46C21.64%203.23%2021.25%202.37%2020.33%201.92C19.86%201.69%2019.25%201.58%2018.47%201.58H15.44L15.52%200.4H19.38C20.47%200.4%2021.35%200.58%2022.02%200.93C22.69%201.28%2023.18%201.76%2023.49%202.36C23.8%202.96%2023.95%203.63%2023.95%204.37C23.95%205.12%2023.79%205.81%2023.47%206.44C23.16%207.07%2022.66%207.57%2021.99%207.95C21.32%208.33%2020.99%208.52%2019.74%208.52H15.52L15.44%207.34H19.14C20.11%207.34%2020.88%206.89%2021.31%206.04C21.53%205.61%2021.64%205.08%2021.64%204.46ZM17.36%200.4%2017.36%2010.96V30.57L18.92%2031.16V31.6H13.09V31.16L14.66%2030.57V10.96V1.43L13.09%200.84V0.4ZM15.63%2020.2%209.86%2026.79%2011.94%2027.49V28.01H6.07V27.49L8.1%2026.79L14.87%2019.31L15.8%2018.63L20.88%2012.69L18.8%2011.99V11.48H24.67V11.99L22.64%2012.69L16.57%2019.52ZM19.77%2026.79%2014.88%2020.67%2014.46%2020.29%208.36%2012.72%206.37%2011.99V11.48H14.78V11.99L12.52%2012.69L16.71%2018L17.17%2018.43L23.94%2026.77L25.93%2027.49V28.01H17.51V27.49Z%22/%3E%3C/svg%3E">
 <link rel="apple-touch-icon" href="/static/chi-rho-crest-icon.svg">
 </head>
@@ -30,6 +29,7 @@
     <span class="chip">Tip <b id="live-tip">—</b></span>
   </div>
   <nav class="nav" aria-label="Sections">
+    <a href="#fees">Fees</a>
     <a href="#status">Overview</a>
     <a href="#payout">Next payout</a>
     <a href="#connect">Connect</a>
@@ -49,6 +49,30 @@
 </header>
 
 <main class="wrap stack">
+  <section id="fees" class="fee-lede" aria-labelledby="fees-title">
+    <div class="fee-lede-head">
+      <h2 id="fees-title">Fees</h2>
+      <p>If you run a Bitcoin node and a DATUM gateway, you choose the transactions in the block and we take <span id="lede-fee-datum">0.5%</span>. If you just point a miner at us, we choose them and we take <span id="lede-fee-stratum">1%</span>. The cheaper fee is the one we want you on.</p>
+    </div>
+    <div class="fee-lede-rates">
+      <a class="fee-lede-rate reco" href="#connect">
+        <small>Your DATUM gateway</small>
+        <b id="top-fee-datum">0.5%</b>
+        <span>Keep 99.5% · you pick the transactions</span>
+      </a>
+      <a class="fee-lede-rate" href="#connect">
+        <small>Public stratum</small>
+        <b id="top-fee-stratum">1%</b>
+        <span>Point and go · our node, our templates</span>
+      </a>
+    </div>
+    <p class="fee-lede-cta">
+      <strong>Set up a DATUM gateway.</strong>
+      Use <a href="https://github.com/iohzrd/datum_gateway" target="_blank" rel="noreferrer">iohzrd</a> so a block you find pays the whole window.
+      <a class="fee-lede-setup" href="#gw-pick">Which gateway</a>
+    </p>
+  </section>
+
   <section id="status" aria-label="Pool status">
     <dl class="ticker" id="stats"></dl>
     <div class="chart-wrap">
@@ -56,9 +80,10 @@
       <canvas id="poolchart" width="1100" height="120" aria-label="Pool hashrate over the last 24 hours" role="img"></canvas>
     </div>
     <p class="note offline-note" id="prime-offline" hidden>Prime is not answering right now. Window, gateway and payout figures are the last ones it published.</p>
+    <p class="note callout" id="overflow-note" hidden></p>
     <ul class="pillars" aria-label="What makes Lazarus different">
       <li><b>Paid in the block itself.</b> No pool balance, no withdrawals. When a block is found, its coinbase pays your address directly. <a href="#payout">See the next payout</a>.</li>
-      <li><b>Bring your own gateway, keep 99.5%.</b> Run Bitcoin Knots and a stock DATUM gateway: your node builds the block, the pool only sets the split. Public stratum is <span id="pillar-stratum-fee">2.5%</span>. <a href="#connect">Connect</a>.</li>
+      <li><b>Bring your own gateway, keep 99.5%.</b> Run Bitcoin Knots and a stock DATUM gateway: your node builds the block, the pool only sets the split. Public stratum is <span id="pillar-stratum-fee">1%</span>. <a href="#connect">Connect</a>.</li>
       <li><b>Verifiable end to end.</b> Every share is rebuilt and hashed; every block found is on the <a href="https://mempool.awokenlazarus.xyz/mining/pool/lazarus" target="_blank" rel="noreferrer">Lazarus Mempool</a>. Source on <a href="https://github.com/AwokenLazarus/Bitcoin" target="_blank" rel="noreferrer">GitHub</a>.</li>
     </ul>
   </section>
@@ -125,7 +150,7 @@
     </div>
     <div class="scroll"><table id="coinbase" class="coinbase-table"></table></div>
     <p class="note" id="coinbase-more-line"><button type="button" class="linkish" id="coinbase-more" hidden></button></p>
-    <p class="note"><strong>Window %</strong> is each address’s share of accepted work in the window; <strong>BTC</strong> is its output after that miner’s fee. Amounts assume the base subsidy — transaction fees in the block scale every output up in proportion. A share whose coinbase pays anything else is refused.</p>
+    <p class="note"><strong>Window shares</strong> is accepted shares still in the window; <strong>Window %</strong> is that address’s share of accepted work; <strong>BTC</strong> is its output after that miner’s fee. Amounts assume the base subsidy — transaction fees in the block scale every output up in proportion. A share whose coinbase pays anything else is refused.</p>
   </section>
 
   <section id="connect">
@@ -145,23 +170,52 @@
       <div class="fee-card" data-tab="tab-stratum" role="button" tabindex="0">
         <p class="fee-kicker">Simplest · point and go</p>
         <p class="fee-title">Public stratum</p>
-        <p class="fee-rate"><span id="fee-stratum">2.5%</span></p>
+        <p class="fee-rate"><span id="fee-stratum">1%</span></p>
         <p class="fee-copy">Our node, our templates. Any BLAKE2b ASIC or miner. Same TIDES window — switch to a gateway later and your accepted work comes with you.</p>
         <p class="fee-cta">Setup below</p>
       </div>
       <div class="fee-card" data-tab="tab-solo" role="button" tabindex="0" id="fee-card-solo" hidden>
         <p class="fee-kicker">All or nothing</p>
         <p class="fee-title">Solo</p>
-        <p class="fee-rate"><span id="fee-solo">2.5%</span></p>
+        <p class="fee-rate"><span id="fee-solo">5%</span></p>
         <p class="fee-copy">No window, no sharing. Find a block and the whole reward is yours less the fee; find nothing and you earn nothing.</p>
         <p class="fee-cta">Setup below</p>
       </div>
     </div>
 
+    <div class="gw-pick" id="gw-pick">
+      <h3 class="kicker" id="gw-pick-title">Which DATUM gateway</h3>
+      <p class="note">If you run your own node, pick one of these. All three speak BLAKE2b and connect here with no patch. Skip this if you use the public stratum.</p>
+      <ol class="gw-rank" aria-labelledby="gw-pick-title">
+        <li class="reco">
+          <span class="n" aria-hidden="true">1</span>
+          <div>
+            <span class="tag">Recommended</span>
+            <strong><a href="https://github.com/iohzrd/datum_gateway" target="_blank" rel="noreferrer">iohzrd</a></strong>
+            <small>A found block pays the whole window — every BLAKE2b miner gets the 16&nbsp;KB coinbase. If the pool split is late, one job can still pay only the pool.</small>
+          </div>
+        </li>
+        <li>
+          <span class="n" aria-hidden="true">2</span>
+          <div>
+            <strong><a href="https://github.com/CONVOYMining/datum_gateway" target="_blank" rel="noreferrer">CONVOY</a></strong>
+            <small>Firmware size classes still apply on BLAKE2b, so a found block often pays only the first ~17 miners. An Antminer A3 is served a pool-only coinbase.</small>
+          </div>
+        </li>
+        <li>
+          <span class="n" aria-hidden="true">3</span>
+          <div>
+            <strong><a href="https://github.com/FlyTheElephant1/datum_gateway" target="_blank" rel="noreferrer">FlyTheElephant</a></strong>
+            <small>Once the split lands, a found block pays the whole window. The first job of every new block is a full template that pays only the pool.</small>
+          </div>
+        </li>
+      </ol>
+    </div>
+
     <div class="tabs" data-tabs>
       <div class="tablist" role="tablist" aria-label="Mining paths">
         <button class="tab" role="tab" type="button" id="tab-stratum" aria-controls="pane-stratum" aria-selected="true">
-          <span class="tab-title">Public stratum <span class="tab-fee" id="tab-fee-stratum">2.5%</span></span>
+          <span class="tab-title">Public stratum <span class="tab-fee" id="tab-fee-stratum">1%</span></span>
           <span class="tab-sub">Point and go · our node builds the block</span>
         </button>
         <button class="tab" role="tab" type="button" id="tab-datum" aria-controls="pane-datum" aria-selected="false">
@@ -169,7 +223,7 @@
           <span class="tab-sub">Your node builds the block · we only split the coinbase</span>
         </button>
         <button class="tab" role="tab" type="button" id="tab-solo" aria-controls="pane-solo" aria-selected="false" hidden>
-          <span class="tab-title">Solo <span class="tab-fee" id="tab-fee-solo">2.5%</span></span>
+          <span class="tab-title">Solo <span class="tab-fee" id="tab-fee-solo">5%</span></span>
           <span class="tab-sub">Keep the whole block · no window, no sharing</span>
         </button>
       </div>
@@ -180,15 +234,15 @@
           <dd class="copyable"><span class="mono" id="stratum"></span><button type="button" class="copy-btn" data-copy-from="stratum" aria-label="Copy stratum URL" title="Copy"></button></dd>
           <dt>User</dt><dd class="mono">bc1q…youraddress.worker</dd>
           <dt>Pass</dt><dd class="mono">x</dd>
-          <dt>Fee</dt><dd><span id="stratum-fee-line">2.5%</span> of your window share, taken inside the coinbase</dd>
+          <dt>Fee</dt><dd><span id="stratum-fee-line">1%</span> of your window share, taken inside the coinbase</dd>
           <dt>Algo</dt><dd>BLAKE2b — Sia-style header, not SHA-256d</dd>
           <dt>Payout</dt><dd>Your share of the TIDES window, in the coinbase of every block the pool finds. See <a href="#payout">Next payout</a>.</dd>
         </dl>
-        <p class="note callout">Our public gateway on <strong>:23334</strong> is itself a DATUM gateway on this Prime — you will see it under <a href="#gateways">Gateways</a> — so work here and work through your own gateway land in the same window under your address.</p>
+        <p class="note callout">Our public gateway on <strong>:23334</strong> is itself a DATUM gateway on this Prime — you will see it under <a href="#gateways">Gateways</a> — so work here and work through your own gateway land in the same window under your address. New sessions start at difficulty <strong>4096</strong>; vardiff then steps 2× every ~20s toward your hashrate.</p>
       </div>
 
       <div class="tabpane panel" role="tabpanel" id="pane-datum" aria-labelledby="tab-datum" hidden>
-        <p class="copy"><strong>You build the block. We only split the coinbase.</strong> Run Bitcoin Knots (BLAKE2b) and a stock <code>datum_gateway</code>, point the gateway at Prime, and point your miners at the gateway. Your node chooses the transactions; Prime hands your gateway the coinbase split for the window, verifies every share, and credits your address. If your miner finds the block, it is your template with everyone’s payout in it.</p>
+        <p class="copy"><strong>You build the block. We only split the coinbase.</strong> Run Bitcoin Knots (BLAKE2b) and a DATUM gateway, point the gateway at Prime, and point your miners at the gateway. Your node chooses the transactions; Prime hands your gateway the coinbase split for the window, verifies every share, and credits your address. If your miner finds the block, it is your template with everyone’s payout in it. <a href="#gw-pick">Which gateway to run</a>.</p>
         <dl class="facts tight">
           <dt>Host</dt>
           <dd class="copyable"><span class="mono" id="datum-host">stratum.awokenlazarus.xyz</span><button type="button" class="copy-btn" data-copy-from="datum-host" aria-label="Copy DATUM host" title="Copy"></button></dd>
@@ -196,20 +250,18 @@
           <dd class="copyable"><span class="mono" id="datum-port">28915</span><button type="button" class="copy-btn" data-copy-from="datum-port" aria-label="Copy DATUM port" title="Copy"></button></dd>
           <dt>Pubkey</dt>
           <dd class="copyable"><span class="mono pubkey" id="datum-pubkey">—</span><button type="button" class="copy-btn" data-copy-from="datum-pubkey" aria-label="Copy pool pubkey" title="Copy"></button></dd>
-          <dt>Fee</dt><dd><span id="datum-fee-line">0.5%</span> of your window share — <span id="fee-ratio">five times</span> lower than the public stratum</dd>
-          <dt>Gateway</dt>
-          <dd>Any stock DATUM gateway that speaks BLAKE2b: <a href="https://github.com/CONVOYMining/datum_gateway" target="_blank" rel="noreferrer">CONVOY</a>, <a href="https://github.com/FlyTheElephant1/datum_gateway" target="_blank" rel="noreferrer">FlyTheElephant1</a> or <a href="https://github.com/iohzrd/datum_gateway" target="_blank" rel="noreferrer">iohzrd</a>. No patch, no special build.</dd>
+          <dt>Fee</dt><dd><span id="datum-fee-line">0.5%</span> of your window share — <span id="fee-ratio">twice</span> lower than the public stratum</dd>
         </dl>
         <div class="section-head fold-head">
-          <h3 class="kicker"><code>datum</code> section of <code>datum_gateway_config.json</code></h3>
+          <h3 class="kicker"><code>stratum</code> + <code>datum</code> sections of <code>datum_gateway_config.json</code></h3>
           <button type="button" class="copy-btn" data-copy-from="gateway-config" aria-label="Copy DATUM config" title="Copy"></button>
         </div>
         <pre class="cfg" id="gateway-config"></pre>
         <ol class="steps">
           <li>Run Bitcoin Knots for the BLAKE2b chain with <code>server=1</code> and a cookie or RPC user the gateway can read.</li>
-          <li>Build the gateway, merge the <code>datum</code> section above into its config, and set <code>mining.pool_address</code> to <em>your</em> payout address. Leftover value the split does not name goes there.</li>
+          <li>Build the gateway, merge the <code>stratum</code> and <code>datum</code> sections above into its config, and set <code>mining.pool_address</code> to <em>your</em> payout address. Leftover value the split does not name goes there. Stock DATUM defaults <code>stratum.vardiff_min</code> to 16384 if you omit it — that is the floor <em>and</em> the start, and Prime cannot lower it. Set 4096 so new sessions start there; vardiff still climbs for faster boxes.</li>
           <li>Point miners at your gateway’s stratum (usually <code>stratum+tcp://127.0.0.1:23334</code>). Username <code>address.worker</code>: the part before the first <code>.</code> is who gets paid and must be an address this chain accepts.</li>
-          <li>Watch your gateway appear under <a href="#gateways">Gateways</a> and your address under <a href="#miners">Miners</a>. The first job a stock gateway publishes, before Prime’s first coinbaser reply lands, pays only its own address; Prime accepts that work and, if such a job found a block, records what the pool then owes the window.</li>
+          <li>Watch your gateway appear under <a href="#gateways">Gateways</a> and your address under <a href="#miners">Miners</a>. Stock builds can still publish a job whose coinbase omits the window: FlyTheElephant does it on the first job of every height; CONVOY and iohzrd only if the pool split is late. Prime accepts that work and, if such a job found a block, records what the pool then owes the window.</li>
         </ol>
         <details class="fold">
           <summary>Who gets paid, by gateway setting</summary>
@@ -246,7 +298,7 @@
         <dl class="facts tight">
           <dt>User</dt><dd class="mono">bc1q…youraddress.worker</dd>
           <dt>Pass</dt><dd class="mono">x</dd>
-          <dt>Fee</dt><dd><span id="solo-fee-line">2.5%</span> of the block, taken as one output in the coinbase you solve. Nothing is withheld and nothing is owed to you between blocks.</dd>
+          <dt>Fee</dt><dd><span id="solo-fee-line">5%</span> of the block, taken as one output in the coinbase you solve. Nothing is withheld and nothing is owed to you between blocks.</dd>
           <dt>Payout</dt><dd>The rest of the block — subsidy and every transaction fee in it — straight to your address, spendable after 100 confirmations.</dd>
           <dt>Your odds</dt><dd id="solo-odds">Expected time to a block at your hashrate is shown on your <a href="#dashboard">stats</a> page.</dd>
         </dl>
@@ -289,13 +341,21 @@
   <section id="miners">
     <div class="section-head">
       <h2>Miners</h2>
-      <p>Hashing now, then everyone else we have seen. <strong>Window %</strong> is next-block pay, not hashrate share — an idle address is still paid while its work is in the window.</p>
+      <p>Hashing now, then everyone else we have seen. <strong>Window shares</strong> is accepted shares still in the TIDES window; <strong>Window %</strong> is next-block pay, not hashrate share — an idle address is still paid while its work is in the window.</p>
     </div>
     <div class="table-head">
       <p class="kicker table-label">Online now</p>
       <p class="kicker table-count" id="online-count"></p>
     </div>
     <div class="scroll"><table id="online"></table></div>
+    <div id="relayed-wrap" hidden>
+      <div class="table-head">
+        <p class="kicker table-label">Relayed to other pools</p>
+        <p class="kicker table-count" id="relayed-count"></p>
+      </div>
+      <p class="note" id="relayed-note"></p>
+      <div class="scroll"><table id="relayed"></table></div>
+    </div>
     <div class="table-head">
       <p class="kicker table-label">Recently seen · not hashing right now</p>
       <p class="kicker table-count" id="seen-count"></p>
@@ -359,6 +419,7 @@
     </div>
     <div class="footer-col">
       <p class="category">Pool</p>
+      <a href="#fees">Fees</a>
       <a href="#status">Overview</a>
       <a href="#payout">Next payout</a>
       <a href="#connect">Connect a miner</a>
@@ -377,7 +438,7 @@
       <span class="copyable footer-endpoint"><span class="mono" id="electrum-endpoint">electrum.awokenlazarus.xyz:50002</span><button type="button" class="copy-btn" data-copy-from="electrum-endpoint" aria-label="Copy Electrum server" title="Copy"></button></span>
       <span class="note faint">Electrum server (SSL). For wallets that understand this chain’s 164-byte BLAKE2b headers (Electrum protocol 1.8).</span>
       <a href="https://github.com/AwokenLazarus/Bitcoin/tree/main/node" target="_blank" rel="noreferrer">Run a Bitcoin Knots node for this chain</a>
-      <a href="https://github.com/CONVOYMining/datum_gateway" target="_blank" rel="noreferrer">DATUM gateway (CONVOY)</a>
+      <a href="https://github.com/iohzrd/datum_gateway" target="_blank" rel="noreferrer">DATUM gateway (iohzrd)</a>
     </div>
     <div class="footer-col">
       <p class="category">Project</p>
@@ -391,8 +452,6 @@
   </div>
 </footer>
 
-<script src="/static/pool.js?v=gwblocks1"></script>
-<script>window.LAZ_CHAT_SOURCE = "pool"; window.LAZ_CHAT_URL = "/api/laz/chat";</script>
-<script src="/static/laz-chat.js?v=3"></script>
+<script src="/static/pool.js?v=stratumfee1"></script>
 </body>
 </html>

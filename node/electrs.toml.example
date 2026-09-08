@@ -6,7 +6,10 @@ electrum_rpc_addr = "0.0.0.0:50011"
 monitoring_addr = "127.0.0.1:4225"
 db_dir = "/home/umbrel/blake2b/electrs-db"
 log_filters = "INFO"
-jsonrpc_timeout = 30
+# Address pages walk scripthash history. Too short → nginx 504; unlimited → one
+# busy address wedges Electrum for everyone (single-threaded RPC).
+jsonrpc_timeout = 90
+index_lookup_limit = 5000
 index_batch_size = 10
 server_banner = "Umbrel electrs header-v2 (BLAKE2b)"
 # Clients allowed to negotiate protocol 1.4 on this v2-header chain. They are still refused

@@ -3,8 +3,11 @@
 #
 # Every key the previous lazarus-prime accepted is still accepted here, so an
 # existing lazarus-prime.toml starts unchanged. Keys it has no use for
-# (activation-height, verify-shares, require-split-gateway) are reported once
-# at startup and otherwise ignored.
+# (activation-height, verify-shares) are reported once at startup and otherwise ignored.
+#
+# Refuse stock empty-first / size-class gateways. Hello UA must be lazarus-gateway*
+# or contain lazarus-split. Lazarus production sets this true.
+# require-split-gateway = false
 
 # DATUM listener gateways connect to.
 listen = "0.0.0.0:28915"
@@ -15,7 +18,9 @@ advertise-address = "stratum.awokenlazarus.xyz:28915"
 # Key, ledger, block log, and mirrored stats.json / ledger.json.
 data-dir = "/home/umbrel/blake2b/lazarus-prime"
 # key-file = "/home/umbrel/blake2b/lazarus-prime/prime.key"   # default: <data-dir>/prime.key
-motd = "Lazarus"
+# Handshake MOTD. Gateways print it as "DATUM Server MOTD". Cap is 511 bytes
+# (stock DATUM strncpy). Same line as the pool site footer.
+motd = "Proverbs 11:1 — a just weight is his delight."
 headline = "Lazarus"
 
 # Pool's own address: receives the fee and any remainder the split cannot place.
@@ -36,8 +41,8 @@ window-min-work = 0
 min-payout = 546
 # DATUM / Prime-gateway fee in basis points (50 = 0.5%).
 fee-bps = 50
-# Public house-stratum fee (250 = 2.5%). 0 inherits fee-bps.
-stratum-fee-bps = 250
+# Public house-stratum fee (100 = 1%). 0 inherits fee-bps.
+stratum-fee-bps = 100
 # Signing-key prefixes (hex) of the pool's own public-stratum gateway.
 # Remote DATUM users who run lazarus-gateway are not matched by UA — only
 # loopback (default) and these prefixes pay the higher fee.

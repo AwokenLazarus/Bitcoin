@@ -7,7 +7,7 @@
   "stratum": {
     "listen_addr": "0.0.0.0",
     "listen_port": 23334,
-    "vardiff_min": 1,
+    "vardiff_min": 4096,
     "vardiff_target_shares_min": 8
   },
   "api": {

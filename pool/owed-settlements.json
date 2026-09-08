@@ -1,0 +1,47 @@
+{
+  "000000000000000ed7b3219894f06bbbdeb0d699b3217ad9016be5be902db69d": {
+    "txid": "a0d5181ec91f79b3bf7ff98e7c01cddeb8de3bc14e46c1af907d5d260d7a72c5",
+    "height": 968541,
+    "note": "Spent the 968440 pool-only coinbase and paid the TIDES window."
+  },
+  "000000000000000643101984ae6f63e080eb19eb6f6d16b52230930d196f9003": {
+    "txid": "3a2738ee2b592e228612c3d6d776b1e5af11cf1268ad84b512381d2d5aae0bbb",
+    "height": 969217,
+    "note": "Spent the 969088 pool-only coinbase and paid the TIDES window."
+  },
+  "000000000000000306ed5fafa039bec2ecb243cbf92b473cb6a399d10f31e277": {
+    "txid": "ef2a22c8814c201a8ddc6d00cb6dd8693dcd3013ff125474ad73263906c8ff19",
+    "height": 969388,
+    "note": "Spent 969284 coinbase vout 18 and paid the 23 dropped TIDES identities."
+  },
+  "000000000000000b9e2e0d0d846cefb6b1530d412d57a2cdbe7587b330e9a632": {
+    "txid": "1e2eeb4a857b3e3acd68de2821fb982003f25f1d6736824959a4f65c63322187",
+    "height": 969492,
+    "note": "Spent 969392 coinbase vout 18 and paid the 24 dropped TIDES identities."
+  },
+  "000000000000000573d226a6e86b368c853fcb304ad0cc0c2df71de947818110": {
+    "txid": "7eb82aeaca78febefef4915f8f276f9fff12b724c64006df074fe831aef735ce",
+    "height": 969840,
+    "note": "Spent 969669 coinbase vout 18 and paid the 39 dropped TIDES identities."
+  },
+  "000000000000000dba16af2be599c5639b5a59fe5b6b9aca6ee7bec57fc64aa5": {
+    "txid": "94047450c079b789915e739fb286744dd380bcaf78d51b66bdca3595777e70f6",
+    "height": 969840,
+    "note": "Spent the 969674 pool-only coinbase and paid the TIDES window."
+  },
+  "00000000000000031c117559a649089080131ae2d6b52de0802273759dd8c6de": {
+    "txid": "162d2480f0fa3088c15c95c3e7e8c09b84a2674fc3306a048377424d86e2f57d",
+    "height": 969840,
+    "note": "Spent 969688 coinbase vout 18 and paid the 40 dropped TIDES identities."
+  },
+  "00000000000000036b74c39d863b651f6ccd2a10b33b5aef2f7beb9b86c77eef": {
+    "txid": "7abccd002df497dbb46a9a2ef3a886a8de577c4a7d8b6f92cc1543ef38fcf6e0",
+    "height": 969855,
+    "note": "Spent 969736 coinbase vout 18 and paid the 50 dropped TIDES identities."
+  },
+  "0000000000000001a745b0747bcdf27029631001f729fa40651aab85f4cafe4f": {
+    "txid": "99bf59f8d038a572cbd6106fcf48dc6ea0995956d2973cf52d3d766c9744fc6e",
+    "height": 969900,
+    "note": "Spent 969796 coinbase vout 18 and paid the 60 dropped TIDES identities."
+  }
+}
