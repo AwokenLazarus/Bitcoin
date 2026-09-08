@@ -1454,6 +1454,9 @@
     if (a && !SECTIONS.has(a)) {
       $("lookup").value = a;
       showMiner(a);
+      // No element carries the address as its id, so the browser has nothing to scroll to;
+      // take the reader to the lookup card ourselves.
+      $("dashboard")?.scrollIntoView({ block: "start" });
     }
   }
 
@@ -1466,6 +1469,16 @@
     if (e.key === "Enter") $("go").click();
   });
   window.addEventListener("hashchange", fromHash);
+  // Clicking the address that is already in the URL fires no hashchange; handle it here.
+  document.addEventListener("click", (e) => {
+    const a = e.target.closest('a[href^="#"]');
+    if (!a) return;
+    const target = a.getAttribute("href").slice(1);
+    if (target && !SECTIONS.has(target) && location.hash.slice(1) === target) {
+      e.preventDefault();
+      fromHash();
+    }
+  });
   fromHash();
   refresh().catch((e) => console.error(e));
   setInterval(() => refresh().catch((e) => console.error(e)), 10000);
