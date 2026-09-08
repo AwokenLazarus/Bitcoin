@@ -24,7 +24,7 @@ NO_WRITE = os.environ.get("POOL_UI_NO_WRITE") == "1"
 
 POOL_FEE = float(CONF.get("pool_fee_percent", 0))
 # Public-stratum fee when primed is not answering; primed's stats.json is authoritative.
-STRATUM_FEE = float(CONF.get("stratum_fee_percent", 1.0))
+STRATUM_FEE = float(CONF.get("stratum_fee_percent", 2.0))
 STRATUM_HOST = CONF.get("stratum_host", "27.69.0.25")
 STRATUM_PORT = int(CONF.get("stratum_port", 23334))
 DATUM_URL = CONF.get("datum_url", "http://127.0.0.1:7152")
@@ -1907,7 +1907,7 @@ def solo_payload():
     rows = sorted(miners.values(), key=lambda m: (-m["hashrate_ghs"], -m["work"]))
     return {
         "enabled": any(e["online"] for e in endpoints),
-        "fee_percent": next((e["fee_percent"] for e in endpoints if e["online"]), 5),
+        "fee_percent": next((e["fee_percent"] for e in endpoints if e["online"]), 2),
         "endpoints": endpoints,
         "hashrate_ghs": hashrate_ghs,
         "miners": rows,

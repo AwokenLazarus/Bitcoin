@@ -87,7 +87,7 @@
 
   // Fee schedule as primed reports it: one rate for work through a miner's own DATUM
   // gateway, another for our public stratum. Filled from /api/pool on every refresh.
-  const fees = { datum: 0.5, stratum: 1.0 };
+  const fees = { datum: 0.5, stratum: 2.0 };
   const feePct = (x) => (Number.isFinite(Number(x)) ? Number(x).toLocaleString(undefined, { maximumFractionDigits: 2 }) + "%" : "\u2014");
   const feeForPath = (path) => (String(path || "").toLowerCase() === "stratum" ? fees.stratum : fees.datum);
   // Which fee schedule an address is on, as a small labelled pill.
@@ -178,7 +178,7 @@
     if (Math.abs(x) >= 0.01) return x.toFixed(4);
     return x.toExponential(2);
   };
-  // BLAKE2b BTC USD from /api/price (Neoxa + NonKYC last prices, weighted by 24h volume).
+  // Bitcoin (BTCB2) USD from /api/price (Neoxa + NonKYC last prices, weighted by 24h volume).
   let priceUsd = null;
   const moneyOnly = (usd) => {
     const u = Number(usd);
@@ -251,8 +251,47 @@
       `<strong>Overflow is on.</strong> Lazarus holds ${Number.isFinite(share) ? share.toFixed(1) : "\u2014"}% of the network hashrate, over the ${Number(ov.enter_pct) || 32}% line we hold ourselves to. ` +
       `Miners already here keep mining here. A <em>new</em> miner pointing at our stratum is relayed to ${ups.length ? ups.join(", ") : "another BLAKE2b pool"} and is paid by that pool, not by us` +
       (ov.proxied_sessions ? ` — ${num(ov.proxied_sessions)} connection${ov.proxied_sessions === 1 ? "" : "s"} relayed right now.` : ".") +
-      ` Own-gateway (DATUM) miners are never relayed. New miners come back to Lazarus once we are under ${Number(ov.exit_pct) || 27}%.`;
+      ` Own-gateway (DATUM) miners are never relayed. New miners come back to Lazarus once we are under ${Number(ov.exit_pct) || 27}%. <a href="#pools">About those pools</a>.`;
     el.hidden = false;
+  }
+  // The "Other pools" cards are the overflow upstreams. When the gateway is health-checking
+  // them, say so on each card: reachable, down, or how many of our relayed miners are there.
+  function poolCards(ov) {
+    const ups = ov && Array.isArray(ov.upstreams) ? ov.upstreams : [];
+    const share = $("pools-share");
+    if (share) {
+      const s = Number(ov && ov.share_pct);
+      share.hidden = !(ov && ov.meter_ok && Number.isFinite(s));
+      if (!share.hidden) {
+        share.innerHTML = `Lazarus holds <b>${s.toFixed(1)}%</b> of the network right now` +
+          (ov.active ? ` — over the ${Number(ov.enter_pct) || 32}% line, so new stratum miners are being relayed.` : ` — under the ${Number(ov.enter_pct) || 32}% line, so nobody is being relayed.`);
+      }
+    }
+    document.querySelectorAll(".pool-card[data-pool]").forEach((card) => {
+      const pill = card.querySelector("[data-pool-state]");
+      if (!pill) return;
+      const want = String(card.getAttribute("data-pool") || "").toLowerCase();
+      const u = ups.find((x) => String(x.name || "").toLowerCase() === want);
+      if (!u || typeof u.healthy !== "boolean") {
+        pill.hidden = true;
+        return;
+      }
+      const n = Number(u.sessions) || 0;
+      if (u.healthy === false) {
+        pill.className = "pill pool-state bad";
+        pill.textContent = "not answering";
+        pill.title = u.last_error ? String(u.last_error) : "Our gateway could not reach this pool's stratum on its last check";
+      } else if (n > 0) {
+        pill.className = "pill pool-state warn";
+        pill.textContent = `${num(n)} relayed here`;
+        pill.title = `${num(n)} of our stratum connection${n === 1 ? " is" : "s are"} being relayed to this pool right now`;
+      } else {
+        pill.className = "pill pool-state ok";
+        pill.textContent = "reachable";
+        pill.title = "Our gateway reached this pool's stratum on its last check";
+      }
+      pill.hidden = false;
+    });
   }
   function relayedTable(rows, ov) {
     const wrap = $("relayed-wrap");
@@ -335,6 +374,7 @@
       .map(([k, v, s]) => `<div><dt>${k}</dt><dd>${v}<small>${s}</small></dd></div>`)
       .join("");
     overflowNote(p.overflow);
+    poolCards(p.overflow);
 
     $("stratum").textContent = p.stratum;
 
@@ -364,6 +404,8 @@
     if ($("datum-pubkey")) $("datum-pubkey").textContent = pubkey || "\u2014";
 
     if ($("live-hr")) $("live-hr").textContent = fmtHr(p.pool_hr_ghs);
+    if ($("nav-hr")) $("nav-hr").textContent = fmtHr(p.pool_hr_ghs);
+    if ($("nav-live")) $("nav-live").classList.toggle("stale", !pr.reachable);
     if ($("live-price")) $("live-price").textContent = priceUsd != null ? moneyOnly(priceUsd) : "\u2014";
     const priceChip = $("live-price-chip");
     if (priceChip) priceChip.classList.toggle("stale", priceUsd == null);
@@ -1267,7 +1309,7 @@
         <div>
           <p class="kicker table-label">Workers</p>
           <p class="note">One row per stratum session. “Public stratum” is our gateway; “own gateway” is share credit arriving through a DATUM gateway you run. Session hashrate is what each connection reports; the credited total is the Hashrate figure above.</p>
-          <div class="scroll"><table><thead><tr><th>Worker</th><th>Path</th><th class="num">Hashrate</th><th class="num">Session</th><th class="num">Accepted</th><th class="num">Rejects</th><th class="num">Last</th></tr></thead><tbody>${workers || '<tr><td colspan="7" class="empty">Offline</td></tr>'}</tbody></table></div>
+          <div class="scroll tall"><table><thead><tr><th>Worker</th><th>Path</th><th class="num">Hashrate</th><th class="num">Session</th><th class="num">Accepted</th><th class="num">Rejects</th><th class="num">Last</th></tr></thead><tbody>${workers || '<tr><td colspan="7" class="empty">Offline</td></tr>'}</tbody></table></div>
         </div>
         <div>
           <p class="kicker table-label">Your payouts</p>
@@ -1391,7 +1433,7 @@
   // retired anchors kept so old bookmarks still land somewhere sensible.
   const SECTIONS = new Set([
     "", "top", "fees", "status", "payout", "window", "connect", "gw-pick", "dashboard", "miners", "gateways",
-    "blocks", "payouts", "how", "datum", "mine", "solo",
+    "blocks", "payouts", "pools", "how", "datum", "mine", "solo",
   ]);
 
   function fromHash() {
@@ -1438,4 +1480,80 @@
       chartLegend($(legend), c, one, many);
     }
   });
+
+  // ---------------------------------------------------------------- chrome
+  // Top bar gets a hairline once the page has scrolled; the nav highlights the section in
+  // view; sections rise in as they enter. All decorative — nothing here touches data — and
+  // all of it degrades to nothing when the browser lacks IntersectionObserver.
+  (() => {
+    const header = document.querySelector(".site-header");
+    if (header) {
+      let raf = 0;
+      const onScroll = () => {
+        if (raf) return;
+        raf = requestAnimationFrame(() => {
+          raf = 0;
+          header.toggleAttribute("data-scrolled", window.scrollY > 8);
+        });
+      };
+      window.addEventListener("scroll", onScroll, { passive: true });
+      onScroll();
+    }
+    if (!("IntersectionObserver" in window)) return;
+
+    const navLinks = [...document.querySelectorAll('.nav a[href^="#"]')];
+    const byId = new Map(navLinks.map((a) => [a.getAttribute("href").slice(1), a]));
+    const targets = [...byId.keys()].map((id) => $(id)).filter(Boolean);
+    if (targets.length) {
+      const visible = new Map();
+      const spy = new IntersectionObserver(
+        (entries) => {
+          for (const e of entries) visible.set(e.target.id, e.isIntersecting ? e.intersectionRatio : 0);
+          // The first section (in document order) with anything on screen is the current one,
+          // so the highlight walks down the nav as the page scrolls rather than jumping to
+          // whichever section happens to fill most of the viewport.
+          let current = null;
+          for (const t of targets) {
+            if (t.hidden) continue;
+            if ((visible.get(t.id) || 0) > 0) { current = t.id; break; }
+          }
+          for (const [id, a] of byId) {
+            if (id === current) a.setAttribute("aria-current", "true");
+            else a.removeAttribute("aria-current");
+          }
+          if (current && byId.get(current)) {
+            const a = byId.get(current);
+            const nav = a.closest(".nav");
+            if (nav && nav.scrollWidth > nav.clientWidth) {
+              const left = a.offsetLeft - nav.clientWidth / 2 + a.offsetWidth / 2;
+              nav.scrollTo({ left, behavior: "smooth" });
+            }
+          }
+        },
+        { rootMargin: "-40% 0px -55% 0px", threshold: [0, 0.01] }
+      );
+      targets.forEach((t) => spy.observe(t));
+    }
+
+    const reduce = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    if (!reduce) {
+      const sections = [...document.querySelectorAll("main .section")];
+      const io = new IntersectionObserver(
+        (entries) => {
+          for (const e of entries) {
+            if (!e.isIntersecting) continue;
+            e.target.classList.add("in");
+            io.unobserve(e.target);
+          }
+        },
+        { rootMargin: "0px 0px -8% 0px" }
+      );
+      for (const s of sections) {
+        // Anything already on screen at load stays put; only sections below the fold animate.
+        if (s.getBoundingClientRect().top < window.innerHeight) continue;
+        s.classList.add("reveal");
+        io.observe(s);
+      }
+    }
+  })();
 })();
