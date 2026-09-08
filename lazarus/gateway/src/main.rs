@@ -1905,7 +1905,7 @@ fn main() {
             let addr = cfg.solo_fee_address.as_deref().unwrap_or("").trim().to_string();
             let script = identity_script(&addr)
                 .expect("solo mode needs solo_fee_address to be a payable address");
-            let bps = cfg.solo_fee_bps.unwrap_or(500);
+            let bps = cfg.solo_fee_bps.unwrap_or(200);
             assert!(bps > 0 && bps <= 10_000, "solo_fee_bps must be 1..=10000");
             (script, bps)
         }

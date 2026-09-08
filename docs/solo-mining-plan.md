@@ -2,13 +2,13 @@
 
 Solo is a second, parallel service: a miner points an ASIC or a GPU at a solo port, and if
 one of its shares is a block, that block's whole reward goes to the address in its username
-less a 5 % fee. Between blocks it earns nothing. This is the opposite trade from the
+less a 2 % fee. Between blocks it earns nothing. This is the opposite trade from the
 pooled service, where every miner is paid a share of every block the pool finds.
 
 | | Who it is for | Where | Fee | The rest of the block |
 |---|---|---|---|---|
-| **Solo ASIC** | BLAKE2b ASICs, no node | `stratum.awokenlazarus.xyz:23335` | 5 % | to the miner's own address |
-| **Solo GPU** | GPUs and CPUs, no node | `stratum.awokenlazarus.xyz:3334` | 5 % | to the miner's own address |
+| **Solo ASIC** | BLAKE2b ASICs, no node | `stratum.awokenlazarus.xyz:23335` | 2 % | to the miner's own address |
+| **Solo GPU** | GPUs and CPUs, no node | `stratum.awokenlazarus.xyz:3334` | 2 % | to the miner's own address |
 
 ## What this is not
 
@@ -45,7 +45,7 @@ One template is shared by every miner on a solo port; the coinbase is not. Each 
 identity gets its own coinbase with two value outputs:
 
 ```
-fee_sats   = floor(coinbasevalue × 500 / 10_000)
+fee_sats   = floor(coinbasevalue × 200 / 10_000)
 outputs    = [ miner: coinbasevalue - fee_sats, pool: fee_sats ]
 scriptSig  = BIP34 height push + "Lazarus/solo" + extranonce slot
 ```
@@ -113,7 +113,7 @@ paying a block out twice.
 Run on regtest (`lazarus-regtest/up.sh up`), against a real Knots node with BLAKE2b active:
 
 * `verify-block.py <height>` — reads the block back off the chain and checks the coinbase
-  has exactly two value outputs, that the pool's is exactly 5 %, that the finder gets the
+  has exactly two value outputs, that the pool's is exactly 2 %, that the finder gets the
   remainder with nothing unaccounted, and that the tag is `Lazarus/solo`.
 * `scan-test.py` — runs `pool/server.py`'s real scanner over the chain and asserts the solo
   blocks land in `solo_blocks`, that `found_blocks` and `rounds` stay empty, and that
