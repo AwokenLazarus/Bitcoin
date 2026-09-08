@@ -19,6 +19,9 @@ use lazarus_protocol::{identity_of, identity_script, Header};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
+mod overflow;
+use overflow::{Gate, Overflow};
+
 #[derive(Parser, Debug)]
 struct Cli { #[arg(long)] config: PathBuf }
 
@@ -29,15 +32,19 @@ struct GwCfg {
     api_listen: String,
     vardiff_min: u64,
     /// First `mining.set_difficulty` for a new session. Defaults to `vardiff_min`.
-    /// ASIC stratum starts at 4096 (inside typical box firmware range). A 19–140 TH/s
-    /// rig still climbs in a few seconds: eight shares trip a 4× step, so it does
-    /// not sit at the start long enough to flood.
+    /// Pooled ASIC starts at 4096. Climbing is 2× per 20s interval so a ~9 TH/s
+    /// box settles at 8192 instead of jumping 4096 → 16384 on the first eight shares.
     #[serde(default)]
     vardiff_start: Option<u64>,
-    /// Hard cap. ASIC default in config is 131072 (~140 TH/s at 4s/share).
+    /// Hard cap. ASIC default is 2^24 (~17.6 PH/s at 4s/share). 131072 only
+    /// covered ~140 TH/s and a PH-class connection would share-flood at the cap.
     /// Unset means no extra cap beyond the 2^40 exponent limit.
     #[serde(default)]
     vardiff_max: Option<u64>,
+    /// Max multiply/divide per retarget. Must be a power of two. Unset is 4 so
+    /// solo configs keep the old 4× climb without naming a new key.
+    #[serde(default)]
+    vardiff_step: Option<u64>,
     rpc: String,
     rpc_cookie: PathBuf,
     prime_host: String,
@@ -63,6 +70,10 @@ struct GwCfg {
     /// Solo: where the found-block log and the stats book are kept.
     #[serde(default)]
     solo_data_dir: Option<PathBuf>,
+    /// Pooled: relay new miners to other pools while Lazarus holds too much of the
+    /// network. Absent means off. See `overflow.rs`.
+    #[serde(default)]
+    overflow: Option<overflow::OverflowCfg>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -118,10 +129,11 @@ const MAX_HEX_FIELD: usize = 16;
 const SEEN_CAP: usize = 8192;
 /// Rolling-window samples kept per miner; pruned by time as well.
 const RECENT_CAP: usize = 4096;
-/// Submit token bucket: refill per second, burst. A 140 TH/s rig at the start difficulty
-/// submits ~8/s; anything sustaining more than 50/s is not mining.
-const SUBMIT_RATE: f64 = 50.0;
-const SUBMIT_BURST: f64 = 200.0;
+/// Submit token bucket: refill per second, burst. A 140 TH/s rig at the start
+/// difficulty submits ~8/s. A PH-class miner at 4096 is ~57/s until vardiff
+/// climbs; 50/s would start refusing those shares.
+const SUBMIT_RATE: f64 = 200.0;
+const SUBMIT_BURST: f64 = 800.0;
 /// Rate-limited or malformed submits before the connection is dropped.
 const FLOOD_LIMIT: u64 = 1000;
 /// Idle miners are disconnected after this long without a line; a half-open connection
@@ -130,8 +142,12 @@ const IDLE_TIMEOUT: Duration = Duration::from_secs(600);
 /// A client that stops reading gets this long before its socket write fails instead of
 /// blocking the job broadcast.
 const WRITE_TIMEOUT: Duration = Duration::from_secs(3);
-const MAX_CONNS: usize = 2048;
-const MAX_CONNS_PER_IP: usize = 32;
+/// Total ASIC sockets this process will accept. House stratum is the PH path;
+/// farms reconnect behind one NAT, so this needs to sit well above a few thousand miners.
+const MAX_CONNS: usize = 8192;
+/// Per-source-IP cap. Proxy farms (one public IP, many boxes) hit this before the total
+/// cap; 256 was refusing 8.218.46.116 while the process still had thousands of slots.
+const MAX_CONNS_PER_IP: usize = 1024;
 
 /// Printable ASCII, no whitespace or control bytes: nothing that can break Prime's NUL
 /// terminated wire framing or forge log lines.
@@ -229,6 +245,16 @@ struct Miner {
     /// Canonical payout identity (`user` up to the first `.`, bech32 folded to lowercase).
     ident: String,
 }
+/// A fresh session record at the start difficulty.
+fn new_miner(host: String, vstart: u64) -> Miner {
+    let now = Instant::now();
+    Miner {
+        host, user: String::new(), ua: String::new(), vdiff: vstart, acc: 0, acc_n: 0, rej: 0, rej_n: 0, last: now,
+        vdiff_prev: vstart, vdiff_prev_until: now, last_retarget: now, retarget_acc_n: 0,
+        recent: VecDeque::new(), job_diffs: VecDeque::new(), seen: HashSet::new(), seen_order: VecDeque::new(),
+        tokens: SUBMIT_BURST, tokens_at: now, flood: 0, jobs: VecDeque::new(), ident: String::new(),
+    }
+}
 /// Solo jobs remembered per session. Templates are republished every `JOB_REFRESH`, so
 /// this is several minutes of history: long enough for any miner's round trip.
 const SOLO_JOBS: usize = 32;
@@ -264,16 +290,16 @@ const HR_WINDOW: Duration = Duration::from_secs(60);
 /// buys nothing: the same hashrate is measured just as well from far fewer shares.
 const VARDIFF_TARGET_SECS: f64 = 4.0;
 const VARDIFF_INTERVAL: Duration = Duration::from_secs(20);
-/// Raise difficulty as soon as this many shares land since the last retarget.
-/// Stops a 19 TH/s unit at a too-low start from flooding (and getting kicked by
-/// MRR) while we wait 20s for the clock.
+/// Enough shares since the last retarget to allow a *down* step before the
+/// 20s clock. Up steps wait for `VARDIFF_INTERVAL` so an eight-share burst at
+/// the start difficulty cannot 2×/4× a 9 TH/s box to 16384.
 const VARDIFF_QUICK_SHARES: u64 = 8;
 const VARDIFF_GRACE: Duration = Duration::from_secs(30);
 /// Estimate hashrate over at least the target share interval. A 50ms burst of
 /// eight shares at the start difficulty is not 200 TH/s.
 const VARDIFF_DT_MIN: f64 = VARDIFF_TARGET_SECS;
-/// Never jump more than 4× (two powers of two) in one retarget.
-const VARDIFF_STEP: u64 = 4;
+/// Default multiply/divide when the config omits `vardiff_step` (solo).
+const VARDIFF_STEP_DEFAULT: u64 = 4;
 /// Job difficulties remembered per session. Matches the gateway job history, so any job a
 /// miner can still name has its difficulty on record.
 const JOB_DIFFS: usize = JOB_HISTORY;
@@ -297,17 +323,24 @@ fn vardiff_ideal(hs: f64) -> u64 {
         return 1;
     }
     let ideal = hs * VARDIFF_TARGET_SECS / 4_294_967_296.0;
-    let pot = ideal.max(1.0).log2().round().clamp(0.0, 40.0) as u32;
+    // Floor, not round: a ~12–15 TH/s box sits on the 8192/16384 boundary and
+    // rounding up is what parked people at 16384 (too high for that class).
+    let pot = ideal.max(1.0).log2().floor().clamp(0.0, 40.0) as u32;
     1u64 << pot
 }
-/// Move toward `ideal`, but only 4× per step and stay inside [floor, cap].
-fn step_vardiff(current: u64, ideal: u64, floor: u64, cap: u64) -> u64 {
+fn resolve_vardiff_step(step: Option<u64>) -> u64 {
+    let s = step.unwrap_or(VARDIFF_STEP_DEFAULT).max(2).min(16);
+    1u64 << s.ilog2()
+}
+/// Move toward `ideal`, at most `step`× per retarget, stay inside [floor, cap].
+fn step_vardiff(current: u64, ideal: u64, floor: u64, cap: u64, step: u64) -> u64 {
+    let step = resolve_vardiff_step(Some(step));
     let cur = pow2_clamp(current, floor, cap);
     let want = pow2_clamp(ideal, floor, cap);
     if want > cur {
-        pow2_clamp(cur.saturating_mul(VARDIFF_STEP).min(want), floor, cap)
+        pow2_clamp(cur.saturating_mul(step).min(want), floor, cap)
     } else if want < cur {
-        pow2_clamp((cur / VARDIFF_STEP).max(want).max(1), floor, cap)
+        pow2_clamp((cur / step).max(want).max(1), floor, cap)
     } else {
         cur
     }
@@ -332,9 +365,24 @@ fn miner_hs(m: &Miner) -> f64 {
 fn miner_hs_vardiff(m: &Miner) -> f64 {
     miner_hs_window(m, VARDIFF_DT_MIN)
 }
-fn should_retarget(m: &Miner) -> bool {
-    m.last_retarget.elapsed() >= VARDIFF_INTERVAL
-        || m.acc_n.saturating_sub(m.retarget_acc_n) >= VARDIFF_QUICK_SHARES
+/// `Some(allow_up)` when it is time to look at vardiff. A sub-4s burst may only
+/// step down (eight shares in 50ms is not 200 TH/s). After `VARDIFF_DT_MIN` the
+/// hashrate estimate is real, so a PH-class miner can climb before the 20s clock.
+fn retarget_kind(elapsed: Duration, shares_since: u64) -> Option<bool> {
+    if elapsed >= VARDIFF_INTERVAL {
+        Some(true)
+    } else if shares_since >= VARDIFF_QUICK_SHARES
+        && elapsed >= Duration::from_secs_f64(VARDIFF_DT_MIN)
+    {
+        Some(true)
+    } else if shares_since >= VARDIFF_QUICK_SHARES {
+        Some(false)
+    } else {
+        None
+    }
+}
+fn should_retarget(m: &Miner) -> Option<bool> {
+    retarget_kind(m.last_retarget.elapsed(), m.acc_n.saturating_sub(m.retarget_acc_n))
 }
 fn record_share(m: &mut Miner, work: u64) {
     let now = Instant::now();
@@ -763,10 +811,12 @@ struct Shared {
     /// node still looks busy from the outside, because shares keep flowing against the
     /// stale job, so the age is surfaced in the audit and warned about in the log.
     last_pub_unix: AtomicU64,
+    /// Network-share valve; `None` when the config has no `overflow` block (solo, tests).
+    overflow: Option<Arc<Overflow>>,
 }
 
-/// Shares allowed to wait for Prime. Roughly a few seconds of a fast miner.
-const PRIME_QUEUE_CAP: u64 = 20_000;
+/// Shares allowed to wait for Prime. Sized for a PH-class warmup while vardiff climbs.
+const PRIME_QUEUE_CAP: u64 = 100_000;
 /// Jobs kept for submission lookup. A share naming a job we no longer hold cannot be
 /// rebuilt, so it has to be turned away; the history therefore has to outlive the
 /// slowest miner's round trip, across block boundaries. Each entry carries the block's
@@ -1118,33 +1168,35 @@ fn handle_miner(mut sock: TcpStream, st: Arc<Shared>, ip: IpAddr) {
     let vmin = st.cfg.vardiff_min.max(1);
     let vmax = st.cfg.vardiff_max.unwrap_or(1u64 << 40).max(vmin);
     let vstart = pow2_clamp(st.cfg.vardiff_start.unwrap_or(vmin), vmin, vmax);
+    let vstep = resolve_vardiff_step(st.cfg.vardiff_step);
     // Every session gets its own extranonce1. Sharing one across the gateway makes
     // identical rigs walk identical (extranonce2, nonce) pairs, so they submit the same
     // shares and the dedupe keeps only whichever arrived first, quietly moving credit
     // from one miner to another.
     let sess_en1 = (u32::from_le_bytes(st.extra1) ^ (id as u32)).to_le_bytes();
-    let now = Instant::now();
-    st.miners.lock().unwrap_or_else(|e| e.into_inner()).insert(id, Miner { host, user: String::new(), ua: String::new(), vdiff: vstart, acc: 0, acc_n: 0, rej: 0, rej_n: 0, last: now, vdiff_prev: vstart, vdiff_prev_until: now,
-        // First retarget after a handful of shares (quickdiff) or ~4s, not a full
-        // 20s at the start value.
-        last_retarget: now.checked_sub(VARDIFF_INTERVAL - Duration::from_secs(4)).unwrap_or(now),
-        retarget_acc_n: 0,
-        recent: VecDeque::new(), job_diffs: VecDeque::new(),
-        seen: HashSet::new(), seen_order: VecDeque::new(),
-        tokens: SUBMIT_BURST, tokens_at: now, flood: 0,
-        jobs: VecDeque::new(), ident: String::new() });
+    // Lines the overflow gate read while waiting for the authorize; handled before the
+    // socket is read again. The gate runs once, at the first subscribe.
+    let mut pending: VecDeque<String> = VecDeque::new();
+    let mut gated = false;
+    // Grandfather bookkeeping is per accepted share but only needs to land every so often.
+    let mut noted_at: Option<Instant> = None;
+    st.miners.lock().unwrap_or_else(|e| e.into_inner()).insert(id, new_miner(host, vstart));
     let mut line = String::new();
     loop {
         line.clear();
-        // Bounded read: a client streaming bytes with no newline gets cut off at
-        // MAX_LINE instead of growing this String until the allocator gives up.
-        let n = match (&mut rdr).take(MAX_LINE + 1).read_line(&mut line) {
-            Ok(0) | Err(_) => break,
-            Ok(n) => n as u64,
-        };
-        if n > MAX_LINE || !line.ends_with('\n') {
-            log::warn!("{host_label}: line too long or unterminated; dropping connection");
-            break;
+        if let Some(p) = pending.pop_front() {
+            line = p;
+        } else {
+            // Bounded read: a client streaming bytes with no newline gets cut off at
+            // MAX_LINE instead of growing this String until the allocator gives up.
+            let n = match (&mut rdr).take(MAX_LINE + 1).read_line(&mut line) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => n as u64,
+            };
+            if n > MAX_LINE || !line.ends_with('\n') {
+                log::warn!("{host_label}: line too long or unterminated; dropping connection");
+                break;
+            }
         }
         let Ok(msg) = serde_json::from_str::<Value>(&line) else {
             // Garbage counts toward the flood budget too; a valid miner never sends it.
@@ -1158,6 +1210,25 @@ fn handle_miner(mut sock: TcpStream, st: Arc<Shared>, ip: IpAddr) {
             "mining.subscribe" => {
                 if let Some(u) = msg.get("params").and_then(|p| p.as_array()).and_then(|a| a.first()).and_then(|x| x.as_str()) {
                     ua = u.chars().filter(|c| c.is_ascii_graphic() || *c == ' ').take(96).collect();
+                }
+                // Overflow gate, once, before anything is answered: a miner we do not know
+                // may be relayed to another pool from here, in which case this session never
+                // gets a Lazarus extranonce or job and the handler is done when the relay is.
+                if !gated && st.mode == Mode::Pooled {
+                    gated = true;
+                    if let Some(ov) = st.overflow.as_ref() {
+                        if ov.considering() {
+                            // Not a local miner until the gate says so.
+                            lk(&st.miners).remove(&id);
+                            match ov.gate(id, &mut sock, &mut rdr, &line, ip, &host_label, IDLE_TIMEOUT, &canon_identity) {
+                                Gate::Relayed => return,
+                                Gate::Local(extra) => {
+                                    pending.extend(extra);
+                                    lk(&st.miners).insert(id, new_miner(host_label.clone(), vstart));
+                                }
+                            }
+                        }
+                    }
                 }
                 if let Ok(c) = sock.try_clone() { lk(&st.miner_socks).insert(id, c); }
                 send_line(&mut sock, &json!({"id": mid, "result": [[["mining.notify", "lz"]], hex::encode(sess_en1), 8], "error": null}));
@@ -1356,18 +1427,34 @@ fn handle_miner(mut sock: TcpStream, st: Arc<Shared>, ip: IpAddr) {
                 if st.mode == Mode::Solo {
                     lk(&st.solo).credit(&j.who.clone().unwrap_or_default(), credit, hash_pot(&hash));
                 }
+                // Proved work here: this identity and this source IP are ours for the
+                // grandfather window, whatever the network share does later.
+                if let Some(ov) = st.overflow.as_ref() {
+                    if noted_at.map(|t| t.elapsed() >= Duration::from_secs(10)).unwrap_or(true) {
+                        noted_at = Some(Instant::now());
+                        ov.note_share(&canon_identity(&user), ip);
+                    }
+                }
                 let mut retarget = None;
                 if let Some(m) = st.miners.lock().unwrap_or_else(|e| e.into_inner()).get_mut(&id) {
                     record_share(m, credit);
-                    if should_retarget(m) {
-                        m.last_retarget = Instant::now();
-                        m.retarget_acc_n = m.acc_n;
-                        let want = step_vardiff(m.vdiff, vardiff_ideal(miner_hs_vardiff(m)), vmin, vmax);
-                        if want != m.vdiff {
+                    if let Some(allow_up) = should_retarget(m) {
+                        let want = step_vardiff(m.vdiff, vardiff_ideal(miner_hs_vardiff(m)), vmin, vmax, vstep);
+                        if want > m.vdiff && !allow_up {
+                            // Eight shares in a couple of seconds is a burst, not a
+                            // 4× hashrate. Wait for the interval before climbing.
+                        } else if want != m.vdiff {
+                            m.last_retarget = Instant::now();
+                            m.retarget_acc_n = m.acc_n;
                             m.vdiff_prev = m.vdiff;
                             m.vdiff_prev_until = Instant::now() + VARDIFF_GRACE;
                             m.vdiff = want;
                             retarget = Some((m.vdiff_prev, want));
+                        } else if allow_up {
+                            m.last_retarget = Instant::now();
+                            m.retarget_acc_n = m.acc_n;
+                        } else {
+                            m.retarget_acc_n = m.acc_n;
                         }
                     }
                 }
@@ -1483,7 +1570,26 @@ fn audit_json(st: &Shared) -> String {
         "prime_dropped": st.prime_dropped.load(Ordering::Relaxed),
         "job_miss": st.job_miss.load(Ordering::Relaxed),
         "template_age_s": unix_now().saturating_sub(st.last_pub_unix.load(Ordering::Relaxed)),
+        "stratum_hashrate": lk(&st.miners).values().map(miner_hs).sum::<f64>(),
+        "overflow": st.overflow.as_ref().map(|o| o.status_json()),
     }).to_string()
+}
+/// `/overflow` — status, or `?mode=off|shadow|auto|force` to switch at runtime. The API
+/// port is loopback-only on the pool host, which is the whole access control.
+fn overflow_json(st: &Shared, path: &str) -> String {
+    let Some(ov) = st.overflow.as_ref() else {
+        return json!({"error": "overflow not configured"}).to_string();
+    };
+    if let Some(q) = path.split_once('?').map(|(_, q)| q) {
+        for kv in q.split('&') {
+            if let Some(("mode", m)) = kv.split_once('=') {
+                if ov.set_mode(m).is_none() {
+                    return json!({"error": format!("bad mode {m:?}; use off|shadow|auto|force")}).to_string();
+                }
+            }
+        }
+    }
+    ov.status_json().to_string()
 }
 fn maybe_submit_block(st: &Shared, j: &Job, hdr: &HeaderV2) {
     let Some(auth) = cookie_auth(&st.cfg.rpc_cookie) else { return };
@@ -1579,6 +1685,10 @@ fn api_loop(st: Arc<Shared>) {
                 ("application/json", audit_json(&st))
             } else if path.starts_with("/solo.json") {
                 ("application/json", solo_json(&st))
+            } else if path.starts_with("/proxied") {
+                ("application/json", st.overflow.as_ref().map(|o| o.proxied_json().to_string()).unwrap_or_else(|| json!({"overflow": null, "proxied": []}).to_string()))
+            } else if path.starts_with("/overflow") {
+                ("application/json", overflow_json(&st, path))
             } else if path.starts_with("/clients") {
                 ("text/html", clients_html(&st))
             } else {
@@ -1627,7 +1737,7 @@ fn solo_json(st: &Shared) -> String {
         "profile": st.cfg.profile.clone().unwrap_or_default(),
         "fee_bps": st.solo_fee_bps,
         "fee_script": hex::encode(&st.solo_fee_script),
-        "vardiff": {"min": st.cfg.vardiff_min, "start": st.cfg.vardiff_start.unwrap_or(st.cfg.vardiff_min), "max": st.cfg.vardiff_max},
+        "vardiff": {"min": st.cfg.vardiff_min, "start": st.cfg.vardiff_start.unwrap_or(st.cfg.vardiff_min), "max": st.cfg.vardiff_max, "step": resolve_vardiff_step(st.cfg.vardiff_step)},
         "height": tpl.as_ref().map(|t| t.height).unwrap_or(0),
         "value": tpl.as_ref().map(|t| t.value).unwrap_or(0),
         "template_age_s": unix_now().saturating_sub(st.last_pub_unix.load(Ordering::Relaxed)),
@@ -1656,7 +1766,16 @@ fn clients_html(st: &Shared) -> String {
             i, html_esc(&m.host), html_esc(&m.user), m.last.elapsed().as_secs_f64(), m.vdiff, m.acc, m.acc_n, m.rej, m.rej_n,
             parse_hr_label(miner_hs(m)), html_esc(&m.ua)));
     }
-    rows.push_str("</TABLE>"); format!("<html><body>{rows}</body></html>")
+    rows.push_str("</TABLE>");
+    // Relayed sessions in their own table so scrapers of the first one see only local
+    // miners (they have no hashrate here; the other pool is paying them).
+    let relayed = st.overflow.as_ref().map(|o| o.clients_rows(0, &html_esc)).unwrap_or_default();
+    if !relayed.is_empty() {
+        rows.push_str("<p>Relayed to other pools (overflow):</p><TABLE><TR><TD>#</TD><TD>Host</TD><TD>Auth Username</TD><TD></TD><TD>Connected</TD><TD></TD><TD>Accepted (submits)</TD><TD></TD><TD>Upstream</TD><TD></TD><TD>UA</TD></TR>");
+        rows.push_str(&relayed);
+        rows.push_str("</TABLE>");
+    }
+    format!("<html><body>{rows}</body></html>")
 }
 fn gbt_loop(st: Arc<Shared>) {
     let tag = st.cfg.coinbase_tag.clone().unwrap_or_else(|| "Lazarus".into());
@@ -1786,7 +1905,7 @@ fn main() {
             let addr = cfg.solo_fee_address.as_deref().unwrap_or("").trim().to_string();
             let script = identity_script(&addr)
                 .expect("solo mode needs solo_fee_address to be a payable address");
-            let bps = cfg.solo_fee_bps.unwrap_or(250);
+            let bps = cfg.solo_fee_bps.unwrap_or(500);
             assert!(bps > 0 && bps <= 10_000, "solo_fee_bps must be 1..=10000");
             (script, bps)
         }
@@ -1810,7 +1929,7 @@ fn main() {
     let prime_on = cfg.prime_port != 0;
     assert!(prime_on || mode == Mode::Solo, "pooled mode needs a Prime to get the TIDES split from");
     log::info!(
-        "lazarus-gateway profile={} mode={:?} stratum={} api={} vardiff_min={} vardiff_start={} vardiff_max={} verify={:?} prime={}",
+        "lazarus-gateway profile={} mode={:?} stratum={} api={} vardiff_min={} vardiff_start={} vardiff_max={} vardiff_step={} verify={:?} prime={}",
         cfg.profile.as_deref().unwrap_or("asic"),
         mode,
         cfg.stratum_listen,
@@ -1818,6 +1937,7 @@ fn main() {
         cfg.vardiff_min,
         cfg.vardiff_start.unwrap_or(cfg.vardiff_min),
         cfg.vardiff_max.unwrap_or(1u64 << 40),
+        resolve_vardiff_step(cfg.vardiff_step),
         verify_mode(cfg.verify_shares.as_deref()),
         if prime_on { format!("{}:{}", cfg.prime_host, cfg.prime_port) } else { "off".into() }
     );
@@ -1857,10 +1977,39 @@ fn main() {
         verify: verify_mode(cfg.verify_shares.as_deref()),
         prime_depth: AtomicU64::new(0), prime_dropped: AtomicU64::new(0),
         job_miss: AtomicU64::new(0), last_pub_unix: AtomicU64::new(0),
+        overflow: match (&cfg.overflow, mode) {
+            (Some(oc), Mode::Pooled) => Some(Arc::new(Overflow::new(
+                oc.clone(),
+                cli.config.parent().unwrap_or(std::path::Path::new(".")),
+            ))),
+            (Some(_), Mode::Solo) => {
+                log::warn!("overflow block ignored: solo gateways do not relay");
+                None
+            }
+            (None, _) => None,
+        },
     });
     if prime_on {
         let s = st.clone();
         thread::spawn(move || prime_loop(s, rx, urx));
+    }
+    if let Some(ov) = st.overflow.clone() {
+        // Meter: Prime's credited pool hashrate (stratum + DATUM) over the node's network
+        // estimate. The stratum sum is passed so the meter can fall back to it when Prime's
+        // stats are unreachable.
+        let s = st.clone();
+        let rpc_url = st.cfg.rpc.clone();
+        let cookie = st.cfg.rpc_cookie.clone();
+        let nblocks = ov.cfg.nethash_blocks.max(1);
+        let net_hs = move || {
+            let auth = cookie_auth(&cookie)?;
+            rpc(&rpc_url, &auth, "getnetworkhashps", json!([nblocks, -1])).and_then(|v| v.as_f64())
+        };
+        let stratum_hs = move || lk(&s.miners).values().map(miner_hs).sum::<f64>();
+        let o1 = ov.clone();
+        thread::Builder::new().name("overflow-meter".into()).spawn(move || o1.run_meter(net_hs, stratum_hs)).expect("overflow meter thread");
+        let o2 = ov.clone();
+        thread::Builder::new().name("overflow-health".into()).spawn(move || o2.run_health()).expect("overflow health thread");
     }
     if mode == Mode::Solo {
         let s = st.clone();
@@ -2192,57 +2341,128 @@ mod vardiff_tests {
     const MAX: u64 = 131072;
     const START: u64 = 4096;
 
+    fn step4(current: u64, ideal: u64) -> u64 {
+        step_vardiff(current, ideal, MIN, MAX, 4)
+    }
+    fn step2(current: u64, ideal: u64) -> u64 {
+        step_vardiff(current, ideal, MIN, MAX, 2)
+    }
+
     #[test]
     fn burst_from_start_does_not_jump_past_4x_or_cap() {
         let huge = 1u64 << 40;
-        assert_eq!(step_vardiff(START, huge, MIN, MAX), 16384);
-        assert_eq!(step_vardiff(16384, huge, MIN, MAX), 65536);
-        assert_eq!(step_vardiff(65536, huge, MIN, MAX), MAX);
-        assert_eq!(step_vardiff(MAX, huge, MIN, MAX), MAX);
+        assert_eq!(step4(START, huge), 16384);
+        assert_eq!(step4(16384, huge), 65536);
+        assert_eq!(step4(65536, huge), MAX);
+        assert_eq!(step4(MAX, huge), MAX);
+    }
+
+    #[test]
+    fn pooled_asic_step_is_2x() {
+        let huge = 1u64 << 40;
+        assert_eq!(step2(START, huge), 8192);
+        assert_eq!(step2(8192, huge), 16384);
+        assert_eq!(step2(16384, huge), 32768);
+    }
+
+    #[test]
+    fn nine_to_fifteen_ths_stays_at_8192() {
+        let ideal = vardiff_ideal(9e12);
+        assert_eq!(ideal, 8192);
+        assert_eq!(step2(START, ideal), 8192);
+        assert_ne!(step2(START, ideal), 16384);
+        assert_eq!(vardiff_ideal(13e12), 8192);
+        assert_eq!(vardiff_ideal(15e12), 8192);
+        assert_eq!(step2(8192, vardiff_ideal(13e12)), 8192);
     }
 
     #[test]
     fn slow_miner_steps_down_to_floor() {
-        assert_eq!(step_vardiff(START, 1, MIN, MAX), MIN);
-        assert_eq!(step_vardiff(MIN, 1, MIN, MAX), MIN);
+        assert_eq!(step4(START, 1), MIN);
+        assert_eq!(step4(MIN, 1), MIN);
+        assert_eq!(step2(START, 1), 2048);
     }
 
     #[test]
-    fn nineteen_ths_leaves_start_in_one_step() {
+    fn nineteen_ths_leaves_start_in_one_4x_step() {
         let ideal = vardiff_ideal(19e12);
         assert_eq!(ideal, 16384);
-        assert_eq!(step_vardiff(START, ideal, MIN, MAX), 16384);
+        assert_eq!(step4(START, ideal), 16384);
+        assert_eq!(step2(START, ideal), 8192);
+        assert_eq!(step2(8192, ideal), 16384);
     }
 
     #[test]
     fn five_point_five_ths_stays_at_start() {
         let ideal = vardiff_ideal(5.5e12);
         assert_eq!(ideal, START);
-        assert_eq!(step_vardiff(START, ideal, MIN, MAX), START);
+        assert_eq!(step4(START, ideal), START);
+        assert_eq!(step2(START, ideal), START);
     }
 
     #[test]
-    fn twenty_seven_ths_reaches_ideal_in_two_steps() {
+    fn twenty_seven_ths_reaches_ideal_in_two_4x_steps() {
         let ideal = vardiff_ideal(27e12);
-        assert_eq!(ideal, 32768);
+        assert_eq!(ideal, 16384);
         let mut d = START;
-        d = step_vardiff(d, ideal, MIN, MAX);
+        d = step4(d, ideal);
         assert_eq!(d, 16384);
-        d = step_vardiff(d, ideal, MIN, MAX);
-        assert_eq!(d, 32768);
     }
 
     #[test]
-    fn one_forty_ths_reaches_cap_in_three_steps() {
+    fn one_forty_ths_reaches_cap_in_three_4x_steps() {
         let ideal = vardiff_ideal(140e12);
+        assert_eq!(ideal, 65536);
+        let mut d = START;
+        let mut steps = 0;
+        while d != 65536 && steps < 8 {
+            d = step4(d, ideal);
+            steps += 1;
+        }
+        assert_eq!(d, 65536);
+        assert!(steps <= 3, "steps={steps}");
+    }
+
+    #[test]
+    fn one_forty_ths_reaches_old_round_cap_when_hashrate_justifies() {
+        let ideal = vardiff_ideal(200e12);
         assert_eq!(ideal, MAX);
         let mut d = START;
         let mut steps = 0;
         while d != ideal && steps < 8 {
-            d = step_vardiff(d, ideal, MIN, MAX);
+            d = step4(d, ideal);
             steps += 1;
         }
         assert_eq!(d, MAX);
         assert!(steps <= 3, "steps={steps}");
+    }
+
+    #[test]
+    fn quick_shares_cannot_raise() {
+        assert_eq!(retarget_kind(Duration::from_secs(1), 8), Some(false));
+        assert_eq!(retarget_kind(Duration::from_secs(20), 1), Some(true));
+        assert_eq!(retarget_kind(Duration::from_secs(1), 3), None);
+    }
+
+    #[test]
+    fn sustained_high_share_rate_may_raise_after_dt_min() {
+        assert_eq!(retarget_kind(Duration::from_secs(4), 8), Some(true));
+        assert_eq!(retarget_kind(Duration::from_millis(3999), 8), Some(false));
+    }
+
+    #[test]
+    fn petahash_ideal_is_above_the_old_140th_cap() {
+        assert_eq!(vardiff_ideal(140e12), 65536);
+        assert_eq!(vardiff_ideal(1e15), 524_288);
+        assert_eq!(vardiff_ideal(1e16), 8_388_608);
+        assert!(vardiff_ideal(1e15) > 131_072);
+    }
+
+    #[test]
+    fn default_step_stays_4_for_solo() {
+        assert_eq!(resolve_vardiff_step(None), 4);
+        assert_eq!(resolve_vardiff_step(Some(2)), 2);
+        assert_eq!(resolve_vardiff_step(Some(3)), 2);
+        assert_eq!(resolve_vardiff_step(Some(1)), 2);
     }
 }

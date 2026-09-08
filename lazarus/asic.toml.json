@@ -2,14 +2,31 @@
   "profile": "asic",
   "stratum_listen": "0.0.0.0:23334",
   "api_listen": "127.0.0.1:7152",
-  "vardiff_min": 1024,
+  "vardiff_min": 4096,
   "vardiff_start": 4096,
-  "vardiff_max": 131072,
+  "vardiff_max": 16777216,
+  "vardiff_step": 2,
   "rpc": "http://127.0.0.1:9332",
   "rpc_cookie": "/home/umbrel/umbrel/app-data/bitcoin-knots/data/bitcoin/.cookie",
   "prime_host": "127.0.0.1",
   "prime_port": 28915,
   "pool_pubkey": "<from lazarus-prime /stats.json pool.pubkey>",
   "coinbase_tag": "Lazarus",
-  "verify_shares": "enforce"
+  "verify_shares": "enforce",
+  "overflow": {
+    "mode": "auto",
+    "enter_pct": 32,
+    "exit_pct": 27,
+    "hold_polls": 3,
+    "poll_secs": 30,
+    "grandfather_hours": 24,
+    "nethash_blocks": 60,
+    "prime_stats_url": "http://127.0.0.1:28916/stats.json",
+    "upstreams": [
+      {"name": "Riptide", "host": "sv1.riptide.maveth.ca", "port": 23337, "url": "https://riptide.maveth.ca/"},
+      {"name": "Convoy", "host": "mine.convoy.xyz", "port": 3333, "url": "https://convoy.xyz/"},
+      {"name": "B2Pool", "host": "ord.b2pool.io", "port": 3333, "url": "https://b2pool.io/"},
+      {"name": "iohzrd", "host": "gateway.iohzrd.tech", "port": 23334, "url": "https://gateway.iohzrd.tech/"}
+    ]
+  }
 }
