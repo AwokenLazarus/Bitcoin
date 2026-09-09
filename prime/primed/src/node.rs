@@ -45,6 +45,10 @@ pub async fn run(shared: Arc<Shared>) {
                     confirm_at = Instant::now() + Duration::from_secs(30);
                     confirm_blocks(&shared, height).await;
                 }
+                if changed {
+                    // book the DATUM rebate share of any solo block the chain just buried
+                    crate::solo::scan(&shared, height).await;
+                }
             }
             Err(e) => {
                 if !warned {
@@ -90,18 +94,25 @@ async fn confirm_blocks(shared: &Shared, tip_height: u32) {
                 if conf > 0 {
                     log::info!("block {hash} at {height} confirmed ({conf})");
                     let mut reapply = Vec::new();
+                    let mut rebate = 0i64;
                     shared.update_block(&hash, |r| {
                         if let Some(kind) = r.kind.strip_prefix("orphan:") {
                             log::info!("block {} at {} is back in the main chain", r.hash, r.height);
                             r.kind = kind.to_string();
-                            // mark_orphan reversed its carry; put it back
+                            // mark_orphan reversed its carry and rebate; put them back
                             reapply = r.carry_delta.clone();
+                            rebate = r.rebate_delta;
                         }
                         r.settled = true;
                     });
-                    if !reapply.is_empty() {
-                        shared.ledger.lock().unwrap().settle_carry(&reapply);
-                        log::info!("block {hash}: re-applied carry for {} identities", reapply.len());
+                    if !reapply.is_empty() || rebate != 0 {
+                        let mut ledger = shared.ledger.lock().unwrap();
+                        ledger.settle_carry(&reapply);
+                        let owed = ledger.settle_rebate(rebate);
+                        log::info!(
+                            "block {hash}: re-applied carry for {} identities, DATUM rebate {rebate:+} -> owed {owed}",
+                            reapply.len()
+                        );
                     }
                 } else if conf < 0 {
                     mark_orphan(shared, &hash, height, "is not in the main chain");
@@ -134,14 +145,22 @@ fn mark_orphan(shared: &Shared, hash: &str, height: u32, why: &str) {
     }
     log::warn!("block {hash} at {height} {why}");
     let mut reverse = Vec::new();
+    let mut rebate = 0i64;
     shared.update_block(hash, |r| {
         r.kind = format!("orphan:{}", r.kind);
         // an orphan's coinbase paid nobody: give back the carry it cleared and take back
-        // the earnings it deferred (the work is still in the window to be paid properly)
+        // the earnings it deferred (the work is still in the window to be paid properly);
+        // likewise the DATUM rebate it paid down is still owed
         reverse = r.carry_delta.iter().map(|(i, d)| (i.clone(), -*d)).collect();
+        rebate = -r.rebate_delta;
     });
-    if !reverse.is_empty() {
-        shared.ledger.lock().unwrap().settle_carry(&reverse);
-        log::info!("block {hash}: reversed carry for {} identities", reverse.len());
+    if !reverse.is_empty() || rebate != 0 {
+        let mut ledger = shared.ledger.lock().unwrap();
+        ledger.settle_carry(&reverse);
+        let owed = ledger.settle_rebate(rebate);
+        log::info!(
+            "block {hash}: reversed carry for {} identities, DATUM rebate {rebate:+} -> owed {owed}",
+            reverse.len()
+        );
     }
 }

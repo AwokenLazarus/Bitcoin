@@ -214,6 +214,75 @@
     .topbar-side .btn.small { display: none; }
   }
 
+  /* ---- DATUM bonus banner: above the hero, brass, hidden when the rebate is off. */
+  .promo {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.6rem 1rem;
+    margin-top: 1rem;
+    padding: 0.7rem 1rem 0.75rem;
+    border: 1px solid color-mix(in oklch, var(--brass) 45%, var(--line));
+    border-left: 3px solid var(--brass);
+    border-radius: var(--r);
+    background: color-mix(in oklch, var(--brass) 10%, var(--bg-inset));
+  }
+  .promo-tag {
+    flex: none;
+    padding: 0.12rem 0.5rem 0.16rem;
+    border: 1px solid var(--brass-dim);
+    border-radius: 999px;
+    font-size: 0.64rem;
+    font-weight: 600;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--brass);
+    white-space: nowrap;
+  }
+  .promo-copy {
+    flex: 1 1 24rem;
+    min-width: 0;
+    font-size: 0.92rem;
+    line-height: 1.5;
+    color: color-mix(in oklch, var(--ink) 86%, var(--muted));
+  }
+  .promo-copy strong { color: var(--ink); font-weight: 600; }
+  .promo-live {
+    margin-left: 0.35rem;
+    padding: 0.02rem 0.45rem;
+    border: 1px solid var(--brass-dim);
+    border-radius: 999px;
+    font-family: var(--mono);
+    font-size: 0.8rem;
+    font-weight: 500;
+    font-variant-numeric: tabular-nums;
+    color: var(--brass);
+    white-space: nowrap;
+  }
+  .promo .btn { flex: none; }
+
+  /* The bonus, wherever it rides alongside a fee rate. */
+  .fee-bonus {
+    font-family: var(--mono);
+    font-size: 0.72rem;
+    font-weight: 500;
+    letter-spacing: 0;
+    color: var(--brass) !important;
+    white-space: nowrap;
+  }
+  .fee-lede-rate .fee-bonus { margin-top: -0.1rem; }
+  .fee-rate .fee-bonus { display: block; text-align: right; }
+  .tab-fee.bonus { border-color: var(--brass-dim); color: var(--brass); }
+  .chip.reco { border-color: color-mix(in oklch, var(--brass) 45%, var(--line)); }
+  .chip.reco b { color: var(--brass); }
+  .rebate-callout { border-left-color: var(--brass); background: color-mix(in oklch, var(--brass) 9%, var(--bg-inset)); }
+  .rebate-callout b { color: var(--brass); font-variant-numeric: tabular-nums; }
+  .how-step.reco {
+    border-color: color-mix(in oklch, var(--brass) 45%, var(--line));
+    background: color-mix(in oklch, var(--brass) 6%, var(--bg-card));
+  }
+  .how-step.reco .how-n { color: var(--brass); }
+
   /* ---- Hero. */
   .hero {
     position: relative;

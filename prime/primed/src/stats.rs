@@ -54,6 +54,8 @@ pub fn build(shared: &Shared) -> Value {
     let split = w.split(sample_value, &shared.split_params, |i| address::to_script(i, shared.network));
     let payouts: std::collections::HashMap<&str, u64> =
         split.payees.iter().map(|p| (p.identity.as_str(), p.sats)).collect();
+    let rebates: std::collections::HashMap<&str, u64> =
+        split.rebate_credits.iter().map(|(i, s)| (i.as_str(), *s)).collect();
 
     let miners: Vec<Value> = w
         .miners()
@@ -70,6 +72,9 @@ pub fn build(shared: &Shared) -> Value {
                 "credits": m.credits,
                 "share_percent": if w.total_work() > 0 { 100.0 * m.work as f64 / w.total_work() as f64 } else { 0.0 },
                 "payout_sats": payouts.get(m.identity.as_str()).copied().unwrap_or(0),
+                // DATUM rebate the next found block credits to this identity's carry (not part
+                // of payout_sats; it is paid with a later output once carry clears the floor)
+                "rebate_sats": rebates.get(m.identity.as_str()).copied().unwrap_or(0),
                 // unplaced earnings from earlier blocks, paid on top once they clear the floor
                 "carry_sats": m.carry,
                 "payable": payable,
@@ -112,10 +117,8 @@ pub fn build(shared: &Shared) -> Value {
             })
             .collect();
         // Gateways that found blocks before the last restart, even if they are not connected now.
-        let mut historic: Vec<_> = finds
-            .iter()
-            .filter(|(gw, f)| f.found > 0 && !gw.is_empty() && !present.contains(*gw))
-            .collect();
+        let mut historic: Vec<_> =
+            finds.iter().filter(|(gw, f)| f.found > 0 && !gw.is_empty() && !present.contains(*gw)).collect();
         historic.sort_by(|a, b| b.1.found.cmp(&a.1.found).then_with(|| a.0.cmp(b.0)));
         for (gw, f) in historic {
             let own = house_gateway(&shared.cfg, gw);
@@ -171,6 +174,9 @@ pub fn build(shared: &Shared) -> Value {
             "prime_id": shared.cfg.prime_id,
             "fee_bps": shared.cfg.fee_bps,
             "stratum_fee_bps": shared.cfg.stratum_fee_bps,
+            // share of the stratum fee rebated to DATUM work, and of solo rewards owed to it
+            "datum_rebate_bps": shared.cfg.datum_rebate_bps,
+            "solo_rebate_bps": shared.cfg.solo_rebate_bps,
             "window_multiple": shared.cfg.window,
             "min_payout": shared.cfg.min_payout,
             "min_diff": shared.cfg.min_diff,
@@ -195,6 +201,15 @@ pub fn build(shared: &Shared) -> Value {
             // carry the next block would pay out, and what it would defer
             "sample_carry_paid_sats": split.carry_paid,
             "sample_deferred_sats": split.unpaid.iter().filter(|u| u.defers()).map(|u| u.earned).sum::<u64>(),
+            // DATUM rebate the next found block credits to DATUM miners' carry, how much of
+            // that is the owed balance going out, and the balance itself (rebate with nobody
+            // to credit yet)
+            "sample_rebate_sats": split.rebate_sats,
+            "sample_rebate_owed_credited_sats": split.rebate_owed_credited,
+            "sample_rebate_deferred_sats": split.rebate_deferred,
+            "rebate_owed_sats": w.rebate_owed(),
+            // solo blocks whose rebate share has been credited (newest first, last 50)
+            "solo_rebates": crate::solo::read_log(&shared.cfg.data_dir).into_iter().rev().take(50).collect::<Vec<_>>(),
             // everything the pool is holding for miners under the floor, and for whom
             "carry_total_sats": w.total_carry(),
             "carry_holders": w.carries().len(),

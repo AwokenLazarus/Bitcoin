@@ -61,21 +61,25 @@
     });
   });
   if (tabs.length) selectTab(tabs[0].id);
-  // The fee cards are the "why"; clicking one opens the matching "how" tab.
-  document.querySelectorAll(".fee-card[data-tab]").forEach((card) => {
-    card.addEventListener("click", () => {
-      selectTab(card.getAttribute("data-tab"));
-      $(card.getAttribute("data-tab"))?.focus({ preventScroll: true });
+  // The fee cards are the "why"; clicking one opens the matching "how" tab. Any link with
+  // data-tab (the DATUM calls to action) does the same, so it lands on the setup it promises.
+  document.querySelectorAll("[data-tab]").forEach((el) => {
+    el.addEventListener("click", () => {
+      const id = el.getAttribute("data-tab");
+      selectTab(id);
+      if (el.classList.contains("fee-card")) $(id)?.focus({ preventScroll: true });
     });
   });
 
   // ------------------------------------------------------------ formatting
   // Formatters and the trend chart live in shared.js (window.LZ), shared with /miner/<addr>.
-  const { blockMarks, esc, fmtHr, num, bigNum, short, shortHash, pct, ago, agoS, dur, when, clock, sig4, amt, amtSats, amtExact, kindPill, statusPill, chartLegend, draw, pathLabel, isPrimePath, sessCell, winShareCell, feePct, poolLink, payStatus, minerCard, showMinerTab, MINER_TABS } = window.LZ;
+  const { blockMarks, esc, fmtHr, num, bigNum, short, shortHash, pct, pctSmart, ago, agoS, dur, when, clock, sig4, amt, amtSats, amtExact, kindPill, statusPill, chartLegend, draw, pathLabel, isPrimePath, sessCell, winShareCell, feePct, poolLink, payStatus, minerCard, showMinerTab, MINER_TABS } = window.LZ;
 
   // Fee schedule as primed reports it: one rate for work through a miner's own DATUM
   // gateway, another for our public stratum. Filled from /api/pool on every refresh.
-  const fees = { datum: 0, stratum: 2.0 };
+  // `rebate` is the points of the stratum fee credited to DATUM work; `uplift` is what that
+  // is worth to a DATUM miner at today's split (rebate × stratum work ÷ DATUM work).
+  const fees = { datum: 0, stratum: 3.0, rebate: 0, uplift: 0, datumWorkPct: 0, stratumWorkPct: 0, datumMiners: 0 };
   const feeForPath = (path) => (String(path || "").toLowerCase() === "stratum" ? fees.stratum : fees.datum);
   // Which fee schedule an address is on, as a small labelled pill.
   // `feePath` is the schedule primed applies to the identity's window work (the fee that is
@@ -120,7 +124,13 @@
     return " · " + moneyOnly(u);
   };
   // 1 TH/s of continuous work at the current difficulty, base subsidy (no tx fees).
-  const thsDay = (p, feePercent) => {
+  // `key` picks which of primed's pre-computed figures to prefer: with the rebate on,
+  // "datum_bonus" is the DATUM rate including the credit at today's work split.
+  const thsDay = (p, feePercent, key) => {
+    if (key) {
+      const pre = Number(p && p["ths_btc_day_" + key]);
+      if (Number.isFinite(pre) && pre > 0) return pre;
+    }
     const billed = Number(p && p["ths_btc_day_" + (feePercent === fees.stratum ? "stratum" : "datum")]);
     if (Number.isFinite(billed) && billed > 0) return billed;
     const gross = Number(p && p.ths_btc_day);
@@ -237,16 +247,133 @@
     wrap.hidden = false;
   }
 
+  // "one point", "1.5 points" — fee percentages read as points of the stratum fee when we are
+  // talking about a slice of it rather than a rate in its own right. `Pts` starts a sentence.
+  const WORDS = ["zero", "one", "two", "three", "four", "five"];
+  const pts = (n) => {
+    const x = Number(n) || 0;
+    const s = Number.isInteger(x) && x < WORDS.length ? WORDS[x] : String(sig4(x));
+    return `${s} point${x === 1 ? "" : "s"}`;
+  };
+  const Pts = (n) => { const s = pts(n); return s.charAt(0).toUpperCase() + s.slice(1); };
+  // The uplift, as the page shows it: a signed percent with a decimal until it gets big.
+  const upliftPct = (n) => "+" + pct(Number(n) || 0, Math.abs(Number(n)) < 100 ? 1 : 0);
+  // The DATUM bonus, everywhere it appears. One knob (`datum_rebate_percent`) turns all of it
+  // on: with the rebate off every element here is hidden and the page reads as it did before.
+  // `uplift` is the number that matters to a miner — what DATUM work earns above its
+  // proportional share of a block right now — so it is what we lead with when Prime reports it.
+  function rebateCopy(p) {
+    const setText = (id, t) => { const e = $(id); if (e) e.textContent = t; };
+    const show = (id, on) => { const e = $(id); if (e) e.hidden = !on; };
+    const on = fees.rebate > 0;
+    const upliftTxt = fees.uplift > 0 ? upliftPct(fees.uplift) : "";
+    const upliftPhrase = fees.uplift > 0
+      ? `At the moment that is <b>${upliftTxt}</b> on top of every DATUM miner's share of every block`
+      : "";
+
+    show("datum-promo", on);
+    show("promo-live", on && !!upliftTxt);
+    const promo = $("promo-live");
+    if (promo && upliftTxt) {
+      promo.textContent = `${upliftTxt} right now`;
+      promo.title = `DATUM work is ${pctSmart(fees.datumWorkPct)} of the window and the public stratum is ${pctSmart(fees.stratumWorkPct)}, so the ${pts(fees.rebate)} taken from stratum work is worth ${upliftTxt} to DATUM work.`;
+    }
+    setText("promo-text", on
+      ? `The public stratum pays ${feePct(fees.stratum)}. ${Pts(fees.rebate)} of it is credited to every DATUM miner holding work in the window, on every block the pool finds — pro rata by your work, whether or not you made that coinbase.`
+      : "");
+
+    show("live-bonus-chip", on && !!upliftTxt);
+    setText("live-bonus", upliftTxt || "\u2014");
+
+    setText("lede-rebate-pts", pts(fees.rebate));
+    show("top-bonus-datum", on && !!upliftTxt);
+    setText("top-bonus-datum", upliftTxt ? `${upliftTxt} DATUM bonus` : "");
+    setText("top-fee-datum-sub", on
+      ? "You keep 100%, you pick the block template, and you collect the DATUM bonus"
+      : "You keep 100% and you pick the block template");
+    setText("top-stratum-rebate", on ? `${pts(fees.rebate)} of the ${feePct(fees.stratum)} goes to the DATUM miners` : "");
+    show("top-stratum-rebate", on);
+
+    const pillar = $("pillar-rebate");
+    if (pillar) {
+      pillar.textContent = on ? `, and ${pts(fees.rebate)} of that is credited to the DATUM miners on every block` : "";
+      pillar.hidden = !on;
+    }
+
+    show("fee-datum-bonus", on && !!upliftTxt);
+    setText("fee-datum-bonus", upliftTxt ? `${upliftTxt} bonus` : "");
+    setText("fee-datum-copy", on
+      ? `On top of your full share, every block credits you a cut of the public stratum's ${feePct(fees.stratum)}.`
+      : "");
+    setText("fee-stratum-copy", on
+      ? `${pts(fees.rebate)} of the fee goes to the DATUM miners; run a gateway and you are on the receiving end.`
+      : "");
+    show("tab-bonus-datum", on && !!upliftTxt);
+    setText("tab-bonus-datum", upliftTxt || "");
+
+    const stratumLine = $("stratum-rebate-line");
+    if (stratumLine) {
+      stratumLine.innerHTML = on
+        ? `. ${pts(fees.rebate)} of it is credited to the DATUM miners in the window — <a href="#pane-datum" data-tab="tab-datum">run your own gateway</a> and it is paid to you instead`
+        : "";
+      stratumLine.hidden = !on;
+      stratumLine.querySelector("[data-tab]")?.addEventListener("click", () => selectTab("tab-datum"));
+    }
+
+    show("datum-bonus-explain", on);
+    const explain = $("datum-bonus-explain-text");
+    if (explain && on) {
+      explain.innerHTML =
+        `The public stratum pays a ${feePct(fees.stratum)} fee. ${Pts(fees.rebate)} of it is never kept by the pool: on every block found it is credited to every DATUM miner holding work in the window, pro rata by that work. ` +
+        `It lands on your balance whether or not your address made that block's coinbase, and is paid with your next output once it clears the minimum — so a small gateway that rarely fits in a coinbase still earns every satoshi of its share. ` +
+        (upliftPhrase ? upliftPhrase + `, because DATUM holds ${pctSmart(fees.datumWorkPct)} of the window and the public stratum holds ${pctSmart(fees.stratumWorkPct)}. The fewer of you there are, the bigger each share.` : "");
+    }
+    show("datum-bonus-dt", on && !!upliftTxt);
+    show("datum-bonus-dd", on && !!upliftTxt);
+    const bonusDd = $("datum-bonus-dd");
+    if (bonusDd && on && upliftTxt) {
+      bonusDd.innerHTML = `<b>${upliftTxt}</b> above your proportional share right now — ${pts(fees.rebate)} of the stratum's ${feePct(fees.stratum)}, split across the ${fees.datumMiners || "\u2014"} DATUM ${fees.datumMiners === 1 ? "miner" : "miners"} in the window by work. Credited on every block, paid with your next output.`;
+    }
+
+    show("how-step-bonus", on);
+    const howBonus = $("how-bonus-copy");
+    if (howBonus && on) {
+      howBonus.innerHTML =
+        `The same block also settles the bonus. ${Pts(fees.rebate)} of the ${feePct(fees.stratum)} charged to public-stratum work is credited to the DATUM miners in the window instead of the pool, divided by their work. ` +
+        `Because it is credited and not paid as its own output, it does not matter whether your address fit in that coinbase: the credit is yours and rides along with your next output. ` +
+        (upliftPhrase ? upliftPhrase + "." : "");
+    }
+
+    const payoutNote = $("payout-rebate-note");
+    if (payoutNote) {
+      const sample = Number(p.fees && p.fees.sample_rebate_btc) || 0;
+      payoutNote.hidden = !on;
+      if (on) {
+        payoutNote.innerHTML =
+          `<strong>Plus the DATUM bonus.</strong> This block also credits ${sample > 0 ? `<b>${amt(sample)}</b>${money(sample)}` : `${pts(fees.rebate)} of the stratum fee`} to the DATUM miners in the window, pro rata by work. ` +
+          `It is not one of the outputs above — it goes onto their balances and is paid with their next output. ` +
+          `<a href="#connect" data-tab="tab-datum">Run a gateway</a> and you are in it.`;
+        payoutNote.querySelector("[data-tab]")?.addEventListener("click", () => selectTab("tab-datum"));
+      }
+    }
+  }
+
   function stats(p) {
     const pr = p.prime || {};
     const tot = pr.totals || {};
     if (p.fees) {
       if (Number.isFinite(Number(p.fees.datum_percent))) fees.datum = Number(p.fees.datum_percent);
       if (Number.isFinite(Number(p.fees.stratum_percent))) fees.stratum = Number(p.fees.stratum_percent);
+      if (Number.isFinite(Number(p.fees.datum_rebate_percent))) fees.rebate = Number(p.fees.datum_rebate_percent);
+      if (Number.isFinite(Number(p.fees.datum_uplift_percent))) fees.uplift = Number(p.fees.datum_uplift_percent);
+      if (Number.isFinite(Number(p.fees.datum_work_percent))) fees.datumWorkPct = Number(p.fees.datum_work_percent);
+      if (Number.isFinite(Number(p.fees.stratum_work_percent))) fees.stratumWorkPct = Number(p.fees.stratum_work_percent);
+      fees.datumMiners = Number(p.fees.datum_miners) || 0;
     }
     const setText = (id, t) => { const e = $(id); if (e) e.textContent = t; };
     for (const id of ["fee-datum", "tab-fee-datum", "datum-fee-line", "top-fee-datum"]) setText(id, feePct(fees.datum));
     for (const id of ["fee-stratum", "tab-fee-stratum", "stratum-fee-line", "pillar-stratum-fee", "top-fee-stratum"]) setText(id, feePct(fees.stratum));
+    rebateCopy(p);
     if (fees.datum === 0 && fees.stratum > 0) {
       setText("fee-ratio", "no cut versus");
     } else if (fees.datum > 0 && fees.stratum > fees.datum) {
@@ -257,7 +384,9 @@
     setText("how-window", String(Number(p.window_multiple) || 8));
     setText("how-fees", fees.datum === fees.stratum
       ? `Fee: ${feePct(fees.datum)} of each miner's window share, taken inside the coinbase.`
-      : `Fees are taken per miner, inside the coinbase, by the path the work arrived on: ${feePct(fees.datum)} of your window share through your own DATUM gateway, ${feePct(fees.stratum)} on the public stratum. Switching paths keeps your accepted work.`);
+      : `Fees are taken per miner, inside the coinbase, by the path the work arrived on: ${feePct(fees.datum)} of your window share through your own DATUM gateway, ${feePct(fees.stratum)} on the public stratum.`
+        + (fees.rebate > 0 ? ` Of the stratum's ${feePct(fees.stratum)}, ${pts(fees.rebate)} is not kept by the pool: it is credited to the DATUM miners in the window on every block found.` : "")
+        + " Switching paths keeps your accepted work.");
     const net = p.network_hr_hs ? (p.network_hr_hs / 1e15).toFixed(2) + " PH/s" : "\u2014";
     const luck = p.luck_percent == null ? "\u2014" : p.luck_percent.toFixed(0) + "%";
     const expected = Number(p.blocks_expected);
@@ -279,6 +408,9 @@
     const remote = Number(pr.gateways_remote) || 0;
     const thsDatum = thsDay(p, fees.datum);
     const thsStratum = thsDay(p, fees.stratum);
+    // Headline yield is the DATUM one including the bonus: it is the number we want a miner
+    // comparing pools to see, and it is what they actually get through a gateway.
+    const thsBonus = fees.rebate > 0 ? thsDay(p, fees.datum, "datum_bonus") : thsDatum;
     // Rigs (stratum sessions, plus one per own-gateway address) vs. distinct payout addresses.
     const workers = Number(p.workers_online) || Number(p.miners_online) || 0;
     const addrs = Number(p.miners_online) || 0;
@@ -294,7 +426,10 @@
         ? "accepted, lifetime · " + num(run) + " this Prime run · " + rejPct
         : "verified by Prime since it started · " + rejPct;
     const cells = [
-      ["1 TH/s yields (est.)", thsDatum != null ? amt(thsDatum) + "/day" + money(thsDatum) : "\u2014", "at current difficulty, base subsidy · DATUM " + feePct(fees.datum) + " · " + (thsStratum != null ? amt(thsStratum) + "/day" + money(thsStratum) : "\u2014") + " on stratum"],
+      ["1 TH/s yields (est.)", thsBonus != null ? amt(thsBonus) + "/day" + money(thsBonus) : "\u2014",
+        "at current difficulty, base subsidy · through your own DATUM gateway"
+        + (fees.rebate > 0 && fees.uplift > 0 ? " incl. the " + pct(fees.uplift, fees.uplift < 100 ? 1 : 0) + " bonus" : "")
+        + " · " + (thsStratum != null ? amt(thsStratum) + "/day" + money(thsStratum) : "\u2014") + " on the " + feePct(fees.stratum) + " stratum"],
       ["Hashrate", fmtHr(p.pool_hr_ghs), hrSub],
       ["Miners", String(inWindow || p.miners_online || 0), inWindow ? "holding work in the window · " + (p.miners_seen ?? "\u2014") + " ever" : (p.miners_seen ?? "\u2014") + " ever"],
       ["Shares", num(sharesMain), sharesSub],
@@ -343,7 +478,7 @@
     if ($("live-price")) $("live-price").textContent = priceUsd != null ? moneyOnly(priceUsd) : "\u2014";
     const priceChip = $("live-price-chip");
     if (priceChip) priceChip.classList.toggle("stale", priceUsd == null);
-    if ($("live-ths")) $("live-ths").textContent = thsDatum != null ? "~" + amt(thsDatum) + "/day" + money(thsDatum) : "\u2014";
+    if ($("live-ths")) $("live-ths").textContent = thsBonus != null ? "~" + amt(thsBonus) + "/day" + money(thsBonus) : "\u2014";
     if ($("live-tip")) $("live-tip").textContent = p.height || "\u2014";
     if ($("live-window")) $("live-window").textContent = fillTxt;
     if ($("live-gateways")) $("live-gateways").textContent = String(gws);
@@ -392,8 +527,9 @@
     $("payout-pool-btc").textContent = value ? amtSats(poolSats) : "\u2014";
     const unplaced = Number(cb.unplaced_sats) || 0;
     const carryPaid = Number(cb.carry_paid_sats) || 0;
+    const rebateSats = Number(cb.rebate_sats) || 0;
     $("payout-pool-sub").textContent = value
-      ? `${pct(eff, 2)} blended fee` + (fees.datum !== fees.stratum ? ` (${feePct(fees.datum)} gateway · ${feePct(fees.stratum)} stratum)` : "") + (unplaced > 1000 ? ` + ${amtSats(unplaced)} carried forward` : "") + (carryPaid > 1000 ? ` − ${amtSats(carryPaid)} carry paid back` : "")
+      ? `${pct(eff, 2)} blended fee` + (fees.datum !== fees.stratum ? ` (${feePct(fees.datum)} gateway · ${feePct(fees.stratum)} stratum)` : "") + (rebateSats > 0 ? ` − ${amtSats(rebateSats)} credited to DATUM miners` : "") + (unplaced > 1000 ? ` + ${amtSats(unplaced)} carried forward` : "") + (carryPaid > 1000 ? ` − ${amtSats(carryPaid)} carry paid back` : "")
       : "\u2014";
   }
 

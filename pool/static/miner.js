@@ -46,7 +46,7 @@
     }, 1400);
   });
 
-  const fees = { datum: 0, stratum: 2.0 };
+  const fees = { datum: 0, stratum: 3.0 };
   let priceUsd = null;
   let blockInterval = 0;
   const money = (btcAmt) => {

@@ -137,6 +137,8 @@ pub struct CoinbaserBase {
     pub miners: Vec<MinerStat>,
     pub total_work: u64,
     pub target_work: u64,
+    /// Outstanding DATUM rebate at snapshot time; the split pays it down.
+    pub rebate_owed: u64,
     /// Payout script per identity in `miners`, so a reply never redoes bech32.
     pub scripts: HashMap<String, Vec<u8>>,
     built_at: Instant,
@@ -315,15 +317,21 @@ impl Shared {
                 return base.clone();
             }
         }
-        let (miners, total_work, target_work) = {
+        let (miners, total_work, target_work, rebate_owed) = {
             let ledger = self.ledger.lock().unwrap_or_else(|e| e.into_inner());
-            (ledger.window.miners(), ledger.window.total_work(), ledger.window.target_work())
+            (
+                ledger.window.miners(),
+                ledger.window.total_work(),
+                ledger.window.target_work(),
+                ledger.window.rebate_owed(),
+            )
         };
         let scripts = miners
             .iter()
             .filter_map(|m| address::to_script(&m.identity, self.network).map(|s| (m.identity.clone(), s)))
             .collect();
-        let base = Arc::new(CoinbaserBase { miners, total_work, target_work, scripts, built_at: Instant::now() });
+        let base =
+            Arc::new(CoinbaserBase { miners, total_work, target_work, rebate_owed, scripts, built_at: Instant::now() });
         *slot = Some(base.clone());
         self.totals.add(&self.totals.coinbaser_base_builds, 1);
         base
@@ -356,10 +364,7 @@ impl Shared {
 
     pub fn load_gateway_payouts(dir: &std::path::Path) -> HashMap<String, GatewayPayout> {
         let p = dir.join("gateway-scripts.json");
-        std::fs::read_to_string(p)
-            .ok()
-            .and_then(|t| serde_json::from_str(&t).ok())
-            .unwrap_or_default()
+        std::fs::read_to_string(p).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default()
     }
 
     pub fn window_target(&self, difficulty: f64) -> u64 {
@@ -448,7 +453,7 @@ mod tests {
         for value in [312_500_000u64, 312_644_067] {
             let live = w.split(value, &params, |i| address::to_script(i, net));
             let snap =
-                tides::split::compute(w.miners(), w.total_work(), value, &params, |i| scripts.get(i).cloned());
+                tides::split::compute(w.miners(), w.total_work(), value, &params, 0, |i| scripts.get(i).cloned());
             assert_eq!(snap.fee_sats, live.fee_sats, "fee at value={value}");
             assert_eq!(snap.pool_sats, live.pool_sats, "pool remainder at value={value}");
             assert_eq!(snap.payees.len(), live.payees.len(), "payee count at value={value}");

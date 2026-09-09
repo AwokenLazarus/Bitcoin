@@ -9,6 +9,7 @@ mod config;
 mod node;
 mod rpc;
 mod session;
+mod solo;
 mod state;
 mod stats;
 
@@ -248,6 +249,7 @@ fn run(cfg: Config) -> i32 {
         split_params: SplitParams {
             fee_bps: cfg.fee_bps,
             stratum_fee_bps: cfg.stratum_fee_bps,
+            datum_rebate_bps: cfg.datum_rebate_bps,
             min_payout: cfg.min_payout,
             // The gateway accepts at most 512 coinbaser entries; one is the pool's own
             // output appended after the payees. The byte budget leaves room for it too.

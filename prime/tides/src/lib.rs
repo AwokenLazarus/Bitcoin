@@ -101,6 +101,10 @@ pub struct Window {
     target_work: u64,
     /// Unplaced earnings per identity; see [`MinerStat::carry`]. Only non-zero entries.
     carry: HashMap<u32, u64>,
+    /// DATUM rebate the pool owes the window from outside it (the rebate share of solo-block
+    /// fees, and stratum rebate from blocks with no DATUM work). Paid down by each split out
+    /// of the fee the pool keeps; see `split::compute`.
+    rebate_owed: u64,
     pub lifetime_shares: u64,
     pub lifetime_work: u64,
 }
@@ -177,9 +181,7 @@ impl Window {
         t.0 = t.0.saturating_add(work);
         t.2 = ts;
         let appended = match self.credits.back_mut() {
-            Some(tail)
-                if tail.ident == ident && tail.ts == ts && tail.height == height && tail.source == source =>
-            {
+            Some(tail) if tail.ident == ident && tail.ts == ts && tail.height == height && tail.source == source => {
                 tail.work = tail.work.saturating_add(work);
                 false
             }
@@ -248,6 +250,27 @@ impl Window {
     /// Carry (unplaced earnings from earlier blocks) held for one identity.
     pub fn carry_of(&self, identity: &str) -> u64 {
         self.ident_index.get(identity).and_then(|i| self.carry.get(i)).copied().unwrap_or(0)
+    }
+
+    /// Outstanding DATUM rebate the pool owes the window; see [`Window::adjust_rebate_owed`].
+    pub fn rebate_owed(&self) -> u64 {
+        self.rebate_owed
+    }
+
+    /// Set the owed DATUM rebate outright (seeding, or an operator correction).
+    pub fn set_rebate_owed(&mut self, sats: u64) {
+        self.rebate_owed = sats;
+    }
+
+    /// Move the owed DATUM rebate by `delta` sats (a found block's [`Split::rebate_delta`],
+    /// or a solo block's rebate share), saturating at zero. Returns the new balance.
+    pub fn adjust_rebate_owed(&mut self, delta: i64) -> u64 {
+        self.rebate_owed = if delta < 0 {
+            self.rebate_owed.saturating_sub(delta.unsigned_abs())
+        } else {
+            self.rebate_owed.saturating_add(delta as u64)
+        };
+        self.rebate_owed
     }
 
     /// Sum of all carry the pool is holding for miners.
@@ -321,13 +344,15 @@ impl Window {
                 });
             }
         }
-        v.sort_by(|a, b| b.work.cmp(&a.work).then_with(|| b.carry.cmp(&a.carry)).then_with(|| a.identity.cmp(&b.identity)));
+        v.sort_by(|a, b| {
+            b.work.cmp(&a.work).then_with(|| b.carry.cmp(&a.carry)).then_with(|| a.identity.cmp(&b.identity))
+        });
         v
     }
 
     /// Compute the coinbase split for a block worth `value` sats.
     pub fn split(&self, value: u64, params: &SplitParams, script_for: impl FnMut(&str) -> Option<Vec<u8>>) -> Split {
-        split::compute(self.miners(), self.total_work, value, params, script_for)
+        split::compute(self.miners(), self.total_work, value, params, self.rebate_owed, script_for)
     }
 }
 
@@ -341,6 +366,9 @@ struct Meta {
     /// it lives in the atomically-written meta file rather than the append-only rows.
     #[serde(default)]
     carry: std::collections::BTreeMap<String, u64>,
+    /// Outstanding DATUM rebate (see [`Window::rebate_owed`]). Pool money owed to miners.
+    #[serde(default)]
+    rebate_owed: u64,
 }
 
 /// Durable [`Window`]: identities, credit rows, and a small meta file on disk.
@@ -368,6 +396,7 @@ impl Ledger {
             fs::read(dir.join(Self::META)).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
         window.lifetime_shares = meta.lifetime_shares;
         window.lifetime_work = meta.lifetime_work;
+        window.rebate_owed = meta.rebate_owed;
 
         let idents_path = dir.join(Self::IDENTS);
         if let Ok(f) = File::open(&idents_path) {
@@ -439,6 +468,22 @@ impl Ledger {
         out
     }
 
+    /// Move the owed DATUM rebate (see [`Window::adjust_rebate_owed`]) and schedule a flush.
+    /// Returns the new balance.
+    pub fn settle_rebate(&mut self, delta: i64) -> u64 {
+        if delta == 0 {
+            return self.window.rebate_owed;
+        }
+        self.dirty = true;
+        self.window.adjust_rebate_owed(delta)
+    }
+
+    /// Set the owed DATUM rebate outright and schedule a flush.
+    pub fn set_rebate_owed(&mut self, sats: u64) {
+        self.window.set_rebate_owed(sats);
+        self.dirty = true;
+    }
+
     /// Set one identity's carry outright and schedule a flush.
     pub fn set_carry(&mut self, identity: &str, sats: u64) {
         let known = self.window.ident_index.contains_key(identity);
@@ -493,6 +538,7 @@ impl Ledger {
             lifetime_shares: self.window.lifetime_shares,
             lifetime_work: self.window.lifetime_work,
             carry: self.window.carries().into_iter().collect(),
+            rebate_owed: self.window.rebate_owed,
         };
         write_atomic(&self.dir.join(Self::META), &serde_json::to_vec_pretty(&meta)?)?;
         self.dirty = false;
@@ -605,6 +651,15 @@ pub struct BlockRecord {
     /// is orphaned, re-applied if it comes back.
     #[serde(default)]
     pub carry_delta: Vec<(String, i64)>,
+    /// DATUM rebate this block credited to DATUM identities' carry (the credits themselves
+    /// are the positive rebate entries inside `carry_delta`).
+    #[serde(default)]
+    pub rebate_credited: u64,
+    /// Adjustment this block applied to the owed DATUM rebate (see `Split::rebate_delta`):
+    /// negative for owed rebate credited out by this block, positive for stratum rebate it
+    /// had no DATUM miner to credit. Reversed if the block is orphaned, re-applied if it returns.
+    #[serde(default)]
+    pub rebate_delta: i64,
     /// Confirmed in the node's main chain.
     pub settled: bool,
     /// Outcome of this Prime's own `submitblock` (the gateway submits too): `pending`,
@@ -860,7 +915,7 @@ mod tests {
         // and the split pays the carry-only identity once its carry clears the floor, out
         // of the pool's fee (with a 0% fee and nothing unplaced there is no remainder to
         // pay it from, and it would simply wait for a block that has one)
-        let p = SplitParams { fee_bps: 100, stratum_fee_bps: 100, min_payout: 500, max_outputs: 512, output_budget_bytes: 14_000 };
+        let p = SplitParams { fee_bps: 100, stratum_fee_bps: 100, min_payout: 500, ..SplitParams::default() };
         let s = l.window.split(1_000_000, &p, |i| Some(i.as_bytes().to_vec()));
         let small = s.payees.iter().find(|x| x.identity == "bc1qsmall").expect("paid from carry alone");
         assert_eq!((small.sats, small.carry), (1_000, 1_000));
@@ -870,6 +925,55 @@ mod tests {
         // an orphan reverses the delta and saturates at zero rather than going negative
         l.settle_carry(&[("bc1qnew".into(), -100)]);
         assert_eq!(l.window.carry_of("bc1qnew"), 0);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// The owed DATUM rebate is pool money owed to miners: it lives in the meta file, survives
+    /// a restart, is paid down by the split, and an orphan's reversal saturates at zero.
+    #[test]
+    fn rebate_owed_survives_restart_and_is_paid_down_by_the_split() {
+        let dir = std::env::temp_dir().join(format!("tides-test-{}-{}", std::process::id(), line!()));
+        let _ = fs::remove_dir_all(&dir);
+        {
+            let mut l = Ledger::open(&dir).unwrap();
+            l.set_target(1_000_000);
+            assert_eq!(l.window.rebate_owed(), 0);
+            // a solo block's rebate share arrives, then a found block books more
+            assert_eq!(l.settle_rebate(3_125_000), 3_125_000);
+            assert_eq!(l.settle_rebate(500), 3_125_500);
+            l.credit("bc1qhouse", 900, 1, 100, SOURCE_STRATUM).unwrap();
+            l.credit("bc1qdatum", 100, 1, 100, SOURCE_DATUM).unwrap();
+            l.persist_window().unwrap();
+        }
+        let mut l = Ledger::open(&dir).unwrap();
+        assert_eq!(l.window.rebate_owed(), 3_125_500, "the balance came back from window.json");
+        let p = SplitParams {
+            fee_bps: 0,
+            stratum_fee_bps: 300,
+            datum_rebate_bps: 100,
+            min_payout: 1,
+            ..SplitParams::default()
+        };
+        let s = l.window.split(1_000_000, &p, |i| Some(i.as_bytes().to_vec()));
+        // stratum 900k → fee 27k in the pool output; 9k of it plus the whole owed balance is
+        // credited to the one DATUM miner when the block is found
+        assert_eq!((s.fee_sats, s.pool_sats, s.rebate_sats), (27_000, 27_000, 9_000 + 3_125_500));
+        assert_eq!(s.rebate_credits, vec![("bc1qdatum".to_string(), 3_134_500)]);
+        assert_eq!(s.rebate_owed_credited, 3_125_500);
+        let d = s.payees.iter().find(|x| x.identity == "bc1qdatum").unwrap();
+        assert_eq!(d.sats, 100_000, "the coinbase itself pays the plain share");
+        assert_eq!(s.pool_sats + s.paid_sats(), 1_000_000);
+        // the block is found: the balance is cleared and the credit sits in carry
+        assert_eq!(l.settle_rebate(s.rebate_delta()), 0);
+        l.settle_carry(&s.carry_delta(|_| true));
+        assert_eq!(l.window.carry_of("bc1qdatum"), 3_134_500);
+        // orphaned: both come back
+        assert_eq!(l.settle_rebate(-s.rebate_delta()), 3_125_500);
+        let reverse: Vec<(String, i64)> = s.carry_delta(|_| true).iter().map(|(i, d)| (i.clone(), -d)).collect();
+        l.settle_carry(&reverse);
+        assert_eq!(l.window.carry_of("bc1qdatum"), 0);
+        // a reversal past zero saturates
+        assert_eq!(l.settle_rebate(-10_000_000), 0);
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -884,8 +988,7 @@ mod tests {
                 l.credit(if i % 5 == 0 { "slow" } else { "fast" }, 40, 1, 1000 + i, SOURCE_DATUM).unwrap();
             }
             l.persist_window().unwrap();
-            let miners: Vec<(String, u64)> =
-                l.window.miners().into_iter().map(|m| (m.identity, m.work)).collect();
+            let miners: Vec<(String, u64)> = l.window.miners().into_iter().map(|m| (m.identity, m.work)).collect();
             let file_rows = fs::metadata(dir.join("credits.bin")).unwrap().len() as usize / Credit::SIZE;
             assert_eq!(file_rows, l.window.len(), "credits.bin must be exactly the live window");
             (l.window.total_work(), l.window.len(), miners)
@@ -919,15 +1022,13 @@ mod tests {
                 }
             }
             l.flush().unwrap();
-            let mut m: Vec<(String, u64)> =
-                l.window.miners().into_iter().map(|x| (x.identity, x.work)).collect();
+            let mut m: Vec<(String, u64)> = l.window.miners().into_iter().map(|x| (x.identity, x.work)).collect();
             m.sort();
             assert_eq!(m.iter().map(|x| x.1).sum::<u64>(), l.window.total_work());
             m
         };
         let l = Ledger::open(&dir).unwrap();
-        let mut after: Vec<(String, u64)> =
-            l.window.miners().into_iter().map(|x| (x.identity, x.work)).collect();
+        let mut after: Vec<(String, u64)> = l.window.miners().into_iter().map(|x| (x.identity, x.work)).collect();
         after.sort();
         assert_eq!(after, before, "per-miner work must be identical after reload");
         let _ = fs::remove_dir_all(&dir);
@@ -970,6 +1071,8 @@ mod tests {
             pool_sats: 0,
             carry_paid: 0,
             carry_delta: vec![],
+            rebate_credited: 0,
+            rebate_delta: 0,
             settled: true,
             submit: "accepted".into(),
             gateway: "ab".into(),
@@ -996,6 +1099,8 @@ mod tests {
             pool_sats: 0,
             carry_paid: 0,
             carry_delta: vec![],
+            rebate_credited: 0,
+            rebate_delta: 0,
             settled: kind == "split",
             submit: "accepted".into(),
             gateway: gw.into(),

@@ -45,7 +45,7 @@ One template is shared by every miner on a solo port; the coinbase is not. Each 
 identity gets its own coinbase with two value outputs:
 
 ```
-fee_sats   = floor(coinbasevalue × 200 / 10_000)
+fee_sats   = floor(coinbasevalue × 300 / 10_000)   # solo_fee_bps, default 300
 outputs    = [ miner: coinbasevalue - fee_sats, pool: fee_sats ]
 scriptSig  = BIP34 height push + "Lazarus/solo" + extranonce slot
 ```

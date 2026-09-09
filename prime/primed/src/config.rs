@@ -61,6 +61,18 @@ pub struct Config {
     /// Public house-stratum fee. 0 means use `fee_bps` (same rate for everyone).
     #[serde(default)]
     pub stratum_fee_bps: u32,
+    /// Share of the house-stratum fee handed to DATUM work instead of kept, basis points of
+    /// stratum work's value (100 = one point of a 3% stratum fee). 0 (default) disables it.
+    #[serde(default)]
+    pub datum_rebate_bps: u32,
+    /// Share of a solo block's reward owed to DATUM work when a `solo-coinbase-tag` block
+    /// paying the pool script lands on chain, basis points of the block's coinbase value.
+    /// Paid down out of the pool's kept fee in later splits. 0 (default) disables it.
+    #[serde(default)]
+    pub solo_rebate_bps: u32,
+    /// Coinbase tag the dedicated solo gateways stamp, for spotting their blocks on chain.
+    #[serde(default = "d_solo_tag")]
+    pub solo_coinbase_tag: String,
     /// Gateway key prefixes (hex) that are the pool's own public stratum.
     #[serde(default)]
     pub house_gateways: Vec<String>,
@@ -182,6 +194,9 @@ fn d_empty_solo_fee() -> u32 {
 fn d_owe() -> String {
     "owe".into()
 }
+fn d_solo_tag() -> String {
+    "Lazarus/solo".into()
+}
 
 impl Config {
     pub fn load(path: &Path) -> Result<Self, String> {
@@ -204,6 +219,15 @@ impl Config {
         }
         if c.stratum_fee_bps > 10_000 {
             return Err("stratum-fee-bps cannot exceed 10000".into());
+        }
+        if c.datum_rebate_bps > c.stratum_fee_bps {
+            return Err("datum-rebate-bps cannot exceed stratum-fee-bps (the rebate comes out of that fee)".into());
+        }
+        if c.solo_rebate_bps > 10_000 {
+            return Err("solo-rebate-bps cannot exceed 10000".into());
+        }
+        if c.solo_coinbase_tag.is_empty() || c.solo_coinbase_tag.len() > 32 {
+            return Err("solo-coinbase-tag must be 1..=32 bytes".into());
         }
         for g in &mut c.house_gateways {
             *g = g.to_ascii_lowercase();
@@ -302,6 +326,28 @@ require-split-gateway = true
         std::fs::write(dir.join("lazarus-prime.key"), "00").unwrap();
         let c = Config::load(&p).unwrap();
         assert_eq!(c.key_file(), dir.join("lazarus-prime.key"));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn rebate_knobs_load_default_off_and_are_bounded_by_the_stratum_fee() {
+        let dir = std::env::temp_dir().join(format!("primed-cfg-r-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("prime.toml");
+        let base = LEGACY.replace("/home/umbrel/blake2b/lazarus-prime", dir.to_str().unwrap());
+        // legacy config: rebates off, tag defaulted
+        std::fs::write(&p, &base).unwrap();
+        let c = Config::load(&p).unwrap();
+        assert_eq!((c.datum_rebate_bps, c.solo_rebate_bps), (0, 0));
+        assert_eq!(c.solo_coinbase_tag, "Lazarus/solo");
+        // the production shape: 3% stratum, 1 point rebated, 1% of solo blocks owed
+        std::fs::write(&p, format!("{base}\nstratum-fee-bps = 300\ndatum-rebate-bps = 100\nsolo-rebate-bps = 100\n"))
+            .unwrap();
+        let c = Config::load(&p).unwrap();
+        assert_eq!((c.fee_bps, c.stratum_fee_bps, c.datum_rebate_bps, c.solo_rebate_bps), (50, 300, 100, 100));
+        // a rebate larger than the fee it comes out of is a config error, not a silent clamp
+        std::fs::write(&p, format!("{base}\nstratum-fee-bps = 300\ndatum-rebate-bps = 301\n")).unwrap();
+        assert!(Config::load(&p).unwrap_err().contains("datum-rebate-bps"));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

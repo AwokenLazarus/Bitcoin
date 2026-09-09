@@ -24,7 +24,7 @@ NO_WRITE = os.environ.get("POOL_UI_NO_WRITE") == "1"
 
 POOL_FEE = float(CONF.get("pool_fee_percent", 0))
 # Public-stratum fee when primed is not answering; primed's stats.json is authoritative.
-STRATUM_FEE = float(CONF.get("stratum_fee_percent", 2.0))
+STRATUM_FEE = float(CONF.get("stratum_fee_percent", 3.0))
 STRATUM_HOST = CONF.get("stratum_host", "27.69.0.25")
 STRATUM_PORT = int(CONF.get("stratum_port", 23334))
 DATUM_URL = CONF.get("datum_url", "http://127.0.0.1:7152")
@@ -380,6 +380,10 @@ def fetch_prime_window():
             # floor, or no room). Prime pays it on top of the next output that fits, so it
             # is already inside window_sats when it is; this is what is still waiting.
             "carry_sats": int(m.get("carry_sats") or 0),
+            # DATUM rebate the next found block credits to this identity's balance (carry):
+            # its share of the public stratum's fee point. Paid with a later output once the
+            # balance clears the floor, so it is not part of window_sats.
+            "rebate_sats": int(m.get("rebate_sats") or 0),
             "payable": bool(m.get("payable")),
             # Ledger writes one credit row per accepted share (no coalesce), so this
             # is accepted shares still inside the TIDES window for this identity.
@@ -400,8 +404,30 @@ def fetch_prime_window():
         stratum_fee_bps = _bps_or(pool.get("stratum_fee_bps"), _bps_or(pool.get("fee_bps"), 0))
     except (TypeError, ValueError):
         stratum_fee_bps = 0
+    # How the window's work splits by path. The rebate pot is stratum work's fee point and
+    # it is shared by DATUM work, so DATUM's uplift over its proportional share is
+    # rebate × stratum_share / datum_share — the headline the UI advertises.
+    stratum_work = sum(v["stratum_work"] for v in by.values())
+    total_work = sum(v["window_work"] for v in by.values())
+    datum_work = max(0, total_work - stratum_work)
+    rebate_bps = int(pool.get("datum_rebate_bps") or 0)
+    datum_uplift = (rebate_bps / 100.0) * (stratum_work / datum_work) if (rebate_bps and datum_work > 0) else 0.0
     meta = {
         "stratum_fee_bps": stratum_fee_bps,
+        "datum_work": datum_work,
+        "stratum_work": stratum_work,
+        "datum_work_percent": (100.0 * datum_work / total_work) if total_work else 0.0,
+        "stratum_work_percent": (100.0 * stratum_work / total_work) if total_work else 0.0,
+        # Percent above its proportional share that DATUM work earns right now, from the rebate.
+        "datum_uplift_percent": datum_uplift,
+        "datum_miners": sum(1 for v in by.values() if v["fee_path"] != "stratum" and v["window_work"] > 0),
+        # DATUM rebate: bps of stratum work's value handed to DATUM work, and of solo-block
+        # rewards owed to it. 0 when primed predates the feature or has it off.
+        "datum_rebate_bps": int(pool.get("datum_rebate_bps") or 0),
+        "solo_rebate_bps": int(pool.get("solo_rebate_bps") or 0),
+        "sample_rebate_sats": int(win.get("sample_rebate_sats") or 0),
+        "sample_rebate_owed_credited_sats": int(win.get("sample_rebate_owed_credited_sats") or 0),
+        "rebate_owed_sats": int(win.get("rebate_owed_sats") or 0),
         "shares": int(win.get("shares") or 0),
         "work": 0,
         "target_work": 0,
@@ -2508,6 +2534,14 @@ def prime_summary():
         "address": pool.get("address") or "",
         "fee_bps": fee_bps,
         "stratum_fee_bps": _bps_or(meta.get("stratum_fee_bps"), fee_bps),
+        "datum_rebate_bps": int(meta.get("datum_rebate_bps") or 0),
+        "solo_rebate_bps": int(meta.get("solo_rebate_bps") or 0),
+        "rebate_owed_sats": int(meta.get("rebate_owed_sats") or 0),
+        "sample_rebate_sats": int(meta.get("sample_rebate_sats") or 0),
+        "datum_work_percent": float(meta.get("datum_work_percent") or 0),
+        "stratum_work_percent": float(meta.get("stratum_work_percent") or 0),
+        "datum_uplift_percent": float(meta.get("datum_uplift_percent") or 0),
+        "datum_miners": int(meta.get("datum_miners") or 0),
         "min_payout_sats": int(pool.get("min_payout") or 0),
         "advertise": pool.get("advertise") or "",
         "hashrate_ghs": meta.get("hashrate_ghs") or 0,
@@ -2623,6 +2657,11 @@ def prime_coinbaser_preview():
         "carry_total_sats": carry_total,
         "carry_holders": int(meta.get("carry_holders") or 0),
         "deferred_sats": int(meta.get("sample_deferred_sats") or 0),
+        # DATUM bonus this split credits to DATUM miners' balances. Not one of the outputs
+        # above: it rides on their next output, so it comes out of the pool's remainder later.
+        "rebate_sats": int(meta.get("sample_rebate_sats") or 0),
+        "rebate_percent": int((meta.get("pool") or {}).get("datum_rebate_bps") or 0) / 100.0,
+        "rebate_owed_sats": int(meta.get("rebate_owed_sats") or 0),
         "pool_address": pool_addr,
         "window_multiple": meta.get("window_multiple") or 8,
         "window_fill_percent": meta.get("fill_percent") or 0,
@@ -2684,12 +2723,16 @@ def pool_payload():
     fill = win["window_fill_percent"]
     datum_fee = prime["fee_bps"] / 100.0 if prime.get("reachable") else POOL_FEE
     stratum_fee = prime["stratum_fee_bps"] / 100.0 if prime.get("reachable") else STRATUM_FEE
+    rebate_pct = (prime.get("datum_rebate_bps") or 0) / 100.0
+    uplift_pct = float(prime.get("datum_uplift_percent") or 0)
     if datum_fee == 0 and stratum_fee == 0:
         fee_clause = "100%, no fee"
     elif datum_fee == stratum_fee:
         fee_clause = f"{100-datum_fee:g}% to miners, {datum_fee:g}% fee"
     else:
         fee_clause = f"{datum_fee:g}% fee through your own DATUM gateway, {stratum_fee:g}% on the public stratum"
+        if rebate_pct > 0:
+            fee_clause += f"; {rebate_pct:g} point{'s' if rebate_pct != 1 else ''} of the stratum fee is credited to DATUM miners"
     payout = (
         f"A found block pays the TIDES window in its coinbase ({fee_clause}): "
         f"{nblocks} network-blocks of accepted work, currently {fill:.0f}% full. "
@@ -2702,7 +2745,25 @@ def pool_payload():
         "fees": {
             "datum_percent": datum_fee,
             "stratum_percent": stratum_fee,
-            "note": "The fee is taken per miner from that miner's window share, by the path the work arrived on. Switching paths keeps the accepted work.",
+            # Of the stratum fee, this many points are credited to DATUM miners' balances on
+            # every found block (pro rata by DATUM work) and paid with their next output that
+            # clears the floor; the pool keeps stratum_percent − this.
+            "datum_rebate_percent": rebate_pct,
+            "solo_rebate_percent": (prime.get("solo_rebate_bps") or 0) / 100.0,
+            "rebate_owed_btc": (prime.get("rebate_owed_sats") or 0) / 1e8,
+            "sample_rebate_btc": (prime.get("sample_rebate_sats") or 0) / 1e8,
+            # What the pot means to a DATUM miner: percent above its proportional share that
+            # DATUM work earns right now (rebate × stratum work ÷ DATUM work in the window).
+            "datum_uplift_percent": uplift_pct,
+            "datum_work_percent": float(prime.get("datum_work_percent") or 0),
+            "stratum_work_percent": float(prime.get("stratum_work_percent") or 0),
+            "datum_miners": int(prime.get("datum_miners") or 0),
+            "note": "The fee is taken per miner from that miner's window share, by the path the work arrived on. Switching paths keeps the accepted work."
+            + (
+                f" {rebate_pct:g}% of stratum work's value is credited to DATUM miners on every block, pro rata by DATUM work, and paid with their next output."
+                if rebate_pct > 0
+                else ""
+            ),
         },
         "stratum": f"stratum+tcp://{STRATUM_HOST}:{STRATUM_PORT}",
         "stratum_asic": f"stratum+tcp://{STRATUM_HOST}:{STRATUM_PORT}",
@@ -2729,6 +2790,8 @@ def pool_payload():
         "ths_btc_day": ths_btc_day,
         "ths_btc_day_datum": ths_btc_day * (1 - datum_fee / 100.0),
         "ths_btc_day_stratum": ths_btc_day * (1 - stratum_fee / 100.0),
+        # DATUM including the rebate credit at today's work split (0 uplift when it is off).
+        "ths_btc_day_datum_bonus": ths_btc_day * (1 - datum_fee / 100.0) * (1 + uplift_pct / 100.0),
         "ttf_seconds": ttf_s,
         "block_interval_seconds": interval,
         "blocks_found": nfound,
@@ -2839,7 +2902,16 @@ def miner_payload(address):
     path_fee = _fee_percent_for_path(
         pinfo.get("fee_path") or ("stratum" if any((m.get("via") or "stratum") == "stratum" for m in recs) else "datum")
     )
-    est = ((miner_hs * 86400.0 / miner_need) * SUBSIDY * (1 - path_fee / 100.0)) if miner_need and miner_hs else 0.0
+    gross_day = ((miner_hs * 86400.0 / miner_need) * SUBSIDY) if miner_need and miner_hs else 0.0
+    est = gross_day * (1 - path_fee / 100.0)
+    # The DATUM case for this address, at today's window split: 0% fee plus the rebate
+    # uplift. For a stratum miner this is what switching gains; for a DATUM miner it is the
+    # bonus already accruing. Zero when the rebate is off.
+    _pm = state.get("prime_meta") or {}
+    uplift_pct = float(_pm.get("datum_uplift_percent") or 0)
+    datum_fee_pct = _fee_percent_for_path("datum")
+    est_datum_day = gross_day * (1 - datum_fee_pct / 100.0) * (1 + uplift_pct / 100.0)
+    est_bonus_day = gross_day * (1 - datum_fee_pct / 100.0) * (uplift_pct / 100.0)
     # Same denominator as the headline hashrate (Prime's pool_ghs), so "% of pool"
     # agrees with the ticker instead of a second sum over online sessions.
     pool_hr = 0.0
@@ -3025,6 +3097,16 @@ def miner_payload(address):
         # Earned in earlier blocks, not yet placed; paid on top of the next output that
         # clears the floor. Zero once it has been paid.
         "carry_btc": int(pinfo.get("carry_sats") or 0) / 1e8,
+        # DATUM rebate the next found block credits to this address's balance (0 for stratum
+        # work, or when the rebate is off). Not inside block_payout_btc.
+        "rebate_btc": int(pinfo.get("rebate_sats") or 0) / 1e8,
+        # This hashrate through a DATUM gateway at today's split: 0% fee plus the rebate
+        # uplift. `est_bonus_btc_day` is the uplift alone; `datum_uplift_percent` is the pool-wide
+        # percent above proportional share that DATUM work earns right now.
+        "est_datum_btc_day": est_datum_day,
+        "est_bonus_btc_day": est_bonus_day,
+        "datum_uplift_percent": uplift_pct,
+        "datum_rebate_percent": int(_pm.get("datum_rebate_bps") or 0) / 100.0,
         "min_payout_btc": int(((state.get("prime_meta") or {}).get("pool") or {}).get("min_payout") or 0) / 1e8,
         "fee_path": pinfo.get("fee_path") or "",
         "fee_percent_path": path_fee,

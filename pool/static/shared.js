@@ -485,7 +485,7 @@
     const hasPool = !!(m.via || Number(m.window_work) > 0 || Number(m.shares_lifetime) > 0 || Number(m.round_share) > 0);
     if (!m.known && !hasSolo) return '<p class="note callout">No stats for that address yet. Connect a miner first.</p>';
     if (!hasPool && hasSolo) return soloCard(m, so);
-    const fees = ctx.fees || { datum: 0, stratum: 2 };
+    const fees = ctx.fees || { datum: 0, stratum: 3 };
     const money = ctx.money || (() => "");
     const feeForPath = (path) => (String(path || "").toLowerCase() === "stratum" ? fees.stratum : fees.datum);
     const tab = MINER_TABS.some(([k]) => k === ctx.tab) ? ctx.tab : "overview";
@@ -545,6 +545,29 @@
       carryBtc > 0
         ? `<div><dt>Carried forward</dt><dd title="${amtExact(carryBtc)}">${amt(carryBtc)}${money(carryBtc)}<small>earned in earlier blocks, under the minimum output · paid on top of your next output that clears it</small></dd></div>`
         : "";
+    // The DATUM bonus for this address. On the gateway path it is money already accruing, so
+    // it gets a ticker cell; on the stratum path it is money being left on the table, so it
+    // gets a callout with what switching would pay. Both vanish when the rebate is off.
+    const onStratum = String(m.fee_path || "").toLowerCase() === "stratum";
+    const upliftPct = Number(m.datum_uplift_percent) || 0;
+    const rebatePct = Number(m.datum_rebate_percent) || 0;
+    const bonusDay = Number(m.est_bonus_btc_day) || 0;
+    const datumDay = Number(m.est_datum_btc_day) || 0;
+    const bonusCell =
+      rebatePct > 0 && !onStratum && (Number(m.rebate_btc) > 0 || upliftPct > 0)
+        ? `<div><dt>DATUM bonus</dt><dd title="${amtExact(m.rebate_btc)}">${amt(m.rebate_btc)}${money(m.rebate_btc)}<small>credited to your balance by the next block${upliftPct > 0 ? " · " + pctSmart(upliftPct) + " above your proportional share" : ""} · your cut of the public stratum's fee, paid with your next output</small></dd></div>`
+        : "";
+    // A gateway miner's daily estimate already includes the bonus; a stratum miner's does not,
+    // and the pitch below says what it would be worth.
+    const withBonus = rebatePct > 0 && !onStratum && upliftPct > 0 && datumDay > 0;
+    const estDay = withBonus ? datumDay : Number(m.est_btc_day) || 0;
+    const estDayNote = withBonus
+      ? `at current difficulty, ${feePct(billedFee)} fee and the ${pctSmart(upliftPct)} DATUM bonus included · once the window matches this hashrate`
+      : `at current difficulty, after the ${feePct(billedFee)} fee · once the window matches this hashrate`;
+    const switchPitch =
+      rebatePct > 0 && onStratum && upliftPct > 0
+        ? `<p class="note callout rebate-callout"><strong>You are paying ${feePct(fees.stratum)} and funding the DATUM bonus.</strong> Of that fee, ${feePct(rebatePct)} of your work's value is not kept by the pool at all — it is credited to the miners who build their own blocks. Point this hashrate through your own DATUM gateway and you stop paying the fee <em>and</em> start collecting that credit: about <b>${amt(datumDay)}</b>${money(datumDay)} a day at this hashrate instead of ${amt(m.est_btc_day)}${money(m.est_btc_day)}, and ${pctSmart(upliftPct)} of that is the bonus alone (${amt(bonusDay)}${money(bonusDay)} a day). Your accepted work comes with you. <a href="/#connect">Set up a gateway</a>.</p>`
+        : "";
     const nWorkers = (m.workers || []).length + relayed.length;
     const nPending = Number(m.immature_blocks) || (m.blocks_found || []).filter((b) => payStatus(b) === "immature").length;
     const nPaid = (m.blocks_found || []).length - (m.blocks_found || []).filter((b) => payStatus(b) === "immature").length;
@@ -561,6 +584,7 @@
     const overview = `
       <div class="mpanel" data-mpanel="overview" ${tab === "overview" ? "" : "hidden"}>
         ${relayNote}
+        ${switchPitch}
         ${windowNote}
         <dl class="ticker">
           <div><dt>Hashrate</dt><dd>${fmtHr(m.hr_ghs || 0)}<small>${Number(m.hr_1h_ghs) > 0 ? "1h avg " + fmtHr(m.hr_1h_ghs) + " · 24h avg " + fmtHr(m.hr_24h_ghs) : "best " + fmtHr(m.best_hr_ghs || 0)} · ${pctSmart(hp)} of pool</small></dd></div>
@@ -568,7 +592,8 @@
           <div><dt>This session</dt><dd>${sessCell(m.via, m.shares_session)}<small>${isPrimePath(m.via) ? "own gateway · Prime credits the window directly" : "public stratum only · resets on reconnect"}</small></dd></div>
           <div><dt>This window</dt><dd>${winShareCell(m)}<small>${Number(m.window_shares) > 0 ? num(m.window_work) + " work still in the TIDES window" : "no accepted shares in the current window"}</small></dd></div>
           <div><dt>Payout window</dt><dd>${pctSmart(wp)}<small>${num(m.window_work)} work · what the next block pays</small></dd></div>
-          <div><dt>Est. / day</dt><dd title="${amtExact(m.est_btc_day)}">${amt(m.est_btc_day)}${money(m.est_btc_day)}<small>at current difficulty, after the ${feePct(billedFee)} fee · once the window matches this hashrate</small></dd></div>
+          <div><dt>Est. / day</dt><dd title="${amtExact(estDay)}">${amt(estDay)}${money(estDay)}<small>${estDayNote}</small></dd></div>
+          ${bonusCell}
           <div><dt>Next block</dt><dd title="${amtExact(m.block_payout_btc)}">${amt(m.block_payout_btc)}${money(m.block_payout_btc)}<small>${nextBlockNote(m)}</small></dd></div>
           ${carryCell(m)}
           <div><dt>Pending</dt><dd title="${amtExact(m.immature_btc)}">${amt(m.immature_btc)}${money(m.immature_btc)}<small>${nPending ? nPending + " block" + (nPending === 1 ? "" : "s") + " maturing · see Payouts" : "nothing waiting to mature"}</small></dd></div>
@@ -589,7 +614,7 @@
           <div><dt>Pending</dt><dd title="${amtExact(m.immature_btc)}">${amt(m.immature_btc)}${money(m.immature_btc)}<small>${nPending ? "in " + nPending + " block" + (nPending === 1 ? "" : "s") + " under " + num(m.maturity_confs || 100) + " confirmations" : "no coinbase outputs maturing"}</small></dd></div>
           <div><dt>Paid</dt><dd title="${amtExact(m.paid_btc)}">${amt(m.paid_btc)}${money(m.paid_btc)}<small>${nPaid} matured block${nPaid === 1 ? "" : "s"}, lifetime</small></dd></div>
           <div><dt>Next block</dt><dd title="${amtExact(m.block_payout_btc)}">${amt(m.block_payout_btc)}${money(m.block_payout_btc)}<small>${pctSmart(wp)} of the window · in the next coinbase${Number(m.carry_btc) > 0 ? " · plus carry as room allows" : ""}</small></dd></div>
-          <div><dt>Est. / day</dt><dd title="${amtExact(m.est_btc_day)}">${amt(m.est_btc_day)}${money(m.est_btc_day)}<small>after the ${feePct(billedFee)} fee at current difficulty</small></dd></div>
+          <div><dt>Est. / day</dt><dd title="${amtExact(estDay)}">${amt(estDay)}${money(estDay)}<small>${withBonus ? `${feePct(billedFee)} fee and the ${pctSmart(upliftPct)} bonus, at current difficulty` : `after the ${feePct(billedFee)} fee at current difficulty`}</small></dd></div>
         </dl>
         <p class="note callout">There is no pool balance and nothing to withdraw. Every block the pool finds pays this address directly in its coinbase; the output becomes spendable ${num(m.maturity_confs || 100)} blocks later.${Number(m.carry_btc) > 0 ? ` <strong>${amt(m.carry_btc)}</strong> you earned in earlier blocks was under the minimum output and is carried forward: it is added to your next output that clears the floor, paid out of the pool's share.` : ""}</p>
         ${pendingTable(m, ctx)}

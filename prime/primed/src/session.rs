@@ -89,6 +89,11 @@ struct IssuedCoinbaser {
     /// Identities the split could not place, kept so a block found on this coinbaser can
     /// roll their earnings into carry.
     unpaid: Vec<tides::Unpaid>,
+    /// DATUM rebate a block found on this coinbaser credits to each DATUM identity's carry,
+    /// and the `rebate_owed` accounting that goes with it (see `Split::rebate_delta`).
+    rebate_credits: Vec<(String, u64)>,
+    rebate_owed_credited: u64,
+    rebate_deferred: u64,
 }
 
 /// How a coinbaser request gets answered. Deliberately has no "drop" variant: a request left
@@ -664,10 +669,14 @@ impl Session {
         // Computed off a shared snapshot, so a reply never waits on the ledger mutex behind
         // share crediting or the other gateways asking at the same tip change.
         let base = self.shared.coinbaser_base();
-        let split =
-            tides::split::compute(base.miners.clone(), base.total_work, value, &self.shared.split_params, |ident| {
-                base.script_for(ident)
-            });
+        let split = tides::split::compute(
+            base.miners.clone(),
+            base.total_work,
+            value,
+            &self.shared.split_params,
+            base.rebate_owed,
+            |ident| base.script_for(ident),
+        );
         let (target, total_work) = (base.target_work, base.total_work);
         let mut outputs: Vec<Output> =
             split.payees.iter().map(|p| Output { sats: p.sats, script: p.script.clone() }).collect();
@@ -689,17 +698,28 @@ impl Session {
         let mut ph = prev_hash;
         ph.reverse();
         log::debug!(
-            "[{}] coinbaser #{id} value={value} prev={} outputs={} pool={} carry_paid={} deferred={} window={}/{}",
+            "[{}] coinbaser #{id} value={value} prev={} outputs={} pool={} carry_paid={} rebate_credit={} rebate_owed_out={} deferred={} window={}/{}",
             self.id,
             &hex::encode(ph)[..16],
             outputs.len(),
             split.pool_sats,
             split.carry_paid,
+            split.rebate_sats,
+            split.rebate_owed_credited,
             split.unpaid.iter().filter(|u| u.defers()).count(),
             total_work,
             target
         );
-        self.coinbasers.push_back(IssuedCoinbaser { id, value, outputs, payees: split.payees, unpaid: split.unpaid });
+        self.coinbasers.push_back(IssuedCoinbaser {
+            id,
+            value,
+            outputs,
+            payees: split.payees,
+            unpaid: split.unpaid,
+            rebate_credits: split.rebate_credits,
+            rebate_owed_credited: split.rebate_owed_credited,
+            rebate_deferred: split.rebate_deferred,
+        });
         while self.coinbasers.len() > COINBASERS_KEPT {
             self.coinbasers.pop_front();
         }
@@ -1003,7 +1023,8 @@ impl Session {
             c.rejected += 1;
             c.last_reject = Some(name);
         });
-        self.send_mining(&mining::share_receipt(mining::REJECTED, code, s.nonce32, s.target_pot, s.job_id), false).await?;
+        self.send_mining(&mining::share_receipt(mining::REJECTED, code, s.nonce32, s.target_pot, s.job_id), false)
+            .await?;
         self.note_reject()
     }
 
@@ -1101,60 +1122,101 @@ impl Session {
         // what every identity the split could not place earned. Applied now — the next
         // coinbaser must not hand out the same carry twice — and reversed if the block is
         // orphaned (node.rs).
+        // The DATUM rebate is not an output: the coinbase paid the pool the whole stratum fee,
+        // and the block's `rebate_credits` now join each DATUM identity's carry (inside
+        // `carry_delta`, so an orphan reverses them with everything else). The `rebate_owed`
+        // balance drops by what was credited out of it and grows by a rebate with nobody to
+        // credit. Split, partial and pool-only blocks all credit alike: the pool holds the fee
+        // either way.
         #[allow(clippy::type_complexity)]
-        let (kind, owed, split, carry_paid, carry_delta): (&str, u64, Vec<(String, u64)>, u64, Vec<(String, i64)>) =
-            match (&v.coinbase_kind, issued) {
-                (CoinbaseKind::Split, Some(c)) => (
-                    "split",
-                    0,
-                    c.payees.iter().map(|p| (p.identity.clone(), p.sats)).collect(),
-                    c.payees.iter().map(|p| p.carry).sum(),
-                    tides::split::carry_delta(&c.payees, &c.unpaid, |_| true),
+        let (kind, owed, split, carry_paid, carry_delta, rebate): (
+            &str,
+            u64,
+            Vec<(String, u64)>,
+            u64,
+            Vec<(String, i64)>,
+            (u64, i64),
+        ) = match (&v.coinbase_kind, issued) {
+            (CoinbaseKind::Split, Some(c)) => (
+                "split",
+                0,
+                c.payees.iter().map(|p| (p.identity.clone(), p.sats)).collect(),
+                c.payees.iter().map(|p| p.carry).sum(),
+                tides::split::carry_delta(&c.payees, &c.unpaid, &c.rebate_credits, |_| true),
+                (
+                    c.rebate_credits.iter().map(|r| r.1).sum(),
+                    tides::split::rebate_delta(c.rebate_owed_credited, c.rebate_deferred),
                 ),
-                (CoinbaseKind::Split, None) => ("split", 0, vec![], 0, vec![]),
-                (CoinbaseKind::Partial(_), Some(c)) => {
-                    let placed = |p: &Payee| v.coinbase.paid_to(&p.script) > 0;
-                    let unpaid: u64 = c.payees.iter().filter(|p| !placed(p)).map(|p| p.sats).sum();
+            ),
+            (CoinbaseKind::Split, None) => ("split", 0, vec![], 0, vec![], (0, 0)),
+            (CoinbaseKind::Partial(_), Some(c)) => {
+                let placed = |p: &Payee| v.coinbase.paid_to(&p.script) > 0;
+                let unpaid: u64 = c.payees.iter().filter(|p| !placed(p)).map(|p| p.sats).sum();
+                (
+                    "partial",
+                    unpaid,
+                    c.payees.iter().map(|p| (p.identity.clone(), p.sats)).collect(),
+                    c.payees.iter().filter(|p| placed(p)).map(|p| p.carry).sum(),
+                    tides::split::carry_delta(&c.payees, &c.unpaid, &c.rebate_credits, placed),
                     (
-                        "partial",
-                        unpaid,
-                        c.payees.iter().map(|p| (p.identity.clone(), p.sats)).collect(),
-                        c.payees.iter().filter(|p| placed(p)).map(|p| p.carry).sum(),
-                        tides::split::carry_delta(&c.payees, &c.unpaid, placed),
-                    )
-                }
-                (CoinbaseKind::PoolOnly, Some(c)) => {
-                    // the reward this block would have split had the gateway carried the outputs
-                    let scaled: Vec<(String, u64)> =
-                        c.payees.iter().map(|p| (p.identity.clone(), scale(p.sats, v.coinbase_value, c.value))).collect();
-                    let owed = scaled.iter().map(|x| x.1).sum();
-                    // nobody was placed, so no carry was paid; the under-floor earnings
-                    // still accrue (the dropped payees are covered by `owed` instead)
-                    ("pool-only", owed, scaled, 0, tides::split::carry_delta(&c.payees, &c.unpaid, |_| false))
-                }
-                (CoinbaseKind::PoolOnly, None) => {
-                    // no coinbaser was issued for this job: split by the live window instead
-                    let ledger = self.shared.ledger.lock().unwrap();
-                    let net = self.shared.network;
-                    let sp =
-                        ledger.window.split(v.coinbase_value, &self.shared.split_params, |i| address::to_script(i, net));
-                    let owed = sp.paid_sats();
-                    let delta = sp.carry_delta(|_| false);
-                    ("pool-only", owed, sp.payees.iter().map(|p| (p.identity.clone(), p.sats)).collect(), 0, delta)
-                }
-                (CoinbaseKind::EmptySolo, _) | (CoinbaseKind::GatewaySolo, _) => ("solo", 0, vec![], 0, vec![]),
-                (CoinbaseKind::Partial(_), None) | (CoinbaseKind::Foreign, _) => ("unknown", 0, vec![], 0, vec![]),
-            };
+                        c.rebate_credits.iter().map(|r| r.1).sum(),
+                        tides::split::rebate_delta(c.rebate_owed_credited, c.rebate_deferred),
+                    ),
+                )
+            }
+            (CoinbaseKind::PoolOnly, Some(c)) => {
+                // the reward this block would have split had the gateway carried the outputs
+                let scaled: Vec<(String, u64)> =
+                    c.payees.iter().map(|p| (p.identity.clone(), scale(p.sats, v.coinbase_value, c.value))).collect();
+                let owed = scaled.iter().map(|x| x.1).sum();
+                // nobody was placed, so no carry was paid; the under-floor earnings
+                // still accrue (the dropped payees are covered by `owed` instead)
+                (
+                    "pool-only",
+                    owed,
+                    scaled,
+                    0,
+                    tides::split::carry_delta(&c.payees, &c.unpaid, &c.rebate_credits, |_| false),
+                    (
+                        c.rebate_credits.iter().map(|r| r.1).sum(),
+                        tides::split::rebate_delta(c.rebate_owed_credited, c.rebate_deferred),
+                    ),
+                )
+            }
+            (CoinbaseKind::PoolOnly, None) => {
+                // no coinbaser was issued for this job: split by the live window instead
+                let ledger = self.shared.ledger.lock().unwrap();
+                let net = self.shared.network;
+                let sp =
+                    ledger.window.split(v.coinbase_value, &self.shared.split_params, |i| address::to_script(i, net));
+                let owed = sp.paid_sats();
+                let delta = sp.carry_delta(|_| false);
+                let rebate = (sp.rebate_sats, sp.rebate_delta());
+                ("pool-only", owed, sp.payees.iter().map(|p| (p.identity.clone(), p.sats)).collect(), 0, delta, rebate)
+            }
+            (CoinbaseKind::EmptySolo, _) | (CoinbaseKind::GatewaySolo, _) => ("solo", 0, vec![], 0, vec![], (0, 0)),
+            (CoinbaseKind::Partial(_), None) | (CoinbaseKind::Foreign, _) => ("unknown", 0, vec![], 0, vec![], (0, 0)),
+        };
+        let (rebate_credited, rebate_delta) = rebate;
         let _ = fee;
+        if rebate_credited > 0 || rebate_delta != 0 {
+            let owed_now = self.shared.ledger.lock().unwrap().settle_rebate(rebate_delta);
+            log::info!(
+                "[{}] block {hash_hex} DATUM rebate: {rebate_credited} sats credited to DATUM miners' carry, owed balance {rebate_delta:+} -> {owed_now} sats",
+                self.id
+            );
+        }
         if !carry_delta.is_empty() {
             let (total, holders) = {
                 let mut ledger = self.shared.ledger.lock().unwrap();
                 ledger.settle_carry(&carry_delta);
                 (ledger.window.total_carry(), ledger.window.carries().len())
             };
-            let deferred: i64 = carry_delta.iter().map(|d| d.1.max(0)).sum();
+            // positive entries are under-floor earnings plus the DATUM rebate credits
+            let added: i64 = carry_delta.iter().map(|d| d.1.max(0)).sum();
+            let deferred = added.saturating_sub(rebate_credited.min(i64::MAX as u64) as i64);
             log::info!(
-                "[{}] block {hash_hex} carry: paid {carry_paid} sats of carry in {} outputs, deferred {deferred} sats for {} identities; pool now holds {total} sats of carry for {holders} miners",
+                "[{}] block {hash_hex} carry: paid {carry_paid} sats of carry in {} outputs, deferred {deferred} sats, credited {rebate_credited} sats of DATUM rebate ({} entries); pool now holds {total} sats of carry for {holders} miners",
                 self.id,
                 carry_delta.iter().filter(|d| d.1 < 0).count(),
                 carry_delta.iter().filter(|d| d.1 > 0).count(),
@@ -1172,6 +1234,8 @@ impl Session {
             pool_sats: v.paid_to_pool,
             carry_paid,
             carry_delta,
+            rebate_credited,
+            rebate_delta,
             settled: false,
             submit: "pending".into(),
             gateway: self.gateway_hex.clone(),
@@ -1180,10 +1244,12 @@ impl Session {
 
         // ask for the transactions so we can submit the block ourselves as a backup
         let job = s.job_id;
-        self.pending_blocks
-            .entry(job)
-            .or_default()
-            .push(PendingBlock { share: v, submit: s, hash_hex, at: Instant::now() });
+        self.pending_blocks.entry(job).or_default().push(PendingBlock {
+            share: v,
+            submit: s,
+            hash_hex,
+            at: Instant::now(),
+        });
         self.send_mining(&mining::request_full_block(job), false).await?;
         // every other gateway should refresh its template now
         let _ = self.shared.notify.send(self.id as u32);
@@ -1333,6 +1399,9 @@ mod tests {
             outputs: vec![Output { sats: value, script: vec![0x00, 0x14, id] }],
             payees: vec![],
             unpaid: vec![],
+            rebate_credits: vec![],
+            rebate_owed_credited: 0,
+            rebate_deferred: 0,
         }
     }
 
