@@ -62,9 +62,10 @@
     if (s < 86400 * 60) return (s / 86400).toFixed(1) + " days";
     return (s / 86400 / 365).toFixed(1) + " years";
   };
-  // ---- amounts: BTC or sats, never scientific notation, at most 4 significant figures.
-  // >= 0.01 BTC reads in BTC ("0.6266 BTC", "3.125 BTC", "124.2 BTC"); below that in sats
+  // ---- amounts: XBT or sats, never scientific notation, at most 4 significant figures.
+  // >= 0.01 reads in XBT ("0.6266 XBT", "3.125 XBT", "124.2 XBT"); below that in sats
   // ("612,300 sats", "42 sats"). Trailing zeros are dropped so 3.1000 reads "3.1".
+  const TICKER = "XBT";
   const sig4 = (x) => {
     if (x === 0) return "0";
     if (Math.abs(x) >= 10000) return Math.round(x).toLocaleString();
@@ -75,18 +76,18 @@
     if (btcValue == null || Number.isNaN(Number(btcValue))) return "\u2014";
     const x = Number(btcValue);
     if (Math.abs(x) < 5e-9) return "0 sats";
-    if (Math.abs(x) >= 0.01) return sig4(x) + " BTC";
+    if (Math.abs(x) >= 0.01) return sig4(x) + " " + TICKER;
     const s = x * 1e8;
     const r = Math.abs(s) >= 10000 ? Number(s.toPrecision(4)) : Math.round(s);
     return r.toLocaleString() + " sats";
   };
   // Same, from an integer sat count.
   const amtSats = (sats) => (sats == null || Number.isNaN(Number(sats)) ? "\u2014" : amt(Number(sats) / 1e8));
-  // Exact figure for tooltips: full 8-place BTC plus the sat count.
+  // Exact figure for tooltips: full 8-place XBT plus the sat count.
   const amtExact = (btcValue) => {
     if (btcValue == null || Number.isNaN(Number(btcValue))) return "";
     const x = Number(btcValue);
-    return x.toFixed(8).replace(/0+$/, "").replace(/\.$/, "") + " BTC (" + Math.round(x * 1e8).toLocaleString() + " sats)";
+    return x.toFixed(8).replace(/0+$/, "").replace(/\.$/, "") + " " + TICKER + " (" + Math.round(x * 1e8).toLocaleString() + " sats)";
   };
   const when = (ts) => (ts ? new Date(ts * 1000).toLocaleString([], { dateStyle: "medium", timeStyle: "short" }) : "");
   const clock = (ts) => (ts ? new Date(ts * 1000).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }) : "");
