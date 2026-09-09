@@ -2,10 +2,13 @@
 """Lazarus public mining-pool dashboard. Scrapes DATUM + Knots; no admin UI exposed."""
 from __future__ import annotations
 
+import contextlib
 import gzip
 import json
 import os
+import queue
 import re
+import socket
 import sqlite3
 import subprocess
 import sys
@@ -127,6 +130,9 @@ def _datum_prime_pubkey():
 
 
 lock = threading.Lock()
+# Readers are pooled, not shared behind `lock`; see _reader().
+_READER_POOL = 12
+_reader_pool = queue.LifoQueue(maxsize=_READER_POOL)
 
 
 def datum_user_pass():
@@ -160,6 +166,12 @@ def _pragma(sql):
 _pragma("PRAGMA journal_mode=WAL")
 _pragma("PRAGMA busy_timeout=8000")
 _pragma("PRAGMA synchronous=NORMAL")
+# An automatic checkpoint only runs when no reader is mid-scan, and a busy dashboard on a
+# 15M-row samples table never leaves that gap: the WAL reached 1.7 GB, every read had to
+# search it, and address pages went from milliseconds to over a minute. Cap it and let the
+# writer keep it trimmed.
+_pragma("PRAGMA journal_size_limit=268435456")
+_pragma("PRAGMA wal_autocheckpoint=2000")
 db_conn.executescript(
     """
     CREATE TABLE IF NOT EXISTS samples (
@@ -184,7 +196,10 @@ db_conn.executescript(
       height INTEGER PRIMARY KEY, hash TEXT, ts INTEGER, reward_btc REAL,
       finder TEXT, pool_fee_btc REAL, miner_btc REAL, coinbase TEXT
     );
-    CREATE INDEX IF NOT EXISTS idx_samples_addr_ts ON samples(address, ts);
+    -- Covers the address history chart: hr_ghs is in the index, so a day of one address's
+    -- samples is read straight from it. Without hr_ghs each of the (over a million, for a
+    -- big farm) matching rows costs a lookup into the 3 GB table and the query took 83s.
+    CREATE INDEX IF NOT EXISTS idx_samples_addr_ts_hr ON samples(address, ts, hr_ghs);
     CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT);
     CREATE TABLE IF NOT EXISTS round_work (
       address TEXT PRIMARY KEY, work REAL NOT NULL DEFAULT 0, last_diff_acc INTEGER DEFAULT 0
@@ -956,16 +971,65 @@ def ensure_open_round():
         )
 
 
+def _new_reader():
+    c = sqlite3.connect(DB, check_same_thread=False, timeout=10)
+    c.row_factory = sqlite3.Row
+    c.execute("PRAGMA busy_timeout=8000")
+    return c
+
+
+@contextlib.contextmanager
+def _reader():
+    """Borrow one of a few reader connections.
+
+    One shared connection behind one lock serialised every query in the process, so a
+    cold cache turned each request into a queue: the address-history query is seconds of
+    work, and 24 of them back to back meant the inflight table filled and /api/miner
+    started answering 503. WAL lets readers overlap each other and the writer.
+
+    A small pool rather than one per thread: this server is thread-per-connection, and a
+    fresh connection starts with an empty page cache, so a few long-lived readers are
+    both bounded and warm."""
+    try:
+        c = _reader_pool.get_nowait()
+    except queue.Empty:
+        c = _new_reader()
+    try:
+        yield c
+    finally:
+        try:
+            _reader_pool.put_nowait(c)
+        except queue.Full:
+            c.close()
+
+
+def _checkpoint_wal():
+    """Force the WAL back into the database. `wal_autocheckpoint` gives up whenever a
+    reader is mid-scan, so on the writer we ask for it outright on a schedule; RESTART
+    rather than TRUNCATE so it does not wait for readers to drain."""
+    if NO_WRITE:
+        return
+    try:
+        with lock:
+            row = db_conn.execute("PRAGMA wal_checkpoint(RESTART)").fetchone()
+        print("wal_checkpoint", tuple(row) if row else None, flush=True)
+    except sqlite3.Error as e:
+        print("wal_checkpoint", e, flush=True)
+
+
 def db(q, args=(), one=False, write=False):
     if write and NO_WRITE:
         return None
-    with lock:
-        cur = db_conn.execute(q, args)
-        if write:
+    if write:
+        # Writes stay on the one connection under the one lock: a single writer per
+        # process, and only the :8888 instance writes at all.
+        with lock:
+            cur = db_conn.execute(q, args)
             db_conn.commit()
             return cur.lastrowid
-        rows = cur.fetchall()
-        return rows[0] if one and rows else (rows if not one else None)
+    with _reader() as c:
+        rows = c.execute(q, args).fetchall()
+    return rows[0] if one and rows else (rows if not one else None)
 
 
 def _curl_quote(s):
@@ -1031,6 +1095,14 @@ def _compute_lock(key):
             lock = threading.Lock()
             _cache_compute_locks[key] = lock
         return lock
+
+
+def cache_peek(key):
+    """The last payload built for `key`, however old, or None. Lets the busy path answer
+    a miner looking at its own stats with slightly stale numbers instead of a 503."""
+    with _resp_cache_lock:
+        hit = _resp_cache.get(key)
+    return hit[1] if hit else None
 
 
 def _cache_store(key, val):
@@ -1528,6 +1600,7 @@ def scrape():
         db("DELETE FROM samples WHERE ts < ?", (ts - 3 * 86400,), write=True)
         db("DELETE FROM pool_samples WHERE ts < ?", (ts - 7 * 86400,), write=True)
         state["last_prune_ts"] = ts
+        _checkpoint_wal()
     prime_by, prime_meta = fetch_prime_window()
     persist_prime_miners(prime_by, ts)
     stratum_addrs = {m.get("address") for m in miners}
@@ -3157,9 +3230,39 @@ def _solo_for(address):
 
 
 class PoolHTTPServer(ThreadingHTTPServer):
-    # Default backlog is 5; a few open dashboards each open several API calls at once.
-    request_queue_size = 128
+    # Default backlog is 5; a few open dashboards each open several API calls at once, and
+    # the proxy in front holds a pool of connections open. When this queue overflows the
+    # kernel leaves the proxy's SYNs unanswered and it reports 502.
+    request_queue_size = 512
     daemon_threads = True
+
+    def server_bind(self):
+        """SO_REUSEPORT: several workers listen on one port and the kernel deals new
+        connections out between them.
+
+        The proxy sends every request to a single port, so one process was carrying the
+        whole dashboard while its siblings on the other ports sat idle. Sharing the port
+        needs no proxy-side change. Every listener on the port must set this, so an old
+        instance has to exit before a new one binds -- which is the order the ensure
+        script already uses."""
+        with contextlib.suppress(OSError, AttributeError):
+            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+        super().server_bind()
+
+
+# Paths cheap enough to answer while the slot table is full.
+_CHEAP_PATHS = frozenset(
+    (
+        "/",
+        "/index.html",
+        "/api/pool",
+        "/api/miners",
+        "/api/coinbaser",
+        "/api/solo",
+        "/api/price",
+        "/api/v1/prices",
+    )
+)
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -3170,42 +3273,59 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         return
 
-    def handle(self):
-        acquired = _inflight.acquire(blocking=False)
-        if acquired:
-            try:
-                super().handle()
-            finally:
-                _inflight.release()
-            return
-        # Slot table is full (usually /api/payouts still flushing to Cloudflare).
-        # Still serve the cheap dashboard bits so hashrate/stats are not 503.
+    def handle_one_request(self):
+        """One request, with the expensive-work slot held only while it is being answered.
+
+        The throttle used to wrap `handle()`, which spans the whole connection: the proxy
+        keeps a pool of connections open, so a slot was held from accept until the socket
+        timed out, idle or not. Roughly 24 upstream connections then pinned every slot and
+        `/api/miner` answered 503 while the box was doing nothing. Reading the request line
+        is the part that blocks on an idle peer, so it stays outside the slot."""
         try:
             self.raw_requestline = self.rfile.readline(65537)
+            if len(self.raw_requestline) > 65536:
+                self.requestline = ""
+                self.request_version = ""
+                self.command = ""
+                self.send_error(414)
+                return
             if not self.raw_requestline:
+                self.close_connection = True
                 return
             if not self.parse_request():
                 return
+            method = getattr(self, "do_" + self.command, None)
+            if method is None:
+                self.send_error(501, f"Unsupported method ({self.command!r})")
+                return
             path = unquote(urlparse(self.path).path)
-            cheap = (
-                path in (
-                    "/",
-                    "/index.html",
-                    "/api/pool",
-                    "/api/miners",
-                    "/api/coinbaser",
-                    "/api/solo",
-                    "/api/price",
-                    "/api/v1/prices",
-                )
-                or path.startswith("/static/")
-            )
-            if cheap:
-                getattr(self, "do_" + self.command)()
+            if path in _CHEAP_PATHS or path.startswith("/static/"):
+                method()
+            elif _inflight.acquire(blocking=False):
+                try:
+                    method()
+                finally:
+                    _inflight.release()
             else:
-                self.send_json({"error": "busy"}, 503)
-        except Exception:
-            pass
+                self._shed(path)
+            self.wfile.flush()
+        except (TimeoutError, socket.timeout):
+            self.close_connection = True
+
+    def _shed(self, path):
+        """Slot table full. An address page is what a miner came here for: if one has
+        already been built for it, hand that over rather than a 503."""
+        stale = None
+        for prefix, bucket in (("/api/miner/", "miner"), ("/api/solo/", "solo")):
+            if path.startswith(prefix):
+                addr = path.split(prefix, 1)[1].strip("/")
+                if _ADDRESS_RE.match(addr):
+                    stale = cache_peek((bucket, addr))
+                break
+        if stale is not None:
+            self.send_json(stale, cache_s=5)
+        else:
+            self.send_json({"error": "busy"}, 503)
 
     def send_json(self, obj, code=200, cache_s=0):
         body = json.dumps(obj, separators=(",", ":")).encode()
