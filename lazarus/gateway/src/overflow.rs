@@ -260,6 +260,9 @@ pub struct Overflow {
     rr: AtomicUsize,
     proxied: Mutex<HashMap<u64, ProxySession>>,
     proxied_total: AtomicU64,
+    /// Relays that ended within `CHURN_SECS` having submitted nothing. When this tracks
+    /// `proxied_total`, relayed miners are hanging up on the handshake and mining nowhere.
+    relays_churned: AtomicU64,
     shadow_would: AtomicU64,
     fail_open: AtomicU64,
     state_file: PathBuf,
@@ -276,6 +279,8 @@ const RELAY_MAX_LINE: u64 = 8 * 1024;
 /// miner's own handshake timeout: at 3 s every such miner hung up at the moment the relay
 /// began and reconnected every 4 s, mining nowhere (9 Sep 2026, 129 relays, 0 shares).
 const AUTHORIZE_WAIT: Duration = Duration::from_millis(500);
+/// A relay that ends sooner than this without a single submit counts as churn.
+const CHURN_SECS: u64 = 10;
 /// Lines we will hold while waiting for the authorize.
 const GATE_MAX_LINES: usize = 6;
 const UPSTREAM_CONNECT: Duration = Duration::from_secs(5);
@@ -339,6 +344,7 @@ impl Overflow {
             rr: AtomicUsize::new(0),
             proxied: Mutex::new(HashMap::new()),
             proxied_total: AtomicU64::new(0),
+            relays_churned: AtomicU64::new(0),
             shadow_would: AtomicU64::new(0),
             fail_open: AtomicU64::new(0),
             state_file,
@@ -488,8 +494,12 @@ impl Overflow {
                     m.share_pct, m.pool_hs / 1e15, m.net_hs / 1e15, self.mode().as_str()
                 );
             } else {
-                log::info!("overflow: share {:.1}% (pool {:.2} PH/s, net {:.2} PH/s) active={} hold={} proxied={}",
-                    m.share_pct, m.pool_hs / 1e15, m.net_hs / 1e15, na, nh, lk(&self.proxied).len());
+                let (total, churned) = (self.proxied_total.load(Ordering::Relaxed), self.relays_churned.load(Ordering::Relaxed));
+                log::info!("overflow: share {:.1}% (pool {:.2} PH/s, net {:.2} PH/s) active={} hold={} proxied={} relays={} churned={}",
+                    m.share_pct, m.pool_hs / 1e15, m.net_hs / 1e15, na, nh, lk(&self.proxied).len(), total, churned);
+                if total >= 10 && churned * 2 > total {
+                    log::warn!("overflow: {churned} of {total} relays died within {}s with no share; relayed miners are not mining anywhere. Check the handshake or set mode=off.", CHURN_SECS);
+                }
             }
         } else {
             log::warn!("overflow: meter failed: {}", m.last_err);
@@ -683,9 +693,14 @@ impl Overflow {
         stats.done.store(true, Ordering::Relaxed);
         drop(updater);
         let (user, since) = lk(&self.proxied).get(&id).map(|p| (p.user.clone(), p.since_unix)).unwrap_or((user, unix_now()));
+        let lasted = unix_now().saturating_sub(since);
+        let submits = stats.submits.load(Ordering::Relaxed);
+        if lasted < CHURN_SECS && submits == 0 {
+            self.relays_churned.fetch_add(1, Ordering::Relaxed);
+        }
         log::info!("overflow: relay ended {host} user={} -> {} after {}s, {} submits / {} accepted",
-            if user.is_empty() { "(never authorized)" } else { &user }, name, unix_now().saturating_sub(since),
-            stats.submits.load(Ordering::Relaxed), stats.accepted.load(Ordering::Relaxed));
+            if user.is_empty() { "(never authorized)" } else { &user }, name, lasted,
+            submits, stats.accepted.load(Ordering::Relaxed));
         Gate::Relayed
     }
 
@@ -716,6 +731,7 @@ impl Overflow {
             "meter_ok": m.ok, "meter_updated_unix": m.updated_unix, "meter_error": m.last_err,
             "grandfathered_identities": gi, "grandfathered_ips": gip,
             "proxied_sessions": proxied.len(), "proxied_total": self.proxied_total.load(Ordering::Relaxed),
+            "relays_churned": self.relays_churned.load(Ordering::Relaxed),
             "shadow_would_relay": self.shadow_would.load(Ordering::Relaxed), "fail_open": self.fail_open.load(Ordering::Relaxed),
             "upstreams": ups,
         })
@@ -1237,6 +1253,7 @@ mod tests {
         assert_eq!(ov.status_json()["proxied_sessions"], 0);
         assert_eq!(ov.status_json()["upstreams"][0]["sessions"], 0);
         assert_eq!(ov.status_json()["proxied_total"], 1);
+        assert_eq!(ov.status_json()["relays_churned"], 0, "a relay that submitted is not churn");
         let s = seen.lock().unwrap();
         assert!(s.iter().any(|l| l.contains("mining.subscribe") && l.contains("cgminer")));
         assert!(s.iter().any(|l| l.contains("mining.authorize") && l.contains("bc1qstranger.rig1")), "username forwarded verbatim");
@@ -1366,6 +1383,7 @@ mod tests {
         miner.shutdown(Shutdown::Both).unwrap();
         drop(rdr);
         assert!(matches!(h.join().unwrap(), Gate::Relayed));
+        assert_eq!(ov.status_json()["relays_churned"], 1, "hung up at once with no share: that is churn");
     }
 
     /// cgminer / intminer: subscribe, wait for the reply, then authorize. The identity
