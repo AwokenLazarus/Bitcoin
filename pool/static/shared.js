@@ -100,7 +100,7 @@
   };
   const statusPill = (status) => {
     const s = String(status || "").toLowerCase();
-    const cls = s === "in chain" || s === "paid" || s === "submitted" ? "ok" : s === "orphaned" || s === "rejected" ? "bad" : s === "immature" || s === "pending" ? "warn" : "";
+    const cls = s === "in chain" || s === "paid" || s === "submitted" || s === "spendable" ? "ok" : s === "orphaned" || s === "rejected" ? "bad" : s === "immature" || s === "pending" ? "warn" : "";
     return s ? `<span class="pill ${cls}">${esc(s)}</span>` : "\u2014";
   };
   function chartLegend(el, c, one, many) {

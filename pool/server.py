@@ -1246,8 +1246,8 @@ def mempool_prices_payload():
 # Identities are DATUM usernames minus the worker suffix: an address, or whatever a
 # gateway forwarded. Anything else is not a miner we could know about.
 _ADDRESS_RE = re.compile(r"^[A-Za-z0-9._~-]{1,128}$")
-# Concurrent requests actually doing work; the rest get a fast 503 instead of a thread each.
-_inflight = threading.BoundedSemaphore(64)
+# Concurrent expensive requests; extras 503. Stats/static still run when this is full.
+_inflight = threading.BoundedSemaphore(24)
 
 
 def parse_hr(s):
@@ -1614,9 +1614,16 @@ def pool_output_parts(pool_addr, on_chain_btc, pb, reward_btc=None):
     if miner_sats:
         miner_btc = min(miner_sats / 1e8, total)
         return miner_btc, max(0.0, total - miner_btc)
-    if reward_btc:
-        fee = min(total, float(reward_btc) * (POOL_FEE / 100.0))
-        return max(0.0, total - fee), fee
+    # Pool wallet is not a TIDES payee here: the whole output is fee + remainder.
+    # Do not fall back to pool_fee_percent (0% DATUM) — that tagged every remainder as a miner
+    # and made the Found table's Pool column all zeros.
+    if pb is not None:
+        fee_sats = pb.get("fee_sats")
+        if fee_sats is None and pb.get("pool_sats") is not None:
+            fee_sats = max(0, int(pb.get("pool_sats") or 0) - int(pb.get("miner_to_pool_sats") or 0))
+        if fee_sats is not None:
+            fee_btc = min(total, int(fee_sats) / 1e8)
+            return max(0.0, total - fee_btc), fee_btc
     return 0.0, total
 
 
@@ -3067,6 +3074,12 @@ def _solo_for(address):
     return row
 
 
+class PoolHTTPServer(ThreadingHTTPServer):
+    # Default backlog is 5; a few open dashboards each open several API calls at once.
+    request_queue_size = 128
+    daemon_threads = True
+
+
 class Handler(BaseHTTPRequestHandler):
     # Socket timeout per request: a client that opens a connection and trickles bytes
     # (slowloris) otherwise holds a thread forever on this thread-per-connection server.
@@ -3076,27 +3089,48 @@ class Handler(BaseHTTPRequestHandler):
         return
 
     def handle(self):
-        if not _inflight.acquire(blocking=False):
+        acquired = _inflight.acquire(blocking=False)
+        if acquired:
             try:
-                self.raw_requestline = self.rfile.readline(65537)
-                if not self.raw_requestline:
-                    return
-                self.parse_request()
-                self.send_json({"error": "busy"}, 503)
-            except Exception:
-                pass
+                super().handle()
+            finally:
+                _inflight.release()
             return
+        # Slot table is full (usually /api/payouts still flushing to Cloudflare).
+        # Still serve the cheap dashboard bits so hashrate/stats are not 503.
         try:
-            super().handle()
-        finally:
-            _inflight.release()
+            self.raw_requestline = self.rfile.readline(65537)
+            if not self.raw_requestline:
+                return
+            if not self.parse_request():
+                return
+            path = unquote(urlparse(self.path).path)
+            cheap = (
+                path in (
+                    "/",
+                    "/index.html",
+                    "/api/pool",
+                    "/api/miners",
+                    "/api/coinbaser",
+                    "/api/solo",
+                    "/api/price",
+                    "/api/v1/prices",
+                )
+                or path.startswith("/static/")
+            )
+            if cheap:
+                getattr(self, "do_" + self.command)()
+            else:
+                self.send_json({"error": "busy"}, 503)
+        except Exception:
+            pass
 
     def send_json(self, obj, code=200, cache_s=0):
         body = json.dumps(obj, separators=(",", ":")).encode()
         enc = (self.headers.get("Accept-Encoding") or "").lower()
         use_gzip = code == 200 and "gzip" in enc and len(body) >= 400
         if use_gzip:
-            body = gzip.compress(body, compresslevel=4)
+            body = gzip.compress(body, compresslevel=1)
         self.send_response(code)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
@@ -3167,7 +3201,7 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json(cached("gateways", 5.0, self._gateways_payload), cache_s=5)
             return
         if path == "/api/payouts":
-            self.send_json(cached("payouts", 10.0, self._payouts_payload), cache_s=10)
+            self.send_json(cached("payouts", 30.0, self._payouts_payload), cache_s=30)
             return
         if path in ("/", "/index.html"):
             self.send_file(STATIC / "index.html", "text/html; charset=utf-8")
@@ -3250,7 +3284,9 @@ class Handler(BaseHTTPRequestHandler):
     def _payouts_payload():
         if True:
             tip = rpc("getblockcount") or 0
-            fbs = db("SELECT height, hash, ts, reward_btc FROM found_blocks ORDER BY height DESC LIMIT 20") or []
+            # Enough history that coinbases past 100 confs show as spendable, not a window
+            # of only-immature recent blocks (the pool finds ~20–40/day).
+            fbs = db("SELECT height, hash, ts, reward_btc FROM found_blocks ORDER BY height DESC LIMIT 250") or []
             payouts = []
             chain_ok = True
             for fb in fbs:
@@ -3263,6 +3299,7 @@ class Handler(BaseHTTPRequestHandler):
                 st = payout_status_for_height(fb["height"], tip)
                 if nval < 2:
                     st = "unsplit"
+                confs = (int(tip) - int(fb["height"]) + 1) if tip and fb["height"] else 0
                 for addr, amt in sorted(splits.items(), key=lambda kv: -kv[1]):
                     payouts.append(
                         {
@@ -3275,6 +3312,7 @@ class Handler(BaseHTTPRequestHandler):
                             "share": (amt / reward) if reward else 0,
                             "status": st,
                             "reward_btc": reward,
+                            "confirmations": confs,
                         }
                     )
             if not chain_ok:
@@ -3352,7 +3390,8 @@ class Handler(BaseHTTPRequestHandler):
             return {
                 "scheme": "TIDES",
                 "fee_percent": POOL_FEE,
-                "maturity_blocks": 100,
+                "maturity_blocks": MATURITY_CONFS,
+                "tip": int(tip or 0),
                 "current_round": current,
                 "payouts": payouts,
                 "prime_blocks": list(prime_blocks.values()),
@@ -3367,7 +3406,7 @@ def main():
     host = CONF.get("listen_host", "0.0.0.0")
     port = int(os.environ.get("POOL_LISTEN_PORT") or CONF.get("listen_port", 8888))
     print(f"lazarus-pool http://{host}:{port}", flush=True)
-    ThreadingHTTPServer((host, port), Handler).serve_forever()
+    PoolHTTPServer((host, port), Handler).serve_forever()
 
 
 if __name__ == "__main__":

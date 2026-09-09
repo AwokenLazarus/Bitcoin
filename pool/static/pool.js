@@ -782,19 +782,18 @@
       const pb = byPrime.get(hash);
       const total = Number(combined) || 0;
       if (!pb || !poolAddr) {
-        const fee = ((p.fee_percent || 0.5) / 100) * (p.subsidy_btc || 3.125);
-        return { miner: Math.max(0, total - fee), fee: Math.min(total, fee) };
+        // No issued split: a pool-address output is fee/remainder, not a miner.
+        return { miner: 0, fee: total };
       }
       const minerSats = (pb.split || []).filter((o) => o.address === poolAddr).reduce((a, o) => a + Number(o.sats || 0), 0);
       if (pb.fee_sats != null) return { miner: minerSats / 1e8, fee: Number(pb.fee_sats) / 1e8 };
       if (minerSats) return { miner: minerSats / 1e8, fee: Math.max(0, (pb.pool_sats || 0) - minerSats) / 1e8 };
-      const fee = (p.fee_percent || 0.5) / 100 * ((pb.coinbase_value || 0) / 1e8 || 3.125);
-      return { miner: Math.max(0, total - fee), fee: Math.min(total, fee) };
+      return { miner: 0, fee: total };
     };
     const byHeight = new Map();
     for (const r of pays.payouts || []) {
       const key = r.hash || String(r.height);
-      const b = byHeight.get(key) || { height: r.height, hash: r.hash, ts: r.ts, outputs: [], miner_btc: 0, pool_btc: 0, status: r.status, kind: r.kind, block_status: r.block_status, owed_sats: r.owed_sats, owed_txid: r.owed_txid, owed_resolved: r.owed_resolved, found_by: r.found_by, reward: r.reward_btc };
+      const b = byHeight.get(key) || { height: r.height, hash: r.hash, ts: r.ts, outputs: [], miner_btc: 0, pool_btc: 0, status: r.status, kind: r.kind, block_status: r.block_status, owed_sats: r.owed_sats, owed_txid: r.owed_txid, owed_resolved: r.owed_resolved, found_by: r.found_by, reward: r.reward_btc, confirmations: r.confirmations };
       const combined = Number(r.miner_btc) || 0;
       if (r.to === "pool" && poolAddr && r.finder === poolAddr) {
         const parts = partsFor(r.hash, combined);
@@ -823,11 +822,28 @@
       byHeight.set(pb.hash, { height: pb.height, hash: pb.hash, ts: pb.ts, outputs: (pb.split || []).map((o) => ({ address: o.address, btc: o.sats / 1e8 })), miner_btc: (pb.split || []).reduce((a, o) => a + o.sats, 0) / 1e8, pool_btc: feeSats / 1e8, status: pb.status, kind: pb.kind, block_status: pb.status, owed_sats: pb.owed_sats, owed_txid: pb.owed_txid, owed_resolved: pb.owed_resolved, found_by: pb.finder, reward: pb.coinbase_value / 1e8, prime_only: true });
     }
     const blocks = [...byHeight.values()].sort((a, b) => (b.height || 0) - (a.height || 0));
+    const tip = Number(pays.tip || p.height || 0);
+    const need = Number(pays.maturity_blocks || 100);
+    const foundStatus = (b) => {
+      const bs = String(b.block_status || "").toLowerCase();
+      if (bs === "orphaned" || bs === "rejected" || bs === "pending") return bs;
+      if (b.prime_only) return bs || b.status || "pending";
+      const h = Number(b.height);
+      const confs = Number(b.confirmations) || (tip && h ? tip - h + 1 : 0);
+      if (h && confs < need) return "immature";
+      if (h && confs >= need) return "spendable";
+      return b.status === "unsplit" ? "pool only" : (b.status || bs || "\u2014");
+    };
+    for (const b of blocks) {
+      if (!b.confirmations && tip && b.height) b.confirmations = tip - b.height + 1;
+    }
     const headers = ["Height", "Block", "Coinbase", "Outputs", "Miners paid", "Pool", "Status", "Found by", "Time"];
     const rows = blocks.map((b, i) => {
-      const poolBtc = b.pool_btc || (b.reward ? Math.max(0, b.reward - b.miner_btc) : null);
+      const poolBtc = b.pool_btc != null ? b.pool_btc : (b.reward ? Math.max(0, b.reward - b.miner_btc) : null);
       const kind = b.kind || (b.outputs.length > 1 ? "split" : b.outputs.length === 1 ? "" : "");
-      const st = b.prime_only ? b.block_status : (b.status === "unsplit" ? "pool only" : b.status);
+      const st = foundStatus(b);
+      const confs = Number(b.confirmations) || 0;
+      const stTitle = st === "immature" && confs ? `${confs}/${need} confirmations` : (st === "spendable" && confs ? `${confs} confirmations` : "");
       const outs = b.outputs.slice().sort((x, y) => y.btc - x.btc);
       const detail = outs.map((o) => `<tr><td></td><td colspan="2"><a href="#${esc(o.address)}">${esc(o.address)}</a>${o.pool ? ' <span class="pill brass">pool</span>' : ""}</td><td class="num" title="${amtExact(o.btc)}">${amt(o.btc)}</td><td class="num faint">${b.reward ? pct(100 * o.btc / b.reward, 2) : ""}</td><td colspan="4"></td></tr>`).join("");
       const owed = b.owed_txid
@@ -840,7 +856,7 @@
         <td class="num">${b.outputs.length}</td>
         <td class="num" title="${amtExact(b.miner_btc)}">${amt(b.miner_btc)}</td>
         <td class="num" title="${poolBtc == null ? "" : amtExact(poolBtc)}">${poolBtc == null ? "\u2014" : amt(poolBtc)}</td>
-        <td>${statusPill(st)}</td>
+        <td title="${esc(stTitle)}">${statusPill(st)}</td>
         <td>${b.found_by ? `<a href="#${esc(b.found_by)}">${short(b.found_by)}</a>` : "\u2014"}</td>
         <td>${when(b.ts)}</td>
       </tr>
@@ -934,18 +950,21 @@
 
   // --------------------------------------------------------------- refresh
   let refreshBusy = false;
+  let lastHeavy = 0;
+  let lastPays = { payouts: [], prime_blocks: [] };
+  let lastBlocks = { blocks: [] };
   async function refresh() {
     if (refreshBusy) return;
     refreshBusy = true;
-    const poolP = j("/api/pool");
-    const cbP = j("/api/coinbaser").catch(() => ({}));
-    const pxP = j("/api/price").catch(() => null);
-    const soP = j("/api/solo").catch(() => null);
-    const minersP = j("/api/miners").catch(() => ({ online: [], seen: [] }));
-    const blocksP = j("/api/blocks").catch(() => ({ blocks: [] }));
-    const paysP = j("/api/payouts").catch(() => ({ payouts: [], prime_blocks: [] }));
     try {
-      const [p, cb, px, so] = await Promise.all([poolP, cbP, pxP, soP]);
+      // Stats first, alone. Starting payouts/miners in the same burst used to stall
+      // /api/pool behind a 660KB Found-by-Lazarus payload on the public replica.
+      const [p, cb, px, so] = await Promise.all([
+        j("/api/pool"),
+        j("/api/coinbaser").catch(() => ({})),
+        j("/api/price").catch(() => null),
+        j("/api/solo").catch(() => null),
+      ]);
       if (px && Number.isFinite(Number(px.USD))) priceUsd = Number(px.USD);
       if (Number(p.block_interval_seconds) > 0) blockInterval = Number(p.block_interval_seconds);
       stats(p);
@@ -956,7 +975,7 @@
       draw($("poolchart"), p.history || [], "hr_ghs", $("poolchart")?.__marks || []);
       chartLegend($("poolchart-legend"), $("poolchart"), "block found", "blocks found");
 
-      const miners = await minersP;
+      const miners = await j("/api/miners").catch(() => ({ online: [], seen: [] }));
       const online = (miners.online || []).filter((m) => m.address);
       const firstOf = (m, i) => online.findIndex((x) => x.address === m.address) === i;
       table(
@@ -1012,7 +1031,18 @@
 
       // Keep the looked-up card current too (same panel stays open).
       if (minerAddr) showMiner(minerAddr).catch(() => {});
-      const [blocks, pays] = await Promise.all([blocksP, paysP]);
+      const now = Date.now();
+      if (now - lastHeavy > 60000 || !(lastPays.payouts || []).length) {
+        const [blocks, pays] = await Promise.all([
+          j("/api/blocks").catch(() => ({ blocks: [] })),
+          j("/api/payouts").catch(() => ({ payouts: [], prime_blocks: [] })),
+        ]);
+        lastBlocks = blocks;
+        lastPays = pays;
+        lastHeavy = now;
+      }
+      const blocks = lastBlocks;
+      const pays = lastPays;
       const marks = blockMarks(foundBlocks(pays, p));
       draw($("poolchart"), p.history || [], "hr_ghs", marks);
       chartLegend($("poolchart-legend"), $("poolchart"), "block found", "blocks found");
