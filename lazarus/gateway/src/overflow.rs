@@ -216,6 +216,11 @@ pub struct Upstream {
     healthy: AtomicBool,
     sessions: AtomicUsize,
     total: AtomicU64,
+    /// Shares relayed miners sent this pool and the `result: true` replies that came back,
+    /// summed over finished relays. The probe only proves the pool answers a subscribe; a
+    /// pool that answers and then refuses every share looks healthy without these.
+    submits: AtomicU64,
+    accepted: AtomicU64,
     checked_unix: AtomicU64,
     last_err: Mutex<String>,
 }
@@ -263,6 +268,9 @@ pub struct Overflow {
     /// Relays that ended within `CHURN_SECS` having submitted nothing. When this tracks
     /// `proxied_total`, relayed miners are hanging up on the handshake and mining nowhere.
     relays_churned: AtomicU64,
+    /// Relays we ended on purpose: the authorize named an identity that is ours, so the
+    /// miner was hung up on to reconnect here. Short and shareless by design, not churn.
+    relays_bounced: AtomicU64,
     shadow_would: AtomicU64,
     fail_open: AtomicU64,
     state_file: PathBuf,
@@ -281,6 +289,9 @@ const RELAY_MAX_LINE: u64 = 8 * 1024;
 const AUTHORIZE_WAIT: Duration = Duration::from_millis(500);
 /// A relay that ends sooner than this without a single submit counts as churn.
 const CHURN_SECS: u64 = 10;
+/// Shares an upstream may take from relayed miners with none accepted before we warn that
+/// it is a black hole. A probe with a bogus share is one or two; a real miner is hundreds.
+const BLACKHOLE_SUBMITS: u64 = 20;
 /// Lines we will hold while waiting for the authorize.
 const GATE_MAX_LINES: usize = 6;
 const UPSTREAM_CONNECT: Duration = Duration::from_secs(5);
@@ -327,6 +338,8 @@ impl Overflow {
                 healthy: AtomicBool::new(true),
                 sessions: AtomicUsize::new(0),
                 total: AtomicU64::new(0),
+                submits: AtomicU64::new(0),
+                accepted: AtomicU64::new(0),
                 checked_unix: AtomicU64::new(0),
                 last_err: Mutex::new(String::new()),
             })
@@ -345,6 +358,7 @@ impl Overflow {
             proxied: Mutex::new(HashMap::new()),
             proxied_total: AtomicU64::new(0),
             relays_churned: AtomicU64::new(0),
+            relays_bounced: AtomicU64::new(0),
             shadow_would: AtomicU64::new(0),
             fail_open: AtomicU64::new(0),
             state_file,
@@ -586,7 +600,24 @@ impl Overflow {
         while buf.len() < GATE_MAX_LINES && Instant::now() < deadline {
             let mut line = String::new();
             match rdr.take(RELAY_MAX_LINE + 1).read_line(&mut line) {
-                Ok(0) | Err(_) => break,
+                Ok(0) => break,
+                Err(_) if !line.is_empty() && !line.ends_with('\n') => {
+                    // The wait ran out mid-line: the bytes read so far are in `line` and
+                    // gone from the reader. Finish the line at the normal timeout rather
+                    // than drop it — a lost authorize is a miner that never gets a share
+                    // accepted and never learns why.
+                    let _ = sock.set_read_timeout(Some(idle));
+                    match rdr.take(RELAY_MAX_LINE + 1).read_line(&mut line) {
+                        Ok(n) if n > 0 && line.len() as u64 <= RELAY_MAX_LINE && line.ends_with('\n') => {}
+                        _ => break,
+                    }
+                    if let Some(u) = authorize_user(&line) {
+                        user = u;
+                    }
+                    buf.push(line);
+                    break;
+                }
+                Err(_) => break,
                 Ok(n) if n as u64 > RELAY_MAX_LINE || !line.ends_with('\n') => break,
                 Ok(_) => {}
             }
@@ -671,6 +702,7 @@ impl Overflow {
         // relay. Read the identity off it so the session row (and the pool UI) names the
         // miner. If it turns out to be one of ours on an IP we had not seen, mark the IP
         // and hang up: the miner's retry lands on Lazarus.
+        let bounced = AtomicBool::new(false);
         let on_authorize = |u: &str| -> bool {
             let ident = canon(u);
             let worker = u.split_once('.').map(|(_, w)| w.to_string()).unwrap_or_default();
@@ -683,6 +715,7 @@ impl Overflow {
                 lk(&self.grandfather).note_ip(ip, unix_now());
                 self.dirty.store(true, Ordering::Relaxed);
                 log::info!("overflow: {host} authorized as {} mid-relay, which is ours; closing so it reconnects to Lazarus", short(u));
+                bounced.store(true, Ordering::Relaxed);
                 return false;
             }
             log::info!("overflow: relay {host} authorized user={} -> {name}", short(u));
@@ -695,12 +728,24 @@ impl Overflow {
         let (user, since) = lk(&self.proxied).get(&id).map(|p| (p.user.clone(), p.since_unix)).unwrap_or((user, unix_now()));
         let lasted = unix_now().saturating_sub(since);
         let submits = stats.submits.load(Ordering::Relaxed);
-        if lasted < CHURN_SECS && submits == 0 {
+        let accepted = stats.accepted.load(Ordering::Relaxed);
+        let was_bounced = bounced.load(Ordering::Relaxed);
+        if was_bounced {
+            self.relays_bounced.fetch_add(1, Ordering::Relaxed);
+        } else if lasted < CHURN_SECS && submits == 0 {
             self.relays_churned.fetch_add(1, Ordering::Relaxed);
         }
-        log::info!("overflow: relay ended {host} user={} -> {} after {}s, {} submits / {} accepted",
+        let up = &self.upstreams[idx];
+        let up_submits = up.submits.fetch_add(submits, Ordering::Relaxed) + submits;
+        let up_accepted = up.accepted.fetch_add(accepted, Ordering::Relaxed) + accepted;
+        log::info!("overflow: relay ended {host} user={} -> {} after {}s, {} submits / {} accepted{}",
             if user.is_empty() { "(never authorized)" } else { &user }, name, lasted,
-            submits, stats.accepted.load(Ordering::Relaxed));
+            submits, accepted, if was_bounced { " (bounced home)" } else { "" });
+        if up_submits >= BLACKHOLE_SUBMITS && up_accepted == 0 {
+            log::warn!(
+                "overflow: {name} has taken {up_submits} shares from relayed miners and accepted none; it answers the probe but may not be paying anyone. Check its username format, or drop it from upstreams."
+            );
+        }
         Gate::Relayed
     }
 
@@ -715,6 +760,7 @@ impl Overflow {
                 "name": u.cfg.name, "host": u.cfg.host, "port": u.cfg.port, "url": u.cfg.url, "miner_url": u.cfg.miner_url,
                 "healthy": u.healthy.load(Ordering::Relaxed), "sessions": u.sessions.load(Ordering::Relaxed),
                 "total_sessions": u.total.load(Ordering::Relaxed), "checked_unix": u.checked_unix.load(Ordering::Relaxed),
+                "submits": u.submits.load(Ordering::Relaxed), "accepted": u.accepted.load(Ordering::Relaxed),
                 "last_error": lk(&u.last_err).clone(),
             }))
             .collect();
@@ -732,6 +778,7 @@ impl Overflow {
             "grandfathered_identities": gi, "grandfathered_ips": gip,
             "proxied_sessions": proxied.len(), "proxied_total": self.proxied_total.load(Ordering::Relaxed),
             "relays_churned": self.relays_churned.load(Ordering::Relaxed),
+            "relays_bounced": self.relays_bounced.load(Ordering::Relaxed),
             "shadow_would_relay": self.shadow_would.load(Ordering::Relaxed), "fail_open": self.fail_open.load(Ordering::Relaxed),
             "upstreams": ups,
         })
@@ -1439,6 +1486,43 @@ mod tests {
         miner.shutdown(Shutdown::Both).unwrap();
         drop(rdr);
         assert!(matches!(h.join().unwrap(), Gate::Relayed));
+        let up0 = ov.status_json()["upstreams"][0].clone();
+        assert_eq!(up0["submits"], 1, "the upstream's share tally follows the relay: {up0}");
+        assert_eq!(up0["accepted"], 1);
+    }
+
+    /// An authorize whose bytes arrive in two pieces around the end of the gate's wait
+    /// must not lose its first half: the gate finishes the line and hands it on whole.
+    #[test]
+    fn gate_finishes_an_authorize_that_straddles_the_wait() {
+        let ov = overflow_for_test(vec![], "force");
+        ov.note_share("bc1qsplit", "198.51.100.9".parse().unwrap());
+        let (mut miner, gw_side) = miner_pair();
+        let ov2 = ov.clone();
+        let h = thread::spawn(move || {
+            let mut sock = gw_side;
+            let mut rdr = BufReader::new(sock.try_clone().unwrap());
+            let mut first = String::new();
+            rdr.read_line(&mut first).unwrap();
+            ov2.gate(21, &mut sock, &mut rdr, &first, "203.0.113.21".parse().unwrap(), "h", Duration::from_secs(30), &|u| u.split('.').next().unwrap_or("").to_string())
+        });
+        miner.write_all(b"{\"id\":1,\"method\":\"mining.subscribe\",\"params\":[\"x\"]}\n").unwrap();
+        // first half lands inside the wait, the rest after it has run out
+        let auth = b"{\"id\":2,\"method\":\"mining.authorize\",\"params\":[\"bc1qsplit.rig\",\"x\"]}\n";
+        let (a, b) = auth.split_at(30);
+        thread::sleep(Duration::from_millis(100));
+        miner.write_all(a).unwrap();
+        // the read that took the first half times out AUTHORIZE_WAIT later; the rest
+        // arrives well after that
+        thread::sleep(AUTHORIZE_WAIT + Duration::from_millis(300));
+        miner.write_all(b).unwrap();
+        match h.join().unwrap() {
+            Gate::Local(lines) => {
+                assert_eq!(lines.len(), 1, "the whole authorize comes back for local handling: {lines:?}");
+                assert_eq!(authorize_user(&lines[0]).as_deref(), Some("bc1qsplit.rig"));
+            }
+            Gate::Relayed => panic!("a grandfathered identity read off the straddling line must stay local"),
+        }
     }
 
     /// One of our miners shows up from an IP we have not seen, with wait-for-reply firmware.
@@ -1483,7 +1567,10 @@ mod tests {
         assert!(matches!(h.join().unwrap(), Gate::Relayed));
         assert!(!seen.lock().unwrap().iter().any(|l| l.contains("bc1qours")), "our address was not authorized upstream");
         assert!(ov.ip_grandfathered(new_ip), "the IP is ours now");
-        assert_eq!(ov.status_json()["proxied_sessions"], 0);
+        let st = ov.status_json();
+        assert_eq!(st["proxied_sessions"], 0);
+        assert_eq!(st["relays_bounced"], 1, "a bounce is counted as a bounce");
+        assert_eq!(st["relays_churned"], 0, "and not as churn, though it was short and shareless");
         // the retry is served locally without touching the network
         let (mut miner2, gw2) = miner_pair();
         let ov3 = ov.clone();
