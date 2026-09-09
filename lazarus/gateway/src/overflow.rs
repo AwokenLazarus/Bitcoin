@@ -268,9 +268,14 @@ pub struct Overflow {
 
 /// Longest stratum line relayed in either direction. Same bound as the local handler.
 const RELAY_MAX_LINE: u64 = 8 * 1024;
-/// How long a miner has to follow `mining.subscribe` with `mining.authorize` before we
-/// decide without its identity. Every firmware we have seen sends both in one round trip.
-const AUTHORIZE_WAIT: Duration = Duration::from_secs(3);
+/// How long to hold the `mining.subscribe` reply for a `mining.authorize` that was sent in
+/// the same breath. Firmware that pipelines both lands the authorize within a few ms and
+/// gets an identity-aware decision. Firmware that waits for the subscribe reply before
+/// authorizing (cgminer, intminer) never sends it in this window; it is relayed without an
+/// identity and the authorize is read off the relay instead. This must stay well under a
+/// miner's own handshake timeout: at 3 s every such miner hung up at the moment the relay
+/// began and reconnected every 4 s, mining nowhere (9 Sep 2026, 129 relays, 0 shares).
+const AUTHORIZE_WAIT: Duration = Duration::from_millis(500);
 /// Lines we will hold while waiting for the authorize.
 const GATE_MAX_LINES: usize = 6;
 const UPSTREAM_CONNECT: Duration = Duration::from_secs(5);
@@ -575,10 +580,7 @@ impl Overflow {
                 Ok(n) if n as u64 > RELAY_MAX_LINE || !line.ends_with('\n') => break,
                 Ok(_) => {}
             }
-            let is_auth = serde_json::from_str::<Value>(&line)
-                .ok()
-                .filter(|v| v.get("method").and_then(|m| m.as_str()) == Some("mining.authorize"))
-                .and_then(|v| v.get("params")?.as_array()?.first()?.as_str().map(|s| s.to_string()));
+            let is_auth = authorize_user(&line);
             buf.push(line);
             if let Some(u) = is_auth {
                 user = u;
@@ -614,7 +616,10 @@ impl Overflow {
             })
             .unwrap_or_default();
         let name = self.upstreams[idx].cfg.name.clone();
-        log::info!("overflow: relaying {host} user={} ua={} -> {} ({}:{})", short(&user), short(&ua), name, self.upstreams[idx].cfg.host, self.upstreams[idx].cfg.port);
+        log::info!(
+            "overflow: relaying {host} user={} ua={} -> {} ({}:{})",
+            if user.is_empty() { "(authorize pending)" } else { &user }, short(&ua), name, self.upstreams[idx].cfg.host, self.upstreams[idx].cfg.port
+        );
         let worker = user.split_once('.').map(|(_, w)| w.to_string()).unwrap_or_default();
         let sess = ProxySession {
             id, host: host.to_string(), ip: ip.to_string(), user: user.clone(), identity: ident, worker, ua,
@@ -652,11 +657,34 @@ impl Overflow {
                 p.accepted = s2.accepted.load(Ordering::Relaxed);
             }
         });
-        pump(miner, rdr, upstream, &initial, Some(&msg), idle, &stats);
+        // Firmware that waited for the subscribe reply sends its authorize now, through the
+        // relay. Read the identity off it so the session row (and the pool UI) names the
+        // miner. If it turns out to be one of ours on an IP we had not seen, mark the IP
+        // and hang up: the miner's retry lands on Lazarus.
+        let on_authorize = |u: &str| -> bool {
+            let ident = canon(u);
+            let worker = u.split_once('.').map(|(_, w)| w.to_string()).unwrap_or_default();
+            if let Some(p) = lk(&self.proxied).get_mut(&id) {
+                p.user = u.to_string();
+                p.identity = ident.clone();
+                p.worker = worker;
+            }
+            if self.ident_grandfathered(&ident) {
+                lk(&self.grandfather).note_ip(ip, unix_now());
+                self.dirty.store(true, Ordering::Relaxed);
+                log::info!("overflow: {host} authorized as {} mid-relay, which is ours; closing so it reconnects to Lazarus", short(u));
+                return false;
+            }
+            log::info!("overflow: relay {host} authorized user={} -> {name}", short(u));
+            true
+        };
+        let sniff: Option<&dyn Fn(&str) -> bool> = if user.is_empty() { Some(&on_authorize) } else { None };
+        pump(miner, rdr, upstream, &initial, Some(&msg), idle, &stats, sniff);
         stats.done.store(true, Ordering::Relaxed);
         drop(updater);
+        let (user, since) = lk(&self.proxied).get(&id).map(|p| (p.user.clone(), p.since_unix)).unwrap_or((user, unix_now()));
         log::info!("overflow: relay ended {host} user={} -> {} after {}s, {} submits / {} accepted",
-            short(&user), name, unix_now().saturating_sub(lk(&self.proxied).get(&id).map(|p| p.since_unix).unwrap_or(unix_now())),
+            if user.is_empty() { "(never authorized)" } else { &user }, name, unix_now().saturating_sub(since),
             stats.submits.load(Ordering::Relaxed), stats.accepted.load(Ordering::Relaxed));
         Gate::Relayed
     }
@@ -789,9 +817,21 @@ pub fn probe(host: &str, port: u16) -> Result<(), String> {
     }
 }
 
+/// The username in a `mining.authorize` line, if that is what the line is.
+fn authorize_user(line: &str) -> Option<String> {
+    let v = serde_json::from_str::<Value>(line).ok()?;
+    if v.get("method").and_then(|m| m.as_str()) != Some("mining.authorize") {
+        return None;
+    }
+    v.get("params")?.as_array()?.first()?.as_str().map(|s| s.to_string())
+}
+
 /// The relay proper. `initial` (subscribe, authorize, anything read while waiting) goes
 /// to the upstream first; then miner lines flow up and upstream lines flow down until
 /// either side closes. Closing one side shuts the other so neither thread lingers.
+/// `on_authorize` sees the username of each `mining.authorize` the miner sends through the
+/// relay; returning `false` ends the relay without forwarding that line.
+#[allow(clippy::too_many_arguments)]
 pub fn pump(
     miner: TcpStream,
     miner_rdr: &mut BufReader<TcpStream>,
@@ -800,6 +840,7 @@ pub fn pump(
     message: Option<&str>,
     idle: Duration,
     stats: &Arc<RelayStats>,
+    on_authorize: Option<&dyn Fn(&str) -> bool>,
 ) {
     let _ = upstream.set_read_timeout(Some(idle));
     let _ = upstream.set_write_timeout(Some(Duration::from_secs(10)));
@@ -820,9 +861,12 @@ pub fn pump(
         Ok(m) => m,
         Err(_) => return,
     };
-    if let Some(m) = message {
-        let _ = miner_w.write_all(format!("{}\n", json!({"id": null, "method": "client.show_message", "params": [m]})).as_bytes());
-    }
+    // The banner waits until the miner has been authorized upstream. cgminer's
+    // initiate_stratum reads exactly one line after subscribe and requires it to be the
+    // result; a notification there is "JSON-RPC decode failed" and a hang-up (this, not
+    // the timeout, was the 0-second relay churn of 9 Sep 2026). After the authorize reply
+    // every firmware is in its steady-state loop, where unknown methods are ignored.
+    let mut pending_msg = message.map(|m| format!("{}\n", json!({"id": null, "method": "client.show_message", "params": [m]})));
     // upstream -> miner
     let down_stats = stats.clone();
     let miner_shut = match miner.try_clone() {
@@ -850,6 +894,13 @@ pub fn pump(
             if miner_w.write_all(line.as_bytes()).is_err() {
                 break;
             }
+            if pending_msg.is_some() && is_true_result(&line) {
+                if let Some(m) = pending_msg.take() {
+                    if miner_w.write_all(m.as_bytes()).is_err() {
+                        break;
+                    }
+                }
+            }
         }
         let _ = miner_shut.shutdown(Shutdown::Both);
     });
@@ -870,6 +921,13 @@ pub fn pump(
         if line.contains("mining.submit") {
             stats.submits.fetch_add(1, Ordering::Relaxed);
         }
+        if let Some(cb) = on_authorize {
+            if let Some(u) = authorize_user(&line) {
+                if !cb(&u) {
+                    break;
+                }
+            }
+        }
         if up_w.write_all(line.as_bytes()).is_err() {
             break;
         }
@@ -881,6 +939,15 @@ pub fn pump(
 /// A `{"id": n, "result": true}` after the handshake is an accepted share. The first two
 /// ids are subscribe/authorize on every firmware we know, but a miner may number them
 /// differently, so this is an estimate for the status row, not accounting.
+/// A reply with an id whose result is literally `true`: the authorize answer during the
+/// handshake, a share accept afterwards. Either way the miner is past `initiate_stratum`.
+fn is_true_result(line: &str) -> bool {
+    let Ok(v) = serde_json::from_str::<Value>(line) else { return false };
+    v.get("method").is_none()
+        && v.get("id").map(|i| !i.is_null()).unwrap_or(false)
+        && v.get("result").and_then(|r| r.as_bool()) == Some(true)
+}
+
 fn is_accept(line: &str) -> bool {
     let Ok(v) = serde_json::from_str::<Value>(line) else { return false };
     if v.get("method").is_some() {
@@ -1133,6 +1200,11 @@ mod tests {
         let joined = got.concat();
         assert!(joined.contains("deadbeef"), "miner must see the upstream's extranonce, got {joined}");
         assert!(joined.contains("client.show_message"), "miner is told it is relayed");
+        // cgminer reads one line after subscribe and requires it to be the result
+        assert!(got[0].contains("\"id\":1") && got[0].contains("deadbeef"), "first line down must be the subscribe result: {}", got[0]);
+        let auth_at = got.iter().position(|l| l.contains("\"id\":2")).expect("authorize reply");
+        let msg_at = got.iter().position(|l| l.contains("client.show_message")).unwrap();
+        assert!(msg_at > auth_at, "banner only after the authorize reply: {joined}");
         assert!(joined.contains("under 32%"), "message names the configured threshold, not a stale literal: {joined}");
         assert!(!joined.contains("{pct}") && !joined.contains("{upstream}"), "placeholders filled: {joined}");
         assert!(joined.contains("mining.notify"));
@@ -1288,10 +1360,124 @@ mod tests {
         let mut l = String::new();
         rdr.read_line(&mut l).unwrap();
         assert!(l.contains("deadbeef") || l.contains("show_message"), "{l}");
-        assert!(t0.elapsed() >= AUTHORIZE_WAIT - Duration::from_millis(200));
+        let waited = t0.elapsed();
+        assert!(waited >= AUTHORIZE_WAIT - Duration::from_millis(200), "held for the pipelined authorize: {waited:?}");
+        assert!(waited < Duration::from_millis(1500), "a miner that waits for its subscribe reply must get it before its own handshake timeout: {waited:?}");
         miner.shutdown(Shutdown::Both).unwrap();
         drop(rdr);
         assert!(matches!(h.join().unwrap(), Gate::Relayed));
+    }
+
+    /// cgminer / intminer: subscribe, wait for the reply, then authorize. The identity
+    /// arrives through the relay and must still end up on the session row.
+    #[test]
+    fn gate_relays_firmware_that_waits_for_the_subscribe_reply_and_learns_its_identity() {
+        let (port, seen) = fake_upstream();
+        let ov = overflow_for_test(vec![up("riptide", port)], "force");
+        let (mut miner, gw_side) = miner_pair();
+        let ov2 = ov.clone();
+        let h = thread::spawn(move || {
+            let mut sock = gw_side;
+            let mut rdr = BufReader::new(sock.try_clone().unwrap());
+            let mut first = String::new();
+            rdr.read_line(&mut first).unwrap();
+            ov2.gate(11, &mut sock, &mut rdr, &first, "203.0.113.11".parse().unwrap(), "203.0.113.11:6000", Duration::from_secs(30), &|u| u.split('.').next().unwrap_or("").to_string())
+        });
+        miner.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        let mut rdr = BufReader::new(miner.try_clone().unwrap());
+        miner.write_all(b"{\"id\":1,\"method\":\"mining.subscribe\",\"params\":[\"cgminer/6.0.44\"]}\n").unwrap();
+        // wait for the subscribe result before saying who we are
+        let t0 = Instant::now();
+        // strict, like cgminer's initiate_stratum: the very first line must be our result
+        let mut sub = String::new();
+        assert!(rdr.read_line(&mut sub).unwrap() > 0, "closed before subscribe reply");
+        assert!(sub.contains("\"id\":1") && sub.contains("deadbeef"), "first line must be the subscribe result, got {sub}");
+        assert!(t0.elapsed() < Duration::from_millis(1500), "subscribe reply took {:?}", t0.elapsed());
+        // the row exists already, anonymous
+        thread::sleep(Duration::from_millis(50));
+        assert_eq!(ov.proxied_json()["proxied"][0]["identity"], "");
+        miner.write_all(b"{\"id\":2,\"method\":\"mining.authorize\",\"params\":[\"bc1qlate.rig2\",\"x\"]}\n").unwrap();
+        let auth = loop {
+            let mut l = String::new();
+            assert!(rdr.read_line(&mut l).unwrap() > 0, "closed before authorize reply");
+            if l.contains("\"id\":2") { break l; }
+        };
+        assert!(auth.contains("true"), "authorize relayed and answered: {auth}");
+        thread::sleep(Duration::from_millis(50));
+        let row = ov.proxied_json()["proxied"][0].clone();
+        assert_eq!(row["identity"], "bc1qlate", "identity learned off the relay: {row}");
+        assert_eq!(row["worker"], "rig2");
+        assert_eq!(row["user"], "bc1qlate.rig2");
+        assert!(seen.lock().unwrap().iter().any(|l| l.contains("mining.authorize") && l.contains("bc1qlate.rig2")), "authorize reached the upstream");
+        // the banner follows the authorize reply, never precedes the handshake
+        let mut banner = String::new();
+        rdr.read_line(&mut banner).unwrap();
+        assert!(banner.contains("client.show_message"), "banner right after authorize reply: {banner}");
+        // and work flows
+        miner.write_all(b"{\"id\":3,\"method\":\"mining.submit\",\"params\":[\"bc1qlate.rig2\",\"job1\",\"0000000000000000\",\"0000000000000000\",\"0000000000000000\"]}\n").unwrap();
+        let mut l = String::new();
+        rdr.read_line(&mut l).unwrap();
+        assert!(l.contains("\"id\":3") && l.contains("true"), "{l}");
+        miner.shutdown(Shutdown::Both).unwrap();
+        drop(rdr);
+        assert!(matches!(h.join().unwrap(), Gate::Relayed));
+    }
+
+    /// One of our miners shows up from an IP we have not seen, with wait-for-reply firmware.
+    /// We only learn it is ours once the authorize passes through the relay: mark the IP,
+    /// hang up, and its retry is served locally.
+    #[test]
+    fn grandfathered_identity_learned_mid_relay_is_bounced_home() {
+        let (port, seen) = fake_upstream();
+        let ov = overflow_for_test(vec![up("riptide", port)], "force");
+        ov.note_share("bc1qours", "198.51.100.1".parse().unwrap());
+        let new_ip: IpAddr = "203.0.113.77".parse().unwrap();
+        assert!(!ov.ip_grandfathered(new_ip));
+        let (mut miner, gw_side) = miner_pair();
+        let ov2 = ov.clone();
+        let h = thread::spawn(move || {
+            let mut sock = gw_side;
+            let mut rdr = BufReader::new(sock.try_clone().unwrap());
+            let mut first = String::new();
+            rdr.read_line(&mut first).unwrap();
+            ov2.gate(12, &mut sock, &mut rdr, &first, new_ip, "203.0.113.77:6001", Duration::from_secs(30), &|u| u.split('.').next().unwrap_or("").to_string())
+        });
+        miner.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        let mut rdr = BufReader::new(miner.try_clone().unwrap());
+        miner.write_all(b"{\"id\":1,\"method\":\"mining.subscribe\",\"params\":[\"cgminer/6.0.44\"]}\n").unwrap();
+        loop {
+            let mut l = String::new();
+            assert!(rdr.read_line(&mut l).unwrap() > 0);
+            if l.contains("\"id\":1") { break; }
+        }
+        miner.write_all(b"{\"id\":2,\"method\":\"mining.authorize\",\"params\":[\"bc1qours.rig9\",\"x\"]}\n").unwrap();
+        // the gateway hangs up instead of authorizing us at the other pool
+        let mut eof = false;
+        for _ in 0..20 {
+            let mut l = String::new();
+            match rdr.read_line(&mut l) {
+                Ok(0) => { eof = true; break; }
+                Ok(_) => continue,
+                Err(_) => break,
+            }
+        }
+        assert!(eof, "miner socket should be closed once the identity is known to be ours");
+        assert!(matches!(h.join().unwrap(), Gate::Relayed));
+        assert!(!seen.lock().unwrap().iter().any(|l| l.contains("bc1qours")), "our address was not authorized upstream");
+        assert!(ov.ip_grandfathered(new_ip), "the IP is ours now");
+        assert_eq!(ov.status_json()["proxied_sessions"], 0);
+        // the retry is served locally without touching the network
+        let (mut miner2, gw2) = miner_pair();
+        let ov3 = ov.clone();
+        let h2 = thread::spawn(move || {
+            let mut sock = gw2;
+            let mut rdr = BufReader::new(sock.try_clone().unwrap());
+            let mut first = String::new();
+            rdr.read_line(&mut first).unwrap();
+            ov3.gate(13, &mut sock, &mut rdr, &first, new_ip, "203.0.113.77:6002", Duration::from_secs(30), &|u| u.to_string())
+        });
+        miner2.write_all(b"{\"id\":1,\"method\":\"mining.subscribe\",\"params\":[\"cgminer/6.0.44\"]}\n").unwrap();
+        assert!(matches!(h2.join().unwrap(), Gate::Local(_)));
     }
 
     #[test]
