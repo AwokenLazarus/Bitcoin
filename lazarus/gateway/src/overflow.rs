@@ -66,7 +66,8 @@ pub struct OverflowCfg {
     /// Grandfather set on disk; defaults next to the gateway config.
     #[serde(default)]
     pub state_file: Option<PathBuf>,
-    /// `client.show_message` text; `{upstream}` is replaced with the pool name.
+    /// `client.show_message` text; `{upstream}` is replaced with the pool name and
+    /// `{pct}` with `enter_pct`.
     #[serde(default)]
     pub message: Option<String>,
     #[serde(default)]
@@ -631,8 +632,9 @@ impl Overflow {
             .cfg
             .message
             .clone()
-            .unwrap_or_else(|| "Lazarus is at capacity (over 30% of BLAKE2b network hashrate). This connection is relayed to {upstream}, which is the pool paying you for it. Reconnect later to return to Lazarus.".into())
-            .replace("{upstream}", &name);
+            .unwrap_or_else(|| "Lazarus is at capacity (holding under {pct}% of BLAKE2b network hashrate). This connection is relayed to {upstream}, which is the pool paying you for it. Reconnect later to return to Lazarus.".into())
+            .replace("{upstream}", &name)
+            .replace("{pct}", &fmt_pct(self.cfg.enter_pct));
         let stats = Arc::new(RelayStats::default());
         let miner = match sock.try_clone() {
             Ok(m) => m,
@@ -900,6 +902,11 @@ fn short(s: &str) -> String {
     s.chars().filter(|c| c.is_ascii_graphic()).take(48).collect()
 }
 
+/// `25.0` → `25`, `27.5` → `27.5`: for the miner-facing message.
+fn fmt_pct(p: f64) -> String {
+    if p.fract() == 0.0 { format!("{}", p as i64) } else { format!("{p}") }
+}
+
 fn lk<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
 }
@@ -1126,6 +1133,8 @@ mod tests {
         let joined = got.concat();
         assert!(joined.contains("deadbeef"), "miner must see the upstream's extranonce, got {joined}");
         assert!(joined.contains("client.show_message"), "miner is told it is relayed");
+        assert!(joined.contains("under 32%"), "message names the configured threshold, not a stale literal: {joined}");
+        assert!(!joined.contains("{pct}") && !joined.contains("{upstream}"), "placeholders filled: {joined}");
         assert!(joined.contains("mining.notify"));
         // a submit goes up and its accept comes back
         miner.write_all(b"{\"id\":3,\"method\":\"mining.submit\",\"params\":[\"bc1qstranger.rig1\",\"job1\",\"0000000000000000\",\"0000000000000000\",\"0000000000000000\"]}\n").unwrap();
