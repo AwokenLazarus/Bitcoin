@@ -526,6 +526,24 @@
       windowNote = `<p class="note callout">Next-block pay is the window % (${pctSmart(wp)}), not hashrate. The window is ${nblocks} network-blocks of accepted work (TIDES). A newly connected high-hashrate miner does not take a matching slice of the next block.</p>`;
     }
     const billedFee = m.est_fee_percent != null ? m.est_fee_percent : (m.fee_percent_path != null ? m.fee_percent_path : feeForPath(m.fee_path));
+    const carryBtc = Number(m.carry_btc) || 0;
+    const floorBtc = Number(m.min_payout_btc) || 0;
+    // The "Next block" figure is Prime's own output for this address. Zero with work in the
+    // window means the share is under the floor this block; it accrues as carry, never lost.
+    const nextBlockNote = (m) => {
+      const path = m.fee_path ? " · your window work is on the " + feePct(m.fee_percent_path != null ? m.fee_percent_path : feeForPath(m.fee_path)) + " " + (m.fee_path === "stratum" ? "public-stratum" : "own-gateway") + " rate" : "";
+      if (m.next_block_exact && !(Number(m.block_payout_btc) > 0) && Number(m.window_work) > 0) {
+        return `under the ${floorBtc > 0 ? amt(floorBtc) + " " : ""}minimum output this block · your share is carried forward, not forfeited${path}`;
+      }
+      if (m.next_block_exact && carryBtc > 0 && Number(m.block_payout_btc) > 0) {
+        return `your output in the coinbase Prime dictates now · includes carry from earlier blocks as room allows${path}`;
+      }
+      return `your output in the coinbase Prime dictates now${path}`;
+    };
+    const carryCell = (m) =>
+      carryBtc > 0
+        ? `<div><dt>Carried forward</dt><dd title="${amtExact(carryBtc)}">${amt(carryBtc)}${money(carryBtc)}<small>earned in earlier blocks, under the minimum output · paid on top of your next output that clears it</small></dd></div>`
+        : "";
     const nWorkers = (m.workers || []).length + relayed.length;
     const nPending = Number(m.immature_blocks) || (m.blocks_found || []).filter((b) => payStatus(b) === "immature").length;
     const nPaid = (m.blocks_found || []).length - (m.blocks_found || []).filter((b) => payStatus(b) === "immature").length;
@@ -550,7 +568,8 @@
           <div><dt>This window</dt><dd>${winShareCell(m)}<small>${Number(m.window_shares) > 0 ? num(m.window_work) + " work still in the TIDES window" : "no accepted shares in the current window"}</small></dd></div>
           <div><dt>Payout window</dt><dd>${pctSmart(wp)}<small>${num(m.window_work)} work · what the next block pays</small></dd></div>
           <div><dt>Est. / day</dt><dd title="${amtExact(m.est_btc_day)}">${amt(m.est_btc_day)}${money(m.est_btc_day)}<small>at current difficulty, after the ${feePct(billedFee)} fee · once the window matches this hashrate</small></dd></div>
-          <div><dt>Next block</dt><dd title="${amtExact(m.block_payout_btc)}">${amt(m.block_payout_btc)}${money(m.block_payout_btc)}<small>your output in the coinbase Prime dictates now${m.fee_path ? " · your window work is on the " + feePct(m.fee_percent_path != null ? m.fee_percent_path : feeForPath(m.fee_path)) + " " + (m.fee_path === "stratum" ? "public-stratum" : "own-gateway") + " rate" : ""}</small></dd></div>
+          <div><dt>Next block</dt><dd title="${amtExact(m.block_payout_btc)}">${amt(m.block_payout_btc)}${money(m.block_payout_btc)}<small>${nextBlockNote(m)}</small></dd></div>
+          ${carryCell(m)}
           <div><dt>Pending</dt><dd title="${amtExact(m.immature_btc)}">${amt(m.immature_btc)}${money(m.immature_btc)}<small>${nPending ? nPending + " block" + (nPending === 1 ? "" : "s") + " maturing · see Payouts" : "nothing waiting to mature"}</small></dd></div>
           <div><dt>Paid</dt><dd title="${amtExact(m.paid_btc)}">${amt(m.paid_btc)}${money(m.paid_btc)}<small>matured coinbase outputs, lifetime</small></dd></div>
         </dl>
@@ -568,10 +587,10 @@
         <dl class="ticker slim four">
           <div><dt>Pending</dt><dd title="${amtExact(m.immature_btc)}">${amt(m.immature_btc)}${money(m.immature_btc)}<small>${nPending ? "in " + nPending + " block" + (nPending === 1 ? "" : "s") + " under " + num(m.maturity_confs || 100) + " confirmations" : "no coinbase outputs maturing"}</small></dd></div>
           <div><dt>Paid</dt><dd title="${amtExact(m.paid_btc)}">${amt(m.paid_btc)}${money(m.paid_btc)}<small>${nPaid} matured block${nPaid === 1 ? "" : "s"}, lifetime</small></dd></div>
-          <div><dt>Next block</dt><dd title="${amtExact(m.block_payout_btc)}">${amt(m.block_payout_btc)}${money(m.block_payout_btc)}<small>${pctSmart(wp)} of the window · in the next coinbase</small></dd></div>
+          <div><dt>Next block</dt><dd title="${amtExact(m.block_payout_btc)}">${amt(m.block_payout_btc)}${money(m.block_payout_btc)}<small>${pctSmart(wp)} of the window · in the next coinbase${Number(m.carry_btc) > 0 ? " · plus carry as room allows" : ""}</small></dd></div>
           <div><dt>Est. / day</dt><dd title="${amtExact(m.est_btc_day)}">${amt(m.est_btc_day)}${money(m.est_btc_day)}<small>after the ${feePct(billedFee)} fee at current difficulty</small></dd></div>
         </dl>
-        <p class="note callout">There is no pool balance and nothing to withdraw. Every block the pool finds pays this address directly in its coinbase; the output becomes spendable ${num(m.maturity_confs || 100)} blocks later.</p>
+        <p class="note callout">There is no pool balance and nothing to withdraw. Every block the pool finds pays this address directly in its coinbase; the output becomes spendable ${num(m.maturity_confs || 100)} blocks later.${Number(m.carry_btc) > 0 ? ` <strong>${amt(m.carry_btc)}</strong> you earned in earlier blocks was under the minimum output and is carried forward: it is added to your next output that clears the floor, paid out of the pool's share.` : ""}</p>
         ${pendingTable(m, ctx)}
         ${paidTable(m, ctx)}
       </div>`;

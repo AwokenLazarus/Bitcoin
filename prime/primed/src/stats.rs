@@ -70,6 +70,8 @@ pub fn build(shared: &Shared) -> Value {
                 "credits": m.credits,
                 "share_percent": if w.total_work() > 0 { 100.0 * m.work as f64 / w.total_work() as f64 } else { 0.0 },
                 "payout_sats": payouts.get(m.identity.as_str()).copied().unwrap_or(0),
+                // unplaced earnings from earlier blocks, paid on top once they clear the floor
+                "carry_sats": m.carry,
                 "payable": payable,
                 "hashrate_ghs": ghs(rw),
                 "last_share_s": ts.saturating_sub(u64::from(last.max(m.last_ts))),
@@ -190,6 +192,12 @@ pub fn build(shared: &Shared) -> Value {
             "sample_value": sample_value,
             "sample_pool_sats": split.pool_sats,
             "sample_fee_sats": split.fee_sats,
+            // carry the next block would pay out, and what it would defer
+            "sample_carry_paid_sats": split.carry_paid,
+            "sample_deferred_sats": split.unpaid.iter().filter(|u| u.defers()).map(|u| u.earned).sum::<u64>(),
+            // everything the pool is holding for miners under the floor, and for whom
+            "carry_total_sats": w.total_carry(),
+            "carry_holders": w.carries().len(),
         },
         "hashrate": { "pool_ghs": ghs(recent_total), "window_s": HASHRATE_WINDOW_S },
         "totals": {

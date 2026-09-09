@@ -89,13 +89,20 @@ async fn confirm_blocks(shared: &Shared, tip_height: u32) {
                 let conf = h.get("confirmations").and_then(|v| v.as_i64()).unwrap_or(0);
                 if conf > 0 {
                     log::info!("block {hash} at {height} confirmed ({conf})");
+                    let mut reapply = Vec::new();
                     shared.update_block(&hash, |r| {
                         if let Some(kind) = r.kind.strip_prefix("orphan:") {
                             log::info!("block {} at {} is back in the main chain", r.hash, r.height);
                             r.kind = kind.to_string();
+                            // mark_orphan reversed its carry; put it back
+                            reapply = r.carry_delta.clone();
                         }
                         r.settled = true;
                     });
+                    if !reapply.is_empty() {
+                        shared.ledger.lock().unwrap().settle_carry(&reapply);
+                        log::info!("block {hash}: re-applied carry for {} identities", reapply.len());
+                    }
                 } else if conf < 0 {
                     mark_orphan(shared, &hash, height, "is not in the main chain");
                 }
@@ -126,5 +133,15 @@ fn mark_orphan(shared: &Shared, hash: &str, height: u32, why: &str) {
         return;
     }
     log::warn!("block {hash} at {height} {why}");
-    shared.update_block(hash, |r| r.kind = format!("orphan:{}", r.kind));
+    let mut reverse = Vec::new();
+    shared.update_block(hash, |r| {
+        r.kind = format!("orphan:{}", r.kind);
+        // an orphan's coinbase paid nobody: give back the carry it cleared and take back
+        // the earnings it deferred (the work is still in the window to be paid properly)
+        reverse = r.carry_delta.iter().map(|(i, d)| (i.clone(), -*d)).collect();
+    });
+    if !reverse.is_empty() {
+        shared.ledger.lock().unwrap().settle_carry(&reverse);
+        log::info!("block {hash}: reversed carry for {} identities", reverse.len());
+    }
 }

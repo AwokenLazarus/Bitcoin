@@ -37,10 +37,11 @@ window = 8
 # Floor on the window target in difficulty-1 shares; only matters where network
 # difficulty is tiny (regtest). 0 disables.
 window-min-work = 0
-# Dust floor for split outputs, sats.
+# Floor for split outputs, sats. An identity under it is not paid this block; what it
+# earned is carried forward and paid on top of its first output that clears the floor.
 min-payout = 546
-# DATUM / Prime-gateway fee in basis points (50 = 0.5%).
-fee-bps = 50
+# DATUM / Prime-gateway fee in basis points (0 = free).
+fee-bps = 0
 # Public house-stratum fee (200 = 2%). 0 inherits fee-bps.
 stratum-fee-bps = 200
 # Signing-key prefixes (hex) of the pool's own public-stratum gateway.

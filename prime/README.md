@@ -199,12 +199,25 @@ The window holds credits `(ts, identity, work, height)` until its total work rea
 `window × network difficulty` (converted to difficulty-1 shares), then trims from the oldest
 end. A split of value `V` pays `fee = V × fee_bps / 10000` to the pool, then distributes the
 rest to identities proportional to their work in the window, dropping outputs below
-`min-payout` (their share stays with the pool and is reported as unpaid). The output list is
-capped by count and size so the coinbase fits in a gateway's largest coinbase class, with the
-pool's output — fee plus whatever could not be placed — appended last. The list therefore
+`min-payout`. The output list is capped by count and size so the coinbase fits in a
+gateway's largest coinbase class, with the pool's output — fee plus whatever could not be
+placed — appended last. The list therefore
 sums to the requested value; a stock gateway pays it verbatim and only adds a pool output of
 its own when the template turns out to be worth more, and `lazarus-gateway`, which writes
 exactly the list it is given, pays the fee instead of burning it.
+
+**Carry.** What a block cannot place is not forfeited. When a block is found, every identity
+the split dropped for being under `min-payout` (or over the size budget) has what it earned
+in that block added to its *carry*, a per-identity balance persisted in `window.json`. Carry
+rides on top of the earned share in every later split and is paid — out of the pool's
+remainder, which is where those sats went — the first time earned + carry clears the floor.
+Because it is paid from the remainder, a large backlog drains over several blocks rather
+than ever pushing the outputs past the template value. An identity whose work has aged out
+of the window entirely is still a payee while its carry alone clears the floor. Carry is
+adjusted by *deltas* when a block is found (so two blocks found off snapshots that predate
+each other's settlement still add up), reversed if the block is orphaned, and re-applied if
+it comes back. Each `BlockRecord` carries `carry_paid` and `carry_delta`; `stats.json`
+reports `carry_sats` per miner and `carry_total_sats` / `carry_holders` for the window.
 
 Stock gateways build several coinbase sizes and hand small miners those with room for only
 the first few outputs, or none at all while a coinbaser reply is in flight. The Prime

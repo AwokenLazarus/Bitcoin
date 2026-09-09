@@ -376,6 +376,10 @@ def fetch_prime_window():
             "window_work": work,
             "window_percent": float(m.get("share_percent") or 0),
             "window_sats": int(m.get("payout_sats") or 0),
+            # Earned in earlier blocks but not yet placed in a coinbase (under the payout
+            # floor, or no room). Prime pays it on top of the next output that fits, so it
+            # is already inside window_sats when it is; this is what is still waiting.
+            "carry_sats": int(m.get("carry_sats") or 0),
             "payable": bool(m.get("payable")),
             # Ledger writes one credit row per accepted share (no coalesce), so this
             # is accepted shares still inside the TIDES window for this identity.
@@ -410,6 +414,12 @@ def fetch_prime_window():
         "sample_value": int(win.get("sample_value") or 0),
         "sample_fee_sats": int(win.get("sample_fee_sats") or 0),
         "sample_pool_sats": int(win.get("sample_pool_sats") or 0),
+        # TIDES carry: earnings the floor kept out of earlier coinbases, held per identity
+        # and paid on top of the next output that clears it (out of the pool's remainder).
+        "sample_carry_paid_sats": int(win.get("sample_carry_paid_sats") or 0),
+        "sample_deferred_sats": int(win.get("sample_deferred_sats") or 0),
+        "carry_total_sats": int(win.get("carry_total_sats") or 0),
+        "carry_holders": int(win.get("carry_holders") or 0),
         "hashrate_ghs": float((data.get("hashrate") or {}).get("pool_ghs") or 0),
         "hashrate_window_s": int((data.get("hashrate") or {}).get("window_s") or 0),
         "uptime_s": int(data.get("uptime_s") or 0),
@@ -787,6 +797,7 @@ def prime_info_for(address):
         "window_percent": 0.0,
         "window_sats": 0,
         "window_shares": 0,
+        "carry_sats": 0,
         "payable": False,
         "window_peak": int(row["peak_work"] or 0),
         "window_last_ts": int(row["last_ts"] or 0),
@@ -2554,10 +2565,18 @@ def prime_coinbaser_preview():
     miners.sort(key=lambda m: -m["sats"])
     miner_sats = sum(m["sats"] for m in miners)
     unpaid = [
-        {"address": addr, "work": int(info.get("window_work") or 0), "share_percent": float(info.get("window_percent") or 0), "reason": "below min payout" if info.get("payable") else "address not payable"}
+        {
+            "address": addr,
+            "work": int(info.get("window_work") or 0),
+            "share_percent": float(info.get("window_percent") or 0),
+            "carry_sats": int(info.get("carry_sats") or 0),
+            "reason": "under the payout floor · carried forward" if info.get("payable") else "address not payable",
+        }
         for addr, info in by.items()
-        if int(info.get("window_sats") or 0) <= 0 and int(info.get("window_work") or 0) > 0
+        if int(info.get("window_sats") or 0) <= 0 and (int(info.get("window_work") or 0) > 0 or int(info.get("carry_sats") or 0) > 0)
     ]
+    carry_total = int(meta.get("carry_total_sats") or 0)
+    carry_paid = int(meta.get("sample_carry_paid_sats") or 0)
     pool_sats = int(meta.get("sample_pool_sats") or max(0, value - miner_sats))
     fee_sats = int(meta.get("sample_fee_sats") or 0)
     pool_addr = (meta.get("pool") or {}).get("address") or ""
@@ -2591,6 +2610,12 @@ def prime_coinbaser_preview():
         # and stratum rates, weighted by whose work fills the window.
         "effective_fee_percent": (100.0 * fee_sats / value) if value else 0.0,
         "unplaced_sats": max(0, pool_sats - fee_sats),
+        # Carry from earlier blocks riding in these outputs (comes out of the pool's
+        # remainder, which is why pool_sats can be under fee_sats), and what is still held.
+        "carry_paid_sats": carry_paid,
+        "carry_total_sats": carry_total,
+        "carry_holders": int(meta.get("carry_holders") or 0),
+        "deferred_sats": int(meta.get("sample_deferred_sats") or 0),
         "pool_address": pool_addr,
         "window_multiple": meta.get("window_multiple") or 8,
         "window_fill_percent": meta.get("fill_percent") or 0,
@@ -2984,9 +3009,16 @@ def miner_payload(address):
         "est_btc_day": est,
         "est_btc_week": est * 7,
         "ttf_seconds": ttf_s,
-        # The exact output primed would put in the next coinbase for this address, when it
-        # has one; otherwise the proportional estimate.
-        "block_payout_btc": (int(pinfo.get("window_sats") or 0) / 1e8) if pinfo.get("window_sats") else SUBSIDY * (1 - path_fee / 100.0) * round_share,
+        # The exact output primed would put in the next coinbase for this address. When
+        # Prime knows the address at all, this is its figure even if that is zero (under
+        # the payout floor: the earnings then accrue as carry instead of being paid). The
+        # proportional estimate is only for an address Prime has not seen.
+        "block_payout_btc": (int(pinfo.get("window_sats") or 0) / 1e8) if pinfo else SUBSIDY * (1 - path_fee / 100.0) * round_share,
+        "next_block_exact": bool(pinfo),
+        # Earned in earlier blocks, not yet placed; paid on top of the next output that
+        # clears the floor. Zero once it has been paid.
+        "carry_btc": int(pinfo.get("carry_sats") or 0) / 1e8,
+        "min_payout_btc": int(((state.get("prime_meta") or {}).get("pool") or {}).get("min_payout") or 0) / 1e8,
         "fee_path": pinfo.get("fee_path") or "",
         "fee_percent_path": path_fee,
         "est_fee_percent": path_fee,

@@ -29,7 +29,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 pub mod split;
-pub use split::{Payee, Split, SplitParams};
+pub use split::{Payee, Split, SplitParams, Unpaid, UnpaidReason};
 
 /// Work that arrived before dual-fee tagging. Split as DATUM (the lower fee).
 pub const SOURCE_UNKNOWN: u8 = 0;
@@ -84,6 +84,10 @@ pub struct MinerStat {
     pub stratum_work: u64,
     pub credits: u64,
     pub last_ts: u32,
+    /// Sats earned in earlier blocks that no coinbase has placed yet (under the payout
+    /// floor or over the size budget). Paid on top of the earned share once it fits.
+    #[serde(default)]
+    pub carry: u64,
 }
 
 /// The sliding share window and identity table. Pure in-memory state.
@@ -95,6 +99,8 @@ pub struct Window {
     totals: HashMap<u32, (u64, u64, u32)>, // work, credit rows, last ts
     total_work: u64,
     target_work: u64,
+    /// Unplaced earnings per identity; see [`MinerStat::carry`]. Only non-zero entries.
+    carry: HashMap<u32, u64>,
     pub lifetime_shares: u64,
     pub lifetime_work: u64,
 }
@@ -239,7 +245,51 @@ impl Window {
         }
     }
 
-    /// Per-identity totals, largest first.
+    /// Carry (unplaced earnings from earlier blocks) held for one identity.
+    pub fn carry_of(&self, identity: &str) -> u64 {
+        self.ident_index.get(identity).and_then(|i| self.carry.get(i)).copied().unwrap_or(0)
+    }
+
+    /// Sum of all carry the pool is holding for miners.
+    pub fn total_carry(&self) -> u64 {
+        self.carry.values().fold(0u64, |a, &b| a.saturating_add(b))
+    }
+
+    /// Every identity with carry, largest first.
+    pub fn carries(&self) -> Vec<(String, u64)> {
+        let mut v: Vec<(String, u64)> =
+            self.carry.iter().map(|(&i, &s)| (self.idents[i as usize].clone(), s)).collect();
+        v.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        v
+    }
+
+    /// Set an identity's carry outright (seeding, or an operator correction).
+    pub fn set_carry(&mut self, identity: &str, sats: u64) {
+        let i = self.intern(identity);
+        if sats == 0 {
+            self.carry.remove(&i);
+        } else {
+            self.carry.insert(i, sats);
+        }
+    }
+
+    /// Move an identity's carry by `delta` sats, saturating at zero. Returns the new carry.
+    /// Deltas (not assignments) are what a found block applies, so two blocks found off
+    /// snapshots that both predate the other's settlement still add up correctly.
+    pub fn adjust_carry(&mut self, identity: &str, delta: i64) -> u64 {
+        let i = self.intern(identity);
+        let cur = self.carry.get(&i).copied().unwrap_or(0);
+        let new = if delta >= 0 { cur.saturating_add(delta as u64) } else { cur.saturating_sub(delta.unsigned_abs()) };
+        if new == 0 {
+            self.carry.remove(&i);
+        } else {
+            self.carry.insert(i, new);
+        }
+        new
+    }
+
+    /// Per-identity totals, largest first. Identities with carry but no work left in the
+    /// window are included (work 0) so their carry can still be paid.
     pub fn miners(&self) -> Vec<MinerStat> {
         let mut stratum: HashMap<u32, u64> = HashMap::new();
         for c in &self.credits {
@@ -256,9 +306,22 @@ impl Window {
                 stratum_work: stratum.get(&i).copied().unwrap_or(0).min(work),
                 credits,
                 last_ts,
+                carry: self.carry.get(&i).copied().unwrap_or(0),
             })
             .collect();
-        v.sort_by(|a, b| b.work.cmp(&a.work).then_with(|| a.identity.cmp(&b.identity)));
+        for (&i, &carry) in &self.carry {
+            if carry > 0 && !self.totals.contains_key(&i) {
+                v.push(MinerStat {
+                    identity: self.idents[i as usize].clone(),
+                    work: 0,
+                    stratum_work: 0,
+                    credits: 0,
+                    last_ts: 0,
+                    carry,
+                });
+            }
+        }
+        v.sort_by(|a, b| b.work.cmp(&a.work).then_with(|| b.carry.cmp(&a.carry)).then_with(|| a.identity.cmp(&b.identity)));
         v
     }
 
@@ -274,6 +337,10 @@ struct Meta {
     target_work: u64,
     lifetime_shares: u64,
     lifetime_work: u64,
+    /// Carry per identity (see [`MinerStat::carry`]). Money the pool holds for miners, so
+    /// it lives in the atomically-written meta file rather than the append-only rows.
+    #[serde(default)]
+    carry: std::collections::BTreeMap<String, u64>,
 }
 
 /// Durable [`Window`]: identities, credit rows, and a small meta file on disk.
@@ -311,6 +378,15 @@ impl Ledger {
                 }
             }
         }
+        // after the identity table so a carried identity already on file keeps its index;
+        // one not on file (seeded by hand) is interned and written on the next flush
+        let mut new_idents = Vec::new();
+        for (identity, sats) in &meta.carry {
+            if !window.ident_index.contains_key(identity) {
+                new_idents.push(identity.clone());
+            }
+            window.set_carry(identity, *sats);
+        }
 
         let credits_path = dir.join(Self::CREDITS);
         let mut rows_on_disk = 0u64;
@@ -332,10 +408,45 @@ impl Ledger {
         let credits_out = BufWriter::new(OpenOptions::new().create(true).append(true).open(&credits_path)?);
         let idents_out = BufWriter::new(OpenOptions::new().create(true).append(true).open(&idents_path)?);
         let mut l = Ledger { dir, window, credits_out, idents_out, rows_on_disk, dirty: false };
+        for identity in new_idents {
+            l.idents_out.write_all(identity.as_bytes())?;
+            l.idents_out.write_all(b"\n")?;
+            l.dirty = true;
+        }
         if l.rows_on_disk > l.window.len() as u64 + 8192 {
             l.compact()?;
         }
         Ok(l)
+    }
+
+    /// Apply a found block's carry adjustments (see [`Split::carry_delta`]) and schedule a
+    /// flush. Returns the identities touched with their new carry.
+    pub fn settle_carry(&mut self, delta: &[(String, i64)]) -> Vec<(String, u64)> {
+        let mut out = Vec::with_capacity(delta.len());
+        for (identity, d) in delta {
+            if *d == 0 {
+                continue;
+            }
+            let known = self.window.ident_index.contains_key(identity);
+            let new = self.window.adjust_carry(identity, *d);
+            if !known {
+                // adjust_carry interned it; keep the identity file in step
+                let _ = self.idents_out.write_all(identity.as_bytes()).and_then(|_| self.idents_out.write_all(b"\n"));
+            }
+            out.push((identity.clone(), new));
+            self.dirty = true;
+        }
+        out
+    }
+
+    /// Set one identity's carry outright and schedule a flush.
+    pub fn set_carry(&mut self, identity: &str, sats: u64) {
+        let known = self.window.ident_index.contains_key(identity);
+        self.window.set_carry(identity, sats);
+        if !known {
+            let _ = self.idents_out.write_all(identity.as_bytes()).and_then(|_| self.idents_out.write_all(b"\n"));
+        }
+        self.dirty = true;
     }
 
     pub fn dir(&self) -> &Path {
@@ -381,6 +492,7 @@ impl Ledger {
             target_work: self.window.target_work(),
             lifetime_shares: self.window.lifetime_shares,
             lifetime_work: self.window.lifetime_work,
+            carry: self.window.carries().into_iter().collect(),
         };
         write_atomic(&self.dir.join(Self::META), &serde_json::to_vec_pretty(&meta)?)?;
         self.dirty = false;
@@ -485,6 +597,14 @@ pub struct BlockRecord {
     /// The split that should have been (or was) paid, identity → sats.
     pub split: Vec<(String, u64)>,
     pub pool_sats: u64,
+    /// Carry from earlier blocks included in this block's outputs (out of the pool's share).
+    #[serde(default)]
+    pub carry_paid: u64,
+    /// Carry adjustments this block applied: identity → signed sats. Negative for carry paid
+    /// out in this coinbase, positive for earnings it could not place. Reversed if the block
+    /// is orphaned, re-applied if it comes back.
+    #[serde(default)]
+    pub carry_delta: Vec<(String, i64)>,
     /// Confirmed in the node's main chain.
     pub settled: bool,
     /// Outcome of this Prime's own `submitblock` (the gateway submits too): `pending`,
@@ -703,6 +823,56 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
+    /// Carry is money the pool holds for miners: it must survive a restart exactly, and an
+    /// identity whose rows have all aged out must still be a payee for its carry.
+    #[test]
+    fn carry_survives_restart_and_outlives_the_window() {
+        let dir = std::env::temp_dir().join(format!("tides-test-{}-{}", std::process::id(), line!()));
+        let _ = fs::remove_dir_all(&dir);
+        {
+            let mut l = Ledger::open(&dir).unwrap();
+            l.set_target(100);
+            l.credit("bc1qsmall", 10, 1, 100, SOURCE_DATUM).unwrap();
+            l.credit("bc1qbig", 90, 1, 101, SOURCE_DATUM).unwrap();
+            // a found block that could not place `small`, and one that paid `big` some carry
+            let touched = l.settle_carry(&[("bc1qsmall".into(), 700), ("bc1qbig".into(), -5)]);
+            assert_eq!(touched, vec![("bc1qsmall".into(), 700), ("bc1qbig".into(), 0)]);
+            assert_eq!(l.settle_carry(&[("bc1qsmall".into(), 300), ("bc1qnew".into(), 42)]).len(), 2);
+            assert_eq!(l.window.carry_of("bc1qsmall"), 1_000);
+            assert_eq!(l.window.total_carry(), 1_042);
+            // `small`'s rows age out, its carry does not
+            for i in 0..20 {
+                l.credit("bc1qbig", 10, 2, 200 + i, SOURCE_DATUM).unwrap();
+            }
+            assert_eq!(l.window.work_of("bc1qsmall"), 0);
+            let m = l.window.miners();
+            let small = m.iter().find(|m| m.identity == "bc1qsmall").expect("carry-only identity is listed");
+            assert_eq!((small.work, small.carry), (0, 1_000));
+            l.persist_window().unwrap();
+        }
+        let mut l = Ledger::open(&dir).unwrap();
+        assert_eq!(l.window.carry_of("bc1qsmall"), 1_000);
+        assert_eq!(l.window.carry_of("bc1qnew"), 42);
+        assert_eq!(l.window.carry_of("bc1qbig"), 0);
+        assert_eq!(l.window.carries(), vec![("bc1qsmall".to_string(), 1_000), ("bc1qnew".to_string(), 42)]);
+        // the reloaded identity table is consistent: a seeded identity was appended once
+        assert_eq!(l.window.identities().iter().filter(|i| *i == "bc1qnew").count(), 1);
+        // and the split pays the carry-only identity once its carry clears the floor, out
+        // of the pool's fee (with a 0% fee and nothing unplaced there is no remainder to
+        // pay it from, and it would simply wait for a block that has one)
+        let p = SplitParams { fee_bps: 100, stratum_fee_bps: 100, min_payout: 500, max_outputs: 512, output_budget_bytes: 14_000 };
+        let s = l.window.split(1_000_000, &p, |i| Some(i.as_bytes().to_vec()));
+        let small = s.payees.iter().find(|x| x.identity == "bc1qsmall").expect("paid from carry alone");
+        assert_eq!((small.sats, small.carry), (1_000, 1_000));
+        assert!(s.unpaid.iter().any(|u| u.identity == "bc1qnew" && u.sats == 42));
+        assert_eq!(s.pool_sats + s.paid_sats(), 1_000_000);
+        assert_eq!(s.pool_sats, s.fee_sats - 1_000);
+        // an orphan reverses the delta and saturates at zero rather than going negative
+        l.settle_carry(&[("bc1qnew".into(), -100)]);
+        assert_eq!(l.window.carry_of("bc1qnew"), 0);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn persist_window_makes_restart_a_noop() {
         let dir = std::env::temp_dir().join(format!("tides-test-{}-{}", std::process::id(), line!()));
@@ -798,6 +968,8 @@ mod tests {
             owed_sats: 0,
             split: vec![("bc1q".into(), 3)],
             pool_sats: 0,
+            carry_paid: 0,
+            carry_delta: vec![],
             settled: true,
             submit: "accepted".into(),
             gateway: "ab".into(),
@@ -822,6 +994,8 @@ mod tests {
             owed_sats: 0,
             split: vec![],
             pool_sats: 0,
+            carry_paid: 0,
+            carry_delta: vec![],
             settled: kind == "split",
             submit: "accepted".into(),
             gateway: gw.into(),
