@@ -15,8 +15,8 @@
   "verify_shares": "enforce",
   "overflow": {
     "mode": "auto",
-    "enter_pct": 32,
-    "exit_pct": 27,
+    "enter_pct": 25,
+    "exit_pct": 22,
     "hold_polls": 3,
     "poll_secs": 30,
     "grandfather_hours": 24,

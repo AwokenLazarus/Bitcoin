@@ -162,10 +162,10 @@
     const share = Number(ov.share_pct);
     const ups = upstreamList(ov);
     el.innerHTML =
-      `<strong>Overflow is on.</strong> Lazarus holds ${Number.isFinite(share) ? share.toFixed(1) : "\u2014"}% of the network hashrate, over the ${Number(ov.enter_pct) || 32}% line we hold ourselves to. ` +
+      `<strong>Overflow is on.</strong> Lazarus holds ${Number.isFinite(share) ? share.toFixed(1) : "\u2014"}% of the network hashrate, over the ${Number(ov.enter_pct) || 25}% line we hold ourselves to. ` +
       `Miners already here keep mining here. A <em>new</em> miner pointing at our stratum is relayed to ${ups.length ? ups.join(", ") : "another BLAKE2b pool"} and is paid by that pool, not by us` +
       (ov.proxied_sessions ? ` — ${num(ov.proxied_sessions)} connection${ov.proxied_sessions === 1 ? "" : "s"} relayed right now.` : ".") +
-      ` Own-gateway (DATUM) miners are never relayed. New miners come back to Lazarus once we are under ${Number(ov.exit_pct) || 27}%. <a href="#pools">About those pools</a>.`;
+      ` Own-gateway (DATUM) miners are never relayed. New miners come back to Lazarus once we are under ${Number(ov.exit_pct) || 22}%. <a href="#pools">About those pools</a>.`;
     el.hidden = false;
   }
   // The "Other pools" cards are the overflow upstreams. When the gateway is health-checking
@@ -178,7 +178,7 @@
       share.hidden = !(ov && ov.meter_ok && Number.isFinite(s));
       if (!share.hidden) {
         share.innerHTML = `Lazarus holds <b>${s.toFixed(1)}%</b> of the network right now` +
-          (ov.active ? ` — over the ${Number(ov.enter_pct) || 32}% line, so new stratum miners are being relayed.` : ` — under the ${Number(ov.enter_pct) || 32}% line, so nobody is being relayed.`);
+          (ov.active ? ` — over the ${Number(ov.enter_pct) || 25}% line, so new stratum miners are being relayed.` : ` — under the ${Number(ov.enter_pct) || 25}% line, so nobody is being relayed.`);
       }
     }
     document.querySelectorAll(".pool-card[data-pool]").forEach((card) => {
