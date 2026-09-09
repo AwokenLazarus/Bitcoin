@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 
 use clap::Parser;
 use lazarus_protocol::cbtx;
-use lazarus_protocol::coinbaser::{parse_coinbaser_v2, CoinbaserV2};
+use lazarus_protocol::coinbaser::{parse_coinbaser_v2, CoinbaserOutput, CoinbaserV2};
 use lazarus_protocol::handshake;
 use lazarus_protocol::keys::{generate_pool_keys, generate_session};
 use lazarus_protocol::mining::{self, CoinbaserRequest, PowSubmit, SUB_BLOCKNOTIFY};
@@ -425,7 +425,42 @@ struct Template {
     /// against them before its job is published.
     weightlimit: Option<u64>,
     tx_weight: u64,
+    /// Transactions dropped from the node's template (and their fees) so the coinbase
+    /// fits under `weightlimit`. Zero when the node left enough room.
+    trimmed_txs: u32,
+    trimmed_fees: u64,
     prev_block: [u8; 32],
+}
+
+/// Block header plus the tx-count varint, in weight units: what a block costs before any
+/// transaction is in it.
+const BLOCK_OVERHEAD_WEIGHT: u64 = 4 * 80 + 4 * 9;
+
+/// BIP141 witness commitment output script for a block whose coinbase has an all-zero
+/// witness nonce (which is what `cbtx::coinbase_witness` writes): OP_RETURN, 36 bytes,
+/// `aa21a9ed`, then sha256d(witness merkle root || nonce). The coinbase's own leaf is
+/// zero by definition.
+fn witness_commitment_script(wtxids: &[[u8; 32]]) -> Vec<u8> {
+    let mut leaves = Vec::with_capacity(wtxids.len() + 1);
+    leaves.push([0u8; 32]);
+    leaves.extend_from_slice(wtxids);
+    let root = pow::merkle_root_from_txids(&leaves);
+    let mut pre = [0u8; 64];
+    pre[..32].copy_from_slice(&root);
+    let commit = pow::sha256d(&pre);
+    let mut s = vec![0x6a, 0x24, 0xaa, 0x21, 0xa9, 0xed];
+    s.extend_from_slice(&commit);
+    s
+}
+
+/// Weight of the coinbase a split would produce on this template: what `build_template`
+/// must keep free so the assembled block is not bad-blk-weight.
+fn coinbase_weight(height: u32, tag: &str, extra1: &[u8; 4], cb: &CoinbaserV2, has_witness_commit: bool) -> u64 {
+    let mut extra = extra1.to_vec(); extra.extend_from_slice(&[0u8; 8]);
+    let wit = if has_witness_commit { Some(&[0u8; 38][..]) } else { None };
+    let leg = cbtx::coinbase_legacy(height, tag, &extra, cb, wit);
+    let w = cbtx::coinbase_witness(height, tag, &extra, cb, wit);
+    3 * leg.len() as u64 + w.len() as u64
 }
 
 /// One template plus one coinbase: what a miner is actually handed.
@@ -945,25 +980,48 @@ fn split_for_value(st: &Shared, value: u64, wait: Duration) -> Option<CoinbaserV
     if cb.outputs.len() < 2 { return None; }
     Some(cb.scale_to(value))
 }
+fn hash32_rev(h: &str) -> Option<[u8; 32]> {
+    let mut b = hex::decode(h).ok()?;
+    if b.len() != 32 { return None; }
+    b.reverse();
+    let mut a = [0u8; 32]; a.copy_from_slice(&b);
+    Some(a)
+}
+
 /// Everything in a `getblocktemplate` that does not depend on the coinbase.
-fn build_template(tpl: &Value, tag: &str) -> Option<Template> {
+///
+/// `coinbase_reserve` is the weight the caller's coinbase will add. The node picked
+/// `transactions` assuming a modest coinbase, and a pool split can be thousands of bytes;
+/// when header + coinbase + transactions would exceed the template's `weightlimit`, the
+/// tail of the transaction list is dropped until it fits and the dropped fees come off
+/// `value`. Templates list parents before children, so cutting from the tail never
+/// strands a dependent. Publishing a slightly smaller block beats publishing nothing:
+/// a gateway that refuses every template leaves its miners hashing a stale job for as
+/// long as the mempool stays full.
+fn build_template(tpl: &Value, tag: &str, coinbase_reserve: u64) -> Option<Template> {
     let prev = hex_rev(tpl.get("previousblockhash")?.as_str()?)?;
     let bits = bits_le(tpl.get("bits")?.as_str()?)?;
     let height = tpl.get("height")?.as_u64()? as u32;
-    let value = tpl.get("coinbasevalue")?.as_u64()?;
+    let mut value = tpl.get("coinbasevalue")?.as_u64()?;
     let curtime = tpl.get("curtime")?.as_u64()? as u32;
     let version = tpl.get("version")?.as_u64()? as i32;
-    let txs = tpl.get("transactions")?.as_array()?.clone();
-    let mut merkle = Vec::new(); let mut tx_hexes = Vec::new();
-    for tx in &txs {
-        if let Some(h) = tx.get("txid").or_else(|| tx.get("hash")).and_then(|x| x.as_str()) {
-            if let Ok(mut b) = hex::decode(h) {
-                if b.len() == 32 { b.reverse(); let mut a = [0u8; 32]; a.copy_from_slice(&b); merkle.push(a); }
-            }
-        }
-        if let Some(d) = tx.get("data").and_then(|x| x.as_str()) {
-            if let Ok(raw) = hex::decode(d) { tx_hexes.push(raw); }
-        }
+    let txs = tpl.get("transactions")?.as_array()?;
+    let mut merkle = Vec::with_capacity(txs.len());
+    let mut wtxids = Vec::with_capacity(txs.len());
+    let mut tx_hexes = Vec::with_capacity(txs.len());
+    let mut weights = Vec::with_capacity(txs.len());
+    let mut fees = Vec::with_capacity(txs.len());
+    for tx in txs {
+        // `txid` is the merkle leaf; `hash` is the wtxid (equal to txid for legacy txs)
+        // and feeds the witness commitment.
+        let Some(txid) = tx.get("txid").or_else(|| tx.get("hash")).and_then(|x| x.as_str()).and_then(hash32_rev) else { continue };
+        let wtxid = tx.get("hash").and_then(|x| x.as_str()).and_then(hash32_rev).unwrap_or(txid);
+        let Some(raw) = tx.get("data").and_then(|x| x.as_str()).and_then(|d| hex::decode(d).ok()) else { continue };
+        merkle.push(txid);
+        wtxids.push(wtxid);
+        tx_hexes.push(raw);
+        weights.push(tx.get("weight").and_then(|w| w.as_u64()).unwrap_or(0));
+        fees.push(tx.get("fee").and_then(|f| f.as_u64()).unwrap_or(0));
     }
     // A template whose txids and bodies do not line up would give a block whose body
     // does not match its merkle root. Refuse it rather than publish it.
@@ -971,7 +1029,42 @@ fn build_template(tpl: &Value, tag: &str) -> Option<Template> {
         log::warn!("template txid/data mismatch: txs={} txids={} bodies={}", txs.len(), merkle.len(), tx_hexes.len());
         return None;
     }
-    let wit = tpl.get("default_witness_commitment").and_then(|x| x.as_str()).and_then(|h| hex::decode(h).ok());
+    let mut wit = tpl.get("default_witness_commitment").and_then(|x| x.as_str()).and_then(|h| hex::decode(h).ok());
+    let weightlimit = tpl.get("weightlimit").and_then(|x| x.as_u64());
+    let mut tx_weight: u64 = weights.iter().sum();
+    let mut trimmed_txs = 0u32;
+    let mut trimmed_fees = 0u64;
+    if let Some(limit) = weightlimit {
+        let budget = limit.saturating_sub(BLOCK_OVERHEAD_WEIGHT + coinbase_reserve);
+        if tx_weight > budget {
+            // Dropping transactions changes the wtxid set, so the node's witness commitment
+            // no longer applies and we must derive our own. Prove the derivation against the
+            // node's value on the untrimmed set first; if it does not agree, do not trim —
+            // the caller's weight check will then refuse the job as before, which is a
+            // stale template rather than an invalid block.
+            let ours = witness_commitment_script(&wtxids);
+            let commit_ok = match wit.as_deref() {
+                Some(theirs) => theirs == ours.as_slice(),
+                None => wtxids.iter().zip(&merkle).all(|(w, t)| w == t),
+            };
+            if !commit_ok {
+                log::error!("witness commitment self-check failed at height {height}; cannot trim template (ours {}, node {:?})", hex::encode(&ours), wit.as_ref().map(hex::encode));
+            } else {
+                while tx_weight > budget && !merkle.is_empty() {
+                    merkle.pop(); wtxids.pop(); tx_hexes.pop();
+                    tx_weight -= weights.pop().unwrap_or(0);
+                    let f = fees.pop().unwrap_or(0);
+                    trimmed_fees = trimmed_fees.saturating_add(f);
+                    value = value.saturating_sub(f);
+                    trimmed_txs += 1;
+                }
+                if wit.is_some() {
+                    wit = Some(witness_commitment_script(&wtxids));
+                }
+                log::info!("template height={height}: trimmed {trimmed_txs} txs ({trimmed_fees} sat fees) so a {coinbase_reserve}-weight coinbase fits under weightlimit {limit}; {} txs / {tx_weight} weight kept", merkle.len());
+            }
+        }
+    }
     Some(Template {
         height,
         value,
@@ -980,13 +1073,15 @@ fn build_template(tpl: &Value, tag: &str) -> Option<Template> {
         version,
         curtime,
         branches: pow::merkle_branches_for_coinbase(&merkle),
+        txn_count: merkle.len() as u32 + 1,
         txids: merkle,
         tx_hexes,
-        txn_count: txs.len() as u32 + 1,
         witness_commit: wit,
         tag: tag.to_string(),
-        weightlimit: tpl.get("weightlimit").and_then(|x| x.as_u64()),
-        tx_weight: txs.iter().filter_map(|t| t.get("weight").and_then(|w| w.as_u64())).sum(),
+        weightlimit,
+        tx_weight,
+        trimmed_txs,
+        trimmed_fees,
         prev_block: prev,
     })
 }
@@ -1555,6 +1650,8 @@ fn audit_json(st: &Shared) -> String {
         "output_sum": j.cb.outputs.iter().map(|o| o.sats).sum::<u64>(),
         "outputs": j.outputs(),
         "tx_count": j.txn_count(),
+        "tx_trimmed": j.tpl.trimmed_txs,
+        "tx_trimmed_fees": j.tpl.trimmed_fees,
         "block_bytes": blk.len(),
         "witness_commit": j.tpl.witness_commit.as_ref().map(|w| hex::encode(w)),
         "coinbase_outputs": outs,
@@ -1810,10 +1907,18 @@ fn gbt_loop(st: Arc<Shared>) {
                     // Solo needs no coinbaser round trip: the split is this template's
                     // value less our fee, and the miner's half depends on who is asking,
                     // so the jobs are built per identity once the template is in place.
-                    match build_template(&tpl, &tag) {
+                    // Reserve room for a two-output coinbase with the longest standard
+                    // scripts (P2WSH/P2TR, 34 bytes).
+                    let has_wc = tpl.get("default_witness_commitment").is_some();
+                    let two_outs = CoinbaserV2 { id: 0, outputs: vec![
+                        CoinbaserOutput { sats: 0, script: vec![0u8; 34] },
+                        CoinbaserOutput { sats: 0, script: vec![0u8; 34] },
+                    ] };
+                    let reserve = coinbase_weight(height as u32, &tag, &st.extra1, &two_outs, has_wc);
+                    match build_template(&tpl, &tag, reserve) {
                         Some(t) => {
                             let t = Arc::new(t);
-                            log::info!("published solo template height={} txs~{} value={} fee_bps={}", t.height, t.txn_count, t.value, st.solo_fee_bps);
+                            log::info!("published solo template height={} txs~{} value={} fee_bps={}{}", t.height, t.txn_count, t.value, st.solo_fee_bps, if t.trimmed_txs > 0 { format!(" (trimmed {} txs)", t.trimmed_txs) } else { String::new() });
                             st.published_outputs.store(2, Ordering::Relaxed);
                             st.published_height.store(height, Ordering::Relaxed);
                             *lk(&st.tpl) = Some(t);
@@ -1841,15 +1946,25 @@ fn gbt_loop(st: Arc<Shared>) {
                             Some((cb, scaled))
                         }
                     });
-                    if let Some((cb, scaled)) = split {
+                    if let Some((cb, mut scaled)) = split {
                         let seq = st.job_seq.fetch_add(1, Ordering::Relaxed);
                         let jid = (seq % 255) as u8 + 1;
-                        let built = build_template(&tpl, &tag)
+                        // Size this split's coinbase first so the template can make room
+                        // for it; if transactions had to go, their fees are no longer ours
+                        // to pay out and the split is scaled down to the smaller value.
+                        let has_wc = tpl.get("default_witness_commitment").is_some();
+                        let reserve = coinbase_weight(height as u32, &tag, &st.extra1, &cb, has_wc);
+                        let built = build_template(&tpl, &tag, reserve)
                             .map(Arc::new)
-                            .and_then(|t| coinbase_job(&t, &st.extra1, cb, jid, seq, None));
+                            .and_then(|t| {
+                                let cb = if cb.value_sum() > t.value { scaled = true; cb.scale_to(t.value) } else { cb };
+                                coinbase_job(&t, &st.extra1, cb, jid, seq, None)
+                            });
                         if let Some(j) = built {
                             let j = Arc::new(j);
-                            log::info!("published job height={} txs~{} outputs={} value={}{}", j.height(), j.txn_count(), j.outputs(), value, if scaled { " (scaled)" } else { "" });
+                            log::info!("published job height={} txs~{} outputs={} value={}{}{}", j.height(), j.txn_count(), j.outputs(), j.tpl.value,
+                                if scaled { " (scaled)" } else { "" },
+                                if j.tpl.trimmed_txs > 0 { format!(" (trimmed {} txs, {} sat)", j.tpl.trimmed_txs, j.tpl.trimmed_fees) } else { String::new() });
                             st.published_outputs.store(j.outputs(), Ordering::Relaxed);
                             st.published_height.store(height, Ordering::Relaxed);
                             let line = notify_line(&j);
@@ -2076,7 +2191,132 @@ mod limits_tests {
             "transactions": [],
             "weightlimit": 4_000_000u64,
         });
-        Arc::new(build_template(&gbt, "Lazarus/solo").expect("template"))
+        Arc::new(build_template(&gbt, "Lazarus/solo", 0).expect("template"))
+    }
+
+    /// A template with `n` fake legacy transactions of `weight` each, all paying `fee`,
+    /// under a fork-sized `weightlimit`. The witness commitment is derived the same way
+    /// the node would, so the trim path's self-check has something to agree with.
+    fn packed_template(n: usize, weight: u64, fee: u64, weightlimit: u64) -> Value {
+        let txs: Vec<Value> = (0..n).map(|i| {
+            let data = vec![i as u8; (weight / 4) as usize];
+            let txid = hex::encode({ let mut h = pow::sha256d(&data); h.reverse(); h });
+            json!({"data": hex::encode(&data), "txid": txid, "hash": txid, "weight": weight, "fee": fee, "sigops": 0, "depends": []})
+        }).collect();
+        let wtxids: Vec<[u8; 32]> = txs.iter().map(|t| hash32_rev(t["hash"].as_str().unwrap()).unwrap()).collect();
+        json!({
+            "previousblockhash": "00000000000000000002a7c4c1e48d76c5a37902165a270156b7a8d72728a054",
+            "bits": "1d00ffff",
+            "height": 970_026,
+            "coinbasevalue": 313_400_289u64,
+            "curtime": 1_788_915_824u64,
+            "version": 2,
+            "transactions": txs,
+            "weightlimit": weightlimit,
+            "default_witness_commitment": hex::encode(witness_commitment_script(&wtxids)),
+        })
+    }
+
+    #[test]
+    fn witness_commitment_matches_the_known_empty_block_vector() {
+        // Every coinbase-only segwit block carries this exact commitment output.
+        assert_eq!(
+            hex::encode(witness_commitment_script(&[])),
+            "6a24aa21a9ede2f61c3f71d1defd3fa999dfa36953755c690689799962b48bebd836974e8cf9"
+        );
+    }
+
+    #[test]
+    fn template_is_left_alone_when_the_coinbase_fits() {
+        // 100 txs * 7_000 = 700_000 weight; 12_336-weight coinbase fits under 800_000.
+        let gbt = packed_template(100, 7_000, 1_000, 800_000);
+        let t = build_template(&gbt, "Lazarus", 12_336).unwrap();
+        assert_eq!(t.trimmed_txs, 0);
+        assert_eq!(t.txids.len(), 100);
+        assert_eq!(t.value, 313_400_289);
+        assert_eq!(hex::encode(t.witness_commit.as_ref().unwrap()), gbt["default_witness_commitment"].as_str().unwrap());
+    }
+
+    #[test]
+    fn overweight_template_is_trimmed_from_the_tail_and_still_publishes() {
+        // Tonight's failure shape: the node filled to 799_880 of 800_000 and the 91-output
+        // coinbase (12_336 weight) pushed the block over. Before this, the gateway refused
+        // every template and miners hashed a stale job for as long as the mempool stayed full.
+        let n = 114usize; let w = 7_000u64; let fee = 1_000u64;
+        let gbt = packed_template(n, w, fee, 800_000); // 798_000 tx weight
+        let reserve = 12_336u64;
+        let t = build_template(&gbt, "Lazarus", reserve).unwrap();
+        assert!(t.trimmed_txs > 0, "must make room");
+        let kept = n as u64 - t.trimmed_txs as u64;
+        assert!(BLOCK_OVERHEAD_WEIGHT + reserve + kept * w <= 800_000, "fits after trim");
+        assert!(BLOCK_OVERHEAD_WEIGHT + reserve + (kept + 1) * w > 800_000, "drops no more than needed");
+        assert_eq!(t.trimmed_fees, t.trimmed_txs as u64 * fee);
+        assert_eq!(t.value, 313_400_289 - t.trimmed_fees, "dropped fees are not ours to pay");
+        assert_eq!(t.txids.len(), kept as usize);
+        assert_eq!(t.tx_hexes.len(), kept as usize);
+        assert_eq!(t.txn_count, kept as u32 + 1);
+        assert_eq!(t.tx_weight, kept * w);
+        // The commitment now covers exactly the kept wtxids.
+        let kept_wtxids: Vec<[u8; 32]> = gbt["transactions"].as_array().unwrap().iter().take(kept as usize)
+            .map(|x| hash32_rev(x["hash"].as_str().unwrap()).unwrap()).collect();
+        assert_eq!(t.witness_commit.as_deref().unwrap(), witness_commitment_script(&kept_wtxids).as_slice());
+        assert_ne!(hex::encode(t.witness_commit.as_ref().unwrap()), gbt["default_witness_commitment"].as_str().unwrap());
+        // And the job that used to be refused is now built, with a coinbase sized to the reserve.
+        let tpl = Arc::new(t);
+        let cb = CoinbaserV2 { id: 1, outputs: (0..91).map(|i| CoinbaserOutput { sats: 1, script: p2wpkh(i as u8) }).collect() };
+        let extra1 = [1u8, 2, 3, 4];
+        let real = coinbase_weight(tpl.height, &tpl.tag, &extra1, &cb, true);
+        assert!(real <= reserve, "test reserve {reserve} must cover a 91 x p2wpkh coinbase ({real})");
+        assert!(coinbase_job(&tpl, &extra1, cb, 1, 1, None).is_some());
+    }
+
+    #[test]
+    fn trim_refuses_when_the_witness_commitment_self_check_fails() {
+        let mut gbt = packed_template(114, 7_000, 1_000, 800_000);
+        gbt["default_witness_commitment"] = json!("6a24aa21a9ed0000000000000000000000000000000000000000000000000000000000000000");
+        let t = build_template(&gbt, "Lazarus", 12_336).unwrap();
+        assert_eq!(t.trimmed_txs, 0, "never derive a commitment we could not verify");
+        assert_eq!(t.txids.len(), 114);
+        // ...and the weight guard in coinbase_job still holds the line.
+        let cb = CoinbaserV2 { id: 1, outputs: (0..91).map(|i| CoinbaserOutput { sats: 1, script: p2wpkh(i as u8) }).collect() };
+        assert!(coinbase_job(&Arc::new(t), &[1, 2, 3, 4], cb, 1, 1, None).is_none());
+    }
+
+    /// Dev tool rather than a unit test: build a block from a saved `getblocktemplate`
+    /// with a forced coinbase reserve so the trim path runs, and write it out for the node
+    /// to judge in `getblocktemplate {"mode":"proposal"}` (a null result is acceptance).
+    ///
+    ///   LAZARUS_GBT=/tmp/gbt.json LAZARUS_RESERVE=100000 LAZARUS_OUT=/tmp/proposal.hex \
+    ///     cargo test -p lazarus-gateway trimmed_block_proposal -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn trimmed_block_proposal_from_saved_template() {
+        let path = std::env::var("LAZARUS_GBT").expect("LAZARUS_GBT=<getblocktemplate json>");
+        let out = std::env::var("LAZARUS_OUT").unwrap_or_else(|_| "/tmp/lazarus-proposal.hex".into());
+        let reserve: u64 = std::env::var("LAZARUS_RESERVE").ok().and_then(|s| s.parse().ok()).unwrap_or(100_000);
+        let gbt: Value = serde_json::from_str(&std::fs::read_to_string(&path).expect("read gbt")).expect("json");
+        let t = build_template(&gbt, "Lazarus", reserve).expect("template");
+        println!("height={} txs={} trimmed={} fees_dropped={} value={} tx_weight={}", t.height, t.txids.len(), t.trimmed_txs, t.trimmed_fees, t.value, t.tx_weight);
+        let cb = CoinbaserV2 { id: 1, outputs: vec![
+            CoinbaserOutput { sats: t.value - 1, script: p2wpkh(1) },
+            CoinbaserOutput { sats: 1, script: p2wpkh(2) },
+        ] };
+        let extra1 = [1u8, 2, 3, 4];
+        let j = coinbase_job(&Arc::new(t), &extra1, cb, 1, 1, None).expect("job fits");
+        let blk = assemble_block(&extra1, &j, &j.header);
+        std::fs::write(&out, hex::encode(&blk)).expect("write");
+        println!("wrote {} bytes of block to {out}", blk.len());
+    }
+
+    #[test]
+    fn coinbase_weight_matches_what_coinbase_job_checks() {
+        let cb = CoinbaserV2 { id: 1, outputs: (0..91).map(|i| CoinbaserOutput { sats: 1, script: p2wpkh(i as u8) }).collect() };
+        let extra1 = [9u8, 9, 9, 9];
+        let mut extra = extra1.to_vec(); extra.extend_from_slice(&[0u8; 8]);
+        let wit = [0u8; 38];
+        let leg = cbtx::coinbase_legacy(970_026, "Lazarus", &extra, &cb, Some(&wit));
+        let w = cbtx::coinbase_witness(970_026, "Lazarus", &extra, &cb, Some(&wit));
+        assert_eq!(coinbase_weight(970_026, "Lazarus", &extra1, &cb, true), 3 * leg.len() as u64 + w.len() as u64);
     }
 
     #[test]
