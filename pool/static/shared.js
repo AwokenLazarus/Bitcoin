@@ -435,6 +435,7 @@
           <td class="num"><span class="mature"><span>${num(confs)} / ${num(need)}</span><span class="mature-bar" style="--p:${p.toFixed(1)}%"></span></span></td>
           <td class="num">${num(left)}</td>
           <td>${eta}</td>
+          <td>${statusPill(left ? "immature" : "maturing")}</td>
           <td>${when(b.ts)}</td>
         </tr>`;
       })
@@ -443,7 +444,7 @@
         <div>
           <p class="kicker table-label">Pending · ${rows.length} block${rows.length === 1 ? "" : "s"} maturing</p>
           <p class="note">A coinbase output can be spent ${need} blocks after the block that carries it. Yours is already on chain; it just is not spendable yet.</p>
-          <div class="scroll${ctx.full ? "" : " tall"}"><table class="pending"><thead><tr><th class="num">Block</th><th class="num">Amount</th><th class="num">Confirmations</th><th class="num">Blocks to go</th><th>Spendable in</th><th>Found</th></tr></thead><tbody>${body}</tbody></table></div>
+          <div class="scroll${ctx.full ? "" : " tall"}"><table class="pending"><thead><tr><th class="num">Block</th><th class="num">Amount</th><th class="num">Confirmations</th><th class="num">Blocks to go</th><th>Spendable in</th><th>Status</th><th>Found</th></tr></thead><tbody>${body}</tbody></table></div>
         </div>`;
   }
 
