@@ -53,8 +53,9 @@ stratum-fee-bps = 300
 datum-rebate-bps = 100
 # Same, out of each dedicated-solo block's reward: when a block whose coinbase is tagged
 # solo-coinbase-tag and pays the pool script lands on chain, this share of its value is
-# credited to the DATUM miners then in the window. 0 turns it off.
-solo-rebate-bps = 100
+# credited to the DATUM miners then in the window. Off: dedicated solo keeps its own 2% fee
+# and owes nothing to the window.
+solo-rebate-bps = 0
 # solo-coinbase-tag = "Lazarus/solo"
 # Signing-key prefixes (hex) of the pool's own public-stratum gateway.
 # Remote DATUM users who run lazarus-gateway are not matched by UA — only

@@ -1,5 +1,5 @@
 {
-  "_comment": "Solo stratum for ASICs. Every miner gets its own coinbase: 97% to the address it authorises with, 3% to solo_fee_address (Prime books one of those three points as a DATUM rebate when the block lands). Nothing is credited to the TIDES window and nothing is owed after the block - the payout is the block. prime_port 0 keeps this instance standalone, so it cannot disturb the pooled gateways or Prime.",
+  "_comment": "Solo stratum for ASICs. Every miner gets its own coinbase: 98% to the address it authorises with, 2% to solo_fee_address. Nothing is credited to the TIDES window and nothing is owed after the block - the payout is the block. prime_port 0 keeps this instance standalone, so it cannot disturb the pooled gateways or Prime.",
   "profile": "solo-asic",
   "mode": "solo",
   "stratum_listen": "0.0.0.0:23335",
@@ -12,7 +12,7 @@
   "rpc_cookie": "/home/umbrel/umbrel/app-data/bitcoin-knots/data/bitcoin/.cookie",
   "prime_host": "127.0.0.1",
   "prime_port": 0,
-  "solo_fee_bps": 300,
+  "solo_fee_bps": 200,
   "solo_fee_address": "<pool payout address>",
   "solo_data_dir": "/home/umbrel/blake2b/lazarus-solo/asic",
   "coinbase_tag": "Lazarus/solo",

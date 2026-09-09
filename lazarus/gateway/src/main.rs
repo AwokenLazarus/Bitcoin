@@ -2020,9 +2020,7 @@ fn main() {
             let addr = cfg.solo_fee_address.as_deref().unwrap_or("").trim().to_string();
             let script = identity_script(&addr)
                 .expect("solo mode needs solo_fee_address to be a payable address");
-            // 3%: 2 points kept by the pool, 1 point owed to DATUM miners (Prime's
-            // solo-rebate-bps books it when the block lands; see docs/datum-rebate-plan.md)
-            let bps = cfg.solo_fee_bps.unwrap_or(300);
+            let bps = cfg.solo_fee_bps.unwrap_or(200);
             assert!(bps > 0 && bps <= 10_000, "solo_fee_bps must be 1..=10000");
             (script, bps)
         }
@@ -2474,7 +2472,7 @@ mod limits_tests {
         assert_eq!(run_mode(Some("Solo")), Mode::Pooled, "only exactly \"solo\" turns on solo payouts");
         assert_eq!(run_mode(Some("solo")), Mode::Solo);
         assert_eq!(fee_for(312_500_000, 250), 7_812_500);
-        assert_eq!(fee_for(312_500_000, 300), 9_375_000, "the default solo fee on a subsidy-only block");
+        assert_eq!(fee_for(312_500_000, 200), 6_250_000, "the default solo fee on a subsidy-only block");
         assert_eq!(fee_for(312_500_000, 50), 1_562_500);
         assert_eq!(fee_for(0, 250), 0);
     }

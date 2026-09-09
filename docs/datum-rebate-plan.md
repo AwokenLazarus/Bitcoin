@@ -1,14 +1,15 @@
-# DATUM rebate: 3% stratum / 3% solo, one point credited to DATUM miners
+# DATUM rebate: 3% stratum, one point credited to DATUM miners
 
-Status: **code and UI ready, not deployed**. Nothing here is live; the live pool is still
-`stratum-fee-bps = 200`, `fee-bps = 0`, `solo_fee_bps = 200`, and the dashboard shows 0% / 2%
-because it reads those numbers from primed.
+Status: **live since 2026-09-09 16:04 UTC**. `stratum-fee-bps = 300`, `fee-bps = 0`,
+`datum-rebate-bps = 100`. Dedicated solo was left alone: `solo_fee_bps = 200` and
+`solo-rebate-bps = 0`. The dashboard reads every one of these numbers from primed.
 
 ## Goal
 
-Raise the public-stratum fee and the dedicated-solo fee from 2% to 3%, keep the pool's cut
-at 2%, and hand the new point to the miners who run their own DATUM gateway. DATUM work stays
-at 0% fee and is credited a share of every block's stratum fee on top of its own share.
+Raise the public-stratum fee from 2% to 3%, keep the pool's cut at 2%, and hand the new point
+to the miners who run their own DATUM gateway. DATUM work stays at 0% fee and is credited a
+share of every block's stratum fee on top of its own share. Dedicated solo is not part of
+this: it keeps its own 2% fee and owes nothing to the window.
 
 ## How it works
 
@@ -36,14 +37,15 @@ Only DATUM work with a payable script is eligible. If a window has **no** payabl
 the point is *deferred* into a `rebate_owed` balance and handed out with the next block that
 has one, so it never quietly stays with the pool.
 
-### Solo blocks
+### Solo blocks — capability, switched off
 
-The dedicated solo ports (`lazarus-gateway --mode solo`, `prime_port 0`) never talk to Prime.
-Their 3% fee output goes to the pool address. Prime's node poller now scans each new block one
-behind the tip (`primed/src/solo.rs`); a coinbase tagged `Lazarus/solo` that pays the pool
-script credits `coinbase_value × solo-rebate-bps / 10 000` to the DATUM miners in the window
-at that moment, as carry, the same way. Each is logged to `solo-rebates.jsonl` with the
-per-identity credits; the cursor is `solo-scan.json`; nothing is backfilled.
+Dedicated solo is deliberately outside the rebate: it stays at 2% and a solo block owes the
+window nothing. The machinery exists and is tested but is off (`solo-rebate-bps = 0`, the
+default): Prime's node poller can scan each new block one behind the tip
+(`primed/src/solo.rs`) and credit `coinbase_value × solo-rebate-bps / 10 000` from a coinbase
+tagged `Lazarus/solo` that pays the pool script to the DATUM miners then in the window, as
+carry, logging each to `solo-rebates.jsonl`. The cursor is `solo-scan.json` and nothing is
+ever backfilled, so turning the knob on cannot reach back over past blocks.
 
 ### Accounting
 
@@ -87,34 +89,30 @@ via carry, the pool nets the same ~6.7M. The pool output is ~9.7M in each coinba
 - 34 DATUM identities credited per block, including the ones under the floor: e.g. the
   identity earning 840 sats/block is also credited 196 sats/block and reaches the 10 000-sat
   floor in 10 blocks instead of 12, never having missed a rebate.
-- A 3.125 BTC solo block credits 3 125 000 sats across the same 34 identities (17 sats dust).
-- All-stratum window: 3 125 000 deferred to `rebate_owed`, credited with the next DATUM block.
+- All-stratum window: the point is deferred to `rebate_owed` and credited with the next block
+  that has payable DATUM work.
 
-Solo today: ~84 TH/s on port 23335 (≈1.9% of pool hashrate), 0 solo blocks found so far,
-so the solo credit is a small, occasional flow.
-
-## What changed (uncommitted)
+## What changed
 
 | Area | Change |
 |---|---|
 | `prime/tides/src/split.rs` | `SplitParams.datum_rebate_bps`; `compute(…, rebate_owed, …)`; `Split.{rebate_credits, rebate_sats, rebate_owed_credited, rebate_deferred}`; `rebate_credits()` helper; `carry_delta` includes credits; `rebate_delta`; carry-room fix; tests |
 | `prime/tides/src/lib.rs` | `Window.rebate_owed` (+ `Meta.rebate_owed` in `window.json`), `Ledger.settle_rebate/set_rebate_owed`, `BlockRecord.{rebate_credited, rebate_delta}`; restart test |
 | `prime/primed/src/config.rs` | `datum-rebate-bps`, `solo-rebate-bps`, `solo-coinbase-tag` (+ validation, test) |
-| `prime/primed/src/solo.rs` | new: solo-block observer crediting carry, `solo-rebates.jsonl`, tests |
+| `prime/primed/src/solo.rs` | new: solo-block observer crediting carry, `solo-rebates.jsonl`, tests (off unless `solo-rebate-bps > 0`) |
 | `prime/primed/src/node.rs` | calls `solo::scan` on tip change; orphan/return reverses/re-applies `rebate_delta` (credits ride in `carry_delta`) |
 | `prime/primed/src/session.rs` | coinbaser keeps its credits; block-found folds them into carry and settles `rebate_owed`; log lines |
 | `prime/primed/src/state.rs` | `CoinbaserBase.rebate_owed` snapshot |
 | `prime/primed/src/stats.rs` | `pool.datum_rebate_bps/solo_rebate_bps`, `window.sample_rebate_*`, `window.rebate_owed_sats`, `window.solo_rebates`, per-miner `rebate_sats` (next block's credit) |
-| `prime/prime.toml.example` | 300 / 100 / 100 documented |
-| `lazarus/gateway/src/main.rs` | solo fee default 200 → 300 (config still wins) |
-| `lazarus/solo-asic.json`, `lazarus/solo-gpu.json`, `docs/solo-mining-plan.md` | 300 bps |
+| `prime/prime.toml.example` | 300 / 100 documented, `solo-rebate-bps = 0` |
 | `pool/server.py` | `fees.{datum_rebate_percent, solo_rebate_percent, datum_uplift_percent, datum_work_percent, stratum_work_percent, datum_miners, rebate_owed_btc, sample_rebate_btc}`, `ths_btc_day_datum_bonus`, coinbaser `rebate_sats/rebate_percent/rebate_owed_sats`, per-miner `rebate_btc`/`est_datum_btc_day`/`est_bonus_btc_day`/`datum_uplift_percent`; `stratum_fee_percent` fallback 3.0 |
 | `pool/static/{index.html,pool.js,shared.js,pool.css,miner.js,miner.html}` | the advertising (below) |
 | `node/umbrel/mempool-theme/www/theme.js` | explorer's pool paragraph names the bonus and the live uplift |
 | `README.md` | fee line |
 
-Everything is default-off: a primed built from this tree with today's `lazarus-prime.toml`
-behaves exactly as now. An older primed reading a `window.json` with `rebate_owed` ignores it.
+Every piece is default-off: a primed built from this tree with a config that names none of the
+new keys behaves exactly as the old one, which is what made the rollback path a config edit.
+An older primed reading a `window.json` with `rebate_owed` ignores it.
 
 ## The advertising
 
@@ -158,39 +156,42 @@ Exercised end to end against a `stats.json` shaped like the one the new build se
 - rebate **off** (today's live `stats.json`, `datum_rebate_bps` absent): all fourteen elements
   hidden, fees read 0% / 2%, no bonus wording anywhere.
 
-## Rollout (when approved)
+## Rollout (done 2026-09-09)
 
-1. **Announce** to miners ahead of time (public stratum 2% → 3%, solo 2% → 3%, DATUM miners
-   are credited the point on every block, worth ≈ +21% on their share at today's split). Every
-   fee number and every line of bonus copy on the site follows primed, so the announcement and
-   the dashboard cannot disagree.
-2. **Build** `primed` and `lazarus-gateway` from this tree; run the suites
-   (`cargo test --workspace` in `prime/`, `cargo test` in `lazarus/gateway/`) — green now.
-3. **Prime** (`/home/umbrel/blake2b/etc/lazarus-prime.toml`):
+1. **Prime** (`/home/umbrel/blake2b/etc/lazarus-prime.toml`):
    ```toml
    stratum-fee-bps = 300
    datum-rebate-bps = 100
-   solo-rebate-bps = 100
+   solo-rebate-bps = 0
    ```
-   Restart `primed` (`kill -TERM` + `start-lazarus-prime.sh`; window, carry and the new
-   balance persist). This is the one step that needs a primed bounce — schedule it.
-4. **Solo gateways** (`lazarus-solo-asic.json`, `lazarus-solo-gpu.json`): `solo_fee_bps: 300`,
-   restart both solo instances. Pooled gateways are untouched.
-5. **Pool UI**: deploy `server.py` + `static/` (the `?v=datum1` bump is already in the HTML);
+   Binary built here (glibc 2.39 → the pool host's 2.41 runs it), validated with
+   `primed --config … check` against both the new and the old config before the swap, then
+   `kill -TERM` + relaunch on the same argv. **3–4s of downtime**, gateways reconnect on
+   their own; window, carry and `rebate_owed` all persisted through it. Binary and config
+   backups are `*.bak-predatum-20260909T160410Z`.
+2. **Solo gateways**: untouched at `solo_fee_bps: 200`.
+3. **Pool UI**: deploy `server.py` + `static/` (the `?v=datum1` bump is already in the HTML);
    `config.json` `stratum_fee_percent: 3.0` (fallback only; live values come from primed).
    Deploy `node/umbrel/mempool-theme/www/theme.js` to the explorer for the same copy there.
-6. **Verify**: coinbaser log shows `rebate_credit=… rebate_owed_out=…`; `stats.json`
-   `pool.stratum_fee_bps == 300`, `window.sample_rebate_sats ≈ 1% × stratum share × value`,
-   `window.sample_pool_sats` ≈ today's + that amount, per-miner `rebate_sats > 0` only for
-   DATUM identities. First found block: log line "credited N sats of DATUM rebate",
-   `blocks[].rebate_credited`, `carry_total_sats` up by ~3M, then back down on the next block
-   as `sample_carry_paid_sats` pays it.
-7. **Watch** the first solo block: `solo-rebates.jsonl` entry with per-identity credits.
+
+### Verified live, first minutes
+
+- `pool.stratum_fee_bps 300`, `datum_rebate_bps 100`, `solo_rebate_bps 0`.
+- Window unbroken across the bounce: 155 miners, 27 carry holders, `carry_total_sats 152 285`.
+- Sample block on a 3.125 BTC coinbase: `sample_fee_sats 8 950 927` (2.8643% of value = 3% of
+  the 95.477% of work that is stratum), `sample_rebate_sats 2 983 638` — exactly one of the
+  three points, 33.33% of the fee — credited across **37 identities**, summing to the pot.
+- Outputs still close exactly: 128 payouts + pool remainder = `sample_value`, delta 0.
+- DATUM work is earning **+21.11%** above its proportional share of the block.
+- What to watch on the first found block: log line "credited N sats of DATUM rebate",
+  `blocks[].rebate_credited`, `carry_total_sats` up by ~3M, then back down on the next block
+  as `sample_carry_paid_sats` pays it out.
 
 ## Rollback
 
-Set `datum-rebate-bps = 0`, `solo-rebate-bps = 0` (and `stratum-fee-bps = 200` if the fee
-itself is rolled back) and restart primed. Credits already in carry are still paid out
+Set `datum-rebate-bps = 0` (and `stratum-fee-bps = 200` if the fee itself is rolled back) and
+restart primed; the pre-deploy binary and config are on the host as
+`*.bak-predatum-20260909T160410Z`. Credits already in carry are still paid out
 normally (they are ordinary carry). A non-zero `rebate_owed` stays on file and is not handed
 out until re-enabled; `Ledger::set_rebate_owed` zeroes it if wanted.
 
@@ -202,9 +203,10 @@ out until re-enabled; `Ledger::set_rebate_owed` zeroes it if wanted.
 - **Coinbaser snapshot.** `CoinbaserBase` is rebuilt at most once a second; two blocks found
   within that second could both hand out the same `rebate_owed` (saturates at zero, bounded
   by the balance — normally 0).
-- **Reorg after a solo credit.** A solo block credited one-behind-tip and then orphaned is not
-  un-credited; the log has the per-identity amounts for a manual `settle_carry` reversal.
 - **Mixed identities.** An address with work on both paths pays 3% on its stratum part and is
   credited on its DATUM part; `fee_path` in stats is still the majority path.
-- **Concentration.** While DATUM is ~4% of the window the uplift is ≈ +23%. If that is not the
-  intent, `datum-rebate-bps` can be set lower than the extra point.
+- **Concentration.** While DATUM is ~4.5% of the window the uplift is ≈ +21%. If that is not
+  the intent, `datum-rebate-bps` can be set lower than the extra point.
+- **Solo rebate off.** `solo-rebate-bps = 0`, so a dedicated-solo block credits the window
+  nothing. Were it ever turned on, a solo block credited one behind the tip and then orphaned
+  would not be un-credited; the log has the per-identity amounts for a manual reversal.
