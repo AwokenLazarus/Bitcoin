@@ -2,7 +2,7 @@
 // (shared.js: minerCard); this file fetches, fills the summary strip and drives the tabs.
 (() => {
   const $ = (id) => document.getElementById(id);
-  const { esc, fmtHr, num, clock, amt, amtExact, draw, chartLegend, payStatus, minerCard, showMinerTab, MINER_TABS, EXPLORER } = window.LZ;
+  const { esc, fmtHr, num, pctSmart, clock, amt, amtExact, draw, chartLegend, payStatus, minerCard, showMinerTab, MINER_TABS, EXPLORER } = window.LZ;
 
   // Address from the path: /miner/<addr>. Fall back to ?addr= and #<addr> for old links.
   const m = location.pathname.match(/^\/miner\/([^/]+)/);
@@ -94,8 +94,8 @@
     chip("mc-hr", fmtHr(d.hr_ghs || 0));
     chip("mc-avg", Number(d.hr_1h_ghs) > 0 ? fmtHr(d.hr_1h_ghs) : "\u2014");
     $("mc-avg").title = "Average of the per-minute samples over the last hour" + (Number(d.hr_24h_ghs) > 0 ? " · 24h average " + fmtHr(d.hr_24h_ghs) : "");
-    chip("mc-share", hp.toFixed(hp >= 10 ? 1 : 2) + "%");
-    chip("mc-window", wp.toFixed(wp >= 10 ? 1 : 2) + "%");
+    chip("mc-share", pctSmart(hp));
+    chip("mc-window", pctSmart(wp));
     chip("mc-pending", amt(d.immature_btc), nPending ? "Pending · " + nPending + " block" + (nPending === 1 ? "" : "s") : "Pending");
     chip("mc-paid", amt(d.paid_btc));
     $("mc-pending").title = amtExact(d.immature_btc) + (nPending ? " in " + nPending + " block" + (nPending === 1 ? "" : "s") + " under " + num(d.maturity_confs || 100) + " confirmations" : "");

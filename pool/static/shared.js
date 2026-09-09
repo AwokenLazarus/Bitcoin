@@ -31,6 +31,15 @@
   // Block hashes lead with zeros; the tail is what identifies them.
   const shortHash = (h) => esc(h && h.length > 16 ? "\u2026" + h.slice(-12) : h || "\u2014");
   const pct = (n, d = 1) => (Number.isFinite(Number(n)) ? Number(n).toFixed(d) + "%" : "\u2014");
+  // Percent that stays legible for small miners: 23.6% / 1.25% / 0.032% — never "0.0%".
+  const pctSmart = (n) => {
+    const x = Number(n);
+    if (!Number.isFinite(x)) return "\u2014";
+    if (Math.abs(x) >= 10) return x.toFixed(1) + "%";
+    if (Math.abs(x) >= 1) return x.toFixed(2) + "%";
+    if (Math.abs(x) < 1e-9) return "0%";
+    return sig4(x) + "%";
+  };
   const ago = (ts) => {
     if (!ts) return "\u2014";
     const s = Math.max(0, Date.now() / 1000 - ts);
@@ -512,9 +521,9 @@
     const nblocks = Number(m.window_multiple) || 8;
     let windowNote;
     if (m.online && hp > 1 && wp < hp * 0.5) {
-      windowNote = `<p class="note callout">Your hashrate is ${hp.toFixed(1)}% of the pool right now, but you hold ${wp.toFixed(1)}% of the ${nblocks}-block payout window. New hash ramps in as work accumulates and older work ages out — that gap is expected, not a missing payout.</p>`;
+      windowNote = `<p class="note callout">Your hashrate is ${pctSmart(hp)} of the pool right now, but you hold ${pctSmart(wp)} of the ${nblocks}-block payout window. New hash ramps in as work accumulates and older work ages out — that gap is expected, not a missing payout.</p>`;
     } else {
-      windowNote = `<p class="note callout">Next-block pay is the window % (${wp.toFixed(1)}%), not hashrate. The window is ${nblocks} network-blocks of accepted work (TIDES). A newly connected high-hashrate miner does not take a matching slice of the next block.</p>`;
+      windowNote = `<p class="note callout">Next-block pay is the window % (${pctSmart(wp)}), not hashrate. The window is ${nblocks} network-blocks of accepted work (TIDES). A newly connected high-hashrate miner does not take a matching slice of the next block.</p>`;
     }
     const billedFee = m.est_fee_percent != null ? m.est_fee_percent : (m.fee_percent_path != null ? m.fee_percent_path : feeForPath(m.fee_path));
     const nWorkers = (m.workers || []).length + relayed.length;
@@ -535,11 +544,11 @@
         ${relayNote}
         ${windowNote}
         <dl class="ticker">
-          <div><dt>Hashrate</dt><dd>${fmtHr(m.hr_ghs || 0)}<small>${Number(m.hr_1h_ghs) > 0 ? "1h avg " + fmtHr(m.hr_1h_ghs) + " · 24h avg " + fmtHr(m.hr_24h_ghs) : "best " + fmtHr(m.best_hr_ghs || 0)} · ${hp.toFixed(1)}% of pool</small></dd></div>
+          <div><dt>Hashrate</dt><dd>${fmtHr(m.hr_ghs || 0)}<small>${Number(m.hr_1h_ghs) > 0 ? "1h avg " + fmtHr(m.hr_1h_ghs) + " · 24h avg " + fmtHr(m.hr_24h_ghs) : "best " + fmtHr(m.best_hr_ghs || 0)} · ${pctSmart(hp)} of pool</small></dd></div>
           <div><dt>Accepted</dt><dd>${num(m.shares_lifetime ?? m.shares_acc)}<small>stays with this address on either path</small></dd></div>
           <div><dt>This session</dt><dd>${sessCell(m.via, m.shares_session)}<small>${isPrimePath(m.via) ? "own gateway · Prime credits the window directly" : "public stratum only · resets on reconnect"}</small></dd></div>
           <div><dt>This window</dt><dd>${winShareCell(m)}<small>${Number(m.window_shares) > 0 ? num(m.window_work) + " work still in the TIDES window" : "no accepted shares in the current window"}</small></dd></div>
-          <div><dt>Payout window</dt><dd>${wp.toFixed(1)}%<small>${num(m.window_work)} work · what the next block pays</small></dd></div>
+          <div><dt>Payout window</dt><dd>${pctSmart(wp)}<small>${num(m.window_work)} work · what the next block pays</small></dd></div>
           <div><dt>Est. / day</dt><dd title="${amtExact(m.est_btc_day)}">${amt(m.est_btc_day)}${money(m.est_btc_day)}<small>at current difficulty, after the ${feePct(billedFee)} fee · once the window matches this hashrate</small></dd></div>
           <div><dt>Next block</dt><dd title="${amtExact(m.block_payout_btc)}">${amt(m.block_payout_btc)}${money(m.block_payout_btc)}<small>your output in the coinbase Prime dictates now${m.fee_path ? " · your window work is on the " + feePct(m.fee_percent_path != null ? m.fee_percent_path : feeForPath(m.fee_path)) + " " + (m.fee_path === "stratum" ? "public-stratum" : "own-gateway") + " rate" : ""}</small></dd></div>
           <div><dt>Pending</dt><dd title="${amtExact(m.immature_btc)}">${amt(m.immature_btc)}${money(m.immature_btc)}<small>${nPending ? nPending + " block" + (nPending === 1 ? "" : "s") + " maturing · see Payouts" : "nothing waiting to mature"}</small></dd></div>
@@ -559,7 +568,7 @@
         <dl class="ticker slim four">
           <div><dt>Pending</dt><dd title="${amtExact(m.immature_btc)}">${amt(m.immature_btc)}${money(m.immature_btc)}<small>${nPending ? "in " + nPending + " block" + (nPending === 1 ? "" : "s") + " under " + num(m.maturity_confs || 100) + " confirmations" : "no coinbase outputs maturing"}</small></dd></div>
           <div><dt>Paid</dt><dd title="${amtExact(m.paid_btc)}">${amt(m.paid_btc)}${money(m.paid_btc)}<small>${nPaid} matured block${nPaid === 1 ? "" : "s"}, lifetime</small></dd></div>
-          <div><dt>Next block</dt><dd title="${amtExact(m.block_payout_btc)}">${amt(m.block_payout_btc)}${money(m.block_payout_btc)}<small>${wp.toFixed(2)}% of the window · in the next coinbase</small></dd></div>
+          <div><dt>Next block</dt><dd title="${amtExact(m.block_payout_btc)}">${amt(m.block_payout_btc)}${money(m.block_payout_btc)}<small>${pctSmart(wp)} of the window · in the next coinbase</small></dd></div>
           <div><dt>Est. / day</dt><dd title="${amtExact(m.est_btc_day)}">${amt(m.est_btc_day)}${money(m.est_btc_day)}<small>after the ${feePct(billedFee)} fee at current difficulty</small></dd></div>
         </dl>
         <p class="note callout">There is no pool balance and nothing to withdraw. Every block the pool finds pays this address directly in its coinbase; the output becomes spendable ${num(m.maturity_confs || 100)} blocks later.</p>
@@ -585,7 +594,7 @@
   }
 
   window.LZ = {
-    blockMarks, esc, fmtHr, num, bigNum, short, shortHash, pct, ago, agoS, dur, when, clock, sig4, amt, amtSats, amtExact,
+    blockMarks, esc, fmtHr, num, bigNum, short, shortHash, pct, pctSmart, ago, agoS, dur, when, clock, sig4, amt, amtSats, amtExact,
     kindPill, statusPill, chartLegend, continuous, chartTip, markHover, draw, CHART_MARK,
     EXPLORER, pathLabel, isPrimePath, sessCell, winShareCell, feePct, poolLink, payStatus, blockLink, soloCard, minerCard, showMinerTab, MINER_TABS,
   };

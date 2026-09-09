@@ -391,8 +391,9 @@
     $("payout-miners-sub").textContent = value ? `${pct(100 * minerSats / value, 1)} of the block · ${n} address${n === 1 ? "" : "es"} paid directly` : "\u2014";
     $("payout-pool-btc").textContent = value ? amtSats(poolSats) : "\u2014";
     const unplaced = Number(cb.unplaced_sats) || 0;
+    const carryPaid = Number(cb.carry_paid_sats) || 0;
     $("payout-pool-sub").textContent = value
-      ? `${pct(eff, 2)} blended fee` + (fees.datum !== fees.stratum ? ` (${feePct(fees.datum)} gateway · ${feePct(fees.stratum)} stratum)` : "") + (unplaced > 1000 ? ` + ${amtSats(unplaced)} not yet payable` : "")
+      ? `${pct(eff, 2)} blended fee` + (fees.datum !== fees.stratum ? ` (${feePct(fees.datum)} gateway · ${feePct(fees.stratum)} stratum)` : "") + (unplaced > 1000 ? ` + ${amtSats(unplaced)} carried forward` : "") + (carryPaid > 1000 ? ` − ${amtSats(carryPaid)} carry paid back` : "")
       : "\u2014";
   }
 
@@ -562,7 +563,7 @@
       rows.push(`<tr class="faint"><td class="num"></td><td>${rest.length} more miner output${rest.length === 1 ? "" : "s"}</td><td></td><td class="num">${restShares ? num(restShares) : "\u2014"}</td><td class="num">${pct(rest.reduce((a, o) => a + Number(o.share_percent || 0), 0))}</td><td class="num">${amtSats(restSats)}</td><td class="num">${value ? pct(100 * restSats / value, 2) : "\u2014"}</td></tr>`);
     }
     if (pool) {
-      rows.push(`<tr class="pool-row"><td class="num faint">${miners.length + 1}</td><td>Lazarus <span class="faint">pool fee${cb.unplaced_sats > 1000 ? " + not yet payable" : ""}</span> · <a href="#${esc(pool.address)}">${short(pool.address)}</a></td><td><span class="pill">pool</span></td><td class="num">\u2014</td><td class="num">\u2014</td><td class="num" title="${amtExact(pool.sats / 1e8)}">${amtSats(pool.sats)}</td><td class="num faint">${value ? pct(100 * pool.sats / value, 2) : "\u2014"}</td></tr>`);
+      rows.push(`<tr class="pool-row"><td class="num faint">${miners.length + 1}</td><td>Lazarus <span class="faint">pool fee${cb.unplaced_sats > 1000 ? " + carried forward" : ""}${Number(cb.carry_paid_sats) > 1000 ? " − carry paid back" : ""}</span> · <a href="#${esc(pool.address)}">${short(pool.address)}</a></td><td><span class="pill">pool</span></td><td class="num">\u2014</td><td class="num">\u2014</td><td class="num" title="${amtExact(pool.sats / 1e8)}">${amtSats(pool.sats)}</td><td class="num faint">${value ? pct(100 * pool.sats / value, 2) : "\u2014"}</td></tr>`);
     }
     el.innerHTML =
       '<thead><tr><th class="num">#</th><th>Paid to</th><th>Path · fee</th><th class="num">Window shares</th><th class="num">Window %</th><th class="num">Output</th><th class="num">Of block</th></tr></thead><tbody>' +
@@ -581,10 +582,16 @@
     if (line) {
       const old = line.querySelector(".unpaid-note");
       if (old) old.remove();
-      if (unpaid.length) {
+      const carryTotal = Number(cb.carry_total_sats) || 0;
+      const carryPaid = Number(cb.carry_paid_sats) || 0;
+      if (unpaid.length || carryTotal > 0 || carryPaid > 0) {
         const s = document.createElement("span");
         s.className = "unpaid-note faint";
-        s.textContent = ` ${unpaid.length} address${unpaid.length === 1 ? "" : "es"} in the window earn${unpaid.length === 1 ? "s" : ""} less than the minimum output right now; that share stays with the pool until it clears.`;
+        const parts = [];
+        if (unpaid.length) parts.push(`${unpaid.length} address${unpaid.length === 1 ? "" : "es"} earn${unpaid.length === 1 ? "s" : ""} less than the minimum output this block; that share is carried forward, not forfeited, and rides on the first output that clears the floor.`);
+        if (carryPaid > 0) parts.push(`${amtSats(carryPaid)} of carry from earlier blocks is included in these outputs.`);
+        if (carryTotal > 0) parts.push(`The pool is holding ${amtSats(carryTotal)} of carry for ${num(cb.carry_holders || 0)} miner${cb.carry_holders === 1 ? "" : "s"}.`);
+        s.textContent = " " + parts.join(" ");
         line.appendChild(s);
       }
     }
@@ -1054,8 +1061,35 @@
       showMiner(addr, tab || "overview");
       // No element carries the address as its id, so the browser has nothing to scroll to;
       // take the reader to the lookup card ourselves.
-      $("dashboard")?.scrollIntoView({ block: "start" });
+      anchorDashboard();
     }
+  }
+  // Scroll to the lookup card, and keep it pinned there while the sections above it fill
+  // with data (tiles, coinbase table, miners) — each one growing pushes the card down and
+  // would otherwise leave the reader looking at whatever slid into the viewport. Stops as
+  // soon as the reader scrolls on their own.
+  let anchorUntil = 0;
+  let userScrolled = false;
+  const stopAnchor = () => { userScrolled = true; };
+  for (const ev of ["wheel", "touchstart", "keydown", "mousedown"]) window.addEventListener(ev, stopAnchor, { passive: true });
+  function anchorDashboard() {
+    const el = $("dashboard");
+    if (!el) return;
+    userScrolled = false;
+    anchorUntil = performance.now() + 6000;
+    // Instant: a smooth scroll restarted every correction would crawl for seconds.
+    el.scrollIntoView({ block: "start", behavior: "instant" });
+    let last = -1;
+    const tick = () => {
+      if (userScrolled || performance.now() > anchorUntil) return;
+      const top = el.getBoundingClientRect().top;
+      if (Math.abs(top - last) > 1) {
+        el.scrollIntoView({ block: "start", behavior: "instant" });
+        last = el.getBoundingClientRect().top;
+      }
+      requestAnimationFrame(tick);
+    };
+    requestAnimationFrame(tick);
   }
 
   $("go").onclick = () => {
