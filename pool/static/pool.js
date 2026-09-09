@@ -119,6 +119,7 @@
     return "$" + u.toLocaleString(undefined, { maximumFractionDigits: u >= 100 ? 0 : 2 });
   };
   const money = (btcAmt) => {
+    if (priceUsd == null) return "";
     const u = Number(btcAmt) * Number(priceUsd);
     if (!Number.isFinite(u) || !Number.isFinite(Number(priceUsd))) return "";
     return " · " + moneyOnly(u);
