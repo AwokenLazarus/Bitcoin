@@ -425,12 +425,19 @@ impl Overflow {
 
     /// One meter poll. `net_hs` asks the node; `stratum_hs` is this gateway's own live sum.
     pub fn tick(&self, net_hs: Option<f64>, stratum_hs: f64) {
-        let mut m = Meter { stratum_hs, updated_unix: unix_now(), ..Default::default() };
         let prime = minreq::get(&self.cfg.prime_stats_url).with_timeout(8).send().ok().and_then(|r| serde_json::from_str::<Value>(r.as_str().ok()?).ok());
-        let pool_ghs = prime.as_ref().and_then(|p| p.pointer("/hashrate/pool_ghs")).and_then(|v| v.as_f64());
         if let Some(p) = prime.as_ref() {
             self.seed_from_prime(p);
         }
+        let pool_ghs = prime.as_ref().and_then(|p| p.pointer("/hashrate/pool_ghs")).and_then(|v| v.as_f64());
+        self.apply_meter(net_hs, stratum_hs, pool_ghs);
+    }
+
+    /// Apply a share reading. `pool_ghs` is Prime's credited GH/s (stratum + DATUM);
+    /// `None` means Prime was unreachable and the stratum sum is incomplete.
+    fn apply_meter(&self, net_hs: Option<f64>, stratum_hs: f64, pool_ghs: Option<f64>) {
+        let mut m = Meter { stratum_hs, updated_unix: unix_now(), ..Default::default() };
+        let prime_ok = pool_ghs.is_some();
         match (pool_ghs, net_hs) {
             (Some(pg), Some(net)) if net > 0.0 => {
                 m.pool_hs = pg * 1e9;
@@ -439,13 +446,14 @@ impl Overflow {
                 m.ok = true;
             }
             (None, Some(net)) if net > 0.0 => {
-                // Prime stats down: the stratum sum is a floor (it misses DATUM), so it can
-                // only under-count. Say so rather than silently flipping out of overflow.
+                // Prime stats down: this is the gateway's live session sum, not Prime's
+                // credited pool. It misses DATUM, and it can also over-count vs the
+                // credited window. Incomplete — do not treat it as the pool share.
                 m.pool_hs = stratum_hs;
                 m.net_hs = net;
                 m.share_pct = 100.0 * stratum_hs / net;
                 m.ok = true;
-                m.last_err = "prime stats unreachable; share is stratum-only (under-counts DATUM)".into();
+                m.last_err = "prime stats unreachable; share is stratum-only".into();
             }
             _ => {
                 m.last_err = "network hashrate unavailable".into();
@@ -454,7 +462,15 @@ impl Overflow {
         if m.ok {
             let active = self.is_active();
             let hold = self.hold.load(Ordering::Relaxed);
-            let (na, nh) = hysteresis(active, hold, m.share_pct, self.cfg.enter_pct, self.cfg.exit_pct, self.cfg.hold_polls);
+            // Incomplete pool number must not flip overflow *off*. DATUM we cannot
+            // see might still have us over the line. Entering on a stratum-only
+            // reading is still safe — if house stratum alone is over `enter_pct`, we
+            // are over.
+            let (na, nh) = if !prime_ok && active {
+                (true, 0)
+            } else {
+                hysteresis(active, hold, m.share_pct, self.cfg.enter_pct, self.cfg.exit_pct, self.cfg.hold_polls)
+            };
             self.hold.store(nh, Ordering::Relaxed);
             if na != active {
                 self.active.store(na, Ordering::Relaxed);
@@ -1307,7 +1323,7 @@ mod tests {
     #[test]
     fn tick_meters_and_flips_with_hysteresis() {
         let ov = overflow_for_test(vec![], "auto");
-        // prime stats unreachable in tests: stratum sum stands in, flagged
+        // prime stats unreachable in tests: stratum sum stands in, flagged; can enter
         for _ in 0..2 {
             ov.tick(Some(10e15), 4e15);
             assert!(!ov.is_active());
@@ -1322,10 +1338,17 @@ mod tests {
         ov.tick(None, 4e15);
         assert!(ov.is_active());
         assert_eq!(ov.status_json()["meter_ok"], false);
+        // stratum-only 20% must NOT exit: the number is incomplete without Prime
         for _ in 0..3 {
             ov.tick(Some(10e15), 2e15);
         }
-        assert!(!ov.is_active(), "20% for three polls turns it off");
+        assert!(ov.is_active(), "incomplete meter while Prime is down must not flip overflow off");
+        assert_eq!(ov.status_json()["flips"], 1);
+        // a full Prime reading below exit for three polls does turn it off
+        for _ in 0..3 {
+            ov.apply_meter(Some(10e15), 2e15, Some(2e6)); // 2e6 GH/s = 2e15 H/s = 20%
+        }
+        assert!(!ov.is_active(), "20% from Prime for three polls turns it off");
         assert_eq!(ov.status_json()["flips"], 2);
     }
 
