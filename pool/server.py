@@ -1656,10 +1656,13 @@ def coinbase_splits(blockhash):
     return by
 
 
+MATURITY_CONFS = 100
+
+
 def payout_status_for_height(height, tip):
     if not height or not tip:
         return "paid"
-    if int(tip) < int(height) + 100:
+    if int(tip) < int(height) + MATURITY_CONFS:
         return "immature"
     return "paid"
 
@@ -2775,8 +2778,12 @@ def rollup_online_by_address(online):
 
 def miner_payload(address):
     recs = [m for m in online_miners() if m["address"] == address]
+    # One sample row per worker per scrape: the address's rate at a scrape is the SUM over
+    # its workers; the minute bucket then averages the scrapes that fell in it. (A plain
+    # AVG(hr_ghs) here would read as the average worker, not the address.)
     hist = db(
-        "SELECT (ts / 60) * 60 AS ts, AVG(hr_ghs) AS hr FROM samples WHERE address=? AND ts > ? "
+        "SELECT (ts / 60) * 60 AS ts, AVG(tot) AS hr FROM "
+        "(SELECT ts, SUM(hr_ghs) AS tot FROM samples WHERE address=? AND ts > ? GROUP BY ts) "
         "GROUP BY (ts / 60) ORDER BY 1",
         (address, int(time.time()) - 86400),
     )
@@ -2845,6 +2852,7 @@ def miner_payload(address):
             if amt <= 0:
                 continue
         st = payout_status_for_height(fb["height"], tip)
+        confs = max(0, int(tip) - int(fb["height"]) + 1) if tip and fb["height"] else 0
         payouts.append(
             {
                 "height": fb["height"],
@@ -2855,12 +2863,17 @@ def miner_payload(address):
                 "work": 0,
                 "status": st,
                 "round_status": st,
+                # Coinbase outputs spend after 100 confirmations; the block itself is one.
+                "confirmations": confs,
+                # Spendable once the chain reaches height + 100 (status flips to paid then).
+                "blocks_to_mature": max(0, int(fb["height"]) + MATURITY_CONFS - int(tip)) if tip and fb["height"] else MATURITY_CONFS,
             }
         )
         if st == "immature":
             immature_btc += amt
         else:
             paid_btc += amt
+    immature_blocks = sum(1 for p in (payouts or []) if p.get("status") == "immature")
     if used_chain and payouts is not None:
         payouts = payouts[:50]
     if not used_chain:
@@ -2881,6 +2894,19 @@ def miner_payload(address):
         )
         paid_btc = float(earned["s"]) if earned else 0
         immature_btc = float(immature["s"]) if immature else 0
+        payouts = [dict(r) for r in (payouts or [])]
+        immature_blocks = sum(1 for p in payouts if p.get("status") == "immature")
+        for p in payouts:
+            confs = max(0, int(tip) - int(p["height"]) + 1) if tip and p.get("height") else 0
+            p["confirmations"] = confs
+            p["blocks_to_mature"] = max(0, int(p["height"]) + MATURITY_CONFS - int(tip)) if tip and p.get("height") else MATURITY_CONFS
+    # Average hashrate over the last hour / day from the per-minute samples, so the
+    # miner page can show a steadier figure than the instantaneous one.
+    now_ts = int(time.time())
+    _h1 = [float(r["hr"] or 0) for r in (hist or []) if int(r["ts"]) > now_ts - 3600]
+    _h24 = [float(r["hr"] or 0) for r in (hist or [])]
+    hr_1h = (sum(_h1) / len(_h1)) if _h1 else hr
+    hr_24h = (sum(_h24) / len(_h24)) if _h24 else hr
     rw = db("SELECT work FROM round_work WHERE address=?", (address,), one=True)
     tw = db("SELECT COALESCE(SUM(work),0) AS s FROM round_work", one=True)
     my_work = float(rw["work"]) if rw else 0.0
@@ -2968,6 +2994,11 @@ def miner_payload(address):
         "paid_btc": paid_btc,
         "unpaid_btc": 0.0,
         "immature_btc": immature_btc,
+        "immature_blocks": immature_blocks,
+        "tip_height": int(tip or 0),
+        "maturity_confs": MATURITY_CONFS,
+        "hr_1h_ghs": hr_1h,
+        "hr_24h_ghs": hr_24h,
         "round_work": my_work,
         "round_share": round_share,
         "window_multiple": win["window_multiple"],
@@ -3108,6 +3139,10 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path in ("/", "/index.html"):
             self.send_file(STATIC / "index.html", "text/html; charset=utf-8")
+            return
+        if path.startswith("/miner/") or path in ("/miner", "/miner.html"):
+            # Dedicated miner page; the address is read from the URL client-side.
+            self.send_file(STATIC / "miner.html", "text/html; charset=utf-8")
             return
         if path.startswith("/static/"):
             fp = STATIC / path[len("/static/") :]

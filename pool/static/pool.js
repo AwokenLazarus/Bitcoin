@@ -70,25 +70,12 @@
   });
 
   // ------------------------------------------------------------ formatting
-  const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
-  const pathLabel = (via, name) => {
-    const gw = String(name || "").trim();
-    if (via === "prime" || via === "gateway") return gw || "own gateway";
-    if (via === "both") return gw ? `stratum + ${gw}` : "stratum + gateway";
-    return "public stratum";
-  };
-  const isPrimePath = (via) => via === "prime" || via === "gateway";
-  const sessCell = (via, n) => (isPrimePath(via) ? "\u2014" : num(n ?? 0));
-  const winShareCell = (m, show) => {
-    if (show === false) return "\u2014";
-    const n = Number(m.window_shares);
-    return Number.isFinite(n) && n > 0 ? num(n) : "\u2014";
-  };
+  // Formatters and the trend chart live in shared.js (window.LZ), shared with /miner/<addr>.
+  const { blockMarks, esc, fmtHr, num, bigNum, short, shortHash, pct, ago, agoS, dur, when, clock, sig4, amt, amtSats, amtExact, kindPill, statusPill, chartLegend, draw, pathLabel, isPrimePath, sessCell, winShareCell, feePct, poolLink, payStatus, minerCard, showMinerTab, MINER_TABS } = window.LZ;
 
   // Fee schedule as primed reports it: one rate for work through a miner's own DATUM
   // gateway, another for our public stratum. Filled from /api/pool on every refresh.
   const fees = { datum: 0, stratum: 2.0 };
-  const feePct = (x) => (Number.isFinite(Number(x)) ? Number(x).toLocaleString(undefined, { maximumFractionDigits: 2 }) + "%" : "\u2014");
   const feeForPath = (path) => (String(path || "").toLowerCase() === "stratum" ? fees.stratum : fees.datum);
   // Which fee schedule an address is on, as a small labelled pill.
   // `feePath` is the schedule primed applies to the identity's window work (the fee that is
@@ -120,64 +107,6 @@
     return html;
   };
 
-  const fmtHr = (ghs) => {
-    if (ghs == null || Number.isNaN(ghs)) return "—";
-    if (Number(ghs) < 1e-6) return "0 H/s";
-    const hs = Number(ghs) * 1e9;
-    if (hs >= 1e15) return (hs / 1e15).toFixed(2) + " PH/s";
-    if (hs >= 1e12) return (hs / 1e12).toFixed(2) + " TH/s";
-    if (hs >= 1e9) return (hs / 1e9).toFixed(2) + " GH/s";
-    if (hs >= 1e6) return (hs / 1e6).toFixed(2) + " MH/s";
-    if (hs >= 1e3) return (hs / 1e3).toFixed(1) + " KH/s";
-    if (hs > 0) return Math.round(hs) + " H/s";
-    return "0 H/s";
-  };
-
-  const num = (n) => (n == null || Number.isNaN(Number(n)) ? "—" : Number(n).toLocaleString());
-  const bigNum = (n) => {
-    const x = Number(n);
-    if (!Number.isFinite(x)) return "\u2014";
-    if (x >= 1e12) return (x / 1e12).toFixed(2) + "T";
-    if (x >= 1e9) return (x / 1e9).toFixed(2) + "G";
-    if (x >= 1e6) return (x / 1e6).toFixed(1) + "M";
-    if (x >= 1e3) return (x / 1e3).toFixed(1) + "k";
-    return x.toFixed(x < 10 ? 2 : 0);
-  };
-  // Every use of these is HTML text, and the inputs are miner-supplied identities, so
-  // they escape here rather than trusting each call site to remember.
-  const short = (a) => esc(a && a.length > 20 ? a.slice(0, 10) + "\u2026" + a.slice(-8) : a || "\u2014");
-  // Block hashes lead with zeros; the tail is what identifies them.
-  const shortHash = (h) => esc(h && h.length > 16 ? "\u2026" + h.slice(-12) : h || "\u2014");
-  const pct = (n, d = 1) => (Number.isFinite(Number(n)) ? Number(n).toFixed(d) + "%" : "\u2014");
-  const ago = (ts) => {
-    if (!ts) return "\u2014";
-    const s = Math.max(0, Date.now() / 1000 - ts);
-    return agoS(s);
-  };
-  const agoS = (s) => {
-    if (s == null || !Number.isFinite(Number(s))) return "\u2014";
-    s = Number(s);
-    if (s < 90) return Math.round(s) + "s ago";
-    if (s < 3600) return Math.round(s / 60) + "m ago";
-    if (s < 86400) return (s / 3600).toFixed(1) + "h ago";
-    return (s / 86400).toFixed(1) + "d ago";
-  };
-  const dur = (s) => {
-    if (s == null || !Number.isFinite(Number(s))) return "\u2014";
-    s = Number(s);
-    if (s < 90) return Math.round(s) + " s";
-    if (s < 3600) return (s / 60).toFixed(0) + " min";
-    if (s < 86400) return (s / 3600).toFixed(1) + " hours";
-    if (s < 86400 * 60) return (s / 86400).toFixed(1) + " days";
-    return (s / 86400 / 365).toFixed(1) + " years";
-  };
-  const btc = (n) => {
-    if (n == null || Number.isNaN(Number(n))) return "\u2014";
-    const x = Number(n);
-    if (Math.abs(x) < 1e-12) return "0";
-    if (Math.abs(x) >= 0.01) return x.toFixed(4);
-    return x.toExponential(2);
-  };
   // Bitcoin (BTCB2) USD from /api/price (Neoxa + NonKYC last prices, weighted by 24h volume).
   let priceUsd = null;
   const moneyOnly = (usd) => {
@@ -203,31 +132,17 @@
     }
     return null;
   };
-  const sats = (n) => (n == null || Number.isNaN(Number(n)) ? "\u2014" : (Number(n) / 1e8).toFixed(8).replace(/0+$/, "").replace(/\.$/, ".0"));
+  // Percent that can be tiny (a miner's share of the network) without scientific notation.
   const expPct = (n) => {
     const x = Number(n);
     if (!Number.isFinite(x) || Math.abs(x) < 1e-12) return "0";
     if (Math.abs(x) >= 0.01) return x.toFixed(2);
-    return x.toExponential(2);
+    return sig4(x);
   };
-  const when = (ts) => (ts ? new Date(ts * 1000).toLocaleString([], { dateStyle: "medium", timeStyle: "short" }) : "");
-  const clock = (ts) => (ts ? new Date(ts * 1000).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }) : "");
   const j = async (url) => {
     const r = await fetch(url);
     if (!r.ok) throw new Error(url + " " + r.status);
     return r.json();
-  };
-  const kindPill = (kind) => {
-    // primed prefixes orphaned records ("orphan:split"); the Status column carries that, this pill says what the coinbase did.
-    const k = String(kind || "").toLowerCase().replace(/^orphan:/, "");
-    const label = k === "split" ? "split" : k === "partial" ? "partial split" : k === "pool-only" ? "pool only" : k || "\u2014";
-    const cls = k === "split" ? "ok" : k === "partial" ? "warn" : k === "pool-only" ? "warn" : "";
-    return k ? `<span class="pill ${cls}">${esc(label)}</span>` : "\u2014";
-  };
-  const statusPill = (status) => {
-    const s = String(status || "").toLowerCase();
-    const cls = s === "in chain" || s === "paid" || s === "submitted" ? "ok" : s === "orphaned" || s === "rejected" ? "bad" : s === "immature" || s === "pending" ? "warn" : "";
-    return s ? `<span class="pill ${cls}">${esc(s)}</span>` : "\u2014";
   };
 
   // ------------------------------------------------------------------ pool
@@ -235,7 +150,6 @@
   // The house stratum relays new miners to other BLAKE2b pools while Lazarus holds more
   // than its share of the network. Miners already here are unaffected; a relayed miner
   // is paid by the pool it was sent to.
-  const poolLink = (name, url) => (url ? `<a href="${esc(url)}" target="_blank" rel="noreferrer">${esc(name || url)}</a>` : esc(name || "\u2014"));
   const upstreamList = (ov) => (ov && ov.upstreams ? ov.upstreams : []).filter((u) => u.healthy !== false).map((u) => poolLink(u.name, u.url));
   function overflowNote(ov) {
     const el = $("overflow-note");
@@ -380,7 +294,7 @@
         ? "accepted, lifetime · " + num(run) + " this Prime run · " + rejPct
         : "verified by Prime since it started · " + rejPct;
     const cells = [
-      ["1 TH/s yields (est.)", thsDatum != null ? btc(thsDatum) + " BTC/Day" + money(thsDatum) : "\u2014", "at current difficulty, base subsidy · DATUM " + feePct(fees.datum) + " · " + (thsStratum != null ? btc(thsStratum) + " BTC/Day" + money(thsStratum) : "\u2014") + " on stratum"],
+      ["1 TH/s yields (est.)", thsDatum != null ? amt(thsDatum) + "/day" + money(thsDatum) : "\u2014", "at current difficulty, base subsidy · DATUM " + feePct(fees.datum) + " · " + (thsStratum != null ? amt(thsStratum) + "/day" + money(thsStratum) : "\u2014") + " on stratum"],
       ["Hashrate", fmtHr(p.pool_hr_ghs), hrSub],
       ["Miners", String(inWindow || p.miners_online || 0), inWindow ? "holding work in the window · " + (p.miners_seen ?? "\u2014") + " ever" : (p.miners_seen ?? "\u2014") + " ever"],
       ["Shares", num(sharesMain), sharesSub],
@@ -429,7 +343,7 @@
     if ($("live-price")) $("live-price").textContent = priceUsd != null ? moneyOnly(priceUsd) : "\u2014";
     const priceChip = $("live-price-chip");
     if (priceChip) priceChip.classList.toggle("stale", priceUsd == null);
-    if ($("live-ths")) $("live-ths").textContent = thsDatum != null ? "~" + btc(thsDatum) + " BTC/Day" + money(thsDatum) : "\u2014";
+    if ($("live-ths")) $("live-ths").textContent = thsDatum != null ? "~" + amt(thsDatum) + "/day" + money(thsDatum) : "\u2014";
     if ($("live-tip")) $("live-tip").textContent = p.height || "\u2014";
     if ($("live-window")) $("live-window").textContent = fillTxt;
     if ($("live-gateways")) $("live-gateways").textContent = String(gws);
@@ -471,14 +385,14 @@
     const feeSats = Number(cb.fee_sats) || 0;
     const n = Number(cb.miner_outputs) || 0;
     const eff = Number.isFinite(Number(cb.effective_fee_percent)) ? Number(cb.effective_fee_percent) : (value ? 100 * feeSats / value : 0);
-    $("payout-reward").textContent = value ? sats(value) + " BTC" + money(value / 1e8) : "\u2014";
+    $("payout-reward").textContent = value ? amtSats(value) + money(value / 1e8) : "\u2014";
     $("payout-reward-sub").textContent = value ? "base subsidy at height " + (p.height ? num(Number(p.height) + 1) : "\u2014") + " · transaction fees add to every output" : "waiting for Prime";
-    $("payout-miners-btc").textContent = value ? sats(minerSats) + " BTC" : "\u2014";
+    $("payout-miners-btc").textContent = value ? amtSats(minerSats) : "\u2014";
     $("payout-miners-sub").textContent = value ? `${pct(100 * minerSats / value, 1)} of the block · ${n} address${n === 1 ? "" : "es"} paid directly` : "\u2014";
-    $("payout-pool-btc").textContent = value ? sats(poolSats) + " BTC" : "\u2014";
+    $("payout-pool-btc").textContent = value ? amtSats(poolSats) : "\u2014";
     const unplaced = Number(cb.unplaced_sats) || 0;
     $("payout-pool-sub").textContent = value
-      ? `${pct(eff, 2)} blended fee` + (fees.datum !== fees.stratum ? ` (${feePct(fees.datum)} gateway · ${feePct(fees.stratum)} stratum)` : "") + (unplaced > 1000 ? ` + ${sats(unplaced)} not yet payable` : "")
+      ? `${pct(eff, 2)} blended fee` + (fees.datum !== fees.stratum ? ` (${feePct(fees.datum)} gateway · ${feePct(fees.stratum)} stratum)` : "") + (unplaced > 1000 ? ` + ${amtSats(unplaced)} not yet payable` : "")
       : "\u2014";
   }
 
@@ -583,7 +497,7 @@
         ` stroke="${s.colour}" stroke-width="5"` +
         ` stroke-dasharray="${len.toFixed(3)} ${(100 - len).toFixed(3)}"` +
         ` stroke-dashoffset="${offset.toFixed(3)}">` +
-        `<title>${esc(s.label)}${s.who ? " \u00b7 " + esc(s.who.text) : ""}${s.note ? " \u00b7 " + s.note : ""} \u2014 ${pct(s.percent, 2)} of the block, ${sats(s.sats)} BTC</title>` +
+        `<title>${esc(s.label)}${s.who ? " \u00b7 " + esc(s.who.text) : ""}${s.note ? " \u00b7 " + s.note : ""} \u2014 ${pct(s.percent, 2)} of the block, ${amtSats(s.sats)}</title>` +
         "</circle>";
       offset -= s.percent;
       return arc;
@@ -639,23 +553,23 @@
     const value = Number(cb.value) || 0;
     const shown = coinbaseExpanded ? miners : miners.slice(0, COINBASE_ROWS);
     const rows = shown.map((o, i) =>
-      `<tr><td class="num faint">${i + 1}</td><td><a href="#${esc(o.address)}">${short(o.address)}</a></td><td>${pathPill(o.fee_path, null, o.name || o.gateway_name)}</td><td class="num">${winShareCell(o)}</td><td class="num">${pct(o.share_percent)}</td><td class="num">${sats(o.sats)}</td><td class="num faint">${value ? pct(100 * o.sats / value, 2) : "\u2014"}</td></tr>`
+      `<tr><td class="num faint">${i + 1}</td><td><a href="#${esc(o.address)}">${short(o.address)}</a></td><td>${pathPill(o.fee_path, null, o.name || o.gateway_name)}</td><td class="num">${winShareCell(o)}</td><td class="num">${pct(o.share_percent)}</td><td class="num" title="${amtExact(o.sats / 1e8)}">${amtSats(o.sats)}</td><td class="num faint">${value ? pct(100 * o.sats / value, 2) : "\u2014"}</td></tr>`
     );
     if (!coinbaseExpanded && miners.length > COINBASE_ROWS) {
       const rest = miners.slice(COINBASE_ROWS);
       const restSats = rest.reduce((a, o) => a + Number(o.sats || 0), 0);
       const restShares = rest.reduce((a, o) => a + (Number(o.window_shares) > 0 ? Number(o.window_shares) : 0), 0);
-      rows.push(`<tr class="faint"><td class="num"></td><td>${rest.length} more miner output${rest.length === 1 ? "" : "s"}</td><td></td><td class="num">${restShares ? num(restShares) : "\u2014"}</td><td class="num">${pct(rest.reduce((a, o) => a + Number(o.share_percent || 0), 0))}</td><td class="num">${sats(restSats)}</td><td class="num">${value ? pct(100 * restSats / value, 2) : "\u2014"}</td></tr>`);
+      rows.push(`<tr class="faint"><td class="num"></td><td>${rest.length} more miner output${rest.length === 1 ? "" : "s"}</td><td></td><td class="num">${restShares ? num(restShares) : "\u2014"}</td><td class="num">${pct(rest.reduce((a, o) => a + Number(o.share_percent || 0), 0))}</td><td class="num">${amtSats(restSats)}</td><td class="num">${value ? pct(100 * restSats / value, 2) : "\u2014"}</td></tr>`);
     }
     if (pool) {
-      rows.push(`<tr class="pool-row"><td class="num faint">${miners.length + 1}</td><td>Lazarus <span class="faint">pool fee${cb.unplaced_sats > 1000 ? " + not yet payable" : ""}</span> · <a href="#${esc(pool.address)}">${short(pool.address)}</a></td><td><span class="pill">pool</span></td><td class="num">\u2014</td><td class="num">\u2014</td><td class="num">${sats(pool.sats)}</td><td class="num faint">${value ? pct(100 * pool.sats / value, 2) : "\u2014"}</td></tr>`);
+      rows.push(`<tr class="pool-row"><td class="num faint">${miners.length + 1}</td><td>Lazarus <span class="faint">pool fee${cb.unplaced_sats > 1000 ? " + not yet payable" : ""}</span> · <a href="#${esc(pool.address)}">${short(pool.address)}</a></td><td><span class="pill">pool</span></td><td class="num">\u2014</td><td class="num">\u2014</td><td class="num" title="${amtExact(pool.sats / 1e8)}">${amtSats(pool.sats)}</td><td class="num faint">${value ? pct(100 * pool.sats / value, 2) : "\u2014"}</td></tr>`);
     }
     el.innerHTML =
-      '<thead><tr><th class="num">#</th><th>Paid to</th><th>Path · fee</th><th class="num">Window shares</th><th class="num">Window %</th><th class="num">BTC</th><th class="num">Of block</th></tr></thead><tbody>' +
+      '<thead><tr><th class="num">#</th><th>Paid to</th><th>Path · fee</th><th class="num">Window shares</th><th class="num">Window %</th><th class="num">Output</th><th class="num">Of block</th></tr></thead><tbody>' +
       (rows.length ? rows.join("") : '<tr><td colspan="7" class="empty">Prime has not issued a split yet</td></tr>') +
       "</tbody>";
     const sum = $("coinbase-summary");
-    if (sum) sum.textContent = cb.outputs ? `${cb.outputs} outputs · ${sats(cb.miner_sats)} BTC to ${cb.miner_outputs} miner${cb.miner_outputs === 1 ? "" : "s"} · ${sats(cb.pool_sats)} BTC to the pool` : "\u2014";
+    if (sum) sum.textContent = cb.outputs ? `${cb.outputs} outputs · ${amtSats(cb.miner_sats)} to ${cb.miner_outputs} miner${cb.miner_outputs === 1 ? "" : "s"} · ${amtSats(cb.pool_sats)} to the pool` : "\u2014";
     const more = $("coinbase-more");
     if (more) {
       more.hidden = miners.length <= COINBASE_ROWS;
@@ -802,9 +716,9 @@
       (s.blocks || []).map((b) => [
         String(b.height),
         b.finder ? `<a href="#${esc(b.finder)}">${short(b.finder)}</a>` : '<span class="faint">unknown</span>',
-        btc(b.reward_btc),
-        btc(b.miner_btc),
-        btc(b.pool_fee_btc),
+        amt(b.reward_btc),
+        amt(b.miner_btc),
+        amt(b.pool_fee_btc),
         when(b.ts),
       ]),
       ["num", null, "num", "num", "num", null],
@@ -902,28 +816,28 @@
       byHeight.set(pb.hash, { height: pb.height, hash: pb.hash, ts: pb.ts, outputs: (pb.split || []).map((o) => ({ address: o.address, btc: o.sats / 1e8 })), miner_btc: (pb.split || []).reduce((a, o) => a + o.sats, 0) / 1e8, pool_btc: feeSats / 1e8, status: pb.status, kind: pb.kind, block_status: pb.status, owed_sats: pb.owed_sats, owed_txid: pb.owed_txid, owed_resolved: pb.owed_resolved, found_by: pb.finder, reward: pb.coinbase_value / 1e8, prime_only: true });
     }
     const blocks = [...byHeight.values()].sort((a, b) => (b.height || 0) - (a.height || 0));
-    const headers = ["Height", "Block", "Coinbase", "Outputs", "Miners paid (BTC)", "Pool (BTC)", "Status", "Found by", "Time"];
+    const headers = ["Height", "Block", "Coinbase", "Outputs", "Miners paid", "Pool", "Status", "Found by", "Time"];
     const rows = blocks.map((b, i) => {
       const poolBtc = b.pool_btc || (b.reward ? Math.max(0, b.reward - b.miner_btc) : null);
       const kind = b.kind || (b.outputs.length > 1 ? "split" : b.outputs.length === 1 ? "" : "");
       const st = b.prime_only ? b.block_status : (b.status === "unsplit" ? "pool only" : b.status);
       const outs = b.outputs.slice().sort((x, y) => y.btc - x.btc);
-      const detail = outs.map((o) => `<tr><td></td><td colspan="2"><a href="#${esc(o.address)}">${esc(o.address)}</a>${o.pool ? ' <span class="pill brass">pool</span>' : ""}</td><td class="num">${btc(o.btc)}</td><td class="num faint">${b.reward ? pct(100 * o.btc / b.reward, 2) : ""}</td><td colspan="4"></td></tr>`).join("");
+      const detail = outs.map((o) => `<tr><td></td><td colspan="2"><a href="#${esc(o.address)}">${esc(o.address)}</a>${o.pool ? ' <span class="pill brass">pool</span>' : ""}</td><td class="num" title="${amtExact(o.btc)}">${amt(o.btc)}</td><td class="num faint">${b.reward ? pct(100 * o.btc / b.reward, 2) : ""}</td><td colspan="4"></td></tr>`).join("");
       const owed = b.owed_txid
-        ? `<div class="faint">window paid${b.owed_sats ? " " + sats(b.owed_sats) : ""} · <a href="${esc(p.explorer)}/tx/${esc(b.owed_txid)}" target="_blank" rel="noreferrer" title="Transaction that paid the window">tx ${shortHash(b.owed_txid)}</a></div>`
-        : (b.owed_sats ? `<div class="faint">owed to window ${sats(b.owed_sats)}</div>` : "");
+        ? `<div class="faint">window paid${b.owed_sats ? " " + amtSats(b.owed_sats) : ""} · <a href="${esc(p.explorer)}/tx/${esc(b.owed_txid)}" target="_blank" rel="noreferrer" title="Transaction that paid the window">tx ${shortHash(b.owed_txid)}</a></div>`
+        : (b.owed_sats ? `<div class="faint">owed to window ${amtSats(b.owed_sats)}</div>` : "");
       return `<tr class="block-row" data-i="${i}" tabindex="0" aria-expanded="false">
         <td class="num"><span class="disclose"></span>${b.height ?? "\u2014"}</td>
         <td>${b.hash ? `<a href="${esc(p.explorer)}/block/${esc(b.hash)}" target="_blank" rel="noreferrer" title="Open in the Lazarus Mempool">${shortHash(b.hash)}</a>` : "\u2014"}</td>
         <td>${kindPill(kind)}${owed}</td>
         <td class="num">${b.outputs.length}</td>
-        <td class="num">${btc(b.miner_btc)}</td>
-        <td class="num">${poolBtc == null ? "\u2014" : btc(poolBtc)}</td>
+        <td class="num" title="${amtExact(b.miner_btc)}">${amt(b.miner_btc)}</td>
+        <td class="num" title="${poolBtc == null ? "" : amtExact(poolBtc)}">${poolBtc == null ? "\u2014" : amt(poolBtc)}</td>
         <td>${statusPill(st)}</td>
         <td>${b.found_by ? `<a href="#${esc(b.found_by)}">${short(b.found_by)}</a>` : "\u2014"}</td>
         <td>${when(b.ts)}</td>
       </tr>
-      <tr class="block-detail" hidden><td colspan="9"><table class="inner"><thead><tr><th></th><th colspan="2">Coinbase output</th><th class="num">BTC</th><th class="num">Of block</th><th colspan="4"></th></tr></thead><tbody>${detail || '<tr><td colspan="9" class="empty">No outputs recorded</td></tr>'}</tbody></table></td></tr>`;
+      <tr class="block-detail" hidden><td colspan="9"><table class="inner"><thead><tr><th></th><th colspan="2">Coinbase output</th><th class="num">Amount</th><th class="num">Of block</th><th colspan="4"></th></tr></thead><tbody>${detail || '<tr><td colspan="9" class="empty">No outputs recorded</td></tr>'}</tbody></table></td></tr>`;
     });
     el.innerHTML =
       "<thead><tr>" + headers.map((h, i) => `<th${[0, 3, 4, 5].includes(i) ? ' class="num"' : ""}>${h}</th>`).join("") + "</tr></thead><tbody>" +
@@ -943,399 +857,38 @@
   }
 
   // Legend + screen-reader text for the marks that landed inside the drawn window.
-  function chartLegend(el, c, one, many) {
-    const n = (c && c.__hits ? c.__hits : []).reduce((a, hit) => a + hit.items.length, 0);
-    const label = n ? `${n} ${n === 1 ? one : many}` : "";
-    if (el) {
-      // The noun is dropped in a narrow container (see .chart-legend-noun), where the
-      // caption has no room for it; the arrow and the count carry the meaning.
-      el.innerHTML = n ? `${n}<span class="chart-legend-noun"> ${esc(n === 1 ? one : many)}</span>` : "";
-      el.hidden = !n;
-    }
-    if (c) {
-      const base = c.dataset.label || c.getAttribute("aria-label") || "";
-      c.dataset.label = base;
-      c.setAttribute("aria-label", n ? `${base}, with ${label} marked` : base);
-    }
-  }
-
-  // One trend marker per found block. Orphans are marked too and say so, since the pool did
-  // find them; the reward just did not stick.
-  function blockMarks(blocks) {
-    return (blocks || [])
-      .filter((b) => Number(b.ts) > 0)
-      .map((b) => {
-        const reward = Number(b.reward) || (Number(b.miner_btc) || 0) + (Number(b.pool_btc) || 0);
-        const st = String(b.prime_only ? b.block_status : b.status || "").toLowerCase();
-        const note = st === "orphaned" || st === "rejected" ? " · " + st : "";
-        return {
-          ts: Number(b.ts),
-          title: (b.height ? "Block " + num(b.height) : "Block found") + " · " + clock(b.ts),
-          sub: (reward ? btc(reward) + " BTC" : "") + note,
-        };
-      });
-  }
-
-  function continuous(hist, key, bucketSec) {
-    const raw = [];
-    for (const item of hist || []) {
-      const ts = Number(item.ts);
-      const v = Number(item[key]);
-      if (!Number.isFinite(ts) || !Number.isFinite(v) || v <= 0) continue;
-      raw.push({ ts, v });
-    }
-    raw.sort((a, b) => a.ts - b.ts);
-    if (!raw.length) return [];
-    const sorted = raw.map((p) => p.v).sort((a, b) => a - b);
-    const typical = sorted[Math.floor(sorted.length * 0.85)] || sorted[sorted.length - 1];
-    const floor = typical > 0 ? typical * 0.03 : 0;
-    const src = raw.filter((p) => p.v >= floor);
-    const use = src.length >= 2 ? src : raw;
-    const start = Math.floor(use[0].ts / bucketSec) * bucketSec;
-    const end = Math.floor(use[use.length - 1].ts / bucketSec) * bucketSec;
-    const sums = new Map();
-    for (const p of use) {
-      const b = Math.floor(p.ts / bucketSec) * bucketSec;
-      const rec = sums.get(b) || { sum: 0, n: 0 };
-      rec.sum += p.v;
-      rec.n += 1;
-      sums.set(b, rec);
-    }
-    const series = [];
-    let last = use[0].v;
-    for (let t = start; t <= end; t += bucketSec) {
-      const rec = sums.get(t);
-      if (rec) last = rec.sum / rec.n;
-      series.push({ ts: t, [key]: last });
-    }
-    return series;
-  }
-
-  // Markers on the trend: one tick per block found, hover for height and amount. `marks` is
-  // [{ts, title, sub}]; ticks closer together than a few pixels share one arrow and tooltip.
-  const CHART_MARK = "oklch(76% 0.13 155)";
-  const MARK_GAP_PX = 7;
-
-  function chartTip(c) {
-    const wrap = c.parentElement;
-    if (!wrap) return null;
-    let tip = wrap.querySelector(".chart-tip");
-    if (!tip) {
-      tip = document.createElement("div");
-      tip.className = "chart-tip";
-      tip.hidden = true;
-      wrap.appendChild(tip);
-    }
-    return tip;
-  }
-
-  function markHover(c) {
-    if (c.__markHover) return;
-    c.__markHover = true;
-    const hide = () => {
-      const tip = chartTip(c);
-      if (tip) tip.hidden = true;
-    };
-    const show = (e) => {
-      const hits = c.__hits || [];
-      const tip = chartTip(c);
-      if (!tip) return;
-      if (!hits.length) return hide();
-      const r = c.getBoundingClientRect();
-      const x = e.clientX - r.left;
-      let best = null;
-      for (const hit of hits) {
-        const d = Math.abs(hit.x - x);
-        if (d <= 11 && (!best || d < Math.abs(best.x - x))) best = hit;
-      }
-      if (!best) return hide();
-      tip.innerHTML = best.html;
-      tip.hidden = false;
-      // Keep the tooltip inside the plot; flip it left of the tick near the right edge.
-      const tw = tip.offsetWidth;
-      tip.style.left = Math.max(2, Math.min(r.width - tw - 2, best.x - tw / 2)) + "px";
-    };
-    c.addEventListener("pointermove", show);
-    c.addEventListener("pointerdown", show);
-    c.addEventListener("pointerleave", hide);
-  }
-
-  function draw(c, hist, key, marks) {
-    if (!c) return;
-    c.__hist = hist || [];
-    c.__marks = marks || [];
-    c.__hits = [];
-    const ctx = c.getContext("2d");
-    const dpr = Math.max(1, window.devicePixelRatio || 1);
-    const cssW = c.clientWidth || c.width;
-    const cssH = c.clientHeight || 148;
-    if (c.width !== Math.round(cssW * dpr) || c.height !== Math.round(cssH * dpr)) {
-      c.width = Math.round(cssW * dpr);
-      c.height = Math.round(cssH * dpr);
-    }
-    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    ctx.clearRect(0, 0, cssW, cssH);
-    if (!hist || hist.length < 2) return;
-    const span = hist[hist.length - 1].ts - hist[0].ts;
-    const bucket = span > 12 * 3600 ? 120 : 60;
-    const series = continuous(hist, key, bucket);
-    if (series.length < 2) return;
-    const ys = series.map((h) => h[key]);
-    const minY = 0;
-    const maxY = Math.max(...ys, 0.01);
-    const minX = series[0].ts;
-    const maxX = series[series.length - 1].ts || minX + 1;
-    // Marks get their own row between the caption and the plot, so the arrows never sit on
-    // top of the caption or the line. No marks in view, no row.
-    const inView = c.__marks
-      .filter((m) => m && Number.isFinite(Number(m.ts)) && m.ts >= minX && m.ts <= maxX)
-      .sort((a, b) => a.ts - b.ts); // clustering below walks left to right
-    const pad = { l: 6, r: 52, t: inView.length ? 30 : 22, b: 18 };
-    const w = cssW - pad.l - pad.r;
-    const h = cssH - pad.t - pad.b;
-    const pt = (item) => {
-      const x = pad.l + ((item.ts - minX) / (maxX - minX)) * w;
-      const y = pad.t + h - ((item[key] || 0) - minY) / (maxY - minY) * h;
-      return [x, y];
-    };
-    ctx.save();
-    ctx.strokeStyle = "rgba(212,180,90,0.16)";
-    ctx.lineWidth = 1;
-    ctx.setLineDash([2, 3]);
-    for (let i = 1; i <= 3; i++) {
-      const y = pad.t + (h * i) / 4;
-      ctx.beginPath();
-      ctx.moveTo(pad.l, y);
-      ctx.lineTo(pad.l + w, y);
-      ctx.stroke();
-    }
-    ctx.setLineDash([]);
-    ctx.restore();
-    // Cluster the marks by pixel so a burst of blocks reads as one arrow, then draw the
-    // ticks under the area fill and the arrows over the line.
-    const hits = [];
-    for (const m of inView) {
-      const x = pad.l + ((m.ts - minX) / (maxX - minX)) * w;
-      const prev = hits[hits.length - 1];
-      if (prev && x - prev.x <= MARK_GAP_PX) prev.items.push(m);
-      else hits.push({ x, items: [m] });
-    }
-    for (const hit of hits) {
-      const n = hit.items.length;
-      const head = n === 1 ? "" : `<b>${n} blocks</b>`;
-      const rows = hit.items
-        .slice(0, 4)
-        .map((m) => `<span>${esc(m.title || "")}</span>${m.sub ? `<span class="faint">${esc(m.sub)}</span>` : ""}`)
-        .join("");
-      hit.html = head + rows + (n > 4 ? `<span class="faint">+${n - 4} more</span>` : "");
-    }
-    c.__hits = hits;
-    if (hits.length) {
-      ctx.save();
-      ctx.strokeStyle = CHART_MARK;
-      ctx.globalAlpha = 0.3;
-      ctx.lineWidth = 1;
-      ctx.setLineDash([2, 3]);
-      for (const hit of hits) {
-        ctx.beginPath();
-        ctx.moveTo(hit.x, pad.t);
-        ctx.lineTo(hit.x, pad.t + h);
-        ctx.stroke();
-      }
-      ctx.restore();
-      markHover(c);
-    }
-    const fill = ctx.createLinearGradient(0, pad.t, 0, pad.t + h);
-    fill.addColorStop(0, "rgba(212,180,90,0.28)");
-    fill.addColorStop(1, "rgba(212,180,90,0)");
-    ctx.beginPath();
-    series.forEach((item, i) => {
-      const [x, y] = pt(item);
-      i ? ctx.lineTo(x, y) : ctx.moveTo(x, y);
-    });
-    const last = pt(series[series.length - 1]);
-    const first = pt(series[0]);
-    ctx.lineTo(last[0], pad.t + h);
-    ctx.lineTo(first[0], pad.t + h);
-    ctx.closePath();
-    ctx.fillStyle = fill;
-    ctx.fill();
-    ctx.beginPath();
-    series.forEach((item, i) => {
-      const [x, y] = pt(item);
-      i ? ctx.lineTo(x, y) : ctx.moveTo(x, y);
-    });
-    ctx.strokeStyle = "#d4b45a";
-    ctx.lineWidth = 1.75;
-    ctx.lineJoin = "round";
-    ctx.lineCap = "round";
-    ctx.stroke();
-    for (const hit of c.__hits || []) {
-      ctx.save();
-      ctx.fillStyle = CHART_MARK;
-      ctx.beginPath();
-      ctx.moveTo(hit.x - 3.5, pad.t - 7);
-      ctx.lineTo(hit.x + 3.5, pad.t - 7);
-      ctx.lineTo(hit.x, pad.t - 2);
-      ctx.closePath();
-      ctx.fill();
-      ctx.restore();
-    }
-    ctx.fillStyle = "#8a7d62";
-    ctx.font = "10px IBM Plex Mono, ui-monospace, monospace";
-    ctx.textAlign = "right";
-    ctx.textBaseline = "top";
-    ctx.fillText(fmtHr(maxY), cssW - 4, 6);
-    ctx.textAlign = "left";
-    ctx.textBaseline = "bottom";
-    const t0 = new Date(minX * 1000);
-    const t1 = new Date(maxX * 1000);
-    const fmtT = (d) => d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
-    ctx.fillText(fmtT(t0), pad.l, cssH - 2);
-    ctx.textAlign = "right";
-    ctx.fillText(fmtT(t1), pad.l + w, cssH - 2);
-  }
 
   const showChart = (on) => {
     const w = $("chart-wrap");
     if (w) w.hidden = !on;
   };
 
-  function soloCard(m, so) {
-    if (!so) return "";
-    const hashing = Number(so.hashrate_ghs) > 1e-6;
-    const status = hashing
-      ? `online · solo${so.via ? " " + so.via : ""}`
-      : so.shares || so.work
-        ? "idle · solo"
-        : "solo";
-    const blocks = so.blocks_list || [];
-    const pays = blocks
-      .map((b) => `<tr><td class="num">${b.height}</td><td class="num">${btc(b.miner_btc)}</td><td class="num">${btc(b.pool_fee_btc)}</td><td>${when(b.ts)}</td></tr>`)
-      .join("");
-    return `
-      <div class="panel miner-card">
-        <div class="addr-line">
-          <span class="copyable"><span class="mono">${esc(m.address || so.address)}</span><button type="button" class="copy-btn" data-copy="${esc(m.address || so.address)}" aria-label="Copy address" title="Copy"></button></span>
-          <span class="status-pill ${hashing ? "ok" : "bad"}">${status}</span>
-        </div>
-        <p class="note callout">This address is on a solo port. Shares here buy no TIDES window share. A block you find pays this address in that block’s coinbase, less the solo fee.</p>
-        <dl class="ticker">
-          <div><dt>Hashrate</dt><dd>${fmtHr(so.hashrate_ghs)}<small>${so.workers ? so.workers + " worker" + (so.workers === 1 ? "" : "s") : "no workers hashing"}</small></dd></div>
-          <div><dt>Accepted</dt><dd>${num(so.shares)}<small>${num(so.work)} work on this solo book</small></dd></div>
-          <div><dt>Best share</dt><dd>${so.best_diff ? num(so.best_diff) : "\u2014"}<small>highest difficulty accepted</small></dd></div>
-          <div><dt>Fee</dt><dd>${feePct(so.fee_percent)}<small>taken in the coinbase if you find a block</small></dd></div>
-          <div><dt>Time to a block</dt><dd>${dur(so.ttf_seconds)}<small>at this hashrate vs current network difficulty</small></dd></div>
-          <div><dt>Blocks found</dt><dd>${num(so.blocks_onchain || so.blocks || blocks.length)}<small>paid in the block itself</small></dd></div>
-        </dl>
-        <div>
-          <p class="kicker table-label">Solo blocks</p>
-          <div class="scroll"><table><thead><tr><th class="num">Height</th><th class="num">Amount</th><th class="num">Fee</th><th>Time</th></tr></thead><tbody>${pays || '<tr><td colspan="4" class="empty">No solo block yet</td></tr>'}</tbody></table></div>
-        </div>
-      </div>`;
-  }
-
   // ----------------------------------------------------------------- miner
-  async function showMiner(addr) {
+  // Block interval from /api/pool, for the "spendable in" ETA on pending payouts.
+  let blockInterval = 0;
+  // Which panel of the miner card is showing; follows the URL as #<addr>/<tab>.
+  let minerTab = "overview";
+  let minerAddr = "";
+  async function showMiner(addr, tab) {
+    if (tab) minerTab = tab;
     if (!addr) {
+      minerAddr = "";
       $("miner").innerHTML = "";
       showChart(false);
       draw($("chart"), [], "hr_ghs");
+      navPayouts("");
       return;
     }
     const m = await j("/api/miner/" + encodeURIComponent(addr));
-    const so = m.solo;
-    const hasSolo = !!so;
+    minerAddr = addr;
+    try { localStorage.setItem("lz.addr", addr); } catch (e) { /* private mode */ }
+    navPayouts(addr);
     const hasPool = !!(m.via || Number(m.window_work) > 0 || Number(m.shares_lifetime) > 0 || Number(m.round_share) > 0);
-    if (!m.known && !hasSolo) {
-      $("miner").innerHTML = '<p class="note callout">No stats for that address yet. Connect a miner first.</p>';
+    $("miner").innerHTML = minerCard(m, { fees, money, blockInterval, tab: minerTab, full: false });
+    if (!m.known || !hasPool) {
       showChart(false);
       return;
     }
-    if (!hasPool && hasSolo) {
-      $("miner").innerHTML = soloCard(m, so);
-      showChart(false);
-      return;
-    }
-    // Per-session rate as the stratum session reports it; the address-level credited rate
-    // (what the pool actually counts) is the Hashrate metric above the table. Gateway-window
-    // rows have no session, so they carry the credited rate.
-    const workerHr = (w) => (w.via === "stratum" ? (Number(w.firmware_hr_ghs) > 0 ? w.firmware_hr_ghs : null) : w.hr_ghs);
-    const relayed = m.relayed || [];
-    const workers = (m.workers || [])
-      .map(
-        (w) =>
-          `<tr><td>${esc(w.worker || "\u2014")}</td><td>${pathLabel(w.via, w.gateway_name || m.gateway_name)}</td><td class="num">${fmtHr(workerHr(w))}</td><td class="num">${sessCell(w.via, w.shares_session)}</td><td class="num">${num(w.shares_lifetime ?? w.shares_acc ?? w.window_work)}</td><td class="num">${num(w.shares_rej)}</td><td class="num">${Number.isFinite(Number(w.last_share_s)) ? Number(w.last_share_s).toFixed(0) + "s" : "\u2014"}</td></tr>`
-      )
-      .concat(
-        relayed.map(
-          (r) =>
-            `<tr><td>${esc(r.worker || "\u2014")}</td><td>relayed &rarr; ${poolLink(r.upstream, r.miner_url || r.upstream_url)}</td><td class="num">\u2014</td><td class="num">\u2014</td><td class="num">${num(r.accepted)} <span class="faint">there</span></td><td class="num">\u2014</td><td class="num">${dur(Number(r.connected_s) || 0)}</td></tr>`
-        )
-      )
-      .join("");
-    let relayNote = "";
-    if (relayed.length) {
-      const pools = [...new Map(relayed.map((r) => [r.upstream, poolLink(r.upstream, r.miner_url || r.upstream_url)])).values()];
-      relayNote = `<p class="note callout"><strong>${relayed.length === 1 ? "This worker is" : relayed.length + " of your workers are"} mining on ${pools.join(" and ")}, not on Lazarus.</strong> Lazarus was over its network-share limit when ${relayed.length === 1 ? "it" : "they"} connected, so our stratum passed the connection straight through. ${pools.length === 1 ? pools[0] : "That pool"} pays for that work under this address; nothing from it lands in our window. Follow the link for your stats there. Reconnecting after we drop under the limit brings the worker back here.</p>`;
-    }
-    const payStatus = (b) => {
-      const s = String(b.status || "").toLowerCase();
-      const rs = String(b.round_status || "").toLowerCase();
-      if (s === "immature") return "immature";
-      if (s === "carried" || rs === "unsplit") return "carried";
-      if (s === "paid" || s === "unpaid") return "paid";
-      return s || rs || "—";
-    };
-    const pays = (m.blocks_found || [])
-      .map((b) => `<tr><td class="num">${b.height}</td><td class="num">${btc(b.miner_btc)}</td><td>${statusPill(payStatus(b))}</td><td>${when(b.ts)}</td></tr>`)
-      .join("");
-    const gwName = String(m.gateway_name || "").trim();
-    const status = !m.online
-      ? (relayed.length ? "relayed · " + esc(relayed[0].upstream || "other pool") : "offline")
-      : isPrimePath(m.via)
-        ? (gwName ? "online · " + gwName : "online · own gateway")
-        : m.via === "both"
-          ? (gwName ? "online · stratum + " + gwName : "online · stratum + gateway")
-          : "online · public stratum";
-    const wp = (m.round_share || 0) * 100;
-    const hp = Number(m.hashrate_pool_percent) || 0;
-    const nblocks = Number(m.window_multiple) || 8;
-    let windowNote;
-    if (m.online && hp > 1 && wp < hp * 0.5) {
-      windowNote = `<p class="note callout">Your hashrate is ${hp.toFixed(1)}% of the pool right now, but you hold ${wp.toFixed(1)}% of the ${nblocks}-block payout window. New hash ramps in as work accumulates and older work ages out — that gap is expected, not a missing payout.</p>`;
-    } else {
-      windowNote = `<p class="note callout">Next-block pay is the window % (${wp.toFixed(1)}%), not hashrate. The window is ${nblocks} network-blocks of accepted work (TIDES). A newly connected high-hashrate miner does not take a matching slice of the next block.</p>`;
-    }
-    $("miner").innerHTML = `
-      <div class="panel miner-card">
-        <div class="addr-line">
-          <span class="copyable"><span class="mono">${esc(m.address)}</span><button type="button" class="copy-btn" data-copy="${esc(m.address)}" aria-label="Copy address" title="Copy"></button></span>
-          <span class="status-pill ${m.online ? "ok" : relayed.length ? "warn" : "bad"}">${status}</span>
-        </div>
-        ${relayNote}
-        ${windowNote}
-        <dl class="ticker">
-          <div><dt>Hashrate</dt><dd>${fmtHr(m.hr_ghs || 0)}<small>best ${fmtHr(m.best_hr_ghs || 0)} · ${hp.toFixed(1)}% of pool now</small></dd></div>
-          <div><dt>Accepted</dt><dd>${num(m.shares_lifetime ?? m.shares_acc)}<small>stays with this address on either path</small></dd></div>
-          <div><dt>This session</dt><dd>${sessCell(m.via, m.shares_session)}<small>${isPrimePath(m.via) ? "own gateway · Prime credits the window directly" : "public stratum only · resets on reconnect"}</small></dd></div>
-          <div><dt>This window</dt><dd>${winShareCell(m)}<small>${Number(m.window_shares) > 0 ? num(m.window_work) + " work still in the TIDES window" : "no accepted shares in the current window"}</small></dd></div>
-          <div><dt>Payout window</dt><dd>${wp.toFixed(1)}%<small>${num(m.window_work)} work · what the next block pays</small></dd></div>
-          <div><dt>Est. / day</dt><dd>${btc(m.est_btc_day)}${money(m.est_btc_day)}<small>at current difficulty, after the ${feePct(m.est_fee_percent != null ? m.est_fee_percent : (m.fee_percent_path != null ? m.fee_percent_path : feeForPath(m.fee_path)))} fee · once the window matches this hashrate</small></dd></div>
-          <div><dt>Next block</dt><dd>${btc(m.block_payout_btc)}${money(m.block_payout_btc)}<small>your output in the coinbase Prime dictates now${m.fee_path ? " · your window work is on the " + feePct(m.fee_percent_path != null ? m.fee_percent_path : feeForPath(m.fee_path)) + " " + (m.fee_path === "stratum" ? "public-stratum" : "own-gateway") + " rate" : ""}</small></dd></div>
-          <div><dt>Immature</dt><dd>${btc(m.immature_btc)}${money(m.immature_btc)}<small>in a coinbase, under 100 confs</small></dd></div>
-          <div><dt>Paid</dt><dd>${btc(m.paid_btc)}${money(m.paid_btc)}<small>in a coinbase, 100+ confs</small></dd></div>
-        </dl>
-        <div>
-          <p class="kicker table-label">Workers</p>
-          <p class="note">One row per stratum session. “Public stratum” is our gateway; “own gateway” is share credit arriving through a DATUM gateway you run. Session hashrate is what each connection reports; the credited total is the Hashrate figure above.</p>
-          <div class="scroll tall"><table><thead><tr><th>Worker</th><th>Path</th><th class="num">Hashrate</th><th class="num">Session</th><th class="num">Accepted</th><th class="num">Rejects</th><th class="num">Last</th></tr></thead><tbody>${workers || '<tr><td colspan="7" class="empty">Offline</td></tr>'}</tbody></table></div>
-        </div>
-        <div>
-          <p class="kicker table-label">Your payouts</p>
-          <div class="scroll"><table><thead><tr><th class="num">Height</th><th class="num">Amount</th><th>Status</th><th>Time</th></tr></thead><tbody>${pays || '<tr><td colspan="4" class="empty">No blocks found yet</td></tr>'}</tbody></table></div>
-        </div>
-      </div>${hasSolo ? soloCard(m, so) : ""}`;
     showChart(true);
     // Same trend markers, but from this address's side: the blocks its work was paid in.
     draw(
@@ -1347,10 +900,29 @@
         .map((b) => ({
           ts: Number(b.ts),
           title: (b.height ? "Block " + num(b.height) : "Block") + " · " + clock(b.ts),
-          sub: btc(b.miner_btc) + " BTC to you" + (payStatus(b) === "immature" ? " · immature" : ""),
+          sub: amt(b.miner_btc) + " to you" + (payStatus(b) === "immature" ? " · immature" : ""),
         }))
     );
     chartLegend($("chart-legend"), $("chart"), "block paid you", "blocks paid you");
+  }
+  // Tab clicks inside the card switch panels and update the URL without a reload.
+  $("miner").addEventListener("click", (e) => {
+    const t = e.target.closest(".mtab[data-mtab]");
+    if (!t) return;
+    e.preventDefault();
+    minerTab = showMinerTab($("miner"), t.getAttribute("data-mtab")) || "overview";
+    if (minerAddr) history.replaceState(null, "", "#" + minerAddr + (minerTab === "overview" ? "" : "/" + minerTab));
+  });
+  // "Payouts" in the top nav goes straight to this address's payouts panel.
+  function navPayouts(addr) {
+    const a = $("nav-payouts");
+    if (!a) return;
+    if (!addr) {
+      a.hidden = true;
+      return;
+    }
+    a.hidden = false;
+    a.href = "#" + addr + "/payouts";
   }
 
   // --------------------------------------------------------------- refresh
@@ -1368,6 +940,7 @@
     try {
       const [p, cb, px, so] = await Promise.all([poolP, cbP, pxP, soP]);
       if (px && Number.isFinite(Number(px.USD))) priceUsd = Number(px.USD);
+      if (Number(p.block_interval_seconds) > 0) blockInterval = Number(p.block_interval_seconds);
       stats(p);
       payoutHero(p, cb || {});
       coinbase(cb || {});
@@ -1391,7 +964,7 @@
           num(m.shares_lifetime ?? m.shares_acc ?? m.window_work),
           winShareCell(m, firstOf(m, i)),
           firstOf(m, i) && m.window_percent != null ? pct(m.window_percent) : "\u2014",
-          firstOf(m, i) && m.window_sats ? sats(m.window_sats) : "\u2014",
+          firstOf(m, i) && m.window_sats ? amtSats(m.window_sats) : "\u2014",
           Number.isFinite(Number(m.last_share_s)) ? Number(m.last_share_s).toFixed(0) + "s" : "\u2014",
         ]),
         [null, null, null, "num", "num", "num", "num", "num", "num", "num"],
@@ -1413,7 +986,7 @@
           num(m.shares_lifetime ?? m.shares_acc ?? m.window_work),
           winShareCell(m),
           m.window_work ? pct(m.window_percent) : "\u2014",
-          m.window_sats ? sats(m.window_sats) : "\u2014",
+          m.window_sats ? amtSats(m.window_sats) : "\u2014",
           ago(m.last_ts),
         ]),
         [null, null, "num", "num", "num", "num", "num"],
@@ -1430,6 +1003,8 @@
           : "";
       }
 
+      // Keep the looked-up card current too (same panel stays open).
+      if (minerAddr) showMiner(minerAddr).catch(() => {});
       const [blocks, pays] = await Promise.all([blocksP, paysP]);
       const marks = blockMarks(foundBlocks(pays, p));
       draw($("poolchart"), p.history || [], "hr_ghs", marks);
@@ -1474,8 +1049,9 @@
       return;
     }
     if (a && !SECTIONS.has(a)) {
-      $("lookup").value = a;
-      showMiner(a);
+      const [addr, tab] = a.split("/");
+      $("lookup").value = addr;
+      showMiner(addr, tab || "overview");
       // No element carries the address as its id, so the browser has nothing to scroll to;
       // take the reader to the lookup card ourselves.
       $("dashboard")?.scrollIntoView({ block: "start" });
@@ -1502,6 +1078,12 @@
     }
   });
   fromHash();
+  if (!minerAddr) {
+    try {
+      const last = localStorage.getItem("lz.addr");
+      if (last && !SECTIONS.has(last)) navPayouts(last);
+    } catch (e) { /* private mode */ }
+  }
   refresh().catch((e) => console.error(e));
   setInterval(() => refresh().catch((e) => console.error(e)), 10000);
   window.addEventListener("resize", () => {

@@ -305,6 +305,9 @@
     scroll-margin-top: calc(var(--topbar) + 0.5rem);
   }
   .section > .wrap { display: grid; gap: 1rem; }
+  /* Grid items default to min-width:auto; a wide table or canvas inside would otherwise
+     stretch the whole column past the viewport on narrow screens. */
+  .section > .wrap > * { min-width: 0; }
   .section > .wrap > .section-head { margin-bottom: 0.5rem; }
   .hero { scroll-margin-top: var(--topbar); }
   .section-head {
@@ -542,6 +545,7 @@
   .miner-card .ticker { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   @container (min-width: 40rem) { .miner-card .ticker { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
   .miner-card .ticker > * { background: var(--bg-inset); box-shadow: none; }
+  @container (min-width: 52rem) { .miner-card .ticker.four { grid-template-columns: repeat(4, minmax(0, 1fr)); } }
 
   /* ---- Charts. */
   .chart-wrap {
@@ -569,7 +573,7 @@
     color: var(--faint);
   }
   /* Key for the block-found ticks the canvas draws along the top of the plot. */
-  .chart-legend { color: var(--good); white-space: nowrap; }
+  .chart-legend { margin-left: 0.6em; color: var(--good); white-space: nowrap; }
   .chart-legend::before { content: "\25BE\00a0"; }
   @container (max-width: 34rem) {
     .chart-legend-noun { display: none; }
@@ -936,6 +940,94 @@
   .miner-card { display: grid; gap: 1.1rem; margin-bottom: 0.9rem; }
   .miner-card .table-label { margin-bottom: 0.4rem; }
   .miner-card .note + .scroll { margin-top: 0.5rem; }
+
+  /* ---- Miner card tabs: Overview / Workers / Payouts. Segmented, underlined like the nav. */
+  .mtabs {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.15rem;
+    border-bottom: 1px solid var(--line);
+  }
+  .mtab {
+    appearance: none;
+    background: none;
+    border: 0;
+    border-bottom: 2px solid transparent;
+    margin-bottom: -1px;
+    padding: 0.55rem 0.9rem 0.6rem;
+    font: inherit;
+    font-size: 0.9rem;
+    font-weight: 500;
+    color: var(--muted);
+    text-decoration: none;
+    cursor: pointer;
+    transition: color 140ms var(--ease), border-color 140ms var(--ease);
+  }
+  .mtab b {
+    margin-left: 0.35rem;
+    padding: 0.02rem 0.45rem;
+    border: 1px solid var(--line-strong);
+    border-radius: 999px;
+    font-family: var(--mono);
+    font-size: 0.7rem;
+    font-weight: 500;
+    color: var(--faint);
+    vertical-align: 0.1em;
+  }
+  .mtab:hover { color: var(--ink); }
+  .mtab[aria-selected="true"] { color: var(--brass); border-bottom-color: var(--brass); }
+  .mtab[aria-selected="true"] b { border-color: var(--brass-dim); color: var(--brass); }
+  .mtab-more {
+    margin-left: auto;
+    padding: 0.55rem 0.4rem 0.6rem;
+    font-size: 0.82rem;
+    color: var(--faint);
+  }
+  .mtab-more:hover { color: var(--brass); }
+  .mpanel { display: grid; gap: 1rem; }
+  .miner-card > *, .mpanel > * { min-width: 0; }
+  .mpanel[hidden] { display: none; }
+
+  /* Maturity progress: confirmations toward spendable. */
+  .mature {
+    display: inline-grid;
+    gap: 0.25rem;
+    min-width: 6.5rem;
+    justify-items: end;
+  }
+  .mature-bar {
+    display: block;
+    width: 100%;
+    height: 3px;
+    border-radius: 2px;
+    background: var(--line-strong);
+    position: relative;
+    overflow: hidden;
+  }
+  .mature-bar::after {
+    content: "";
+    position: absolute;
+    inset: 0 auto 0 0;
+    width: var(--p, 0%);
+    background: var(--brass);
+    border-radius: 2px;
+  }
+  table.pending td { vertical-align: middle; }
+
+  /* ---- /miner/<addr>: the address is the headline. */
+  .miner-page main { padding-top: calc(var(--topbar) + 1.5rem); }
+  .miner-head .addr-title {
+    font-family: var(--mono);
+    font-size: clamp(0.95rem, 2.2vw, 1.35rem);
+    font-weight: 500;
+    letter-spacing: 0;
+    overflow-wrap: anywhere;
+    line-height: 1.35;
+  }
+  .miner-head .addr-title .copyable { font-size: inherit; }
+  .miner-head .hero-stats { margin-top: 0.25rem; }
+  .miner-page .nav a[aria-current="true"] { color: var(--brass); }
 
   /* Small labelled states inside tables: coinbase kind, block status, our own gateway. */
   .pill {
