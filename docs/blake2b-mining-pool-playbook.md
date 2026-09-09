@@ -142,8 +142,12 @@ includeconf=blake2b.conf
 ```conf
 # Chain-mandated headline — copy from the fork’s docs, not this file’s example wording.
 blake2b_headline=<CHAIN_HEADLINE>
-# This fork’s block weight/size (confirm on the chain; one public fork used 800000 / 300000)
-blockmaxweight=800000
+# This fork’s block weight/size (confirm on the chain; one public fork used 800000 / 300000).
+# Build BELOW the consensus limit: the pool's split coinbase (Prime TIDES, up to 14000 bytes
+# ~56k weight) is added after the node picks transactions. A node that fills to the limit
+# makes the gateway refuse every template ("block would weigh N > weightlimit") and miners
+# hash a stale job until the mempool drains.
+blockmaxweight=736000
 blockmaxsize=300000
 
 # Exclusive outbound to BLAKE2b-speaking peers.
@@ -177,7 +181,7 @@ rpcport=<RPC_PORT_B>
 port=<P2P_PORT_B>
 rpcallowip=127.0.0.1
 blake2b_headline=<CHAIN_HEADLINE>
-blockmaxweight=800000
+blockmaxweight=736000
 blockmaxsize=300000
 addnode=127.0.0.1:<P2P_PORT>
 connect=<BLAKE2B_PEER_…>
@@ -461,6 +465,16 @@ Tell miners **only** `<STRATUM_HOST>`, never the website name.
 
 Watch `/api/payouts` or `found_blocks`. Seed state (no replay). Hosted SMTP rejects a vanity `From:` that is not an identity on that account (Proton vs Cloudflare Email Routing). Keep the working SMTP user until a real send identity exists. Never print tokens.
 
+## 8b. Stale-template defence (not optional)
+
+The quietest outage a pool has: every gateway process up, every miner still connected, and no new job for a quarter of an hour. Prime credits nothing for stale work, so the pool's hashrate graph simply falls. Two layers guard against it.
+
+**Gateway trims to fit.** `lazarus-gateway` sizes the coinbase it is about to publish and, if header + coinbase + the node's transactions would exceed the template's `weightlimit`, drops transactions from the tail (parents precede children, so nothing is stranded), subtracts their fees from the coinbase value and recomputes the witness commitment. It proves its own commitment derivation against the node's `default_witness_commitment` on the untrimmed set first; on disagreement it refuses to trim and the job is refused as before rather than a bad block going out. Look for `trimmed N txs` in the gateway log and `tx_trimmed` in `/audit`. Trimming on every template means the node's `blockmaxweight` is too high (see §1.2) — fix the node, do not rely on the trim.
+
+**Watchdog pages you.** `scripts/gateway-watchdog.sh` runs from a one-minute systemd user timer (`node/umbrel/systemd/gateway-watchdog.{service,timer}`) and reads `/audit` from every running gateway. It alerts through Home Assistant (phone push + persistent notification; token in `blake2b/secrets/ha.env`) when a gateway's `template_age_s` passes 90 s — saying whether Knots RPC is up or down — when a gateway's API stops answering, or when it has trimmed on five consecutive checks. One alert per condition, re-alert every 15 min, one "recovered" when it clears. `gateway-watchdog.sh --test` sends a test push.
+
+To prove a gateway's block is valid without waiting for a solve: `curl :<API>/audit | jq -r .block_hex` and feed it to `getblocktemplate {"mode":"proposal","data":HEX,"rules":["segwit","blake2b"]}`; `null` is acceptance. The ignored test `trimmed_block_proposal_from_saved_template` in the gateway crate does the same for a *trimmed* block from a saved template.
+
 ---
 
 ## 9. Explorer (mempool on Umbrel)
@@ -552,6 +566,8 @@ A 3-minute timer: read heights; when ready, rewrite nginx upstream and `docker r
 - [ ] Public IP `ESTAB` to DATUM; remote shares accepted
 - [ ] House ASIC uses `<STRATUM_HOST>`, not `<WAN_IP>`
 - [ ] Pool UI stratum string uses `<STRATUM_HOST>`
+- [ ] Knots `blockmaxweight` leaves room for the coinbase (736000 on an 800000 fork); `/audit` shows `tx_trimmed: 0`
+- [ ] `gateway-watchdog.timer` active; `gateway-watchdog.sh --test` reaches your phone
 
 ---
 

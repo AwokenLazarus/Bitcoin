@@ -1,0 +1,6 @@
+[Unit]
+Description=Lazarus gateway watchdog (stale template / trim alerts to Home Assistant)
+
+[Service]
+Type=oneshot
+ExecStart=/home/umbrel/blake2b/bin/gateway-watchdog.sh
