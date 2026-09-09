@@ -48,6 +48,7 @@
     --r-sm: 8px;
     --radius: 6px;
     --topbar: 3.6rem;
+    --mast: var(--topbar);
     --ease: cubic-bezier(0.2, 0.7, 0.2, 1);
     --shadow-card: 0 1px 0 oklch(100% 0 0 / 3%) inset, 0 12px 40px -24px oklch(0% 0 0 / 70%);
     color-scheme: dark;
@@ -58,7 +59,11 @@
 }
 
 @layer base {
-  html { scrollbar-gutter: stable; scroll-behavior: smooth; }
+  html {
+    scrollbar-gutter: stable;
+    scroll-behavior: smooth;
+    scroll-padding-top: calc(var(--mast) + 0.5rem);
+  }
   body {
     min-height: 100dvh;
     font-family: var(--sans);
@@ -106,8 +111,8 @@
     margin-inline: auto;
   }
 
-  /* ---- Top bar: brand, section nav (scroll-spied), live hashrate, one call to action. */
-  .site-header {
+  /* ---- Sticky chrome: nav + DATUM bonus banner freeze together at the top. */
+  .site-mast {
     position: sticky;
     top: 0;
     z-index: 20;
@@ -117,9 +122,12 @@
     -webkit-backdrop-filter: blur(16px) saturate(1.15);
     transition: border-color 200ms var(--ease), background 200ms var(--ease);
   }
-  .site-header[data-scrolled] {
+  .site-mast[data-scrolled] {
     border-bottom-color: var(--line);
     background: color-mix(in oklch, var(--bg) 86%, transparent);
+  }
+  .site-header {
+    border-bottom: 1px solid transparent;
   }
   .topbar {
     display: grid;
@@ -214,18 +222,19 @@
     .topbar-side .btn.small { display: none; }
   }
 
-  /* ---- DATUM bonus banner: above the hero, brass, hidden when the rebate is off. */
+  /* ---- DATUM bonus banner: full-bleed strip under the nav, hidden when the rebate is off. */
   .promo {
+    margin: 0;
+    border-top: 1px solid color-mix(in oklch, var(--brass) 35%, var(--line));
+    background: color-mix(in oklch, var(--brass) 12%, transparent);
+  }
+  .promo-row {
     display: flex;
     flex-wrap: wrap;
     align-items: center;
-    gap: 0.6rem 1rem;
-    margin-top: 1rem;
-    padding: 0.7rem 1rem 0.75rem;
-    border: 1px solid color-mix(in oklch, var(--brass) 45%, var(--line));
+    gap: 0.55rem 1rem;
+    padding-block: 0.55rem 0.6rem;
     border-left: 3px solid var(--brass);
-    border-radius: var(--r);
-    background: color-mix(in oklch, var(--brass) 10%, var(--bg-inset));
   }
   .promo-tag {
     flex: none;
@@ -371,14 +380,14 @@
   .section {
     padding-block: clamp(3rem, 2.5rem + 2.5vw, 5.5rem);
     border-top: 1px solid var(--line);
-    scroll-margin-top: calc(var(--topbar) + 0.5rem);
+    scroll-margin-top: calc(var(--mast) + 0.5rem);
   }
   .section > .wrap { display: grid; gap: 1rem; }
   /* Grid items default to min-width:auto; a wide table or canvas inside would otherwise
      stretch the whole column past the viewport on narrow screens. */
   .section > .wrap > * { min-width: 0; }
   .section > .wrap > .section-head { margin-bottom: 0.5rem; }
-  .hero { scroll-margin-top: var(--topbar); }
+  .hero { scroll-margin-top: var(--mast); }
   .section-head {
     display: grid;
     gap: 0.55rem;
@@ -416,8 +425,8 @@
   }
   .sub-head { margin-bottom: 0.9rem; }
   .fold-head { margin: 1rem 0 0.4rem; }
-  .anchor { display: block; height: 0; scroll-margin-top: calc(var(--topbar) + 1rem); }
-  #gw-pick { scroll-margin-top: calc(var(--topbar) + 1rem); }
+  .anchor { display: block; height: 0; scroll-margin-top: calc(var(--mast) + 1rem); }
+  #gw-pick { scroll-margin-top: calc(var(--mast) + 1rem); }
 
   /* ---- Footer: same four-column link tree as the Lazarus Mempool footer. */
   .site-footer {
@@ -1766,6 +1775,6 @@
     transition: none !important;
     animation: none !important;
   }
-  .site-header { backdrop-filter: none; -webkit-backdrop-filter: none; }
+  .site-mast { backdrop-filter: none; -webkit-backdrop-filter: none; }
   .reveal { opacity: 1; transform: none; }
 }

@@ -638,6 +638,19 @@
     return want;
   }
 
+  // Keep in-page anchors from landing under the sticky nav (+ DATUM banner). --mast is the
+  // live height of .site-mast; CSS scroll-margin/padding read it.
+  (() => {
+    const mast = document.querySelector(".site-mast") || document.querySelector(".site-header");
+    if (!mast) return;
+    const sync = () => {
+      document.documentElement.style.setProperty("--mast", `${Math.round(mast.getBoundingClientRect().height)}px`);
+    };
+    sync();
+    if (typeof ResizeObserver === "function") new ResizeObserver(sync).observe(mast);
+    window.addEventListener("resize", sync, { passive: true });
+  })();
+
   window.LZ = {
     blockMarks, esc, fmtHr, num, bigNum, short, shortHash, pct, pctSmart, ago, agoS, dur, when, clock, sig4, amt, amtSats, amtExact,
     kindPill, statusPill, chartLegend, continuous, chartTip, markHover, draw, CHART_MARK,

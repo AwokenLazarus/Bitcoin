@@ -172,13 +172,16 @@
 
   // Top bar hairline once scrolled, same as the front page.
   const header = document.querySelector(".site-header");
+  const mast = document.querySelector(".site-mast") || header;
   if (header) {
     let raf = 0;
     const onScroll = () => {
       if (raf) return;
       raf = requestAnimationFrame(() => {
         raf = 0;
-        header.toggleAttribute("data-scrolled", window.scrollY > 8);
+        const on = window.scrollY > 8;
+        header.toggleAttribute("data-scrolled", on);
+        if (mast && mast !== header) mast.toggleAttribute("data-scrolled", on);
       });
     };
     window.addEventListener("scroll", onScroll, { passive: true });

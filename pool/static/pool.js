@@ -280,7 +280,7 @@
       promo.title = `DATUM work is ${pctSmart(fees.datumWorkPct)} of the window and the public stratum is ${pctSmart(fees.stratumWorkPct)}, so the ${pts(fees.rebate)} taken from stratum work is worth ${upliftTxt} to DATUM work.`;
     }
     setText("promo-text", on
-      ? `The public stratum pays ${feePct(fees.stratum)}. ${Pts(fees.rebate)} of it is credited to every DATUM miner holding work in the window, on every block the pool finds — pro rata by your work, whether or not you made that coinbase.`
+      ? `The public stratum pays ${feePct(fees.stratum)}. ${Pts(fees.rebate)} of it is credited to every DATUM miner holding work in the window, on every block the pool finds — pro rata by your DATUM work, whether or not you made that coinbase.`
       : "");
 
     show("live-bonus-chip", on && !!upliftTxt);
@@ -325,7 +325,7 @@
     const explain = $("datum-bonus-explain-text");
     if (explain && on) {
       explain.innerHTML =
-        `The public stratum pays a ${feePct(fees.stratum)} fee. ${Pts(fees.rebate)} of it is never kept by the pool: on every block found it is credited to every DATUM miner holding work in the window, pro rata by that work. ` +
+        `The public stratum pays a ${feePct(fees.stratum)} fee. ${Pts(fees.rebate)} of it is never kept by the pool: on every block found it is credited to every DATUM miner holding work in the window, pro rata by DATUM work. ` +
         `It lands on your balance whether or not your address made that block's coinbase, and is paid with your next output once it clears the minimum — so a small gateway that rarely fits in a coinbase still earns every satoshi of its share. ` +
         (upliftPhrase ? upliftPhrase + `, because DATUM holds ${pctSmart(fees.datumWorkPct)} of the window and the public stratum holds ${pctSmart(fees.stratumWorkPct)}. The fewer of you there are, the bigger each share.` : "");
     }
@@ -351,7 +351,7 @@
       payoutNote.hidden = !on;
       if (on) {
         payoutNote.innerHTML =
-          `<strong>Plus the DATUM bonus.</strong> This block also credits ${sample > 0 ? `<b>${amt(sample)}</b>${money(sample)}` : `${pts(fees.rebate)} of the stratum fee`} to the DATUM miners in the window, pro rata by work. ` +
+          `<strong>Plus the DATUM bonus.</strong> This block also credits ${sample > 0 ? `<b>${amt(sample)}</b>${money(sample)}` : `${pts(fees.rebate)} of the stratum fee`} to the DATUM miners in the window, pro rata by DATUM work. ` +
           `It is not one of the outputs above — it goes onto their balances and is paid with their next output. ` +
           `<a href="#connect" data-tab="tab-datum">Run a gateway</a> and you are in it.`;
         payoutNote.querySelector("[data-tab]")?.addEventListener("click", () => selectTab("tab-datum"));
@@ -1305,13 +1305,16 @@
   // all of it degrades to nothing when the browser lacks IntersectionObserver.
   (() => {
     const header = document.querySelector(".site-header");
+    const mast = document.querySelector(".site-mast") || header;
     if (header) {
       let raf = 0;
       const onScroll = () => {
         if (raf) return;
         raf = requestAnimationFrame(() => {
           raf = 0;
-          header.toggleAttribute("data-scrolled", window.scrollY > 8);
+          const on = window.scrollY > 8;
+          header.toggleAttribute("data-scrolled", on);
+          if (mast && mast !== header) mast.toggleAttribute("data-scrolled", on);
         });
       };
       window.addEventListener("scroll", onScroll, { passive: true });
