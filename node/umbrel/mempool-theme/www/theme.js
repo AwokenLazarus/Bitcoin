@@ -813,7 +813,7 @@
   var MIN_SLICE_DEG = 3;      // narrower slices cannot show a readable band
   var SVGNS = 'http://www.w3.org/2000/svg';
   var PIE_START = 270;        // twelve o'clock in SVG angles, where the pie's first slice begins
-  var BUILD = '8';
+  var BUILD = '9';
   var LABEL_STEPS = [0, -15, 15, -30, 30, -46, 46];   // where a hover label may sit, in order
   var bandInfo = (self.__lazarusTheme || {}).bands = { state: 'idle', log: [] };
   function bandState(st) {
@@ -1438,37 +1438,6 @@
     bandInfo.sig = sig;
   }
 
-  /* ?lzdebug=1 (sticky, ?lzdebug=0 to stop) puts what the bands are doing on the page, so a
-   * misbehaving browser can be reported with a screenshot instead of a console session. */
-  function bandDebug() {
-    var q = /[?&]lzdebug=([01])/.exec(location.search);
-    if (q) { try { localStorage.setItem('lzdebug', q[1]); } catch (e) { /* private mode */ } }
-    var on = false;
-    try { on = localStorage.getItem('lzdebug') === '1'; } catch (e) { on = !!q && q[1] === '1'; }
-    var panel = document.getElementById('lz-debug');
-    if (!on) { if (panel) panel.remove(); return; }
-    if (!panel) {
-      panel = el('div', { id: 'lz-debug' });
-      document.body.appendChild(panel);
-    }
-    var host = document.querySelector('app-pool-ranking [_echarts_instance_]');
-    var chart = host && host.querySelector('svg:not(.lz-bands)');
-    var ov = host && host.querySelector('svg.lz-bands');
-    function box(s) { return s ? s.getAttribute('width') + 'x' + s.getAttribute('height') : '-'; }
-    panel.innerHTML = '<b>gateway bands build ' + esc(BUILD) + '</b>' +
-      '<span>state: ' + esc(String(bandInfo.state)) + '</span>' +
-      '<span>bands: ' + (bandInfo.drawn || 0) + ' in ' + (bandInfo.pools || 0) + ' pools \u00b7 ' +
-        esc(String(bandInfo.window || '-')) + '</span>' +
-      '<span>chart ' + box(chart) + ' \u00b7 overlay ' + (ov ? box(ov) : 'MISSING') + '</span>' +
-      '<span>screen Δ ' + (function () {
-        if (!chart || !ov) return '-';
-        var a = chart.getBoundingClientRect(), b = ov.getBoundingClientRect();
-        return (b.left - a.left).toFixed(1) + ',' + (b.top - a.top).toFixed(1);
-      }()) + '</span>' +
-      '<span>zoom ' + (self.devicePixelRatio || 1).toFixed(2) + ' \u00b7 ' + self.innerWidth + 'px</span>' +
-      bandInfo.log.map(function (l) { return '<span class="lz-debug-log">' + esc(l) + '</span>'; }).join('');
-  }
-
   var scheduled = false;
   function apply() {
     scheduled = false;
@@ -1479,7 +1448,6 @@
     try { minerBadges(); } catch (e) { /* never break the explorer */ }
     try { paintClockFiat(); } catch (e) { /* never break the explorer */ }
     try { drawBands(); } catch (e) { bandState('error: ' + e); }
-    try { bandDebug(); } catch (e) { /* never break the explorer */ }
   }
   function schedule() {
     if (scheduled) return;
@@ -1488,6 +1456,9 @@
   }
 
   function start() {
+    try { localStorage.removeItem('lzdebug'); } catch (e) { /* private mode */ }
+    var leftover = document.getElementById('lz-debug');
+    if (leftover) leftover.remove();
     apply();
     // Last line of defence for the bands: whatever moves the chart -- a zoom, a resize, a
     // re-render that drops the overlay -- this notices within a tick. drawBands hashes the
@@ -1495,7 +1466,6 @@
     // there, so an idle page pays a hash four times a second and nothing else.
     setInterval(function () {
       try { drawBands(); } catch (e) { bandState('error: ' + e); }
-      try { bandDebug(); } catch (e) { /* never break the explorer */ }
     }, 250);
     new MutationObserver(schedule).observe(document.body, { childList: true, subtree: true });
     self.addEventListener('resize', bandsReflow, { passive: true });
