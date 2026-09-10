@@ -720,7 +720,7 @@
 
   function footer() {
     var tree = document.querySelector('app-global-footer .link-tree');
-    if (!tree || tree.querySelector('.lz-links')) return;
+    if (tree && !tree.querySelector('.lz-links')) {
     var col = el('div', { class: 'links lz-links' });
     col.appendChild(el('p', { class: 'category' }, 'Lazarus'));
     var links = [
@@ -751,6 +751,16 @@
     var cols = tree.querySelectorAll('.links');
     var legal = cols.length ? cols[cols.length - 1] : null;
     if (legal) tree.insertBefore(col, legal); else tree.appendChild(col);
+    }
+    footerVersion();
+  }
+
+  function footerVersion() {
+    var p = document.querySelector('footer .row.version p');
+    if (!p || p.querySelector('.lz-theme-ver')) return;
+    p.appendChild(document.createTextNode(' · '));
+    p.appendChild(el('span', { class: 'lz-theme-ver', title: 'Lazarus theme: DATUM gateway bands in the mining pie' },
+      'Lazarus bands ' + BUILD));
   }
 
   // Blocks mined through a DATUM gateway carry the gateway's own tag next to the pool's; the
@@ -803,7 +813,7 @@
   var MIN_SLICE_DEG = 3;      // narrower slices cannot show a readable band
   var SVGNS = 'http://www.w3.org/2000/svg';
   var PIE_START = 270;        // twelve o'clock in SVG angles, where the pie's first slice begins
-  var BUILD = 'gateway bands build 7';
+  var BUILD = '8';
   var LABEL_STEPS = [0, -15, 15, -30, 30, -46, 46];   // where a hover label may sit, in order
   var bandInfo = (self.__lazarusTheme || {}).bands = { state: 'idle', log: [] };
   function bandState(st) {
@@ -834,8 +844,13 @@
   }
 
   function bandWindow() {
+    // The /mining dashboard widget is always the 1w luck pie; the graphs page stores its
+    // own window in localStorage, which must not leak onto that widget.
+    if (isMiningDash()) return '1w';
     try { return localStorage.getItem('miningWindowPreference') || '1w'; } catch (e) { return '1w'; }
   }
+  function isPoolsGraph() { return /\/graphs\/mining\/pools/.test(location.pathname); }
+  function isMiningDash() { return /^\/mining\/?$/.test(location.pathname); }
   function normTag(s) { return String(s == null ? '' : s).replace(/[^a-z0-9]/gi, '').toLowerCase(); }
   function hash32(s) {
     var h = 5381;
@@ -1159,8 +1174,9 @@
   }
 
   function drawBands() {
-    // Only the full pools graph: the dashboard's pie widget is too small for bands.
-    if (!/\/graphs\/mining\/pools/.test(location.pathname)) { bandState('inactive'); dropBands(); return; }
+    // The full pools graph and the /mining dashboard widget (1w luck pie). Other pies
+    // (pool pages, tiny tiles) stay stock.
+    if (!isPoolsGraph() && !isMiningDash()) { bandState('inactive'); dropBands(); return; }
     var host = document.querySelector('app-pool-ranking [_echarts_instance_]');
     var svg = host && host.querySelector('svg:not(.lz-bands)');
     if (!svg) { bandState('no chart yet'); dropBands(); return; }
@@ -1409,7 +1425,7 @@
     });
 
     var wrap = host.parentNode;
-    if (wrap && !wrap.querySelector('.lz-bands-note')) {
+    if (isPoolsGraph() && wrap && !wrap.querySelector('.lz-bands-note')) {
       wrap.insertBefore(el('p', { class: 'lz-bands-note' },
         '<b>Outer bands: DATUM gateways</b>, largest on the rim, by the tag their coinbase carries. ' +
         'The inner band is the pool\u2019s blocks with no gateway tag \u2014 its own stratum. ' +
@@ -1439,7 +1455,7 @@
     var chart = host && host.querySelector('svg:not(.lz-bands)');
     var ov = host && host.querySelector('svg.lz-bands');
     function box(s) { return s ? s.getAttribute('width') + 'x' + s.getAttribute('height') : '-'; }
-    panel.innerHTML = '<b>' + esc(BUILD) + '</b>' +
+    panel.innerHTML = '<b>gateway bands build ' + esc(BUILD) + '</b>' +
       '<span>state: ' + esc(String(bandInfo.state)) + '</span>' +
       '<span>bands: ' + (bandInfo.drawn || 0) + ' in ' + (bandInfo.pools || 0) + ' pools \u00b7 ' +
         esc(String(bandInfo.window || '-')) + '</span>' +

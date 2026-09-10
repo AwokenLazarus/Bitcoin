@@ -172,7 +172,7 @@ across a stop/start to see names on blocks indexed before it.
 
 ## Mempool explorer: gateway bands in the mining-pool pie
 
-Each slice of the pie on `/graphs/mining/pools` is one pool's blocks in the chosen window. Pools that
+Each slice of the pie on `/graphs/mining/pools` (and the 1w luck pie on `/mining`) is one pool's blocks in the chosen window. Pools that
 speak DATUM hand template building to their miners' own gateways, and every such block names the
 gateway that built it, so a slice can be read as the gateways behind it. `theme.js` draws that: inside
 a slice, one arc band per gateway tag, ordered smallest to largest outward so the biggest gateway is on
