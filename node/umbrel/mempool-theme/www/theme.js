@@ -1070,6 +1070,18 @@
     for (var i = 0; i < left.length; i++) undim(left[i]);
   }
 
+  /* Ctrl+wheel zoom and window resizes rewrite the chart's path data in place, which is not
+   * a childList mutation, so the observer that drives everything else never hears about it
+   * and the bands would sit on the old geometry until the next block or clock tick moved
+   * something. The trailing redraw is for the resize ECharts does one frame later. */
+  var reflowTimer = null;
+  function bandsReflow() {
+    bandInfo.sig = null;
+    schedule();
+    clearTimeout(reflowTimer);
+    reflowTimer = setTimeout(function () { bandInfo.sig = null; schedule(); }, 350);
+  }
+
   function dropBands() {
     undimAll();
     var stale = document.querySelectorAll('svg.lz-bands, .lz-band-tip, .lz-bands-note');
@@ -1083,6 +1095,10 @@
     var host = document.querySelector('app-pool-ranking [_echarts_instance_]');
     var svg = host && host.querySelector('svg');
     if (!svg) { bandInfo.state = 'no chart yet'; dropBands(); return; }
+    if (self.ResizeObserver && !host.__lzRO) {
+      host.__lzRO = new self.ResizeObserver(bandsReflow);
+      host.__lzRO.observe(host);
+    }
 
     var win = bandWindow();
     var api = cachedJson('pools-' + win, '/api/v1/mining/pools/' + win, 120000);
@@ -1093,7 +1109,8 @@
 
     // Redraw when the pie itself changes (window, resize, new block) and not on every one of
     // the DOM mutations that bring us here.
-    var sig = hash32([win, tagDoc.generated, host.clientWidth, host.clientHeight].join(':') +
+    var sig = hash32([win, tagDoc.generated, host.clientWidth, host.clientHeight,
+      svg.getAttribute('width'), svg.getAttribute('height')].join(':') +
       Array.prototype.map.call(svg.querySelectorAll('path'), function (p) { return p.getAttribute('d'); }).join(''));
     if (bandInfo.sig === sig) return;
     undimAll();                       // a redraw ends any hover, so nothing stays faded
@@ -1118,11 +1135,16 @@
 
     var old = host.querySelector('svg.lz-bands');
     if (old) old.remove();
+    // The sector coordinates are in the chart SVG's user space, which at a fractional
+    // browser zoom is not the rounded clientWidth; match it exactly or the rings sit a
+    // pixel off the bands they trace.
+    var vw = parseFloat(svg.getAttribute('width')) || host.clientWidth;
+    var vh = parseFloat(svg.getAttribute('height')) || host.clientHeight;
     var ov = document.createElementNS(SVGNS, 'svg');
     ov.setAttribute('class', 'lz-bands');
-    ov.setAttribute('width', host.clientWidth);
-    ov.setAttribute('height', host.clientHeight);
-    ov.setAttribute('viewBox', '0 0 ' + host.clientWidth + ' ' + host.clientHeight);
+    ov.setAttribute('width', vw);
+    ov.setAttribute('height', vh);
+    ov.setAttribute('viewBox', '0 0 ' + vw + ' ' + vh);
 
     var drawn = 0, pools = 0, netHs = windowHashrate(api, win);
     slices.forEach(function (slice, k) {
@@ -1225,7 +1247,7 @@
       ov.appendChild(lead);
       ov.appendChild(text);
       var w = text.getComputedTextLength ? text.getComputedTextLength() : 80;
-      var x = right ? Math.min(tx + 3, host.clientWidth - 4 - w) : Math.max(tx - 3, 4 + w);
+      var x = right ? Math.min(tx + 3, vw - 4 - w) : Math.max(tx - 3, 4 + w);
       text.setAttribute('x', x.toFixed(1));
       text.setAttribute('text-anchor', right ? 'start' : 'end');
       // The pie's own labels crowd both sides, so step the tag off the bisector until it
@@ -1269,7 +1291,7 @@
       // covering the band it is describing.
       tip.innerHTML = bandTooltipHtml(b);
       tip.setAttribute('data-shown', '');
-      var W = host.clientWidth, H = host.clientHeight, tw = tip.offsetWidth, th = tip.offsetHeight;
+      var W = vw, H = vh, tw = tip.offsetWidth, th = tip.offsetHeight;
       var gap = 12, beside = anchor.y - th / 2, spots = [];
       if (pie.cx + pie.r + gap + tw <= W) spots.push([pie.cx + pie.r + gap, beside]);
       if (pie.cx - pie.r - gap - tw >= 0) spots.push([pie.cx - pie.r - gap - tw, beside]);
@@ -1333,6 +1355,8 @@
   function start() {
     apply();
     new MutationObserver(schedule).observe(document.body, { childList: true, subtree: true });
+    self.addEventListener('resize', bandsReflow, { passive: true });
+    if (self.visualViewport) self.visualViewport.addEventListener('resize', bandsReflow, { passive: true });
   }
   if (document.body) start(); else document.addEventListener('DOMContentLoaded', start);
 })();

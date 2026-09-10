@@ -204,7 +204,12 @@ the bands into an overlay SVG on top, absolutely positioned so it takes no part 
 checked before anything is drawn -- the sector count has to be explained by one of the component's share
 thresholds, and every sector's angle has to agree with the share the pools API reports -- and any
 mismatch, missing `pool-tags.json` or unreadable path data leaves the stock pie alone.
-`window.__lazarusTheme.bands` says which happened.
+`window.__lazarusTheme.bands` says which happened. A resize or a ctrl+wheel zoom is the one thing the
+chart does not announce -- it rewrites the same path elements in place, which is not the childList
+mutation the theme is driven by -- so the bands also redraw from a `ResizeObserver` on the chart box and
+from `resize` on the window and the visual viewport, once immediately and once after the resize ECharts
+does a frame later. The overlay is sized from the chart SVG's own width, not the rounded `clientWidth`,
+because at 110% or 150% zoom those differ and the highlight ring would trace a pixel off its band.
 
 Band thickness is proportional to the tag's share of the pool, plus a floor of a few pixels so a
 one-block gateway is still visible; gateways under 1% of the pool share a single *N smaller gateways*
