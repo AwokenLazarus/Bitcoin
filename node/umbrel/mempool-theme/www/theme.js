@@ -802,7 +802,8 @@
   var MIN_BAND_PX = 3.5;      // every band stays visible; the rest is share-proportional
   var MIN_SLICE_DEG = 3;      // narrower slices cannot show a readable band
   var SVGNS = 'http://www.w3.org/2000/svg';
-  var BUILD = 'gateway bands build 5';
+  var PIE_START = 270;        // twelve o'clock in SVG angles, where the pie's first slice begins
+  var BUILD = 'gateway bands build 6';
   var LABEL_STEPS = [0, -15, 15, -30, 30, -46, 46];   // where a hover label may sit, in order
   var bandInfo = (self.__lazarusTheme || {}).bands = { state: 'idle', log: [] };
   function bandState(st) {
@@ -879,54 +880,75 @@
     return { cx: cx, cy: cy, r: Math.sqrt(rr) };
   }
 
-  /* Read the pie back out of its own SVG: the filled closed paths are the sectors, in data
-   * order. Each carries its outer and inner radius in the arc commands (plus the 1px corner
-   * arcs from itemStyle.borderRadius) and starts at its own leading edge, so consecutive
-   * start angles give every sector's span. */
+  /* Read the pie back out of its own SVG. Filled closed paths are the sectors. Radii come
+   * from each path's own arcs (the 1px corner arcs from itemStyle.borderRadius are skipped).
+   * Order comes from start-edge angles, not document order: ECharts moves the hovered
+   * sector to the end of the SVG so it paints on top. */
   function readPie(svg) {
-    var all = svg.querySelectorAll('path'), sectors = [], radii = {}, outer = [], i, p, d, m, a;
+    var all = svg.querySelectorAll('path'), sectors = [], outer = [], i, p, d, m, a;
     for (i = 0; i < all.length; i++) {
       p = all[i];
       d = p.getAttribute('d') || '';
       if (!(p.getAttribute('fill') || 'none').match(/^(#|rgb)/i) || !/Z\s*$/.test(d)) continue;
       m = MOVE_RE.exec(d);
       if (!m) return null;
-      var arcs = [];
+      var arcs = [], lo = Infinity, hi = 0;
       ARC_RE.lastIndex = 0;
       while ((a = ARC_RE.exec(d))) {
-        arcs.push({ r: parseFloat(a[1]), x: parseFloat(a[6]), y: parseFloat(a[7]) });
-        radii[arcs[arcs.length - 1].r.toFixed(3)] = arcs[arcs.length - 1].r;
+        var arc = { r: parseFloat(a[1]), x: parseFloat(a[6]), y: parseFloat(a[7]) };
+        arcs.push(arc);
+        if (arc.r > 2) { lo = Math.min(lo, arc.r); hi = Math.max(hi, arc.r); }  // skip corner arcs
       }
-      if (!arcs.length) return null;
-      sectors.push({ el: p, x: parseFloat(m[1]), y: parseFloat(m[2]), arcs: arcs });
+      if (!arcs.length || !hi) return null;
+      sectors.push({ el: p, x: parseFloat(m[1]), y: parseFloat(m[2]), arcs: arcs,
+                     r: hi, r0: lo === hi ? 0 : lo });
     }
     if (!sectors.length) return null;
-    var sorted = Object.keys(radii).map(function (k) { return radii[k]; }).sort(function (x, y) { return y - x; });
-    var r = sorted[0], r0 = sorted.length > 1 ? sorted[1] : 0;
-    if (!(r > 4) || !(r0 >= 0) || r0 >= r) return null;
-    // Mid-resize the chart can hold sectors from two sizes at once. Taking the largest and
-    // second largest radius across all of them would then mix the eras and draw bands
-    // across the hole, so every sector has to carry the same outer radius.
-    for (i = 0; i < sectors.length; i++) {
-      var mx = 0;
-      for (var j = 0; j < sectors[i].arcs.length; j++) mx = Math.max(mx, sectors[i].arcs[j].r);
-      if (Math.abs(mx - r) > 0.6) return null;
-    }
+
+    /* Radii are read per sector and the pie's own radius is the one most sectors share.
+     * The sector under the pointer is not the same size as the others -- ECharts scales it
+     * on hover -- and mid-resize the chart can briefly hold two sizes at once. Taking the
+     * largest radius anywhere would follow the hovered sector and draw every band into the
+     * few pixels it grew by; refusing to read at all would blank the bands whenever the
+     * pointer crosses the chart. So: the majority sets the pie, and a sector that differs
+     * keeps its own radii and has its bands drawn to match. */
+    var tally = {}, best = null;
     sectors.forEach(function (s) {
+      var k = s.r.toFixed(1);
+      tally[k] = (tally[k] || 0) + 1;
+      if (!best || tally[k] > tally[best] || (tally[k] === tally[best] && s.r < parseFloat(best))) best = k;
+    });
+    var r = parseFloat(best), base = sectors.filter(function (s) { return Math.abs(s.r - r) < 0.6; });
+    if (base.length * 2 < sectors.length) return null;      // no majority: a half-drawn chart
+    var inner = {}, bestIn = null;
+    base.forEach(function (s) {
+      var k = s.r0.toFixed(1);
+      inner[k] = (inner[k] || 0) + 1;
+      if (!bestIn || inner[k] > inner[bestIn]) bestIn = k;
+    });
+    var r0 = parseFloat(bestIn);
+    if (!(r > 4) || !(r0 >= 0) || r0 >= r) return null;
+    base.forEach(function (s) {
       outer.push({ x: s.x, y: s.y });
       s.arcs.forEach(function (arc) { if (Math.abs(arc.r - r) < 0.5) outer.push({ x: arc.x, y: arc.y }); });
     });
     var fit = fitCircle(outer);
     if (!fit || Math.abs(fit.r - r) > 3) return null;
 
+    /* Order comes from the angles, not from the document: ECharts moves the sector under
+     * the pointer to the end of the SVG so it paints on top, and reading spans between
+     * whatever paths happen to be adjacent then gives nonsense. Sorted clockwise from
+     * twelve o'clock -- where the pie starts -- the sectors are back in data order, which
+     * the per-slice share check downstream then confirms. */
     var n = sectors.length;
     sectors.forEach(function (s) { s.angle = norm360(Math.atan2(s.y - fit.cy, s.x - fit.cx) * 180 / Math.PI); });
+    sectors.sort(function (a2, b2) { return norm360(a2.angle - PIE_START) - norm360(b2.angle - PIE_START); });
     var sum = 0;
     sectors.forEach(function (s, k) {
       s.span = n === 1 ? 360 : norm360(sectors[(k + 1) % n].angle - s.angle);
       sum += s.span;
     });
-    if (Math.abs(sum - 360) > 1) return null;      // not one clockwise pie in data order
+    if (Math.abs(sum - 360) > 1) return null;      // not one pie
     return { cx: fit.cx, cy: fit.cy, r: r, r0: r0, sectors: sectors };
   }
 
@@ -1150,16 +1172,18 @@
     // skip the redraw while the bands are actually still on the page.
     if (bandInfo.sig === sig && host.querySelector('svg.lz-bands')) return;
     undimAll();                       // a redraw ends any hover, so nothing stays faded
+    var hadOverlay = !!host.querySelector('svg.lz-bands');
 
     var pie = readPie(svg);
-    if (!pie) { bandState('sectors unreadable'); bandInfo.sig = sig; dropBands(); return; }
+    // A hovered ECharts sector is a different size and lives at the end of the SVG. If the
+    // read still fails, leave whatever overlay is already on the page -- blanking it is
+    // how the bands used to vanish the moment the pointer crossed the pie.
+    if (!pie) { bandState('sectors unreadable'); return; }
     var slices = expectedSlices(api, pie.sectors.length);
-    if (!slices) { bandState('slice count ' + pie.sectors.length + ' unexplained'); bandInfo.sig = sig; dropBands(); return; }
+    if (!slices) { bandState('slice count ' + pie.sectors.length + ' unexplained'); return; }
     for (var i = 0; i < slices.length; i++) {
       if (Math.abs(slices[i].share - pie.sectors[i].span / 3.6) > 0.4) {
         bandState('slice ' + i + ' is ' + (pie.sectors[i].span / 3.6).toFixed(2) + '%, API says ' + slices[i].share.toFixed(2) + '%');
-        bandInfo.sig = sig;
-        dropBands();
         return;
       }
     }
@@ -1181,6 +1205,13 @@
     ov.setAttribute('width', vw);
     ov.setAttribute('height', vh);
     ov.setAttribute('viewBox', '0 0 ' + vw + ' ' + vh);
+    // Own the pie's pointer so ECharts cannot emphasise a sector out from under the bands.
+    // Labels and leader lines sit outside this doughnut and stay the chart's.
+    var catcher = document.createElementNS(SVGNS, 'path');
+    catcher.setAttribute('d', bandSectorPath(pie.cx, pie.cy, pie.r0, pie.r, pie.sectors[0].angle, 359.9));
+    catcher.setAttribute('fill', 'transparent');
+    catcher.setAttribute('class', 'lz-band-catcher');
+    ov.appendChild(catcher);
 
     var drawn = 0, pools = 0, netHs = windowHashrate(api, win);
     slices.forEach(function (slice, k) {
@@ -1190,10 +1221,13 @@
       var list = entry ? poolBands(entry) : null;
       if (!list) return;
       var base = sector.el.getAttribute('fill');
-      var height = pie.r - pie.r0;
+      // The hovered sector is a different size from the rest, so use its own radii.
+      var sr = sector.r > 4 ? sector.r : pie.r, sr0 = sector.r0 > 0 ? sector.r0 : pie.r0;
+      if (sr0 >= sr) { sr = pie.r; sr0 = pie.r0; }
+      var height = sr - sr0;
       var minT = Math.min(MIN_BAND_PX, height * 0.4 / list.length);
       var free = height - minT * list.length;
-      var cursor = pie.r0;
+      var cursor = sr0;
       var gws = list.filter(function (b) { return b.kind !== 'stratum'; }).length;
       var seen = 0;
       list.forEach(function (b) {

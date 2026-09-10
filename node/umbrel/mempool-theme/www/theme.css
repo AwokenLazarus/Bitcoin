@@ -455,6 +455,8 @@ footer .lz-footer-note { font-size: 0.74rem; color: var(--lz-faint) !important; 
 .chart svg.lz-bands { position: absolute; left: 0; top: 0; z-index: 3; pointer-events: none; }
 svg.lz-bands path { pointer-events: auto; cursor: pointer; stroke: var(--lz-bg); stroke-width: 0.75; }
 svg.lz-bands path:hover { stroke: var(--lz-brass); stroke-width: 1.1; }
+svg.lz-bands path.lz-band-catcher,
+svg.lz-bands path.lz-band-catcher:hover { fill: transparent; stroke: none; cursor: default; }
 /* Hovering a band: it brightens, everything belonging to another pool falls back, and the
    gateway's tag is written at the rim -- a band is a few pixels tall, so the ring and the
    label are what make it findable, not the band itself. */
