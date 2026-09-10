@@ -17,6 +17,9 @@ Outputs:
   * the `pools` table upserted by slug (unique_id kept stable for existing rows).
   * blocks from START_HEIGHT re-attributed where the priority match differs from the stored
     pool_id, and the API disk cache patched so the UI shows the new names without a restart.
+  * pool-tags.json in the theme's www dir (served at /lazarus/pool-tags.json): blocks per
+    coinbase secondary tag per pool per mining window, which the theme draws as gateway
+    bands inside each slice of the mining-pool pie.
 
 Match priority (a block can carry both a pool address and a tag, so order matters):
 
@@ -49,10 +52,13 @@ import sys
 import time
 import urllib.parse
 import urllib.request
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 POOLS_DIR = Path(os.environ.get("POOLS_DIR", os.path.expanduser("~/blake2b/pools")))
 OUT_JSON = POOLS_DIR / "pools-v2.json"
+THEME_WWW = Path(os.environ.get("THEME_WWW", os.path.expanduser("~/blake2b/mempool-theme/www")))
+TAGS_JSON = THEME_WWW / "pool-tags.json"
 OVERRIDES = POOLS_DIR / "pools-overrides.json"
 STATE = POOLS_DIR / "pools-state.json"
 KILOMBINO_URL = "https://raw.githubusercontent.com/Kilombino/mempool-bip110/main/pools-v2.json"
@@ -384,11 +390,12 @@ def compile_matchers(merged, ids):
 
 
 def retag(cur, matchers, unknown, ids_by_slug, names):
-    cur.execute("SELECT height, hash, pool_id, coinbase_addresses, coinbase_raw FROM blocks WHERE height >= %s",
-                (START_HEIGHT,))
+    cur.execute("SELECT height, hash, pool_id, coinbase_addresses, coinbase_raw, blockTimestamp, stale "
+                "FROM blocks WHERE height >= %s", (START_HEIGHT,))
     updated = 0
     by_height = {}
-    for height, hsh, pool_id, addrs_json, raw in cur.fetchall():
+    meta = []
+    for height, hsh, pool_id, addrs_json, raw, block_ts, stale in cur.fetchall():
         try:
             addrs = set(json.loads(addrs_json or "[]"))
         except Exception:
@@ -404,13 +411,175 @@ def retag(cur, matchers, unknown, ids_by_slug, names):
                 break
         new_id, uid, slug, name = (hit[1][0], hit[1][1], hit[0], names[hit[0]]) if hit else (unknown[0], unknown[1], "unknown", "Unknown")
         by_height[height] = {"id": uid, "name": name, "slug": slug}
+        # The pool stats the pie is drawn from count only blocks on the best chain, so the
+        # gateway aggregate has to skip stale rows too or the bands would not add up.
+        if not stale:
+            meta.append((block_epoch(block_ts), slug, name, secondary_tag(raw, name)))
         if new_id != pool_id:
             if DRY_RUN:
                 log(f"  would retag block {height}: pool_id {pool_id} -> {new_id} ({slug})")
             else:
                 cur.execute("UPDATE blocks SET pool_id=%s WHERE height=%s AND hash=%s", (new_id, height, hsh))
             updated += 1
-    return updated, by_height
+    return updated, by_height, meta
+
+
+# --- gateway tags -----------------------------------------------------------------------------
+# A DATUM gateway writes `<primary> 0x0F <secondary> 0x00` as the first coinbase push after the
+# BIP34 height: the primary tag is the pool's, the secondary the gateway operator's. The backend
+# patch in ../umbrel/mempool-patches detects that layout structurally and exposes both as
+# extras.pool.minerNames; the functions below are the same rule (ported from that patch's
+# isDATUMCoinbase / parseTemplateCreator), so a band in the pie and the name on a block page
+# always come from the same bytes.
+
+def is_datum_coinbase(raw):
+    if not raw or len(raw) % 2 or not re.fullmatch(r"[0-9a-fA-F]+", raw):
+        return False
+    try:
+        b = bytes.fromhex(raw)
+    except ValueError:
+        return False
+    if not b:
+        return False
+    height_len = b[0]
+    if height_len < 1 or height_len > 8:
+        return False
+    i = 1 + height_len
+    if i >= len(b):
+        return False
+    tags_len = b[i]
+    if tags_len == 0x4C:
+        i += 1
+        if i >= len(b):
+            return False
+        tags_len = b[i]
+    start = i + 1
+    if tags_len < 4 or start + tags_len > len(b):
+        return False
+    tags = b[start:start + tags_len]
+    if tags[-1] != 0x00:
+        return False
+    # The next push is the gateway's unique id: 3 bytes mining solo, longer when the pool's
+    # prime id is appended. Solo DATUM blocks are left alone -- their secondary tag is the
+    # miner's own free text, not a template creator.
+    uid = start + tags_len
+    if uid >= len(b):
+        return False
+    uid_len = b[uid]
+    if uid_len <= 3 or uid_len > 75 or uid + 1 + uid_len > len(b):
+        return False
+    separators = 0
+    for k, byte in enumerate(tags[:-1]):
+        if byte == 0x0F:
+            if k == 0 or k == len(tags) - 2:      # both tags must be non-empty
+                return False
+            separators += 1
+        elif byte < 0x20 or byte > 0x7E:
+            return False
+    return separators == 1
+
+
+def datum_names(raw):
+    """The minerNames the backend would publish for this coinbase, or []."""
+    b = bytes.fromhex(raw)
+    i = 1 + b[0]
+    tags_len = b[i]
+    if tags_len == 0x4C:
+        i += 1
+        tags_len = b[i]
+    text = b[i + 1:i + 1 + tags_len].decode("latin1").replace("\x00", "", 1)   # JS replaces once
+    return [re.sub(r"[^a-zA-Z0-9 ]", "", n) for n in text.split("\x0f")]
+
+
+def secondary_tag(raw, pool_name):
+    """The gateway operator's tag for a pooled DATUM block, or None.
+
+    A secondary that only repeats the pool's own tag carries no information, so such a block
+    counts as untagged rather than as a band of its own.
+    """
+    if not is_datum_coinbase(raw or ""):
+        return None
+    try:
+        names = datum_names(raw)
+    except Exception:
+        return None
+    if len(names) < 2:
+        return None
+    tag = names[1].strip()
+    if not tag or tag.lower() == names[0].strip().lower():
+        return None
+    return tag
+
+
+def block_epoch(ts):
+    if isinstance(ts, datetime):
+        return int((ts if ts.tzinfo else ts.replace(tzinfo=timezone.utc)).timestamp())
+    try:
+        return int(ts)
+    except (TypeError, ValueError):
+        return 0
+
+
+def months_ago(now, n):
+    month = now.month - n
+    year = now.year + (month - 1) // 12
+    month = (month - 1) % 12 + 1
+    day = min(now.day, [31, 29 if year % 4 == 0 and (year % 100 or year % 400 == 0) else 28,
+                        31, 30, 31, 30, 31, 31, 30, 31, 30, 31][month - 1])
+    return now.replace(year=year, month=month, day=day)
+
+
+def tag_windows(now):
+    """The mining windows the pie offers, as (name, cutoff epoch). Mirrors the backend's
+    `BETWEEN DATE_SUB(NOW(), INTERVAL ...) AND NOW()`, months included."""
+    out = [("24h", now - timedelta(days=1)), ("3d", now - timedelta(days=3)), ("1w", now - timedelta(weeks=1))]
+    out += [(n, months_ago(now, m)) for n, m in (("1m", 1), ("3m", 3), ("6m", 6), ("1y", 12), ("2y", 24), ("3y", 36))]
+    return [(name, int(cut.timestamp())) for name, cut in out] + [("all", 0)]
+
+
+def write_pool_tags(meta):
+    """pool-tags.json: blocks per secondary tag, per pool, per window. Only pools with at
+    least one tagged block are listed; the theme draws no bands for the others."""
+    now = datetime.now(timezone.utc)
+    doc = {
+        "generated": int(now.timestamp()),
+        "rule": "coinbase secondary tag: <primary> 0x0F <secondary> 0x00 (DATUM gateway)",
+        "windows": {},
+    }
+    for name, cutoff in tag_windows(now):
+        rows = [m for m in meta if m[0] >= cutoff]
+        pools = {}
+        for ts, slug, pool_name, tag in rows:
+            p = pools.setdefault(slug, {"name": pool_name, "blocks": 0, "untagged": 0, "tags": {}})
+            p["blocks"] += 1
+            if tag:
+                p["tags"][tag] = p["tags"].get(tag, 0) + 1
+            else:
+                p["untagged"] += 1
+        # Windows longer than the chain's history are only covered from its first block.
+        first = min([m[0] for m in rows] or [int(now.timestamp())])
+        doc["windows"][name] = {
+            "seconds": max(1, int(now.timestamp()) - max(cutoff, first)),
+            "blocks": len(rows),
+            "pools": {s: p for s, p in pools.items() if p["tags"]},
+        }
+    text = json.dumps(doc, separators=(",", ":"), sort_keys=True)
+    if DRY_RUN:
+        w = doc["windows"].get("1w", {})
+        log(f"would write pool-tags.json: 1w {len(w.get('pools', {}))} pools with tags, {len(text)} bytes")
+        return 0
+    if not THEME_WWW.is_dir():
+        return 0
+    try:
+        if TAGS_JSON.exists() and TAGS_JSON.read_text() == text:
+            return 0
+        tmp = TAGS_JSON.with_suffix(".tmp")
+        tmp.write_text(text)
+        tmp.replace(TAGS_JSON)
+    except OSError as e:
+        log("pool-tags.json not written:", e)
+        return 0
+    return len(text)
 
 
 def patch_cache(by_height):
@@ -461,7 +630,7 @@ def main():
             conn.commit()
         names = {slug: e["name"] for slug, e, _ in merged}
         matchers = compile_matchers(merged, ids)
-        updated, by_height = retag(cur, matchers, ids["unknown"], ids, names)
+        updated, by_height, meta = retag(cur, matchers, ids["unknown"], ids, names)
         if DRY_RUN:
             conn.rollback()
         else:
@@ -480,9 +649,11 @@ def main():
 
     patched = patch_cache(by_height) if updated else 0
     tagged = sum(1 for v in by_height.values() if v["slug"] != "unknown")
+    tags_bytes = write_pool_tags(meta)
+    gateways = len({m[3] for m in meta if m[3]})
     log(f"{'DRY RUN: ' if DRY_RUN else ''}pools: {len(merged)} merged, {changed} updated, {inserted} inserted, "
         f"{moved} renumbered; blocks: {len(by_height)} scanned, {tagged} attributed, {updated} retagged, "
-        f"cache {patched} patched")
+        f"cache {patched} patched; gateway tags: {gateways} seen, pool-tags.json {tags_bytes} bytes")
     return 0
 
 
