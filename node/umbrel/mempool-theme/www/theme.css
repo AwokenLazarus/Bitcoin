@@ -447,3 +447,43 @@ footer .lz-footer-note { font-size: 0.74rem; color: var(--lz-faint) !important; 
 ::-webkit-scrollbar { width: 10px; height: 10px; }
 ::-webkit-scrollbar-track { background: var(--lz-bg); }
 ::-webkit-scrollbar-thumb { background: var(--lz-line-strong); border-radius: 2px; }
+
+/* --- gateway bands in the mining-pool pie (theme.js drawBands) --------------------------
+   An overlay SVG sits on top of the ECharts pie, so it must stay out of layout: the chart
+   div is already position:relative. Only the bands take the pointer, so the pie's own
+   labels and leader lines stay hoverable. */
+.chart svg.lz-bands { position: absolute; left: 0; top: 0; pointer-events: none; }
+svg.lz-bands path { pointer-events: auto; cursor: pointer; stroke: var(--lz-bg); stroke-width: 0.75; }
+svg.lz-bands path:hover { stroke: var(--lz-brass); stroke-width: 1.1; }
+.lz-band-tip {
+  position: absolute;
+  left: 0;
+  top: 0;
+  z-index: 6;
+  display: none;
+  max-width: 21rem;
+  padding: 0.45rem 0.6rem;
+  border: 1px solid var(--lz-line-strong);
+  border-radius: 2px;
+  background: var(--lz-bg-raised);
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.5);
+  font-family: var(--lz-sans);
+  font-size: 0.78rem;
+  line-height: 1.4;
+  color: var(--lz-ink);
+  pointer-events: none;
+}
+.lz-band-tip[data-shown] { display: block; }
+.lz-band-tip b { display: block; color: var(--lz-brass); font-weight: 600; }
+.lz-band-tip span { display: block; font-family: var(--lz-mono); font-size: 0.72rem; color: var(--lz-muted); }
+.lz-band-tip .lz-band-sub { color: var(--lz-faint); }
+.lz-band-tip .lz-band-live { color: var(--lz-good); }
+.lz-bands-note {
+  margin: 0.1rem auto 1rem;
+  max-width: 44rem;
+  text-align: center;
+  font-size: 0.74rem;
+  line-height: 1.5;
+  color: var(--lz-faint);
+}
+.lz-bands-note b { color: var(--lz-muted); font-weight: 600; }
