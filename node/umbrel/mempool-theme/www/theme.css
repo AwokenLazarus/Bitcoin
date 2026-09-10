@@ -507,3 +507,25 @@ svg.lz-bands rect.lz-band-chip { fill: var(--lz-bg-raised); stroke: var(--lz-lin
   color: var(--lz-faint);
 }
 .lz-bands-note b { color: var(--lz-muted); font-weight: 600; }
+
+/* ?lzdebug=1: what the bands think they are doing, on the page, for reporting a browser
+   that misbehaves without asking anyone to open a console. */
+#lz-debug {
+  position: fixed;
+  right: 8px;
+  bottom: 8px;
+  z-index: 9999;
+  max-width: 22rem;
+  padding: 0.4rem 0.55rem;
+  border: 1px solid var(--lz-brass);
+  border-radius: 2px;
+  background: var(--lz-bg-raised);
+  font-family: var(--lz-mono);
+  font-size: 0.7rem;
+  line-height: 1.35;
+  color: var(--lz-ink);
+  pointer-events: none;
+}
+#lz-debug b { display: block; color: var(--lz-brass); }
+#lz-debug span { display: block; }
+#lz-debug .lz-debug-log { color: var(--lz-faint); }
