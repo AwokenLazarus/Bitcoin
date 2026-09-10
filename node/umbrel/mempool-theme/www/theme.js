@@ -1068,18 +1068,34 @@
   function undimAll() {
     var left = document.querySelectorAll('app-pool-ranking [data-lz-dim]');
     for (var i = 0; i < left.length; i++) undim(left[i]);
+    // A redraw replaces the overlay the hover handlers belong to, so a tooltip left open by
+    // a zoom or a resize would sit there pinned to nothing.
+    var tips = document.querySelectorAll('.lz-band-tip[data-shown]');
+    for (var j = 0; j < tips.length; j++) tips[j].removeAttribute('data-shown');
   }
 
   /* Ctrl+wheel zoom and window resizes rewrite the chart's path data in place, which is not
    * a childList mutation, so the observer that drives everything else never hears about it
    * and the bands would sit on the old geometry until the next block or clock tick moved
-   * something. The trailing redraw is for the resize ECharts does one frame later. */
-  var reflowTimer = null;
+   * something. A resize is not one event either: the viewport changes, then ECharts resizes
+   * its SVG some frames later, so after any of them the overlay is checked against the
+   * chart's width every frame for a while and redrawn the frame it stops matching. */
+  var watchUntil = 0, watching = false;
   function bandsReflow() {
     bandInfo.sig = null;
     schedule();
-    clearTimeout(reflowTimer);
-    reflowTimer = setTimeout(function () { bandInfo.sig = null; schedule(); }, 350);
+    watchUntil = Date.now() + 900;
+    if (watching) return;
+    watching = true;
+    (self.requestAnimationFrame || setTimeout)(watchResize);
+  }
+  function watchResize() {
+    // Not just the size: the pie's centre moves inside an unchanged canvas when the labels
+    // relayout. drawBands hashes the sector paths and returns early when they are the same,
+    // so calling it per frame costs a hash and redraws only on the frame that moved.
+    try { drawBands(); } catch (e) { bandInfo.state = 'error: ' + e; }
+    if (Date.now() < watchUntil) (self.requestAnimationFrame || setTimeout)(watchResize);
+    else watching = false;
   }
 
   function dropBands() {
@@ -1093,7 +1109,7 @@
     // Only the full pools graph: the dashboard's pie widget is too small for bands.
     if (!/\/graphs\/mining\/pools/.test(location.pathname)) { bandInfo.state = 'inactive'; dropBands(); return; }
     var host = document.querySelector('app-pool-ranking [_echarts_instance_]');
-    var svg = host && host.querySelector('svg');
+    var svg = host && host.querySelector('svg:not(.lz-bands)');
     if (!svg) { bandInfo.state = 'no chart yet'; dropBands(); return; }
     if (self.ResizeObserver && !host.__lzRO) {
       host.__lzRO = new self.ResizeObserver(bandsReflow);
