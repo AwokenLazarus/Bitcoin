@@ -25,7 +25,7 @@ Match priority (a block can carry both a pool address and a tag, so order matter
   2  named tag pools                 a coinbase tag someone chose (AlphaPool, Titus 1:15, ...)
   3  named address pools             Kilombino entries with a real name
   4  "Solo <addr>" address pools     Kilombino auto-names, just an address
-  5  generic tag pools               DATUM / Knots / blake2b-mainnet software strings
+  5  generic tag pools               DATUM miners / DATUM / Knots / blake2b-mainnet software strings
 
 The backend matches a new block against `SELECT ... FROM pools`, i.e. in row-id order, so the
 priority above is encoded in the ids themselves: each priority owns an id band (Lazarus 1-99,
@@ -218,8 +218,10 @@ def merge(kilombino, guide, ov):
     pos = {s: i for i, s in enumerate(ordered)}
     # Within a band the more specific matcher has to come first. "Lazarus/solo" contains
     # "Lazarus", so without this a block found by a solo miner would be credited to the
-    # pool, whose window earned nothing from it.
-    within = {"lazarussolo": 0, "lazarus": 1}
+    # pool, whose window earned nothing from it. DATUM miners is generic (matches last so
+    # CONVOY/RIPTIDE keep their DATUM User coinbases) but must still beat the narrower
+    # generic `datum` slug on leftover tag-only / solo DATUM blocks.
+    within = {"lazarussolo": 0, "lazarus": 1, "datumminers": 0, "datumuser": 1, "datum": 2}
     ordered.sort(key=lambda s: (prio(s), within.get(s, 2), pos[s]))
     return [(s, pools[s], prio(s)) for s in ordered]
 
