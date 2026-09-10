@@ -1,5 +1,5 @@
 {
-  "_comment": "Local corrections layered over the upstream pool lists by pools-sync.py. Keys: pools (merged by slug; replace=true discards upstream addresses/tags for that slug; pool=true matches before individual miners' addresses), drop (slugs never emitted), generic (tag-only software identifiers matched last so a miner's own tag or address wins). PyBLOCK's LOTTO/CAROUSEL/CHIRP modes are folded into one PyBLOCK entry, as mempool.guide shows them.",
+  "_comment": "Local corrections layered over the upstream pool lists by pools-sync.py. Keys: pools (merged by slug; replace=true discards upstream addresses/tags for that slug; pool=true matches before individual miners' addresses), drop (slugs never emitted), generic (tag-only software identifiers matched last so a miner's own tag or address wins). DATUM miners (mempool.guide regex DATUM|datum|Datum) must stay generic: in the tag band it sits ahead of CONVOY/RIPTIDE and steals their DATUM User coinbases. PyBLOCK's LOTTO/CAROUSEL/CHIRP modes are folded into one PyBLOCK entry, as mempool.guide shows them.",
   "pools": [
     {
       "_comment": "Blocks found by a miner on the solo ports. Tag only, never the payout address: the pool's address is in a solo coinbase too, as the fee output, and matching on it would take pooled blocks as well. Ranked ahead of Lazarus because 'Lazarus/solo' contains 'Lazarus'.",
@@ -95,6 +95,7 @@
     "solo1pyblock"
   ],
   "generic": [
+    "datumminers",
     "datum",
     "datumuser",
     "knots",

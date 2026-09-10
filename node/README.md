@@ -137,7 +137,9 @@ The stock backend ships a SHA-256 pool list, so almost every BLAKE2b block was "
    from its weekly list and cached for a week (their API is slow; ~25 fetched per run),
 3. `pools/pools-overrides.json` -- Lazarus (pool payout address + tag, always first), extra tags, entries to
    drop or fold (PyBLOCK's LOTTO/CAROUSEL/CHIRP -> PyBLOCK), and the generic software tags
-   (`DATUM`, `Knots`, `blake2b-mainnet`) that must match last.
+   (`DATUM miners`, `DATUM`, `Knots`, `blake2b-mainnet`) that must match last. DATUM miners is
+   generic on purpose: its regex is `DATUM|datum|Datum`, so a tag-band id would steal
+   `CONVOY\\x0fDATUM User` / `RIPTIDE\\x0fDATUM User` coinbases before those pools.
 
 It upserts the `pools` table by slug (stable `unique_id`s, so a backend `pools-v2.json` import agrees),
 writes the merged list to `~/blake2b/pools/pools-v2.json` (served on :8765 for the backend), then
