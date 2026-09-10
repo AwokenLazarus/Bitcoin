@@ -801,6 +801,8 @@
   var FOLD_SHARE = 0.01;      // gateways under 1% of the pool share one band
   var MIN_BAND_PX = 3.5;      // every band stays visible; the rest is share-proportional
   var MIN_SLICE_DEG = 3;      // narrower slices cannot show a readable band
+  var SVGNS = 'http://www.w3.org/2000/svg';
+  var LABEL_STEPS = [0, -15, 15, -30, 30, -46, 46];   // where a hover label may sit, in order
   var bandInfo = (self.__lazarusTheme || {}).bands = { state: 'idle' };
   var httpCache = {};
 
@@ -1060,7 +1062,16 @@
     return tip;
   }
 
+  // The chart's own sectors are faded by inline style while a band is hovered, so anything
+  // that redraws has to be sure none is left behind.
+  function undim(el) { el.style.opacity = ''; el.removeAttribute('data-lz-dim'); }
+  function undimAll() {
+    var left = document.querySelectorAll('app-pool-ranking [data-lz-dim]');
+    for (var i = 0; i < left.length; i++) undim(left[i]);
+  }
+
   function dropBands() {
+    undimAll();
     var stale = document.querySelectorAll('svg.lz-bands, .lz-band-tip, .lz-bands-note');
     for (var i = 0; i < stale.length; i++) stale[i].remove();
     bandInfo.sig = null;
@@ -1085,6 +1096,7 @@
     var sig = hash32([win, tagDoc.generated, host.clientWidth, host.clientHeight].join(':') +
       Array.prototype.map.call(svg.querySelectorAll('path'), function (p) { return p.getAttribute('d'); }).join(''));
     if (bandInfo.sig === sig) return;
+    undimAll();                       // a redraw ends any hover, so nothing stays faded
 
     var pie = readPie(svg);
     if (!pie) { bandInfo.state = 'sectors unreadable'; bandInfo.sig = sig; dropBands(); return; }
@@ -1106,7 +1118,7 @@
 
     var old = host.querySelector('svg.lz-bands');
     if (old) old.remove();
-    var ov = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    var ov = document.createElementNS(SVGNS, 'svg');
     ov.setAttribute('class', 'lz-bands');
     ov.setAttribute('width', host.clientWidth);
     ov.setAttribute('height', host.clientHeight);
@@ -1135,11 +1147,12 @@
         b.netHs = netHs;
         var r0 = cursor, r1 = cursor + minT + free * b.share;
         cursor = r1;
+        b.sector = sector; b.r0 = r0; b.r1 = r1;      // the hover ring and label need these
         // The stratum band keeps the slice's own colour, so a pool with gateways still reads
         // as its slice with rings on it; the gateways step lighter outward.
         var dL = b.kind === 'stratum' ? 0 : 0.05 + 0.17 * (gws <= 1 ? 1 : seen / (gws - 1));
         if (b.kind !== 'stratum') seen++;
-        var path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+        var path = document.createElementNS(SVGNS, 'path');
         path.setAttribute('d', bandSectorPath(pie.cx, pie.cy, r0, r1, sector.angle, sector.span));
         path.setAttribute('data-lz-band', b.kind);
         path.style.fill = shade(base, dL);
@@ -1153,19 +1166,133 @@
     if (!drawn) { bandInfo.state = 'no gateway blocks in ' + win; bandInfo.sig = sig; dropBands(); return; }
     host.appendChild(ov);
 
+    /* Hover: the band under the pointer lifts off its slice the way an ECharts sector does,
+     * everything belonging to another pool fades back, and the gateway's own tag is written
+     * at the rim on a leader line -- a band is a few pixels tall, so the name has to be
+     * legible somewhere other than a tooltip that may be across the chart. */
     var tip = bandTip(host);
-    ov.addEventListener('mousemove', function (ev) {
-      var b = ev.target && ev.target.__lzBand;
-      if (!b) return;
+    var hot = null, dimmed = [];
+    function clearHot() {
+      if (hot) { hot.classList.remove('lz-hot'); hot = null; }
+      for (var i = 0; i < dimmed.length; i++) undim(dimmed[i]);
+      dimmed = [];
+      ov.removeAttribute('data-hover');
+      var gone = ov.querySelectorAll('.lz-band-label, .lz-band-lead, .lz-band-ring, .lz-band-chip');
+      for (var j = 0; j < gone.length; j++) gone[j].remove();
+      var lit = ov.querySelectorAll('.lz-dim');
+      for (var k = 0; k < lit.length; k++) lit[k].classList.remove('lz-dim');
+      tip.removeAttribute('data-shown');
+    }
+    function setHot(p) {
+      clearHot();
+      var b = p.__lzBand;
+      hot = p;
+      p.classList.add('lz-hot');
+      ov.setAttribute('data-hover', '');
+      var mid = b.sector.angle + b.sector.span / 2;
+      // A ring traced just outside the band, rather than moving the band itself: a band can
+      // be three pixels tall, and shifting it out from under the pointer would flicker.
+      var ring = document.createElementNS(SVGNS, 'path');
+      ring.setAttribute('class', 'lz-band-ring');
+      ring.setAttribute('d', bandSectorPath(pie.cx, pie.cy, Math.max(1, b.r0 - 1.6), b.r1 + 1.6,
+        b.sector.angle, b.sector.span));
+      ov.appendChild(ring);
+      // Fade the other pools -- their bands here, their sectors in the chart underneath.
+      Array.prototype.forEach.call(ov.querySelectorAll('path'), function (o) {
+        if (o.__lzBand && o.__lzBand.slug !== b.slug) o.classList.add('lz-dim');
+      });
+      slices.forEach(function (s, k) {
+        if (s.slug === b.slug || !pie.sectors[k]) return;
+        pie.sectors[k].el.style.opacity = '0.4';
+        pie.sectors[k].el.setAttribute('data-lz-dim', '');
+        dimmed.push(pie.sectors[k].el);
+      });
+
+      // The tag, at the rim on the band's own bisector, clamped inside the chart box.
+      var anchor = polar(pie.cx, pie.cy, (b.r1 + b.r0) / 2, mid);
+      var elbow = polar(pie.cx, pie.cy, pie.r + 16, mid);
+      var right = elbow.x >= pie.cx;
+      var tx = elbow.x + (right ? 9 : -9);
+      var lead = document.createElementNS(SVGNS, 'polyline');
+      lead.setAttribute('class', 'lz-band-lead');
+      lead.setAttribute('points', [anchor.x.toFixed(1) + ',' + anchor.y.toFixed(1),
+        elbow.x.toFixed(1) + ',' + elbow.y.toFixed(1), tx.toFixed(1) + ',' + elbow.y.toFixed(1)].join(' '));
+      var text = document.createElementNS(SVGNS, 'text');
+      text.setAttribute('class', 'lz-band-label');
+      text.setAttribute('y', elbow.y.toFixed(1));
+      text.setAttribute('dy', '0.34em');
+      text.textContent = b.kind === 'stratum' ? b.poolName + ' \u00b7 public stratum' : b.label;
+      ov.appendChild(lead);
+      ov.appendChild(text);
+      var w = text.getComputedTextLength ? text.getComputedTextLength() : 80;
+      var x = right ? Math.min(tx + 3, host.clientWidth - 4 - w) : Math.max(tx - 3, 4 + w);
+      text.setAttribute('x', x.toFixed(1));
+      text.setAttribute('text-anchor', right ? 'start' : 'end');
+      // The pie's own labels crowd both sides, so step the tag off the bisector until it
+      // has a clear line to sit on, the way the chart's own leader lines bend.
+      var hostBox = host.getBoundingClientRect(), taken = [];
+      Array.prototype.forEach.call(svg.querySelectorAll('text'), function (t) {
+        var r = t.getBoundingClientRect();
+        if (r.width) taken.push({ x0: r.left - hostBox.left, x1: r.right - hostBox.left,
+                                  y0: r.top - hostBox.top, y1: r.bottom - hostBox.top });
+      });
+      var lx0 = right ? x : x - w, lx1 = right ? x + w : x, dy = 0;
+      for (var s = 0; s < LABEL_STEPS.length; s++) {
+        var ty = elbow.y + LABEL_STEPS[s], clear = true;
+        for (var q = 0; q < taken.length; q++) {
+          var t2 = taken[q];
+          if (lx1 > t2.x0 - 3 && lx0 < t2.x1 + 3 && ty + 7 > t2.y0 && ty - 7 < t2.y1) { clear = false; break; }
+        }
+        if (clear) { dy = LABEL_STEPS[s]; break; }
+      }
+      text.setAttribute('y', (elbow.y + dy).toFixed(1));
+      lead.setAttribute('points', [anchor.x.toFixed(1) + ',' + anchor.y.toFixed(1),
+        elbow.x.toFixed(1) + ',' + elbow.y.toFixed(1),
+        tx.toFixed(1) + ',' + (elbow.y + dy).toFixed(1)].join(' '));
+      // One side of the pie is a solid stack of the chart's own labels, so there is not
+      // always a clear line to move to: the tag sits on a chip and simply covers what it
+      // must, for as long as the pointer is on the band.
+      if (text.getBBox) {
+        var bb = text.getBBox();
+        var chip = document.createElementNS(SVGNS, 'rect');
+        chip.setAttribute('class', 'lz-band-chip');
+        chip.setAttribute('x', (bb.x - 5).toFixed(1));
+        chip.setAttribute('y', (bb.y - 3).toFixed(1));
+        chip.setAttribute('width', (bb.width + 10).toFixed(1));
+        chip.setAttribute('height', (bb.height + 6).toFixed(1));
+        chip.setAttribute('rx', '2');
+        ov.insertBefore(chip, text);
+      }
+
+      // Pinned clear of the pie rather than following the pointer: the bands are fixed
+      // shapes, and a tooltip that chases the cursor across a doughnut spends its time
+      // covering the band it is describing.
       tip.innerHTML = bandTooltipHtml(b);
       tip.setAttribute('data-shown', '');
-      var box = host.getBoundingClientRect();
-      var x = ev.clientX - box.left + 14, y = ev.clientY - box.top + 12;
-      tip.style.left = Math.max(0, Math.min(x, box.width - tip.offsetWidth - 4)) + 'px';
-      tip.style.top = Math.max(0, Math.min(y, box.height - tip.offsetHeight - 4)) + 'px';
+      var W = host.clientWidth, H = host.clientHeight, tw = tip.offsetWidth, th = tip.offsetHeight;
+      var gap = 12, beside = anchor.y - th / 2, spots = [];
+      if (pie.cx + pie.r + gap + tw <= W) spots.push([pie.cx + pie.r + gap, beside]);
+      if (pie.cx - pie.r - gap - tw >= 0) spots.push([pie.cx - pie.r - gap - tw, beside]);
+      spots.push([W - tw - 4, 4], [4, 4], [W - tw - 4, H - th - 4], [4, H - th - 4]);
+      // On a narrow screen the pie fills the box and something has to be covered; whatever
+      // it is, it must not be the band being described.
+      var bb = hot.getBBox ? hot.getBBox() : null, best = spots[0], bestHit = Infinity;
+      spots.forEach(function (sp) {
+        var sx = Math.max(4, Math.min(sp[0], W - tw - 4)), sy = Math.max(4, Math.min(sp[1], H - th - 4));
+        var hit = !bb ? 0 : Math.max(0, Math.min(sx + tw, bb.x + bb.width + 6) - Math.max(sx, bb.x - 6)) *
+                            Math.max(0, Math.min(sy + th, bb.y + bb.height + 6) - Math.max(sy, bb.y - 6));
+        if (hit < bestHit) { bestHit = hit; best = [sx, sy]; }
+      });
+      tip.style.left = best[0] + 'px';
+      tip.style.top = best[1] + 'px';
+    }
+    ov.addEventListener('mousemove', function (ev) {
+      var p = ev.target;
+      if (p && p.__lzBand && p !== hot) setHot(p);
     });
+    ov.addEventListener('mouseleave', clearHot);
     ov.addEventListener('mouseout', function (ev) {
-      if (ev.target && ev.target.__lzBand) tip.removeAttribute('data-shown');
+      if (ev.target && ev.target.__lzBand && !(ev.relatedTarget && ev.relatedTarget.__lzBand)) clearHot();
     });
     ov.addEventListener('click', function (ev) {
       var b = ev.target && ev.target.__lzBand;

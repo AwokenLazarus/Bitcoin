@@ -455,6 +455,26 @@ footer .lz-footer-note { font-size: 0.74rem; color: var(--lz-faint) !important; 
 .chart svg.lz-bands { position: absolute; left: 0; top: 0; pointer-events: none; }
 svg.lz-bands path { pointer-events: auto; cursor: pointer; stroke: var(--lz-bg); stroke-width: 0.75; }
 svg.lz-bands path:hover { stroke: var(--lz-brass); stroke-width: 1.1; }
+/* Hovering a band: it brightens, everything belonging to another pool falls back, and the
+   gateway's tag is written at the rim -- a band is a few pixels tall, so the ring and the
+   label are what make it findable, not the band itself. */
+svg.lz-bands path.lz-dim { opacity: 0.3; }
+svg.lz-bands path.lz-hot { filter: brightness(1.1) saturate(1.15); stroke: var(--lz-brass); stroke-width: 1.1; }
+svg.lz-bands path.lz-band-ring {
+  fill: none;
+  pointer-events: none;
+  stroke: var(--lz-brass);
+  stroke-width: 1.3;
+  stroke-linejoin: round;
+}
+svg.lz-bands .lz-band-lead { fill: none; stroke: var(--lz-brass); stroke-width: 1; opacity: 0.75; }
+svg.lz-bands text.lz-band-label {
+  fill: var(--lz-brass);
+  font-family: var(--lz-mono);
+  font-size: 0.76rem;
+  font-weight: 600;
+}
+svg.lz-bands rect.lz-band-chip { fill: var(--lz-bg-raised); stroke: var(--lz-line-strong); stroke-width: 1; }
 .lz-band-tip {
   position: absolute;
   left: 0;

@@ -210,7 +210,15 @@ Band thickness is proportional to the tag's share of the pool, plus a floor of a
 one-block gateway is still visible; gateways under 1% of the pool share a single *N smaller gateways*
 band just outside the stratum band, and slices narrower than 3 degrees get no bands at all. Colours are
 the slice's own colour stepped in OKLCH lightness, the stratum band keeping the slice's colour exactly,
-so a pool with gateways reads as its own slice with rings on it. Hovering a band gives its blocks, its
+so a pool with gateways reads as its own slice with rings on it.
+
+A band is only a few pixels tall, so hovering one does more than raise a tooltip: the band brightens
+inside a brass ring, every other pool fades back (its bands here, its sector in the chart underneath),
+and the gateway's tag is written at the rim on a leader line. The tag sits on a chip because one side of
+the pie is a solid stack of the chart's own labels with no clear line to move to. The tooltip is pinned
+beside the pie rather than following the pointer, and picks whichever position covers the hovered band
+least, so on a phone -- where the pie fills the box and something must be covered -- it is never the band
+you are pointing at. Hovering gives its blocks, its
 share of the pool and of all blocks, and an estimated hashrate taken from the same figure as the pools
 table (so a pool's bands add up to its row; the short windows only, as upstream). Bands of the pool's
 own slice add a live line from `pool.awokenlazarus.xyz/api/gateways` -- work share now, shares this
