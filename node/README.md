@@ -211,9 +211,13 @@ from `resize` on the window and the visual viewport, per frame for the second th
 250 ms interval that never stops. That last one is the backstop: ECharts rebuilds its container on some
 resizes and takes the overlay with it, and because the sector paths can come back byte-identical, "the
 chart has not changed" is only a reason to skip the redraw while the bands are still on the page --
-otherwise they were simply gone until the next window change. Half-resized renders are refused rather
-than drawn, since a chart holding sectors from two sizes at once would give a mixed pair of radii and
-put bands across the hole. The overlay is sized from the chart SVG's own width, not the rounded
+otherwise they were simply gone until the next window change. Hovering a slice with no bands used to
+blank every arc: ECharts scales that sector and moves it to the end of the SVG, which mixed radii and
+broke document-order spans; the overlay now owns the pie's pointer (labels stay the chart's), radii are
+taken per sector with the majority setting the pie, and a failed read leaves the overlay in place
+instead of removing it. The overlay is sized from the chart SVG's own width, not the rounded
+`clientWidth`, and is mounted on the ECharts inner box (the pie SVG sits 18px down from
+`.chart`) so a page zoom cannot scale a gap between the bands and the pie. `window.__lazarusTheme.bands.log` keeps the last dozen state changes with timestamps.
 `clientWidth`, because at 110% or 150% zoom those differ and the highlight ring would trace a pixel off
 its band. `window.__lazarusTheme.bands.log` keeps the last dozen state changes with timestamps.
 

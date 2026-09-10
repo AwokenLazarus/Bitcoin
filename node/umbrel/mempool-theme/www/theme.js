@@ -803,7 +803,7 @@
   var MIN_SLICE_DEG = 3;      // narrower slices cannot show a readable band
   var SVGNS = 'http://www.w3.org/2000/svg';
   var PIE_START = 270;        // twelve o'clock in SVG angles, where the pie's first slice begins
-  var BUILD = 'gateway bands build 6';
+  var BUILD = 'gateway bands build 7';
   var LABEL_STEPS = [0, -15, 15, -30, 30, -46, 46];   // where a hover label may sit, in order
   var bandInfo = (self.__lazarusTheme || {}).bands = { state: 'idle', log: [] };
   function bandState(st) {
@@ -1092,13 +1092,27 @@
     return lines.join('');
   }
 
-  function bandTip(host) {
-    var tip = host.querySelector('.lz-band-tip');
+  function bandTip(mount) {
+    var tip = mount.querySelector('.lz-band-tip');
     if (!tip) {
       tip = el('div', { class: 'lz-band-tip' });
-      host.appendChild(tip);
+      mount.appendChild(tip);
     }
     return tip;
+  }
+
+  /* Sit on the chart SVG's own box, not the host's. The ECharts instance lives in a nested
+   * relative div that is already a few pixels down from `.chart`; an overlay at left:0 top:0
+   * of `.chart` is therefore that many pixels above the pie, and page zoom scales the gap. */
+  function pinOverlay(ov, svg) {
+    if (!ov || !svg || !ov.parentNode) return;
+    var mb = ov.parentNode.getBoundingClientRect();
+    var sb = svg.getBoundingClientRect();
+    if (!sb.width) return;
+    ov.style.left = (sb.left - mb.left) + 'px';
+    ov.style.top = (sb.top - mb.top) + 'px';
+    ov.style.width = sb.width + 'px';
+    ov.style.height = sb.height + 'px';
   }
 
   // The chart's own sectors are faded by inline style while a band is hovered, so anything
@@ -1153,6 +1167,7 @@
     if (self.ResizeObserver && !host.__lzRO) {
       host.__lzRO = new self.ResizeObserver(bandsReflow);
       host.__lzRO.observe(host);
+      host.__lzRO.observe(svg.parentNode || host);
     }
 
     var win = bandWindow();
@@ -1170,7 +1185,10 @@
     // ECharts rebuilds its container on some resizes and takes the overlay with it, and the
     // sector paths can come back byte-identical, so "nothing changed" is only a reason to
     // skip the redraw while the bands are actually still on the page.
-    if (bandInfo.sig === sig && host.querySelector('svg.lz-bands')) return;
+    if (bandInfo.sig === sig && host.querySelector('svg.lz-bands')) {
+      pinOverlay(host.querySelector('svg.lz-bands'), svg);
+      return;
+    }
     undimAll();                       // a redraw ends any hover, so nothing stays faded
     var hadOverlay = !!host.querySelector('svg.lz-bands');
 
@@ -1195,16 +1213,14 @@
 
     var old = host.querySelector('svg.lz-bands');
     if (old) old.remove();
-    // The sector coordinates are in the chart SVG's user space, which at a fractional
-    // browser zoom is not the rounded clientWidth; match it exactly or the rings sit a
-    // pixel off the bands they trace.
+    var mount = svg.parentNode || host;
     var vw = parseFloat(svg.getAttribute('width')) || host.clientWidth;
     var vh = parseFloat(svg.getAttribute('height')) || host.clientHeight;
     var ov = document.createElementNS(SVGNS, 'svg');
     ov.setAttribute('class', 'lz-bands');
     ov.setAttribute('width', vw);
     ov.setAttribute('height', vh);
-    ov.setAttribute('viewBox', '0 0 ' + vw + ' ' + vh);
+    ov.setAttribute('viewBox', svg.getAttribute('viewBox') || ('0 0 ' + vw + ' ' + vh));
     // Own the pie's pointer so ECharts cannot emphasise a sector out from under the bands.
     // Labels and leader lines sit outside this doughnut and stay the chart's.
     var catcher = document.createElementNS(SVGNS, 'path');
@@ -1256,13 +1272,14 @@
     });
 
     if (!drawn) { bandState('no gateway blocks in ' + win); bandInfo.sig = sig; dropBands(); return; }
-    host.appendChild(ov);
+    mount.appendChild(ov);
+    pinOverlay(ov, svg);
 
     /* Hover: the band under the pointer lifts off its slice the way an ECharts sector does,
      * everything belonging to another pool fades back, and the gateway's own tag is written
      * at the rim on a leader line -- a band is a few pixels tall, so the name has to be
      * legible somewhere other than a tooltip that may be across the chart. */
-    var tip = bandTip(host);
+    var tip = bandTip(mount);
     var hot = null, dimmed = [];
     function clearHot() {
       if (hot) { hot.classList.remove('lz-hot'); hot = null; }
@@ -1375,8 +1392,8 @@
                             Math.max(0, Math.min(sy + th, bb.y + bb.height + 6) - Math.max(sy, bb.y - 6));
         if (hit < bestHit) { bestHit = hit; best = [sx, sy]; }
       });
-      tip.style.left = best[0] + 'px';
-      tip.style.top = best[1] + 'px';
+      tip.style.left = (parseFloat(ov.style.left) || 0) + best[0] + 'px';
+      tip.style.top = (parseFloat(ov.style.top) || 0) + best[1] + 'px';
     }
     ov.addEventListener('mousemove', function (ev) {
       var p = ev.target;
@@ -1427,6 +1444,11 @@
       '<span>bands: ' + (bandInfo.drawn || 0) + ' in ' + (bandInfo.pools || 0) + ' pools \u00b7 ' +
         esc(String(bandInfo.window || '-')) + '</span>' +
       '<span>chart ' + box(chart) + ' \u00b7 overlay ' + (ov ? box(ov) : 'MISSING') + '</span>' +
+      '<span>screen Δ ' + (function () {
+        if (!chart || !ov) return '-';
+        var a = chart.getBoundingClientRect(), b = ov.getBoundingClientRect();
+        return (b.left - a.left).toFixed(1) + ',' + (b.top - a.top).toFixed(1);
+      }()) + '</span>' +
       '<span>zoom ' + (self.devicePixelRatio || 1).toFixed(2) + ' \u00b7 ' + self.innerWidth + 'px</span>' +
       bandInfo.log.map(function (l) { return '<span class="lz-debug-log">' + esc(l) + '</span>'; }).join('');
   }

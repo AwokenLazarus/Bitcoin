@@ -452,7 +452,7 @@ footer .lz-footer-note { font-size: 0.74rem; color: var(--lz-faint) !important; 
    An overlay SVG sits on top of the ECharts pie, so it must stay out of layout: the chart
    div is already position:relative. Only the bands take the pointer, so the pie's own
    labels and leader lines stay hoverable. */
-.chart svg.lz-bands { position: absolute; left: 0; top: 0; z-index: 3; pointer-events: none; }
+.chart svg.lz-bands { position: absolute; left: 0; top: 0; z-index: 3; overflow: visible; pointer-events: none; }
 svg.lz-bands path { pointer-events: auto; cursor: pointer; stroke: var(--lz-bg); stroke-width: 0.75; }
 svg.lz-bands path:hover { stroke: var(--lz-brass); stroke-width: 1.1; }
 svg.lz-bands path.lz-band-catcher,
