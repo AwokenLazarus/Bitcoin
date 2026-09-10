@@ -207,9 +207,15 @@ mismatch, missing `pool-tags.json` or unreadable path data leaves the stock pie 
 `window.__lazarusTheme.bands` says which happened. A resize or a ctrl+wheel zoom is the one thing the
 chart does not announce -- it rewrites the same path elements in place, which is not the childList
 mutation the theme is driven by -- so the bands also redraw from a `ResizeObserver` on the chart box and
-from `resize` on the window and the visual viewport, once immediately and once after the resize ECharts
-does a frame later. The overlay is sized from the chart SVG's own width, not the rounded `clientWidth`,
-because at 110% or 150% zoom those differ and the highlight ring would trace a pixel off its band.
+from `resize` on the window and the visual viewport, per frame for the second that follows, and from a
+250 ms interval that never stops. That last one is the backstop: ECharts rebuilds its container on some
+resizes and takes the overlay with it, and because the sector paths can come back byte-identical, "the
+chart has not changed" is only a reason to skip the redraw while the bands are still on the page --
+otherwise they were simply gone until the next window change. Half-resized renders are refused rather
+than drawn, since a chart holding sectors from two sizes at once would give a mixed pair of radii and
+put bands across the hole. The overlay is sized from the chart SVG's own width, not the rounded
+`clientWidth`, because at 110% or 150% zoom those differ and the highlight ring would trace a pixel off
+its band. `window.__lazarusTheme.bands.log` keeps the last dozen state changes with timestamps.
 
 Band thickness is proportional to the tag's share of the pool, plus a floor of a few pixels so a
 one-block gateway is still visible; gateways under 1% of the pool share a single *N smaller gateways*

@@ -803,7 +803,14 @@
   var MIN_SLICE_DEG = 3;      // narrower slices cannot show a readable band
   var SVGNS = 'http://www.w3.org/2000/svg';
   var LABEL_STEPS = [0, -15, 15, -30, 30, -46, 46];   // where a hover label may sit, in order
-  var bandInfo = (self.__lazarusTheme || {}).bands = { state: 'idle' };
+  var bandInfo = (self.__lazarusTheme || {}).bands = { state: 'idle', log: [] };
+  function bandState(st) {
+    if (bandInfo.state !== st) {
+      bandInfo.log.push(new Date().toTimeString().slice(0, 8) + ' ' + st);
+      if (bandInfo.log.length > 12) bandInfo.log.shift();
+    }
+    bandInfo.state = st;
+  }
   var httpCache = {};
 
   // Small GET cache. A fetch that resolves schedules another apply(), so the bands appear as
@@ -896,6 +903,14 @@
     var sorted = Object.keys(radii).map(function (k) { return radii[k]; }).sort(function (x, y) { return y - x; });
     var r = sorted[0], r0 = sorted.length > 1 ? sorted[1] : 0;
     if (!(r > 4) || !(r0 >= 0) || r0 >= r) return null;
+    // Mid-resize the chart can hold sectors from two sizes at once. Taking the largest and
+    // second largest radius across all of them would then mix the eras and draw bands
+    // across the hole, so every sector has to carry the same outer radius.
+    for (i = 0; i < sectors.length; i++) {
+      var mx = 0;
+      for (var j = 0; j < sectors[i].arcs.length; j++) mx = Math.max(mx, sectors[i].arcs[j].r);
+      if (Math.abs(mx - r) > 0.6) return null;
+    }
     sectors.forEach(function (s) {
       outer.push({ x: s.x, y: s.y });
       s.arcs.forEach(function (arc) { if (Math.abs(arc.r - r) < 0.5) outer.push({ x: arc.x, y: arc.y }); });
@@ -914,24 +929,25 @@
     return { cx: fit.cx, cy: fit.cy, r: r, r0: r0, sectors: sectors };
   }
 
-  /* What the pools API says the slices are, in the order the chart draws them: pools above
-   * the share threshold, then "Other". The threshold depends on the viewport, so the one
-   * that reproduces the sector count is the one the component used. */
+  /* What the pools API says the slices are, in the order the chart draws them. The chart
+   * keeps the pools above a share threshold that depends on the viewport and sweeps the
+   * rest into "Other", but the threshold itself does not have to be known: the API is
+   * already sorted by blocks, so n sectors means the first n-1 pools and an Other. Every
+   * span is checked against these shares afterwards, which is what actually proves it. */
   function expectedSlices(api, n) {
     var total = Number(api && api.blockCount) || 0;
-    if (!total || !api.pools) return null;
-    var thresholds = [0.5, 1, 2];
-    for (var t = 0; t < thresholds.length; t++) {
-      var keep = [], other = 0;
-      api.pools.forEach(function (p) {
+    if (!total || !api.pools || n < 1 || n > api.pools.length + 1) return null;
+    function take(k, withOther) {
+      var keep = [], rest = 0;
+      api.pools.forEach(function (p, i) {
         var share = p.blockCount / total * 100;
-        if (share < thresholds[t]) { other += share; return; }
-        keep.push({ slug: p.slug, name: p.name, blocks: p.blockCount, share: share });
+        if (i < k) keep.push({ slug: p.slug, name: p.name, blocks: p.blockCount, share: share });
+        else rest += share;
       });
-      keep.push({ slug: null, name: 'Other', blocks: null, share: other });
-      if (keep.length === n) return keep;
+      if (withOther) keep.push({ slug: null, name: 'Other', blocks: null, share: rest });
+      return keep.length === n ? keep : null;
     }
-    return null;
+    return take(n - 1, true) || take(n, false);
   }
 
   /* The bands of one pool, innermost first: untagged blocks, then the gateways that are too
@@ -1093,7 +1109,7 @@
     // Not just the size: the pie's centre moves inside an unchanged canvas when the labels
     // relayout. drawBands hashes the sector paths and returns early when they are the same,
     // so calling it per frame costs a hash and redraws only on the frame that moved.
-    try { drawBands(); } catch (e) { bandInfo.state = 'error: ' + e; }
+    try { drawBands(); } catch (e) { bandState('error: ' + e); }
     if (Date.now() < watchUntil) (self.requestAnimationFrame || setTimeout)(watchResize);
     else watching = false;
   }
@@ -1107,10 +1123,10 @@
 
   function drawBands() {
     // Only the full pools graph: the dashboard's pie widget is too small for bands.
-    if (!/\/graphs\/mining\/pools/.test(location.pathname)) { bandInfo.state = 'inactive'; dropBands(); return; }
+    if (!/\/graphs\/mining\/pools/.test(location.pathname)) { bandState('inactive'); dropBands(); return; }
     var host = document.querySelector('app-pool-ranking [_echarts_instance_]');
     var svg = host && host.querySelector('svg:not(.lz-bands)');
-    if (!svg) { bandInfo.state = 'no chart yet'; dropBands(); return; }
+    if (!svg) { bandState('no chart yet'); dropBands(); return; }
     if (self.ResizeObserver && !host.__lzRO) {
       host.__lzRO = new self.ResizeObserver(bandsReflow);
       host.__lzRO.observe(host);
@@ -1119,25 +1135,28 @@
     var win = bandWindow();
     var api = cachedJson('pools-' + win, '/api/v1/mining/pools/' + win, 120000);
     var tagDoc = cachedJson('tags', TAGS_URL, 120000);
-    if (!api || !tagDoc) { bandInfo.state = 'waiting for data'; return; }
+    if (!api || !tagDoc) { bandState('waiting for data'); return; }
     var wdoc = (tagDoc.windows || {})[win];
-    if (!wdoc || !wdoc.pools) { bandInfo.state = 'no tag data for ' + win; dropBands(); return; }
+    if (!wdoc || !wdoc.pools) { bandState('no tag data for ' + win); dropBands(); return; }
 
     // Redraw when the pie itself changes (window, resize, new block) and not on every one of
     // the DOM mutations that bring us here.
     var sig = hash32([win, tagDoc.generated, host.clientWidth, host.clientHeight,
       svg.getAttribute('width'), svg.getAttribute('height')].join(':') +
       Array.prototype.map.call(svg.querySelectorAll('path'), function (p) { return p.getAttribute('d'); }).join(''));
-    if (bandInfo.sig === sig) return;
+    // ECharts rebuilds its container on some resizes and takes the overlay with it, and the
+    // sector paths can come back byte-identical, so "nothing changed" is only a reason to
+    // skip the redraw while the bands are actually still on the page.
+    if (bandInfo.sig === sig && host.querySelector('svg.lz-bands')) return;
     undimAll();                       // a redraw ends any hover, so nothing stays faded
 
     var pie = readPie(svg);
-    if (!pie) { bandInfo.state = 'sectors unreadable'; bandInfo.sig = sig; dropBands(); return; }
+    if (!pie) { bandState('sectors unreadable'); bandInfo.sig = sig; dropBands(); return; }
     var slices = expectedSlices(api, pie.sectors.length);
-    if (!slices) { bandInfo.state = 'slice count ' + pie.sectors.length + ' unexplained'; bandInfo.sig = sig; dropBands(); return; }
+    if (!slices) { bandState('slice count ' + pie.sectors.length + ' unexplained'); bandInfo.sig = sig; dropBands(); return; }
     for (var i = 0; i < slices.length; i++) {
       if (Math.abs(slices[i].share - pie.sectors[i].span / 3.6) > 0.4) {
-        bandInfo.state = 'slice ' + i + ' is ' + (pie.sectors[i].span / 3.6).toFixed(2) + '%, API says ' + slices[i].share.toFixed(2) + '%';
+        bandState('slice ' + i + ' is ' + (pie.sectors[i].span / 3.6).toFixed(2) + '%, API says ' + slices[i].share.toFixed(2) + '%');
         bandInfo.sig = sig;
         dropBands();
         return;
@@ -1201,7 +1220,7 @@
       pools++;
     });
 
-    if (!drawn) { bandInfo.state = 'no gateway blocks in ' + win; bandInfo.sig = sig; dropBands(); return; }
+    if (!drawn) { bandState('no gateway blocks in ' + win); bandInfo.sig = sig; dropBands(); return; }
     host.appendChild(ov);
 
     /* Hover: the band under the pointer lifts off its slice the way an ECharts sector does,
@@ -1241,7 +1260,7 @@
       });
       slices.forEach(function (s, k) {
         if (s.slug === b.slug || !pie.sectors[k]) return;
-        pie.sectors[k].el.style.opacity = '0.4';
+        pie.sectors[k].el.style.opacity = '0.55';
         pie.sectors[k].el.setAttribute('data-lz-dim', '');
         dimmed.push(pie.sectors[k].el);
       });
@@ -1344,7 +1363,7 @@
         'The inner band is the pool\u2019s blocks with no gateway tag \u2014 its own stratum. ' +
         'Sizes are blocks found in this window, so a short window moves a lot.'), host.nextSibling);
     }
-    bandInfo.state = 'ok';
+    bandState('ok');
     bandInfo.pools = pools;
     bandInfo.drawn = drawn;
     bandInfo.window = win;
@@ -1360,7 +1379,7 @@
     try { dashboard(); } catch (e) { /* never break the explorer */ }
     try { minerBadges(); } catch (e) { /* never break the explorer */ }
     try { paintClockFiat(); } catch (e) { /* never break the explorer */ }
-    try { drawBands(); } catch (e) { bandInfo.state = 'error: ' + e; }
+    try { drawBands(); } catch (e) { bandState('error: ' + e); }
   }
   function schedule() {
     if (scheduled) return;
@@ -1370,6 +1389,11 @@
 
   function start() {
     apply();
+    // Last line of defence for the bands: whatever moves the chart -- a zoom, a resize, a
+    // re-render that drops the overlay -- this notices within a tick. drawBands hashes the
+    // sector paths and returns immediately when they are unchanged and the overlay is still
+    // there, so an idle page pays a hash four times a second and nothing else.
+    setInterval(function () { try { drawBands(); } catch (e) { bandState('error: ' + e); } }, 250);
     new MutationObserver(schedule).observe(document.body, { childList: true, subtree: true });
     self.addEventListener('resize', bandsReflow, { passive: true });
     if (self.visualViewport) self.visualViewport.addEventListener('resize', bandsReflow, { passive: true });
