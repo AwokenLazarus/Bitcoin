@@ -628,8 +628,7 @@
     return (hs / 1e6).toFixed(1) + ' MH/s';
   }
   function pct(x) { return isFinite(Number(x)) ? Number(x).toLocaleString(undefined, { maximumFractionDigits: 2 }) + '%' : '—'; }
-  // DATUM bonus is N percentage *points* of the stratum fee: "one point of the 3%"
-  // (其中一个百分点). Never a fraction of the fee (pct() of the rebate on "that fee").
+  // DATUM bonus is N percentage *points* of public-stratum work: "half a point of the 2.5%".
   function pointsOfFee(points, feePercent) {
     var n = Number(points);
     var fee = Number(feePercent);
@@ -660,7 +659,7 @@
               '<p class="lz-kicker">Miners</p>' +
               '<p class="lz-head">Mine with Lazarus Pool, paid in the block itself</p>' +
               '<p class="lz-stats" id="lz-pool-stats"><span class="lz-dot" aria-hidden="true"></span><span class="lz-stats-text">Loading pool status…</span></p>' +
-              '<p class="lz-copy" id="lz-pool-copy">Every block found pays each miner directly in its coinbase by TIDES window share. 0% fee through your own DATUM gateway, 3% on the public stratum — and one point of the 3% is credited to the DATUM miners in the window on every block.</p>' +
+              '<p class="lz-copy" id="lz-pool-copy">Every block found pays each miner directly in its coinbase by TIDES window share. 0% fee through your own DATUM gateway, 2.5% on the public stratum — and 0.5% of public-stratum work is credited to DATUM miners in the window on every block.</p>' +
               '<p class="lz-actions">' +
                 '<a class="btn btn-primary btn-sm" href="' + POOL + '" target="_blank" rel="noopener">Open Lazarus Pool ↗</a>' +
                 '<a class="btn btn-secondary btn-sm" href="/mining/pool/' + POOL_SLUG + '">Blocks found by Lazarus</a>' +
@@ -685,10 +684,9 @@
         // With the DATUM bonus on, a gateway miner is paid more than its window share, and
         // the explorer's one paragraph about the pool is the place to say so.
         var uplift = Number(fees.datum_uplift_percent) || 0;
-        var bonus = Number(fees.datum_rebate_percent) > 0 ? pointsOfFee(fees.datum_rebate_percent, fees.stratum_percent) : '';
         c.textContent = 'Every block found pays each miner directly in its coinbase by TIDES window share. ' + pct(fees.datum_percent) + ' fee through your own DATUM gateway, ' + pct(fees.stratum_percent) + ' on the public stratum'
-          + (bonus
-            ? ' — and ' + bonus + ' is credited to the DATUM miners in the window on every block'
+          + (Number(fees.datum_rebate_percent) > 0
+            ? ' — and ' + pct(fees.datum_rebate_percent) + ' of public-stratum work is credited to DATUM miners in the window on every block'
               + (uplift > 0 ? ', worth +' + pct(uplift) + ' on their share right now.' : '.')
             : '.');
       }

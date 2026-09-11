@@ -34,8 +34,8 @@ window = 8
 window-min-work = 0
 # Dust floor for split outputs, sats.
 min-payout = 546
-# DATUM / Prime-gateway fee in basis points (50 = 0.5%).
-fee-bps = 50
+# DATUM / Prime-gateway fee in basis points (0 = free).
+fee-bps = 0
 # Public house-stratum fee (250 = 2.5%). 0 inherits fee-bps.
 stratum-fee-bps = 250
 # Signing-key prefixes (hex) of the pool's own public-stratum gateway.
