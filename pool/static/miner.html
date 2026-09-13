@@ -3,38 +3,54 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Miner — Lazarus Pool</title>
-<meta name="description" content="Live hashrate, workers, TIDES window share and every coinbase payout for one address on Lazarus Pool.">
+<title data-i18n="meta.minerTitle">Miner — Lazarus Pool</title>
+<meta name="description" data-i18n="meta.minerDescription" content="Live hashrate, workers, TIDES window share and every coinbase payout for one address on Lazarus Pool.">
 <meta name="theme-color" content="#16130f">
 <meta name="robots" content="noindex">
+<script>
+(function () {
+  var q = new URLSearchParams(location.search).get("lang");
+  var c = (document.cookie.match(/(?:^|; )lz_lang=([^;]*)/) || [])[1];
+  var n = (q || decodeURIComponent(c || "") || "").replace("_", "-");
+  var zh = n === "zh" || /^zh-/i.test(n);
+  if (!q && !c) zh = /^zh\b/i.test(navigator.language || (navigator.languages && navigator.languages[0]) || "");
+  if (q === "en" || (/^en-/i.test(n) && q)) zh = false;
+  if (zh) { document.documentElement.lang = "zh-CN"; document.documentElement.classList.add("lang-zh"); }
+})();
+</script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;1,400&family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,500;1,6..72,400;1,6..72,500&display=swap">
-<link rel="stylesheet" href="/static/pool.css?v=stickypromo1">
+<link rel="stylesheet" href="/static/pool.css?v=seo5">
 <link rel="icon" href="data:image/svg+xml,%3Csvg%20xmlns=%22http://www.w3.org/2000/svg%22%20viewBox=%220%200%2032%2032%22%3E%3Crect%20width=%2232%22%20height=%2232%22%20fill=%22%231c1914%22/%3E%3Cpath%20fill=%22%23dbb565%22%20d=%22M21.64%204.46C21.64%203.23%2021.25%202.37%2020.33%201.92C19.86%201.69%2019.25%201.58%2018.47%201.58H15.44L15.52%200.4H19.38C20.47%200.4%2021.35%200.58%2022.02%200.93C22.69%201.28%2023.18%201.76%2023.49%202.36C23.8%202.96%2023.95%203.63%2023.95%204.37C23.95%205.12%2023.79%205.81%2023.47%206.44C23.16%207.07%2022.66%207.57%2021.99%207.95C21.32%208.33%2020.99%208.52%2019.74%208.52H15.52L15.44%207.34H19.14C20.11%207.34%2020.88%206.89%2021.31%206.04C21.53%205.61%2021.64%205.08%2021.64%204.46ZM17.36%200.4%2017.36%2010.96V30.57L18.92%2031.16V31.6H13.09V31.16L14.66%2030.57V10.96V1.43L13.09%200.84V0.4ZM15.63%2020.2%209.86%2026.79%2011.94%2027.49V28.01H6.07V27.49L8.1%2026.79L14.87%2019.31L15.8%2018.63L20.88%2012.69L18.8%2011.99V11.48H24.67V11.99L22.64%2012.69L16.57%2019.52ZM19.77%2026.79%2014.88%2020.67%2014.46%2020.29%208.36%2012.72%206.37%2011.99V11.48H14.78V11.99L12.52%2012.69L16.71%2018L17.17%2018.43L23.94%2026.77L25.93%2027.49V28.01H17.51V27.49Z%22/%3E%3C/svg%3E">
 <link rel="apple-touch-icon" href="/static/chi-rho-crest-icon.svg">
 </head>
 <body class="miner-page">
-<a class="skip" href="#miner">Skip to miner stats</a>
+<a class="skip" href="#miner" data-i18n="skipMiner">Skip to miner stats</a>
 
 <div class="site-mast">
 <header class="site-header" id="top">
   <div class="topbar wrap">
     <a class="wordmark" href="/">Lazarus <em>Pool</em></a>
-    <nav class="nav" aria-label="Miner views">
-      <a href="#overview" data-mtab="overview">Overview</a>
-      <a href="#workers" data-mtab="workers">Workers</a>
-      <a href="#payouts" data-mtab="payouts">Payouts</a>
+    <nav class="nav" data-i18n-aria="nav.minerViews" aria-label="Miner views">
+      <a href="#overview" data-mtab="overview" data-i18n="nav.overview">Overview</a>
+      <a href="#workers" data-mtab="workers" data-i18n="nav.workers">Workers</a>
+      <a href="#payouts" data-mtab="payouts" data-i18n="nav.payouts">Payouts</a>
       <span class="nav-out">
-        <a href="/#status">Pool<span class="ext" aria-hidden="true"></span></a>
-        <a href="/#payout">Next payout<span class="ext" aria-hidden="true"></span></a>
-        <a href="/#connect">Connect<span class="ext" aria-hidden="true"></span></a>
-        <a href="https://mempool.awokenlazarus.xyz" target="_blank" rel="noreferrer" title="Lazarus Mempool — block explorer for this chain">Explorer<span class="ext" aria-hidden="true"></span></a>
+        <a href="/#status"><span data-i18n="nav.pool">Pool</span><span class="ext" aria-hidden="true"></span></a>
+        <a href="/#payout"><span data-i18n="nav.payout">Next payout</span><span class="ext" aria-hidden="true"></span></a>
+        <a href="/#connect"><span data-i18n="nav.connect">Connect</span><span class="ext" aria-hidden="true"></span></a>
+        <a href="/#hardware"><span data-i18n="nav.hardware">Hardware</span><span class="ext" aria-hidden="true"></span></a>
+        <a href="https://mempool.awokenlazarus.xyz" target="_blank" rel="noreferrer" data-i18n-title="nav.explorerTitle" title="Lazarus Mempool — block explorer for this chain"><span data-i18n="nav.explorer">Explorer</span><span class="ext" aria-hidden="true"></span></a>
       </span>
     </nav>
     <div class="topbar-side">
-      <span class="chip nav-live" data-live id="nav-live" title="Pool hashrate right now"><b id="nav-hr">—</b></span>
-      <a class="btn small" href="/#dashboard">Look up another</a>
+      <div class="lang-switch" role="group" data-i18n-aria="lang.group" aria-label="Language">
+        <button type="button" class="lang-btn" data-lang="zh-CN">中文</button>
+        <button type="button" class="lang-btn" data-lang="en" aria-pressed="true">English</button>
+      </div>
+      <span class="chip nav-live" data-live id="nav-live" data-i18n-title="nav.navHr" title="Pool hashrate right now"><b id="nav-hr">—</b></span>
+      <a class="btn small" href="/#dashboard" data-i18n="nav.lookUpAnother">Look up another</a>
     </div>
   </div>
 </header>
@@ -46,21 +62,21 @@
       <header class="section-head">
         <p class="eyebrow">Miner · <span id="miner-status-word">loading</span></p>
         <h2 id="miner-title" class="mono addr-title">—</h2>
-        <p class="section-lede" id="miner-lede">Live hashrate, workers, TIDES window share and every coinbase that has paid this address.</p>
+        <p class="section-lede" id="miner-lede" data-i18n="miner.lede">Live hashrate, workers, TIDES window share and every coinbase that has paid this address.</p>
       </header>
-      <div class="hero-stats" aria-live="polite" aria-label="Miner summary">
-        <span class="chip" data-live id="mc-hr"><span>Hashrate</span> <b>—</b></span>
-        <span class="chip" id="mc-avg" title="Average of the per-minute samples over the last hour"><span>1h avg</span> <b>—</b></span>
-        <span class="chip" id="mc-share" title="This address's credited hashrate as a share of the pool"><span>Of pool</span> <b>—</b></span>
-        <span class="chip" id="mc-window" title="Share of the TIDES payout window; what the next block pays"><span>Window</span> <b>—</b></span>
-        <span class="chip" id="mc-pending" title="Coinbase outputs to this address still under 100 confirmations"><span>Pending</span> <b>—</b></span>
-        <span class="chip" id="mc-paid" title="Matured coinbase outputs to this address, lifetime"><span>Paid</span> <b>—</b></span>
+      <div class="hero-stats" aria-live="polite" data-i18n-aria="miner.summaryAria" aria-label="Miner summary">
+        <span class="chip" data-live id="mc-hr"><span data-i18n="miner.hr">Hashrate</span> <b>—</b></span>
+        <span class="chip" id="mc-avg" data-i18n-title="miner.avgTitle" title="Average of the per-minute samples over the last hour"><span data-i18n="miner.avg">1h avg</span> <b>—</b></span>
+        <span class="chip" id="mc-share" data-i18n-title="miner.shareTitle" title="This address's credited hashrate as a share of the pool"><span data-i18n="miner.ofPool">Of pool</span> <b>—</b></span>
+        <span class="chip" id="mc-window" data-i18n-title="miner.windowTitle" title="Share of the TIDES payout window; what the next block pays"><span data-i18n="miner.window">Window</span> <b>—</b></span>
+        <span class="chip" id="mc-pending" data-i18n-title="miner.pendingTitle" title="Coinbase outputs to this address still under 100 confirmations"><span data-i18n="miner.pending">Pending</span> <b>—</b></span>
+        <span class="chip" id="mc-paid" data-i18n-title="miner.paidTitle" title="Matured coinbase outputs to this address, lifetime"><span data-i18n="miner.paid">Paid</span> <b>—</b></span>
       </div>
       <div class="chart-wrap" id="chart-wrap">
-        <div class="chart-caption">Hashrate · last 24h <span class="chart-legend" id="chart-legend" hidden></span></div>
-        <canvas id="chart" width="1100" height="150" aria-label="Hashrate over the last 24 hours" role="img"></canvas>
+        <div class="chart-caption"><span data-i18n="miner.chart">Hashrate · last 24h</span> <span class="chart-legend" id="chart-legend" hidden></span></div>
+        <canvas id="chart" width="1100" height="150" data-i18n-aria="miner.chartAria" aria-label="Hashrate over the last 24 hours" role="img"></canvas>
       </div>
-      <div id="miner"><p class="note">Loading…</p></div>
+      <div id="miner"><p class="note" data-i18n="miner.load">Loading…</p></div>
     </div>
   </section>
 </main>
@@ -69,33 +85,37 @@
   <div class="wrap footer-grid">
     <div class="footer-brand">
       <a class="wordmark small" href="/">Lazarus <em>Pool</em></a>
-      <p class="note">Bitcoin mining, paid in the coinbase. <i class="serif">Proverbs 11:1</i> — a just weight is his delight.</p>
+      <p class="note" data-i18n-html="footer.blurb">Bitcoin mining, paid in the coinbase. <i class="serif">Proverbs 11:1</i> — a just weight is his delight.</p>
     </div>
     <div class="footer-col">
-      <p class="category">Pool</p>
-      <a href="/#fees">Fees</a>
-      <a href="/#status">Overview</a>
-      <a href="/#payout">Next payout</a>
-      <a href="/#connect">Connect a miner</a>
-      <a href="/#blocks">Blocks &amp; payouts</a>
-      <a href="/#pools">Other DATUM pools</a>
+      <p class="category" data-i18n="footer.pool">Pool</p>
+      <a href="/#fees" data-i18n="footer.fees">Fees</a>
+      <a href="/#status" data-i18n="footer.overview">Overview</a>
+      <a href="/#payout" data-i18n="footer.payout">Next payout</a>
+      <a href="/#connect" data-i18n="footer.connect">Connect a miner</a>
+      <a href="/#blocks" data-i18n="footer.blocks">Blocks &amp; payouts</a>
+      <a href="/#pools" data-i18n="footer.pools">Other DATUM pools</a>
     </div>
     <div class="footer-col">
-      <p class="category">Explorer</p>
-      <a href="https://mempool.awokenlazarus.xyz" target="_blank" rel="noreferrer">Lazarus Mempool</a>
-      <a href="https://mempool.awokenlazarus.xyz/mining/pool/lazarus" target="_blank" rel="noreferrer">Blocks found by Lazarus</a>
-      <a id="explorer-addr" href="https://mempool.awokenlazarus.xyz" target="_blank" rel="noreferrer">This address on the explorer</a>
+      <p class="category" data-i18n="footer.explorer">Explorer</p>
+      <a href="https://mempool.awokenlazarus.xyz" target="_blank" rel="noreferrer" data-i18n="footer.mempool">Lazarus Mempool</a>
+      <a href="https://mempool.awokenlazarus.xyz/mining/pool/lazarus" target="_blank" rel="noreferrer" data-i18n="footer.found">Blocks found by Lazarus</a>
+      <a id="explorer-addr" href="https://mempool.awokenlazarus.xyz" target="_blank" rel="noreferrer" data-i18n="footer.thisAddr">This address on the explorer</a>
     </div>
     <div class="footer-col">
-      <p class="category">Project</p>
-      <a href="https://discord.gg/fD33dJXnzz" target="_blank" rel="noreferrer">Discord</a>
-      <a href="https://github.com/AwokenLazarus/Bitcoin" target="_blank" rel="noreferrer">Source on GitHub</a>
-      <a id="api-link" href="/api/pool" target="_blank" rel="noreferrer">This miner’s API (JSON)</a>
+      <p class="category" data-i18n="footer.project">Project</p>
+      <a href="https://discord.gg/fD33dJXnzz" target="_blank" rel="noreferrer" data-i18n="footer.discord">Discord</a>
+      <a href="https://github.com/AwokenLazarus/Bitcoin" target="_blank" rel="noreferrer" data-i18n="footer.source">Source on GitHub</a>
+      <a id="api-link" href="/api/pool" target="_blank" rel="noreferrer" data-i18n="footer.minerApi">This miner’s API (JSON)</a>
     </div>
   </div>
 </footer>
 
-<script src="/static/shared.js?v=stickypromo1"></script>
-<script src="/static/miner.js?v=stickypromo1"></script>
+<script src="/static/i18n.js?v=seo5"></script>
+<script src="/static/i18n/en.js?v=seo5"></script>
+<script src="/static/i18n/zh-CN.js?v=seo5"></script>
+<script>LZ_I18N.boot();</script>
+<script src="/static/shared.js?v=seo5"></script>
+<script src="/static/miner.js?v=seo5"></script>
 </body>
 </html>

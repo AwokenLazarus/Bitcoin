@@ -31,11 +31,13 @@
     --brass: oklch(80% 0.11 84);
     --brass-dim: oklch(63% 0.08 84);
     --brass-ink: oklch(20% 0.04 75);
+    --solo: oklch(68% 0.11 52);
     --good: oklch(76% 0.13 155);
     --bad: oklch(68% 0.145 28);
     --warn: oklch(80% 0.12 85);
-    --sans: "IBM Plex Sans", "Helvetica Neue", Helvetica, Arial, sans-serif;
-    --serif: "Newsreader", "Iowan Old Style", Palatino, "Times New Roman", serif;
+    --cjk: "PingFang SC", "Hiragino Sans GB", "Noto Sans SC", "Source Han Sans SC", "Microsoft YaHei", "WenQuanYi Micro Hei", sans-serif;
+    --sans: "IBM Plex Sans", var(--cjk), "Helvetica Neue", Helvetica, Arial, sans-serif;
+    --serif: "Newsreader", "Songti SC", "Noto Serif SC", "Source Han Serif SC", "STSong", "SimSun", "Iowan Old Style", Palatino, "Times New Roman", serif;
     --mono: "IBM Plex Mono", ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
     /* Chi Rho (labarum): the Lazarus mark, geometry identical to static/chi-rho.svg and the
        mempool theme's copy. Kept as a mask so it takes --brass wherever it is used. Its viewBox
@@ -211,6 +213,42 @@
     align-items: center;
     gap: 0.6rem;
   }
+  .lang-switch {
+    display: flex;
+    flex: none;
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    overflow: hidden;
+  }
+  .lang-btn {
+    appearance: none;
+    background: transparent;
+    border: 0;
+    margin: 0;
+    padding: 0.18rem 0.58rem;
+    font-size: 0.72rem;
+    font-weight: 600;
+    line-height: 1.3;
+    color: var(--muted);
+  }
+  .lang-btn:hover { color: var(--ink); background: color-mix(in oklch, var(--ink) 6%, transparent); }
+  .lang-btn[aria-pressed="true"] {
+    background: var(--bg-raised);
+    color: var(--ink);
+  }
+  html.lang-zh {
+    --serif: "PingFang SC", "Hiragino Sans GB", "Songti SC", "Noto Serif SC", "Source Han Serif SC", "STSong", "SimSun", serif;
+  }
+  html.lang-zh .eyebrow,
+  html.lang-zh .promo-tag,
+  html.lang-zh .kicker,
+  html.lang-zh .kicker.table-label,
+  html.lang-zh .category,
+  html.lang-zh .fee-kicker {
+    letter-spacing: 0.04em;
+    text-transform: none;
+  }
+  html.lang-zh .hero h1, html.lang-zh .hero #hero-title { letter-spacing: 0; }
   @media (max-width: 860px) {
     .topbar { grid-template-columns: auto auto; grid-template-areas: "brand side" "nav nav"; row-gap: 0.15rem; padding-bottom: 0.4rem; }
     .wordmark { grid-area: brand; }
@@ -269,6 +307,25 @@
     white-space: nowrap;
   }
   .promo .btn { flex: none; }
+  .promo-dismiss {
+    flex: none;
+    width: 1.75rem;
+    height: 1.75rem;
+    margin-left: auto;
+    padding: 0;
+    border: 1px solid var(--line);
+    border-radius: var(--r-sm);
+    background: var(--bg-inset);
+    color: var(--muted);
+    font-size: 1.15rem;
+    line-height: 1;
+    transition: color 140ms var(--ease), border-color 140ms var(--ease), background 140ms var(--ease);
+  }
+  .promo-dismiss:hover,
+  .promo-dismiss:focus-visible {
+    color: var(--brass);
+    border-color: var(--brass);
+  }
 
   /* The bonus, wherever it rides alongside a fee rate. */
   .fee-bonus {
@@ -337,7 +394,7 @@
     color: var(--brass);
   }
   .eyebrow i { font-family: var(--serif); font-weight: 400; font-style: italic; text-transform: none; letter-spacing: 0; font-size: 1.1em; color: var(--muted); }
-  .hero h1 {
+  .hero h1, .hero #hero-title {
     font-family: var(--serif);
     font-size: clamp(2.3rem, 1.4rem + 3.1vw, 4rem);
     font-weight: 500;
@@ -345,7 +402,7 @@
     letter-spacing: -0.03em;
     color: var(--ink);
   }
-  .hero h1 em {
+  .hero h1 em, .hero #hero-title em {
     font-style: italic;
     font-weight: 400;
     color: var(--brass);
@@ -357,6 +414,70 @@
     color: var(--muted);
   }
   .hero-lede span { color: var(--ink); font-weight: 600; font-variant-numeric: tabular-nums; }
+  /* Opening copy on the keyword URLs (/bip110, /tides …), injected server-side. */
+  .seo-intro {
+    padding: clamp(2rem, 1.4rem + 2vw, 3.4rem) 0 0;
+  }
+  .seo-intro .wrap { display: grid; gap: 1rem; max-width: 52rem; }
+  .seo-intro h1 {
+    font-family: var(--serif);
+    font-size: clamp(1.9rem, 1.3rem + 2.1vw, 2.9rem);
+    font-weight: 500;
+    line-height: 1.08;
+    letter-spacing: -0.02em;
+    color: var(--ink);
+  }
+  .seo-intro p {
+    font-size: clamp(1rem, 0.95rem + 0.25vw, 1.12rem);
+    line-height: 1.6;
+    color: var(--muted);
+  }
+  .seo-intro p b { color: var(--ink); font-weight: 600; }
+  .seo-intro p a { color: var(--brass); }
+  .seo-intro code {
+    font-family: var(--mono);
+    font-size: 0.92em;
+    color: var(--ink);
+  }
+  html.lang-zh .seo-intro h1 { letter-spacing: 0; }
+  /* Comparison and reference tables inside that copy. Six columns will not fit a phone, so the
+     wrapper scrolls sideways rather than letting the table decide the page width. */
+  .seo-table {
+    overflow-x: auto;
+    border: 1px solid var(--line);
+    border-radius: var(--r-sm);
+    background: var(--bg-raised);
+  }
+  .seo-table table { min-width: 42rem; font-size: 0.78rem; border-radius: inherit; }
+  .seo-table caption {
+    padding: 0.6rem 0.75rem;
+    text-align: left;
+    font-family: var(--sans);
+    font-size: 0.78rem;
+    color: var(--faint);
+    border-bottom: 1px solid var(--line);
+  }
+  .seo-table th, .seo-table td {
+    padding: 0.55rem 0.75rem;
+    text-align: left;
+    vertical-align: top;
+    border-bottom: 1px solid var(--line);
+    white-space: normal;
+  }
+  .seo-table thead th { color: var(--faint); font-weight: 500; }
+  .seo-table tbody th { color: var(--ink); font-weight: 600; white-space: nowrap; }
+  .seo-table tbody tr:last-child th, .seo-table tbody tr:last-child td { border-bottom: 0; }
+  .seo-table tbody tr:first-child th[scope="row"] { color: var(--brass); }
+
+  .hero-firsts {
+    max-width: 40rem;
+    padding-left: 0.85rem;
+    border-left: 2px solid var(--brass-dim);
+    font-size: 0.92rem;
+    line-height: 1.5;
+    color: var(--muted);
+  }
+  .hero-firsts b { color: var(--ink); font-weight: 600; }
   .hero-actions {
     display: flex;
     flex-wrap: wrap;
@@ -626,6 +747,126 @@
   @container (min-width: 52rem) { .miner-card .ticker.four { grid-template-columns: repeat(4, minmax(0, 1fr)); } }
 
   /* ---- Charts. */
+  .path-hr {
+    display: grid;
+    gap: 0.9rem;
+    margin: 0.85rem 0 1rem;
+    padding: 0.9rem 1rem 1.1rem;
+    border: 1px solid var(--line);
+    border-radius: var(--r);
+    background: var(--bg-card);
+    box-shadow: var(--shadow-card);
+  }
+  .path-hr-pies {
+    display: grid;
+    grid-template-columns: 1fr;
+    justify-items: center;
+    align-items: start;
+    gap: 1.25rem;
+  }
+  @container (min-width: 40rem) {
+    .path-hr.has-gw .path-hr-pies {
+      grid-template-columns: 1fr 1fr;
+    }
+    .path-hr.has-gw .path-hr-keys {
+      grid-template-columns: 1fr 1fr;
+    }
+  }
+  .path-hr-chart-wrap {
+    display: grid;
+    grid-template-rows: 1.25rem 168px;
+    justify-items: center;
+    gap: 0.45rem;
+    width: 100%;
+  }
+  .path-hr-chart {
+    position: relative;
+    width: 168px;
+    height: 168px;
+  }
+  .path-hr-chart canvas {
+    width: 168px;
+    height: 168px;
+    max-width: none;
+  }
+  .path-hr-center {
+    position: absolute;
+    inset: 22%;
+    display: grid;
+    place-content: center;
+    text-align: center;
+    pointer-events: none;
+  }
+  .path-hr-center b {
+    font-family: var(--mono);
+    font-size: 1.35rem;
+    font-weight: 500;
+    color: var(--brass);
+    line-height: 1.15;
+  }
+  .path-hr-center small {
+    font-size: 0.64rem;
+    font-weight: 500;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--faint);
+  }
+  .path-hr-keys {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 1rem 1.5rem;
+    min-width: 0;
+  }
+  .path-hr-copy {
+    min-width: 0;
+  }
+  .path-hr-title {
+    margin: 0;
+    height: 1.25rem;
+    font-size: 0.66rem;
+    font-weight: 500;
+    letter-spacing: 0.09em;
+    text-transform: uppercase;
+    color: var(--faint);
+    text-align: center;
+    line-height: 1.25rem;
+    overflow: hidden;
+  }
+  .path-hr-legend {
+    list-style: none;
+    padding: 0;
+    margin: 0.15rem 0 0.4rem;
+    display: grid;
+    gap: 0.4rem;
+  }
+  .path-hr-legend li {
+    display: grid;
+    grid-template-columns: 0.7rem minmax(0, 1fr) auto;
+    gap: 0.4rem 0.65rem;
+    align-items: center;
+  }
+  .path-hr-swatch {
+    width: 0.7rem;
+    height: 0.7rem;
+    border-radius: 2px;
+  }
+  .path-hr-legend small {
+    display: block;
+    color: var(--faint);
+    font-size: 0.74rem;
+  }
+  .path-hr-legend b {
+    font-family: var(--mono);
+    font-weight: 500;
+    font-size: 0.92rem;
+    white-space: nowrap;
+  }
+  .path-hr-note {
+    font-size: 0.74rem;
+    line-height: 1.4;
+    color: var(--muted);
+  }
+
   .chart-wrap {
     position: relative;
     margin-top: 0.15rem;
@@ -1689,6 +1930,148 @@
   .pool-state { flex: 0 0 auto; }
   #pools-share b { color: var(--brass); font-family: var(--mono); font-weight: 500; }
   #pools-note { max-width: 56rem; }
+
+  /* ---- Hardware: BT-Miners BTCB2 catalog with live Lazarus earnings. */
+  /* Hashrate in, XBT and dollars per day out, from the same live figure the status panel shows. */
+  .calc {
+    display: grid;
+    gap: 0.9rem 1.6rem;
+    grid-template-columns: minmax(0, 1fr);
+    align-items: end;
+    margin: 0 0 1.2rem;
+    padding: 1rem 1.1rem;
+    border: 1px solid var(--line);
+    border-radius: var(--r-sm);
+    background: var(--bg-raised);
+  }
+  .calc-field { display: grid; gap: 0.4rem; }
+  .calc-field label {
+    font-size: 0.78rem;
+    color: var(--faint);
+  }
+  .calc-input { display: flex; gap: 0.5rem; }
+  .calc-input input, .calc-input select {
+    padding: 0.5rem 0.6rem;
+    font-family: var(--mono);
+    font-variant-numeric: tabular-nums;
+    color: var(--ink);
+    background: var(--bg-inset);
+    border: 1px solid var(--line);
+    border-radius: var(--r-sm);
+  }
+  .calc-input input { width: 8rem; }
+  .calc-input input:focus-visible, .calc-input select:focus-visible {
+    outline: 2px solid var(--brass-dim);
+    outline-offset: 1px;
+  }
+  .calc-out { display: grid; gap: 0.3rem; }
+  .calc-row {
+    display: flex;
+    align-items: baseline;
+    gap: 0.5rem;
+    font-size: 0.82rem;
+    color: var(--faint);
+  }
+  .calc-row b {
+    font-family: var(--mono);
+    font-size: 1.05rem;
+    font-variant-numeric: tabular-nums;
+    color: var(--brass);
+  }
+  .calc-row.faint b { font-size: 0.9rem; color: var(--muted); }
+  .calc-usd { font-family: var(--mono); color: var(--muted); }
+  .calc-note, #calc-note { grid-column: 1 / -1; margin: 0; }
+  @container (min-width: 34rem) {
+    .calc { grid-template-columns: auto minmax(0, 1fr); }
+  }
+
+  .hw-toolbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.8rem 1.2rem;
+    flex-wrap: wrap;
+    margin: 0 0 0.9rem;
+  }
+  .hw-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 0.6rem;
+    list-style: none;
+    padding: 0;
+    margin: 0;
+  }
+  @container (min-width: 64rem) { .hw-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); } }
+  @container (max-width: 34rem) { .hw-grid { grid-template-columns: 1fr; } }
+  .hw-card {
+    display: grid;
+    grid-template-rows: auto 1fr;
+    gap: 0.75rem;
+    height: 100%;
+    padding: 1rem 1.05rem 1.1rem;
+    border: 1px solid var(--line);
+    border-radius: var(--r-lg);
+    background: var(--bg-card);
+    box-shadow: var(--shadow-card);
+    text-decoration: none;
+    color: inherit;
+    min-width: 0;
+    transition: border-color 140ms var(--ease), transform 140ms var(--ease);
+  }
+  .hw-card:hover { border-color: var(--brass-dim); transform: translateY(-1px); }
+  .hw-card:focus-visible { outline: 2px solid var(--brass); outline-offset: 2px; }
+  .hw-card.oos { opacity: 0.78; }
+  .hw-img {
+    width: 100%;
+    height: 7.5rem;
+    object-fit: contain;
+    background: var(--bg-inset);
+    border-radius: var(--r-sm);
+  }
+  .hw-img-empty { display: block; }
+  .hw-body { display: grid; gap: 0.45rem; align-content: start; min-width: 0; }
+  .hw-head {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 0.45rem;
+    flex-wrap: wrap;
+  }
+  .hw-head h3 {
+    font-family: var(--serif);
+    font-size: 1.12rem;
+    font-weight: 500;
+    letter-spacing: -0.015em;
+    line-height: 1.25;
+    color: var(--ink);
+  }
+  .hw-card:hover h3 { color: var(--brass); }
+  .hw-spec { font-size: 0.82rem; color: var(--muted); }
+  .hw-facts {
+    display: grid;
+    gap: 0.45rem 0.6rem;
+    margin: 0.35rem 0 0;
+    padding-top: 0.65rem;
+    border-top: 1px solid var(--line);
+  }
+  .hw-facts > div { min-width: 0; }
+  .hw-facts dt {
+    font-size: 0.64rem;
+    font-weight: 600;
+    letter-spacing: 0.09em;
+    text-transform: uppercase;
+    color: var(--faint);
+  }
+  .hw-facts dd {
+    font-family: var(--mono);
+    font-size: 1.02rem;
+    font-weight: 500;
+    letter-spacing: -0.02em;
+    color: var(--ink);
+  }
+  .hw-facts > div:first-child dd { color: var(--brass); }
+  #hardware-empty { max-width: 52rem; }
+  #hardware-disclaimer { max-width: 52rem; margin-top: 0.2rem; }
 
   /* ---- How it works: three numbered steps. */
   .how-grid {

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import gzip
+import html
 import json
 import os
 import queue
@@ -27,7 +28,7 @@ NO_WRITE = os.environ.get("POOL_UI_NO_WRITE") == "1"
 
 POOL_FEE = float(CONF.get("pool_fee_percent", 0))
 # Public-stratum fee when primed is not answering; primed's stats.json is authoritative.
-STRATUM_FEE = float(CONF.get("stratum_fee_percent", 3.0))
+STRATUM_FEE = float(CONF.get("stratum_fee_percent", 10.0))
 STRATUM_HOST = CONF.get("stratum_host", "27.69.0.25")
 STRATUM_PORT = int(CONF.get("stratum_port", 23334))
 DATUM_URL = CONF.get("datum_url", "http://127.0.0.1:7152")
@@ -1037,11 +1038,13 @@ def _curl_quote(s):
     return '"' + str(s).replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n") + '"'
 
 
-def curl(url, digest=False, timeout=3):
+def curl(url, digest=False, timeout=3, headers=None):
     # Credentials go to curl through a config file on stdin (`-K -`), never on the command
     # line, where every local process could read them from /proc/*/cmdline.
     cmd = ["curl", "-sS", "--max-time", str(timeout), "-K", "-"]
     conf = [f"url = {_curl_quote(url)}"]
+    for h in headers or ():
+        conf.append(f"header = {_curl_quote(h)}")
     if digest:
         u, p = datum_user_pass()
         conf += ["digest", f"user = {_curl_quote(f'{u}:{p}')}"]
@@ -1084,6 +1087,7 @@ def rpc(method, params=None):
 _resp_cache = {}
 _resp_cache_lock = threading.Lock()
 _RESP_CACHE_MAX = 512
+_BLOCKHASH_RE = re.compile(r"^[0-9a-fA-F]{64}$")
 _cache_compute_locks = {}
 _cache_refreshing = set()
 
@@ -1339,6 +1343,215 @@ def mempool_prices_payload():
         if isinstance(v, (int, float)):
             out[k] = v
     return out
+
+
+# BT-Miners BTCB2 collection (WooCommerce Store API). Public, no key. Category 1470 is
+# https://bt-miners.com/collections/btcb2-miners/ — BLAKE2b/Siacoin boxes that hash this chain.
+_BT_MINERS_COLLECTION = "https://bt-miners.com/collections/btcb2-miners/"
+_BT_MINERS_API = (
+    "https://bt-miners.com/wp-json/wc/store/v1/products?category=1470&per_page=50&orderby=price&order=asc"
+)
+_HR_IN_TITLE = re.compile(r"(\d+(?:\.\d+)?)\s*(T|G|M|K)H/?s", re.I)
+_hardware_lock = threading.Lock()
+_hardware_cache = {"miners": None, "ts": 0.0, "refreshing": False, "error": ""}
+
+
+def _wc_attr(product, name):
+    want = name.strip().lower()
+    for a in product.get("attributes") or []:
+        if (a.get("name") or "").strip().lower() != want:
+            continue
+        terms = a.get("terms") or []
+        if not terms:
+            return ""
+        default = next((t for t in terms if t.get("default")), terms[0])
+        return str(default.get("name") or "")
+    return ""
+
+
+def _ths_from_product(product):
+    """Advertised BLAKE2b hashrate in TH/s. Title first: dual-mode boxes (HS5) put HNS in the attribute."""
+    title = html.unescape(product.get("name") or "")
+    m = _HR_IN_TITLE.search(title)
+    if m:
+        n = float(m.group(1))
+        unit = m.group(2).upper()
+        return n * {"T": 1.0, "G": 1e-3, "M": 1e-6, "K": 1e-9}[unit]
+    raw = _wc_attr(product, "Hashrate")
+    try:
+        hs = float(raw)
+    except (TypeError, ValueError):
+        return None
+    return (hs / 1e12) if hs > 0 else None
+
+
+def _usd_from_wc_prices(prices):
+    if not isinstance(prices, dict):
+        return None
+    raw = prices.get("price")
+    if raw in (None, "", []):
+        return None
+    try:
+        minor = int(prices.get("currency_minor_unit") or 2)
+        return float(raw) / (10 ** minor)
+    except (TypeError, ValueError):
+        return None
+
+
+def _watts_from_product(product):
+    raw = _wc_attr(product, "Power")
+    try:
+        w = float(raw)
+    except (TypeError, ValueError):
+        return None
+    return w if w > 0 else None
+
+
+def _normalize_bt_miners(raw):
+    miners = []
+    for p in raw or []:
+        if not isinstance(p, dict):
+            continue
+        name = html.unescape(p.get("name") or "").strip()
+        url = (p.get("permalink") or "").strip()
+        if not name or not url:
+            continue
+        if "hosting" in name.lower() and "miner" not in name.lower():
+            continue
+        ths = _ths_from_product(p)
+        if ths is None or ths <= 0:
+            continue
+        imgs = p.get("images") or []
+        image = ""
+        if imgs and isinstance(imgs[0], dict):
+            image = imgs[0].get("thumbnail") or imgs[0].get("src") or ""
+        watts = _watts_from_product(p)
+        miners.append(
+            {
+                "id": p.get("id"),
+                "name": name,
+                "model": html.unescape(_wc_attr(p, "pcname") or name),
+                "url": url,
+                "sku": html.unescape(p.get("sku") or ""),
+                "ths": ths,
+                "watts": watts,
+                "price_usd": _usd_from_wc_prices(p.get("prices") or {}),
+                "in_stock": bool(p.get("is_in_stock")),
+                "condition": html.unescape(_wc_attr(p, "Condition") or ""),
+                "image": image,
+            }
+        )
+    miners.sort(key=lambda m: (-(m.get("ths") or 0), m.get("name") or ""))
+    return miners
+
+
+def _hardware_fetch():
+    raw = curl(
+        _BT_MINERS_API,
+        timeout=12,
+        headers=(
+            "User-Agent: LazarusPool/1.0 (+https://pool.awokenlazarus.xyz)",
+            "Accept: application/json",
+        ),
+    )
+    if not raw:
+        raise RuntimeError("bt-miners catalog empty")
+    data = json.loads(raw)
+    if not isinstance(data, list):
+        raise RuntimeError("bt-miners catalog unexpected")
+    miners = _normalize_bt_miners(data)
+    if not miners:
+        raise RuntimeError("bt-miners catalog parsed empty")
+    return miners
+
+
+def _hardware_refresh_bg():
+    try:
+        miners = _hardware_fetch()
+        with _hardware_lock:
+            _hardware_cache["miners"] = miners
+            _hardware_cache["ts"] = time.time()
+            _hardware_cache["error"] = ""
+    except Exception as e:
+        print("hardware", e, flush=True)
+        with _hardware_lock:
+            _hardware_cache["error"] = str(e)
+            if _hardware_cache["miners"] is None:
+                _hardware_cache["ts"] = time.time()
+    finally:
+        with _hardware_lock:
+            _hardware_cache["refreshing"] = False
+
+
+def hardware_catalog(max_age=900.0):
+    """Listed BTCB2 machines. Stale-while-revalidate so a shop outage does not stall the UI."""
+    now = time.time()
+    with _hardware_lock:
+        miners = _hardware_cache["miners"]
+        age = now - _hardware_cache["ts"]
+        err = _hardware_cache["error"]
+        if miners and age < max_age:
+            return miners, err
+        if not _hardware_cache["refreshing"]:
+            _hardware_cache["refreshing"] = True
+            threading.Thread(target=_hardware_refresh_bg, daemon=True).start()
+        if miners:
+            return miners, err
+    try:
+        miners = _hardware_fetch()
+        with _hardware_lock:
+            _hardware_cache["miners"] = miners
+            _hardware_cache["ts"] = time.time()
+            _hardware_cache["error"] = ""
+        return miners, ""
+    except Exception as e:
+        print("hardware", e, flush=True)
+        with _hardware_lock:
+            _hardware_cache["error"] = str(e)
+            return _hardware_cache["miners"] or [], str(e)
+
+
+def hardware_payload():
+    catalog, err = hardware_catalog()
+    pool = cache_peek("pool") or {}
+    if not pool.get("ths_btc_day"):
+        try:
+            pool = cached("pool", 5.0, pool_payload) or pool
+        except Exception:
+            pass
+    px = price_payload()
+    usd = px.get("USD")
+    try:
+        usd = float(usd) if usd is not None else None
+    except (TypeError, ValueError):
+        usd = None
+    ths_gross = float(pool.get("ths_btc_day") or 0)
+    ths_datum = float(pool.get("ths_btc_day_datum_bonus") or pool.get("ths_btc_day_datum") or 0)
+    ths_stratum = float(pool.get("ths_btc_day_stratum") or 0)
+    if ths_datum <= 0 and ths_gross > 0:
+        ths_datum = ths_gross
+    miners = []
+    for m in catalog:
+        ths = float(m.get("ths") or 0)
+        xbt = (ths * ths_datum) if ths_datum > 0 and ths > 0 else None
+        xbt_stratum = (ths * ths_stratum) if ths_stratum > 0 and ths > 0 else None
+        row = dict(m)
+        row["xbt_day"] = xbt
+        row["usd_day"] = (xbt * usd) if xbt is not None and usd is not None else None
+        row["xbt_day_stratum"] = xbt_stratum
+        row["usd_day_stratum"] = (xbt_stratum * usd) if xbt_stratum is not None and usd is not None else None
+        miners.append(row)
+    return {
+        "source": "BT-Miners",
+        "source_url": _BT_MINERS_COLLECTION,
+        "miners": miners,
+        "price_usd": usd,
+        "ths_btc_day": ths_datum,
+        "ths_btc_day_stratum": ths_stratum,
+        "difficulty": pool.get("difficulty"),
+        "error": err or "",
+        "note": "Estimates use current network difficulty and the 3.125 XBT base subsidy, through a DATUM gateway on Lazarus (bonus included). Electricity is not included. Prices are BT-Miners list prices.",
+    }
 
 
 # Identities are DATUM usernames minus the worker suffix: an address, or whatever a
@@ -1726,6 +1939,30 @@ def pool_output_parts(pool_addr, on_chain_btc, pb, reward_btc=None):
     return 0.0, total
 
 
+def found_outputs_payload(blockhash):
+    """Coinbase outputs for one found block, with the pool-address fee split applied."""
+    splits = coinbase_splits(blockhash)
+    if not splits:
+        return None
+    pr = prime_summary()
+    pool_addr = pr.get("address") or ""
+    pb = next((b for b in (pr.get("blocks") or []) if b.get("hash") == blockhash), None)
+    fb = db("SELECT reward_btc FROM found_blocks WHERE hash=?", (blockhash,), one=True)
+    reward = float((fb["reward_btc"] if fb else 0) or 0) or sum(splits.values()) or 1.0
+    outs = []
+    for addr, amt in sorted(splits.items(), key=lambda kv: -kv[1]):
+        amt = float(amt or 0)
+        if pool_addr and addr == pool_addr:
+            miner_btc, fee_btc = pool_output_parts(pool_addr, amt, pb, reward)
+            if miner_btc > 0:
+                outs.append({"address": addr, "btc": miner_btc, "share": miner_btc / reward, "to": "miner"})
+            if fee_btc > 0:
+                outs.append({"address": addr, "btc": fee_btc, "share": fee_btc / reward if reward else 0, "to": "pool"})
+        else:
+            outs.append({"address": addr, "btc": amt, "share": amt / reward if reward else 0, "to": "miner"})
+    return {"hash": blockhash, "outputs": outs}
+
+
 _cb_split_table = {"ok": False}
 
 
@@ -2010,12 +2247,17 @@ def solo_blocks_rows(limit=50):
     return [dict(r) for r in rows]
 
 
-def solo_payload():
-    """Everything the UI shows about solo.
+def _solo_is_hashing(m):
+    """Connected or proving work right now — not a leftover identity from the solo book."""
+    return float(m.get("hashrate_ghs") or 0) > 1e-9 or int(m.get("workers") or 0) > 0
 
-    Solo is served only by standalone gateways: they build their own templates, pay the
-    finder directly in the coinbase, and never talk to Prime. Nothing here touches the
-    TIDES window and nothing here is ever owed.
+
+def _collect_solo():
+    """Merge the standalone solo gateways. Includes idle book identities.
+
+    The gateways' /solo.json is a lifetime scoreboard (who ever submitted) plus whoever
+    is connected. The public table only wants the hashing ones; the per-address page
+    still needs the book so a finder can see their own row after they disconnect.
     """
     endpoints, miners = [], {}
     hashrate_ghs = 0.0
@@ -2029,6 +2271,24 @@ def solo_payload():
         up = bool(doc.get("mode") == "solo")
         ghs = float(doc.get("hashrate") or 0) / 1e9
         hashrate_ghs += ghs
+        live_n = 0
+        for m in doc.get("miners") or []:
+            ident = m.get("identity") or ""
+            if not ident:
+                continue
+            hr = float(m.get("hashrate") or 0) / 1e9
+            workers = int(m.get("workers") or 0)
+            e = miners.setdefault(ident, _solo_row(ident))
+            e["hashrate_ghs"] += hr
+            e["workers"] += workers
+            e["work"] += int(m.get("work") or 0)
+            e["shares"] += int(m.get("shares") or 0)
+            e["blocks"] += int(m.get("blocks") or 0)
+            e["best_diff"] = max(e["best_diff"], int(m.get("best_diff") or 0))
+            e["via"] = gw.get("name") or "stratum"
+            e["fee_percent"] = (doc.get("fee_bps") or 0) / 100.0
+            if hr > 1e-9 or workers > 0:
+                live_n += 1
         endpoints.append(
             {
                 "name": gw.get("name") or doc.get("profile") or "solo",
@@ -2040,37 +2300,35 @@ def solo_payload():
                 "template_age_s": doc.get("template_age_s"),
                 "vardiff": doc.get("vardiff") or {},
                 "hashrate_ghs": ghs,
-                "miners": len(doc.get("miners") or []),
+                "miners": live_n,
             }
         )
-        for m in doc.get("miners") or []:
-            ident = m.get("identity") or ""
-            if not ident:
-                continue
-            e = miners.setdefault(ident, _solo_row(ident))
-            e["hashrate_ghs"] += float(m.get("hashrate") or 0) / 1e9
-            e["workers"] += int(m.get("workers") or 0)
-            e["work"] += int(m.get("work") or 0)
-            e["shares"] += int(m.get("shares") or 0)
-            e["blocks"] += int(m.get("blocks") or 0)
-            e["best_diff"] = max(e["best_diff"], int(m.get("best_diff") or 0))
-            e["via"] = gw.get("name") or "stratum"
-            e["fee_percent"] = (doc.get("fee_bps") or 0) / 100.0
+    return endpoints, miners, hashrate_ghs
 
+
+def solo_payload():
+    """Everything the UI shows about solo.
+
+    Solo is served only by standalone gateways: they build their own templates, pay the
+    finder directly in the coinbase, and never talk to Prime. Nothing here touches the
+    TIDES window and nothing here is ever owed.
+    """
+    endpoints, miners, hashrate_ghs = _collect_solo()
     blocks = solo_blocks_rows()
     # The chain is the authority on who found what; the gateways' own counters are only a
     # live view and reset if an instance is replaced.
     for b in blocks:
         if b["finder"] in miners:
             miners[b["finder"]]["blocks_onchain"] = miners[b["finder"]].get("blocks_onchain", 0) + 1
-    rows = sorted(miners.values(), key=lambda m: (-m["hashrate_ghs"], -m["work"]))
+    live = [m for m in miners.values() if _solo_is_hashing(m)]
+    live.sort(key=lambda m: (-m["hashrate_ghs"], -m["work"]))
     return {
         "enabled": any(e["online"] for e in endpoints),
-        "fee_percent": next((e["fee_percent"] for e in endpoints if e["online"]), 2),
+        "fee_percent": next((e["fee_percent"] for e in endpoints if e["online"]), 2.5),
         "endpoints": endpoints,
         "hashrate_ghs": hashrate_ghs,
-        "miners": rows,
-        "miner_count": len(rows),
+        "miners": live,
+        "miner_count": len(live),
         "blocks": blocks,
         "blocks_found": len(blocks),
         "ts": int(time.time()),
@@ -2106,16 +2364,20 @@ def _solo_row_for(miners, addr):
 
 
 def solo_miner_payload(addr):
-    doc = solo_payload()
-    me = _solo_row_for(doc["miners"], addr)
+    endpoints, miners, _hr = _collect_solo()
+    blocks = solo_blocks_rows()
+    me = miners.get(addr) or _solo_row_for(miners.values(), addr)
+    if me:
+        me = dict(me)
+        me["blocks_onchain"] = sum(1 for b in blocks if _addr_key(b.get("finder")) == _addr_key(addr))
     key = _addr_key(addr)
     return {
         "address": addr,
         "found": me is not None,
         "solo": me or _solo_row(addr),
-        "blocks": [b for b in doc["blocks"] if _addr_key(b.get("finder")) == key],
-        "endpoints": doc["endpoints"],
-        "ts": doc["ts"],
+        "blocks": [b for b in blocks if _addr_key(b.get("finder")) == key],
+        "endpoints": endpoints,
+        "ts": int(time.time()),
     }
 
 
@@ -2743,6 +3005,126 @@ def prime_coinbaser_preview():
     }
 
 
+def _hasher_path(m):
+    """Live arrival path for one miner row: own DATUM gateway vs public stratum."""
+    via = str(m.get("via") or "").lower()
+    if via in ("prime", "gateway"):
+        return "datum"
+    return "stratum"
+
+
+def _path_hashrate(miners):
+    """Credited live hashrate split by hasher path. One row per payout address.
+
+    Same identity-level credited rate as the pool ticker (Prime ledger), classified by
+    whether that address is hashing through its own DATUM gateway or the public stratum
+    right now. Not TIDES window share, and not overflow.datum_hs (that meter is for relay).
+    """
+    seen = set()
+    datum = stratum = 0.0
+    n_datum = n_stratum = 0
+    for m in miners or []:
+        a = m.get("address") or ""
+        if not a or a in seen:
+            continue
+        seen.add(a)
+        hr = float(m.get("credited_hr_ghs") or 0)
+        if hr < 1e-6:
+            hr = float(m.get("hr_ghs") or 0)
+        if _hasher_path(m) == "datum":
+            datum += hr
+            n_datum += 1
+        else:
+            stratum += hr
+            n_stratum += 1
+    return datum, stratum, n_datum, n_stratum
+
+
+_DATUM_GW_MIN_PCT = 0.5
+_DATUM_GW_HASHING_S = 180
+
+
+def _datum_gateway_slices(gateways, datum_hr_ghs):
+    """Live DATUM hashrate by named gateway. Percents are of DATUM hashrate, not the pool.
+
+    House public stratum (`own` / fee_path stratum) is excluded. Slice weights are each
+    hashing gateway's session work per connected second (average rate since connect), then
+    scaled so they sum to the same credited `datum_hr_ghs` as the path pie. Every gateway
+    at or above 0.5% of DATUM hashrate keeps its own slice; the rest fold into Other.
+    """
+    try:
+        datum = float(datum_hr_ghs or 0)
+    except (TypeError, ValueError):
+        datum = 0.0
+    if datum <= 1e-12:
+        return [], 0
+    buckets = {}
+    for g in gateways or []:
+        if g.get("own") or g.get("offline"):
+            continue
+        if str(g.get("fee_path") or "").lower() == "stratum":
+            continue
+        try:
+            work = float(g.get("work") or 0)
+            accepted = int(g.get("accepted") or 0)
+            last = g.get("last_share_s")
+            last_s = float(last) if last is not None else 1e9
+            connected = max(float(g.get("connected_s") or 0), 30.0)
+        except (TypeError, ValueError):
+            continue
+        if work <= 0 or accepted <= 0 or last_s >= _DATUM_GW_HASHING_S:
+            continue
+        tag = str(g.get("secondary_tag") or g.get("name") or "").strip()
+        gw = str(g.get("gateway") or "")
+        key = tag.lower() if tag else (gw or f"id:{g.get('id')}")
+        b = buckets.get(key)
+        if b is None:
+            b = {"name": tag, "gateway": gw, "weight": 0.0, "sessions": 0}
+            buckets[key] = b
+        b["weight"] += work / connected
+        b["sessions"] += 1
+        if tag:
+            b["name"] = tag
+        if gw and not b["gateway"]:
+            b["gateway"] = gw
+    items = sorted(buckets.values(), key=lambda x: -x["weight"])
+    total_w = sum(x["weight"] for x in items)
+    if total_w <= 0:
+        return [], 0
+    n = len(items)
+    head, tail = [], []
+    for x in items:
+        if 100.0 * x["weight"] / total_w >= _DATUM_GW_MIN_PCT:
+            head.append(x)
+        else:
+            tail.append(x)
+    if tail:
+        head.append(
+            {
+                "name": "",
+                "gateway": "",
+                "weight": sum(x["weight"] for x in tail),
+                "sessions": sum(int(x["sessions"]) for x in tail),
+                "other": True,
+            }
+        )
+    items = head
+    out = []
+    for x in items:
+        frac = x["weight"] / total_w
+        out.append(
+            {
+                "name": x["name"],
+                "gateway": x.get("gateway") or "",
+                "hr_ghs": datum * frac,
+                "percent": 100.0 * frac,
+                "sessions": int(x["sessions"]),
+                "other": bool(x.get("other")),
+            }
+        )
+    return out, n
+
+
 def pool_payload():
     node = node_info()
     miners = online_miners()
@@ -2760,6 +3142,18 @@ def pool_payload():
         pool_hr = _lpool
     elif pool_hr < 1e-9:
         pool_hr = state.get("pool_hr_ghs") or 0
+    datum_hr, stratum_hr, datum_hr_miners, stratum_hr_miners = _path_hashrate(miners)
+    split = datum_hr + stratum_hr
+    if pool_hr > 1e-9 and split > 1e-9:
+        scale = pool_hr / split
+        datum_hr *= scale
+        stratum_hr *= scale
+    elif pool_hr > 1e-9 and split <= 1e-9:
+        stratum_hr = pool_hr
+        datum_hr = 0.0
+    path_den = datum_hr + stratum_hr
+    datum_hr_pct = (100.0 * datum_hr / path_den) if path_den > 1e-12 else 0.0
+    stratum_hr_pct = (100.0 * stratum_hr / path_den) if path_den > 1e-12 else 0.0
     online = len(seen_addr)
     net = float(node.get("networkhashps") or 0)
     first = db("SELECT MIN(first_ts) AS t FROM miners", one=True)
@@ -2792,6 +3186,9 @@ def pool_payload():
     )
     win = tides_window_snapshot()
     prime = prime_summary()
+    # /api/pool is polled every 10s. Full coinbase splits for ~100 blocks were ~900 KB of
+    # that payload (and gzipped on every request). Found-by-Lazarus reads /api/payouts.
+    prime_pub = {k: v for k, v in prime.items() if k != "blocks"}
     nblocks = int(win["window_multiple"] or 8)
     fill = win["window_fill_percent"]
     datum_fee = prime["fee_bps"] / 100.0 if prime.get("reachable") else POOL_FEE
@@ -2811,6 +3208,7 @@ def pool_payload():
         f"{nblocks} network-blocks of accepted work, currently {fill:.0f}% full. "
         f"Hashrate is not your cut — a new rig starts near 0% and ramps as its work enters and older work ages out."
     )
+    datum_gateways, datum_gateway_count = _datum_gateway_slices(prime.get("gateways") or [], datum_hr)
     return {
         "name": "Lazarus",
         "tagline": "Proverbs 11:1",
@@ -2843,6 +3241,17 @@ def pool_payload():
         "host": STRATUM_HOST,
         "port": STRATUM_PORT,
         "pool_hr_ghs": pool_hr,
+        # Live credited hashrate by hasher path (DATUM gateway vs public stratum). Percents
+        # sum to 100 of pool_hr_ghs. Window work split is fees.datum_work_percent.
+        "datum_hr_ghs": datum_hr,
+        "stratum_hr_ghs": stratum_hr,
+        "datum_hr_percent": datum_hr_pct,
+        "stratum_hr_percent": stratum_hr_pct,
+        "datum_hr_miners": datum_hr_miners,
+        "stratum_hr_miners": stratum_hr_miners,
+        # DATUM slice only: hashing remote gateways, percents of datum_hr_ghs.
+        "datum_gateways": datum_gateways,
+        "datum_gateway_count": datum_gateway_count,
         "miners_online": online,
         "workers_online": max(workers, online),
         "miners_seen": int(known["n"]) if known else online,
@@ -2886,7 +3295,7 @@ def pool_payload():
             "pool_pass_full_users": True,
             "pooled_mining_only": True,
         },
-        "prime": prime,
+        "prime": prime_pub,
         # Network-share valve on the house stratum: over the line, new miners are relayed
         # to other BLAKE2b pools and paid there. Absent when the gateway lacks the feature.
         "overflow": overflow_doc().get("overflow"),
@@ -3250,17 +3659,1047 @@ class PoolHTTPServer(ThreadingHTTPServer):
         super().server_bind()
 
 
+def _collapse_found_payouts(rows):
+    """One object per block. Per-output lists are served from `/api/found/<hash>` when a
+    row is expanded — putting them in /api/payouts was ~7 MB JSON and froze the public page."""
+    order = []
+    by = {}
+    for row in rows or []:
+        key = row.get("hash") or row.get("height")
+        if key not in by:
+            order.append(key)
+            by[key] = {
+                "height": row.get("height"),
+                "hash": row.get("hash"),
+                "ts": row.get("ts"),
+                "status": row.get("status"),
+                "kind": row.get("kind") or "",
+                "block_status": row.get("block_status") or "",
+                "owed_sats": row.get("owed_sats") or 0,
+                "owed_txid": row.get("owed_txid") or "",
+                "owed_resolved": bool(row.get("owed_resolved")),
+                "found_by": row.get("found_by") or "",
+                "gateway": row.get("gateway") or "",
+                "reward_btc": row.get("reward_btc"),
+                "confirmations": row.get("confirmations") or 0,
+                "miner_btc": 0.0,
+                "pool_btc": 0.0,
+                "outputs": [],
+            }
+        b = by[key]
+        to = row.get("to") or "miner"
+        amt = float(row.get("miner_btc") or 0)
+        b["outputs"].append(
+            {
+                "address": row.get("finder") or "",
+                "btc": amt,
+                "share": row.get("share") or 0,
+                "to": to,
+            }
+        )
+        if to == "pool":
+            b["pool_btc"] += amt
+        else:
+            b["miner_btc"] += amt
+    public = []
+    for k in order:
+        b = by[k]
+        pub = dict(b)
+        pub["output_count"] = len(b["outputs"])
+        pub.pop("outputs", None)
+        public.append(pub)
+    return public
+
+
+def _public_prime_blocks(blocks):
+    """Keep splits only for blocks not yet in chain (pending/orphan). In-chain splits
+    already live on the collapsed payouts.outputs list."""
+    slim = []
+    for b in blocks or []:
+        d = dict(b)
+        if str(d.get("status") or "") == "in chain":
+            d["split"] = []
+        slim.append(d)
+    return slim
+
+
+# Public origin for canonical / sitemap / OG. Override in config.json if the UI is mirrored.
+_PUBLIC_SITE = str(CONF.get("public_url") or "https://pool.awokenlazarus.xyz").rstrip("/")
+_SEO_PAGES = {
+    "/": {
+        "en": {
+            "title": "Lazarus Pool — BLAKE2b Bitcoin (XBT / BTCB2) mining pool for Siacoin ASICs",
+            "description": (
+                "Mine Bitcoin (XBT / BTCB2) with any Siacoin BLAKE2b ASIC — Goldshell SC, iBeLink BM-S3, "
+                "Antminer A3. The first pool to pay TIDES as a split coinbase on this BIP-110 Bitcoin fork's "
+                "mainnet, and the first to subsidize DATUM miners with its own stratum hashers. 0% via DATUM, "
+                "10% public stratum (stratum+tcp://stratum.awokenlazarus.xyz:23334)."
+            ),
+            "scroll": "",
+        },
+        "zh": {
+            "title": "Lazarus Pool — 用 Siacoin BLAKE2b 矿机挖比特币（XBT / BTCB2）的矿池",
+            "description": (
+                "用任何能挖 Siacoin 的 BLAKE2b ASIC 挖比特币（XBT / BTCB2）——金贝 SC、iBeLink BM-S3、蚂蚁 A3。"
+                "本矿池是这条 BIP-110 比特币分叉主网上第一家用 TIDES 拆分 coinbase 支付的矿池，也是第一家"
+                "用自有 stratum 算力补贴 DATUM 矿工的矿池。自建 DATUM 0%，公共 stratum 10%"
+                "（stratum+tcp://stratum.awokenlazarus.xyz:23334）。"
+            ),
+            "scroll": "",
+        },
+    },
+    "/hardware": {
+        "en": {
+            "title": "Siacoin ASICs that mine Bitcoin XBT (BTCB2) — Lazarus Pool",
+            "description": (
+                "Any ASIC that can mine Siacoin can mine Bitcoin XBT on BLAKE2b. "
+                "Goldshell SC, iBeLink BM-S3, Antminer A3 — prices and estimated XBT per day on Lazarus Pool."
+            ),
+            "scroll": "hardware",
+        },
+        "zh": {
+            "title": "能挖 Siacoin 的 ASIC 都能挖比特币 XBT（BTCB2）— Lazarus Pool",
+            "description": "能挖 Siacoin 的 BLAKE2b 矿机都能在 Lazarus Pool 挖比特币 XBT。金贝 SC、iBeLink BM-S3、蚂蚁 A3，含价格与日收益估算。",
+            "scroll": "hardware",
+        },
+    },
+    "/connect": {
+        "en": {
+            "title": "Connect a miner to Lazarus Pool — XBT / BTCB2 stratum and DATUM",
+            "description": (
+                "Point a BLAKE2b ASIC at stratum+tcp://stratum.awokenlazarus.xyz:23334. "
+                "Username is your Bitcoin (XBT) payout address. Or run a DATUM gateway at 0% fee."
+            ),
+            "scroll": "connect",
+        },
+        "zh": {
+            "title": "接入 Lazarus Pool — XBT / BTCB2 的 stratum 与 DATUM",
+            "description": "把 BLAKE2b 矿机指向 stratum+tcp://stratum.awokenlazarus.xyz:23334。用户名是你的比特币（XBT）收款地址。或自建 DATUM 网关，手续费 0%。",
+            "scroll": "connect",
+        },
+    },
+    "/mine-xbt": {
+        "en": {
+            "title": "How to mine XBT (BTCB2) — Lazarus Pool",
+            "description": (
+                "Mine Bitcoin XBT / BTCB2 with a Siacoin ASIC. Algorithm BLAKE2b, not SHA-256. "
+                "Stratum: stratum+tcp://stratum.awokenlazarus.xyz:23334 — user = payout address, pass = x."
+            ),
+            "scroll": "connect",
+        },
+        "zh": {
+            "title": "如何挖 XBT（BTCB2）— Lazarus Pool",
+            "description": "用 Siacoin ASIC 挖比特币 XBT / BTCB2。算法是 BLAKE2b，不是 SHA-256。Stratum：stratum+tcp://stratum.awokenlazarus.xyz:23334，用户名=收款地址，密码 x。",
+            "scroll": "connect",
+        },
+    },
+    "/how": {
+        "en": {
+            "title": "How TIDES payouts work — Lazarus Pool (Bitcoin XBT / BTCB2)",
+            "description": (
+                "TIDES window share, the DATUM subsidy, and coinbase payouts on the BLAKE2b Bitcoin "
+                "(XBT / BTCB2) chain. No pool balance, no withdrawals — the block pays your address directly."
+            ),
+            "scroll": "how",
+        },
+        "zh": {
+            "title": "TIDES 如何支付 — Lazarus Pool（比特币 XBT / BTCB2）",
+            "description": "BLAKE2b 比特币（XBT / BTCB2）链上的 TIDES 窗口份额、DATUM 补贴与 coinbase 支付。没有矿池余额，不用提现。",
+            "scroll": "how",
+        },
+    },
+    "/bip110": {
+        "en": {
+            "title": "BIP-110 Bitcoin fork mining — BLAKE2b (XBT / BTCB2) | Lazarus Pool",
+            "description": (
+                "BIP-110 split Bitcoin at block 961,632 in August 2026; the resulting chain then moved its "
+                "proof-of-work to BLAKE2b at block 961,640. Mine this Bitcoin fork (XBT / BTCB2) with Siacoin "
+                "ASICs on Lazarus Pool — TIDES, DATUM, and payouts inside the coinbase."
+            ),
+            "scroll": "how",
+        },
+        "zh": {
+            "title": "BIP-110 比特币分叉挖矿 — BLAKE2b（XBT / BTCB2）| Lazarus Pool",
+            "description": (
+                "BIP-110 于 2026 年 8 月在 961,632 高度让比特币分链，这条链随后在 961,640 高度把工作量证明"
+                "从 SHA-256d 换成 BLAKE2b。在 Lazarus Pool 用 Siacoin 矿机挖这条比特币分叉（XBT / BTCB2）："
+                "TIDES、DATUM，并在 coinbase 内直接支付。"
+            ),
+            "scroll": "how",
+        },
+    },
+    "/datum-subsidy": {
+        "en": {
+            "title": "DATUM subsidy — the first pool to pay for decentralization | Lazarus Pool",
+            "description": (
+                "Lazarus Pool was the first pool anywhere to use its stratum hashers to subsidize DATUM miners. "
+                "Run your own DATUM gateway and Bitcoin Knots node: 0% fee plus a share of the public stratum's "
+                "fee on every block. Decentralization that pays instead of costing."
+            ),
+            "scroll": "connect",
+        },
+        "zh": {
+            "title": "DATUM 补贴 — 第一家为去中心化付钱的矿池 | Lazarus Pool",
+            "description": (
+                "Lazarus Pool 是第一家用自有 stratum 算力补贴 DATUM 矿工的矿池。自建 DATUM 网关和 "
+                "Bitcoin Knots 节点：手续费 0%，每个区块还把公共 stratum 手续费的一部分记给你。"
+                "去中心化不再是成本，而是收益。"
+            ),
+            "scroll": "connect",
+        },
+    },
+    "/profitability": {
+        "en": {
+            "title": "Is mining XBT profitable? BLAKE2b ASIC earnings | Lazarus Pool",
+            "description": (
+                "Profitable crypto mining for idle Siacoin hardware: live XBT / BTCB2 per TH/s per day at current "
+                "difficulty, per-machine estimates in XBT and dollars, and the DATUM subsidy on top."
+            ),
+            "scroll": "hardware",
+        },
+        "zh": {
+            "title": "挖 XBT 划算吗？BLAKE2b 矿机收益 | Lazarus Pool",
+            "description": (
+                "让闲置的 Siacoin 矿机重新赚钱：按当前难度的每 TH/s 每日 XBT / BTCB2 收益、逐台机器的 XBT 与美元"
+                "估算，另加 DATUM 补贴。"
+            ),
+            "scroll": "hardware",
+        },
+    },
+    "/tides": {
+        "en": {
+            "title": "TIDES split coinbase — first on BLAKE2b Bitcoin mainnet | Lazarus Pool",
+            "description": (
+                "Lazarus Pool is the first pool confirmed to pay TIDES as a split coinbase on BLAKE2b Bitcoin "
+                "(XBT / BTCB2) mainnet. Every address in a window worth eight times difficulty is an output of "
+                "the block found — non-custodial by construction, with no pool balance to trust."
+            ),
+            "scroll": "how",
+        },
+        "zh": {
+            "title": "TIDES 拆分 coinbase — BLAKE2b 比特币主网首家 | Lazarus Pool",
+            "description": (
+                "Lazarus Pool 是 BLAKE2b 比特币（XBT / BTCB2）主网上第一家用 TIDES 拆分 coinbase 支付的矿池。"
+                "相当于全网难度八倍的滚动窗口内，每个地址都是所出区块的一个输出——天然非托管，没有需要信任的矿池余额。"
+            ),
+            "scroll": "how",
+        },
+    },
+    "/pools": {
+        "en": {
+            "title": "BTCB2 / XBT mining pools compared — fees, custody, transaction fees",
+            "description": (
+                "Every BLAKE2b Bitcoin (XBT / BTCB2) pool worth pointing hashrate at, compared on what "
+                "actually differs: the fee, whether the pool holds a balance for you, whether the block's "
+                "transaction fees reach miners, and whether it limits its own share of the network."
+            ),
+            "scroll": "pools",
+        },
+        "zh": {
+            "title": "BTCB2 / XBT 矿池对比 — 手续费、是否托管、交易费归谁",
+            "description": (
+                "值得投入算力的 BLAKE2b 比特币（XBT / BTCB2）矿池对比，只比真正有差别的地方：手续费、矿池是否"
+                "替你保管余额、区块里的交易费是否分给矿工，以及它是否限制自己在全网中的占比。"
+            ),
+            "scroll": "pools",
+        },
+    },
+    "/self-cap": {
+        "en": {
+            "title": "The 25% line: a mining pool that turns hashrate away — Lazarus Pool",
+            "description": (
+                "No pool should hold a third of a chain. Past 25% of network hashrate Lazarus relays new "
+                "stratum miners to another BTCB2 / XBT pool and lets that pool pay them. Enforced in the "
+                "software on every connection, not promised in a blog post."
+            ),
+            "scroll": "pools",
+        },
+        "zh": {
+            "title": "25% 这条线：会把算力拒之门外的矿池 — Lazarus Pool",
+            "description": (
+                "没有哪个矿池该占一条链的三分之一。算力超过全网 25% 后，Lazarus 会把新接入的 stratum 矿工中继到"
+                "另一家 BTCB2 / XBT 矿池，由那家矿池付款。这是每一次连接都由软件强制执行的，不是博客里的承诺。"
+            ),
+            "scroll": "pools",
+        },
+    },
+    "/non-custodial": {
+        "en": {
+            "title": "Non-custodial XBT mining: no pool balance, no withdrawal — Lazarus Pool",
+            "description": (
+                "Lazarus Pool never holds your coins. Every payout is an output of the block itself, paid to "
+                "your address by the coinbase — no balance, no minimum, no withdrawal, nothing owed to anyone "
+                "if the pool disappeared tonight."
+            ),
+            "scroll": "how",
+        },
+        "zh": {
+            "title": "非托管挖矿：没有矿池余额，不用提现 — Lazarus Pool",
+            "description": (
+                "Lazarus Pool 从不持有你的币。每一笔支付都是区块本身的一个输出，由 coinbase 直接付到你的地址——"
+                "没有余额、没有起付线、不用提现；哪怕矿池今晚消失，也不欠任何人。"
+            ),
+            "scroll": "how",
+        },
+    },
+    "/calculator": {
+        "en": {
+            "title": "XBT / BTCB2 mining calculator — earnings per TH/s at live difficulty",
+            "description": (
+                "Type in your hashrate and get estimated XBT and dollars per day on the BLAKE2b Bitcoin chain, "
+                "from live difficulty, price and the DATUM subsidy. Per-machine estimates for every Siacoin "
+                "ASIC are listed below it."
+            ),
+            "scroll": "calc",
+        },
+        "zh": {
+            "title": "XBT / BTCB2 挖矿收益计算器 — 按实时难度算每 TH/s 收益",
+            "description": (
+                "输入你的算力，按实时难度、价格与 DATUM 补贴，算出在 BLAKE2b 比特币链上每天大约能拿多少 XBT 和"
+                "多少美元。下方还有每一款 Siacoin 矿机的逐台估算。"
+            ),
+            "scroll": "calc",
+        },
+    },
+    "/blocks": {
+        "en": {
+            "title": "Blocks found by Lazarus Pool — XBT / BTCB2 coinbase payouts you can open",
+            "description": (
+                "Every block Lazarus Pool has found on the BLAKE2b Bitcoin (XBT / BTCB2) chain, with the "
+                "coinbase outputs it paid. Open any of them in the explorer and check your own address "
+                "against the TIDES window."
+            ),
+            "scroll": "blocks",
+        },
+        "zh": {
+            "title": "Lazarus Pool 出的区块 — 可逐条核对的 XBT / BTCB2 coinbase 支付",
+            "description": (
+                "Lazarus Pool 在 BLAKE2b 比特币（XBT / BTCB2）链上找到的每一个区块，以及它支付的 coinbase 输出。"
+                "任意打开一个到浏览器里，就能拿自己的地址对着 TIDES 窗口核对。"
+            ),
+            "scroll": "blocks",
+        },
+    },
+    "/api": {
+        "en": {
+            "title": "Lazarus Pool API — public JSON for the BLAKE2b Bitcoin (XBT / BTCB2) pool",
+            "description": (
+                "Public, unauthenticated JSON endpoints for pool hashrate, the TIDES window, blocks found, "
+                "coinbase outputs, gateways, payouts, price and hardware estimates. No key, no rate limit "
+                "worth worrying about, CORS open."
+            ),
+            "scroll": "",
+        },
+        "zh": {
+            "title": "Lazarus Pool API — BLAKE2b 比特币（XBT / BTCB2）矿池的公开 JSON",
+            "description": (
+                "公开、免鉴权的 JSON 接口：矿池算力、TIDES 窗口、已出区块、coinbase 输出、网关、支付、价格与"
+                "硬件收益估算。不需要 key，也没有值得担心的频率限制，CORS 全开。"
+            ),
+            "scroll": "",
+        },
+    },
+}
+# Trailing-slash and legacy spellings of the same page, so every variant answers 200 and
+# canonicalises to one URL rather than splitting the same content across near-duplicates.
+# The pool comparison. Each figure is what that pool publishes on its own site, so the claim is
+# checkable and stays fair when they change it; our own most expensive number is in there too,
+# because a comparison that only flatters the host is worth nothing to the person reading it.
+_POOL_TABLE_EN = """<div class="seo-table"><table>
+        <caption>BLAKE2b Bitcoin (XBT / BTCB2) pools, as each publishes its own terms, September 2026</caption>
+        <thead><tr><th scope="col">Pool</th><th scope="col">Fee</th><th scope="col">Reward scheme</th><th scope="col">Who holds your coins</th><th scope="col">The block's transaction fees</th><th scope="col">Limit on its own share</th></tr></thead>
+        <tbody>
+        <tr><th scope="row">Lazarus Pool</th><td>0% own DATUM gateway · 10% public stratum, five of those points paid back to DATUM miners</td><td>TIDES, 8&times; difficulty</td><td>Nobody. The block's coinbase pays your address</td><td>Scale every miner's payout up</td><td>25%, enforced by relaying new miners elsewhere</td></tr>
+        <tr><th scope="row">B2Pool</th><td>0% own DATUM gateway · 1% stratum</td><td>TIDES, 8&times; difficulty</td><td>Coinbase where it fits, otherwise the pool until your balance passes 10,000 sat</td><td>Stay with the pool</td><td>None published</td></tr>
+        <tr><th scope="row">AlphaPool</th><td>2.5%</td><td>PPLNS</td><td>The pool, until a block reaches 100-confirmation maturity and a batch cycle pays out</td><td>Not published</td><td>30%, pledged after it passed 50% of the network</td></tr>
+        </tbody>
+      </table></div>"""
+
+_POOL_TABLE_ZH = """<div class="seo-table"><table>
+        <caption>BLAKE2b 比特币（XBT / BTCB2）矿池对比，均按各家自行公布的口径，2026 年 9 月</caption>
+        <thead><tr><th scope="col">矿池</th><th scope="col">手续费</th><th scope="col">奖励方式</th><th scope="col">谁替你拿着币</th><th scope="col">区块里的交易费</th><th scope="col">自身占比上限</th></tr></thead>
+        <tbody>
+        <tr><th scope="row">Lazarus Pool</th><td>自建 DATUM 网关 0% · 公共 stratum 10%，其中五个点返还给 DATUM 矿工</td><td>TIDES，难度 8 倍</td><td>没有人。由区块的 coinbase 直接付到你的地址</td><td>等比例抬高每位矿工的收益</td><td>25%，超过即把新矿工中继到别家</td></tr>
+        <tr><th scope="row">B2Pool</th><td>自建 DATUM 网关 0% · stratum 1%</td><td>TIDES，难度 8 倍</td><td>能进 coinbase 就进，否则由矿池代持至余额超过 10,000 sat</td><td>留给矿池</td><td>未公布</td></tr>
+        <tr><th scope="row">AlphaPool</th><td>2.5%</td><td>PPLNS</td><td>矿池代持，直到区块达到 100 确认成熟并由批量周期支付</td><td>未公布</td><td>30%，在占到全网一半以上之后承诺</td></tr>
+        </tbody>
+      </table></div>"""
+
+_API_TABLE_EN = """<div class="seo-table"><table>
+        <caption>Public endpoints. GET, JSON, no authentication.</caption>
+        <thead><tr><th scope="col">Endpoint</th><th scope="col">What it returns</th></tr></thead>
+        <tbody>
+        <tr><th scope="row"><code>/api/pool</code></th><td>Hashrate by path, network difficulty and share, the TIDES window, the fee split and the live XBT per TH/s per day</td></tr>
+        <tr><th scope="row"><code>/api/coinbaser</code></th><td>The coinbase output list Prime is handing out right now — the next block's payout, before it is found</td></tr>
+        <tr><th scope="row"><code>/api/blocks</code></th><td>Every block the pool has found, with height, time and reward</td></tr>
+        <tr><th scope="row"><code>/api/found/&lt;blockhash&gt;</code></th><td>The coinbase outputs a found block actually paid</td></tr>
+        <tr><th scope="row"><code>/api/miners</code></th><td>Addresses with accepted work in the window, their share of it and their hashrate</td></tr>
+        <tr><th scope="row"><code>/api/gateways</code></th><td>Connected DATUM gateways and what each is contributing</td></tr>
+        <tr><th scope="row"><code>/api/payouts</code></th><td>Coinbase payouts already made, per address</td></tr>
+        <tr><th scope="row"><code>/api/solo</code></th><td>Solo miners and blocks found solo</td></tr>
+        <tr><th scope="row"><code>/api/price</code></th><td>The XBT price the site converts with</td></tr>
+        <tr><th scope="row"><code>/api/hardware</code></th><td>The Siacoin ASIC list with prices and estimated XBT and dollars per day</td></tr>
+        </tbody>
+      </table></div>"""
+
+_API_TABLE_ZH = """<div class="seo-table"><table>
+        <caption>公开接口。GET、JSON、免鉴权。</caption>
+        <thead><tr><th scope="col">接口</th><th scope="col">返回内容</th></tr></thead>
+        <tbody>
+        <tr><th scope="row"><code>/api/pool</code></th><td>各路径算力、全网难度与占比、TIDES 窗口、手续费拆分，以及实时的每 TH/s 每日 XBT</td></tr>
+        <tr><th scope="row"><code>/api/coinbaser</code></th><td>Prime 此刻正在下发的 coinbase 输出列表——也就是下一个区块在出块之前就定好的支付</td></tr>
+        <tr><th scope="row"><code>/api/blocks</code></th><td>矿池找到的每一个区块，含高度、时间与奖励</td></tr>
+        <tr><th scope="row"><code>/api/found/&lt;区块哈希&gt;</code></th><td>某个已出区块实际支付的 coinbase 输出</td></tr>
+        <tr><th scope="row"><code>/api/miners</code></th><td>窗口内有有效工作量的地址、各自占比与算力</td></tr>
+        <tr><th scope="row"><code>/api/gateways</code></th><td>已连接的 DATUM 网关及各自的贡献</td></tr>
+        <tr><th scope="row"><code>/api/payouts</code></th><td>已完成的 coinbase 支付，按地址列出</td></tr>
+        <tr><th scope="row"><code>/api/solo</code></th><td>单挖矿工与单挖出的区块</td></tr>
+        <tr><th scope="row"><code>/api/price</code></th><td>本站折算所用的 XBT 价格</td></tr>
+        <tr><th scope="row"><code>/api/hardware</code></th><td>Siacoin 矿机列表，含价格与每日 XBT / 美元估算</td></tr>
+        </tbody>
+      </table></div>"""
+
+# Page-specific opening copy. Every pretty URL serves the same dashboard below, so without this
+# each one is a near-duplicate and Google collapses them into the homepage.
+_SEO_INTRO = {
+    # Chinese only. The English homepage keeps the hero as its <h1>; /zh/ needs Chinese copy in the
+    # markup itself rather than relying on the browser to translate it after load.
+    "/": {
+        "zh": ("用 Siacoin BLAKE2b 矿机挖比特币（XBT / BTCB2）", [
+            "任何能挖 Siacoin 的 ASIC 都能挖这条链——同为 BLAKE2b，原厂固件即可，不用换硬件。把矿机指向 <b>stratum+tcp://stratum.awokenlazarus.xyz:23334</b>，用户名填你的收款地址，密码填 <code>x</code>。没有账户，不用注册。",
+            "支付走 TIDES 拆分 coinbase：矿池找到区块时，窗口内每个地址都成为该区块的一个输出，直接付到你的地址。没有矿池余额、没有起付线、不用提现，矿池也从不持有你的币。自建 DATUM 网关 0% 手续费，并从公共 stratum 的手续费里分得补贴。",
+            "<a href=\"/zh/mine-xbt\">如何开始挖</a> · <a href=\"/zh/hardware\">哪些矿机能用</a> · <a href=\"/zh/calculator\">收益计算器</a> · <a href=\"/zh/pools\">各矿池对比</a> · <a href=\"/zh/self-cap\">为什么我们把自己限制在 25%</a>",
+        ]),
+    },
+    "/bip110": {
+        "en": ("BIP-110 and BLAKE2b: what actually forked", [
+            "BIP-110 is a Bitcoin proposal to restrict non-financial data in transactions for a year. It asked for 55% of hashrate to signal support and peaked near 2.6%, and nodes running it began rejecting blocks that did not signal at height 961,632 on 8 August 2026. That is the moment the chain split. This chain is the BIP-110 branch; the majority chain carried on under SHA-256d, unaffected.",
+            "The proof-of-work change is a separate, later decision on this branch. On 30 August 2026 it moved from SHA-256d to BLAKE2b with a Sia-style header: block 961,639 was the last SHA-256d block and 961,640 the first BLAKE2b one. Everything else is still Bitcoin — the 21 million cap, the halving schedule, script, addresses, and every block of history before the split.",
+            "So \u201cBIP-110\u201d is what people call this chain, but BLAKE2b is what decides your hardware. Any ASIC built for Siacoin mines here on stock firmware; no SHA-256 machine can produce a valid share at all. Because the pre-split history is shared with Bitcoin, generate a fresh address for this chain and keep SHA-256 keys well clear. Lazarus Pool mines it with <a href=\"/tides\">TIDES payouts in the coinbase</a> and pays a <a href=\"/datum-subsidy\">subsidy to DATUM miners</a>.",
+        ]),
+        "zh": ("BIP-110 与 BLAKE2b：到底分叉了什么", [
+            "BIP-110 是一项比特币提案，主张在一年内限制交易中的非金融数据。它需要 55% 的算力表态支持，最高只到约 2.6%；运行它的节点从 2026 年 8 月 8 日、961,632 高度起开始拒绝不表态的区块——那一刻链就分开了。本链是 BIP-110 这一支，多数链继续用 SHA-256d，未受影响。",
+            "改工作量证明是这一支后来的另一个决定。2026 年 8 月 30 日，它从 SHA-256d 换成了 BLAKE2b（Sia 风格区块头）：961,639 是最后一个 SHA-256d 区块，961,640 是第一个 BLAKE2b 区块。其余部分仍是比特币——2100 万上限、减半周期、脚本、地址，以及分叉前的全部历史。",
+            "所以「BIP-110」是大家对这条链的称呼，但真正决定你用什么硬件的是 BLAKE2b。任何为 Siacoin 而造的 ASIC 用原厂固件就能在这里挖矿；SHA-256 机器根本产不出有效份额。由于分叉前的历史与比特币共享，请为本链另生成新地址，SHA-256 的私钥务必远离。Lazarus Pool 用 <a href=\"/tides\">TIDES 在 coinbase 内支付</a>，并向 <a href=\"/datum-subsidy\">DATUM 矿工发放补贴</a>。",
+        ]),
+    },
+    "/tides": {
+        "en": ("TIDES: paid inside the block, not from a pool balance", [
+            "TIDES keeps a rolling window of accepted shares worth roughly eight times network difficulty — days of pool work, not the last hour. When the pool finds a block, every address in that window becomes an output of that block's coinbase, in proportion to its share of the window and less that miner's fee. A new rig starts near zero and ramps up as its work enters the window and older work ages out.",
+            "Lazarus Pool is the first pool confirmed to run a TIDES split coinbase on BLAKE2b Bitcoin mainnet — not on a testnet and not as a proposal, but in blocks you can open in the explorer and read the outputs of. The consequence matters more than the mechanism: there is no pool balance, no minimum, and no withdrawal, because the pool never holds your coins in the first place. If it vanished tonight, nobody would be owed anything.",
+        ]),
+        "zh": ("TIDES：在区块里直接支付，而不是从矿池余额里提现", [
+            "TIDES 维护一个滚动窗口，容量约为全网难度的八倍——那是好几天的矿池工作量，而不是最近一小时。矿池找到区块时，窗口内每个地址都会成为该区块 coinbase 的一个输出，按其窗口占比支付并扣除该矿工的手续费。新机器从接近零开始，随着新工作进入、旧工作老化而逐步爬升。",
+            "Lazarus Pool 是 BLAKE2b 比特币主网上第一家被确认运行 TIDES 拆分 coinbase 的矿池——不是测试网，也不是提案，而是你可以在浏览器里打开并逐条查看输出的真实区块。比机制更重要的是后果：没有矿池余额、没有起付线、不用提现，因为矿池从一开始就不持有你的币。哪怕它今晚消失，也不欠任何人。",
+        ]),
+    },
+    "/datum-subsidy": {
+        "en": ("The DATUM subsidy: getting paid to decentralize", [
+            "Running your own DATUM gateway against your own Bitcoin Knots node means you build the block template and choose the transactions in it. The pool only supplies the coinbase split and verifies your shares. That work costs you nothing in fees here — DATUM miners pay 0% — and it moves template construction out of the pool's hands, which is the part of mining centralization that actually matters.",
+            "Lazarus Pool is the first pool anywhere to fund a subsidy for that from its own stratum hashers. The public stratum charges 10%, and five of those points are not kept: on every block found they are credited pro rata to every DATUM miner holding work in the window, whether or not that miner's template produced the block. Decentralizing the network pays better than using the pool's own stratum, which is the incentive the right way round. <a href=\"/connect\">Gateway setup and the config to copy.</a>",
+        ]),
+        "zh": ("DATUM 补贴：为去中心化拿钱", [
+            "用自己的 Bitcoin Knots 节点跑自己的 DATUM 网关，意味着区块模板由你构建、交易由你挑选，矿池只提供 coinbase 拆分并校验你的份额。在这里这件事不收你一分手续费——DATUM 矿工 0%——而且它把模板构建权从矿池手里移走，那才是挖矿中心化真正要紧的一环。",
+            "Lazarus Pool 是全网第一家用自有 stratum 算力为此出资补贴的矿池。公共 stratum 收 10%，其中五个点并不留下：每找到一个区块，就按比例记给窗口内每一位 DATUM 矿工，无论那个区块是不是由他的模板产出。让网络去中心化比用矿池的 stratum 更赚钱——激励方向本该如此。<a href=\"/connect\">网关配置与可直接复制的 config。</a>",
+        ]),
+    },
+    "/profitability": {
+        "en": ("Is mining Bitcoin XBT profitable?", [
+            "Difficulty on this BLAKE2b chain is still low relative to a full block subsidy, which is the whole reason a Siacoin ASIC that stopped paying for itself on Sia can earn again here. The live figure for XBT per TH/s per day sits in the pool summary and moves with difficulty and price; the machine list below turns it into an estimate in XBT and in dollars for each specific box at today's numbers.",
+            "Read those estimates honestly. They assume the base subsidy with no transaction fees, they use the current difficulty rather than a forecast, they route through your own DATUM gateway with the subsidy included, and they do not subtract electricity — that number is yours and it decides whether any of this works for you. Transaction fees in a found block scale every payout up proportionally. <a href=\"/hardware\">See the machines and their estimates below.</a>",
+        ]),
+        "zh": ("挖比特币 XBT 划算吗？", [
+            "本 BLAKE2b 链的难度相对于完整区块奖励仍然偏低，这正是一台在 Sia 上已经赚不回电费的 Siacoin 矿机能在这里重新赚钱的原因。每 TH/s 每日 XBT 的实时数字就在矿池概览里，随难度与价格变化；下面的机器列表把它换算成每台机器在当前数字下的 XBT 与美元估算。",
+            "请如实看待这些估算：它们按基础奖励计算、不含交易费，用的是当前难度而非预测，走你自己的 DATUM 网关并已计入补贴，而且没有扣除电费——那个数字只有你知道，也正是它决定这件事对你是否成立。区块里的交易费会等比例抬高每一笔支付。<a href=\"/hardware\">机器与估算见下方。</a>",
+        ]),
+    },
+    "/hardware": {
+        "en": ("Siacoin BLAKE2b ASICs that mine Bitcoin XBT", [
+            "Any ASIC that can mine Siacoin can mine Bitcoin XBT, because both are BLAKE2b — no firmware change, no new hardware. Goldshell's SC series, iBeLink's BM-S3, BM-S3+ and BM-N3, and the Antminer A3 all connect and start hashing. SHA-256 machines cannot: an S19, S21 or Whatsminer will never produce a valid share on this chain.",
+            "The list below is BT-Miners' BTCB2 collection with their prices, turned into estimated XBT and dollars per day at current difficulty and price, through your own DATUM gateway with the subsidy included. Electricity is not in those numbers. Click any machine to open its page on BT-Miners. Lazarus Pool is not responsible for BT-Miners' customer support or quality of service.",
+        ]),
+        "zh": ("能挖比特币 XBT 的 Siacoin BLAKE2b 矿机", [
+            "任何能挖 Siacoin 的 ASIC 都能挖比特币 XBT，因为两者同为 BLAKE2b——不用换固件，也不用换硬件。金贝 SC 系列、iBeLink BM-S3 / BM-S3+ / BM-N3、蚂蚁 A3 都能直接连上开始工作。SHA-256 机器不行：S19、S21 或神马在本链永远产不出有效份额。",
+            "下面的列表来自 BT-Miners 的 BTCB2 系列，价格是他们的，并按当前难度与价格换算成每日 XBT 与美元估算，走你自己的 DATUM 网关并计入补贴。电费不在其中。点击任意机器可打开其 BT-Miners 页面。Lazarus Pool 不对 BT-Miners 的客户支持或服务质量负责。",
+        ]),
+    },
+    "/connect": {
+        "en": ("Connect a miner to Lazarus Pool", [
+            "Point the miner at <b>stratum+tcp://stratum.awokenlazarus.xyz:23334</b>, set the username to the address you want paid — optionally <code>address.worker</code> — and the password to <code>x</code>. The algorithm is BLAKE2b with a Sia-style header, not SHA-256d. New sessions start at difficulty 4096 and vardiff steps up toward your hashrate from there. There is no account and no registration; the username is the payout instruction.",
+            "There are two ways in. The public stratum charges 10% and our node builds the templates, which is the one-line setup. Running your own Bitcoin Knots node and DATUM gateway costs 0% and pays you a <a href=\"/datum-subsidy\">share of that stratum fee</a> on every block, because you are building the templates yourself. Both land in the same TIDES window under your address, so switching later keeps the accepted work you already have.",
+        ]),
+        "zh": ("把矿机接入 Lazarus Pool", [
+            "把矿机指向 <b>stratum+tcp://stratum.awokenlazarus.xyz:23334</b>，用户名填你要收款的地址（也可以写成 <code>地址.worker</code>），密码填 <code>x</code>。算法是 BLAKE2b（Sia 风格区块头），不是 SHA-256d。新会话从难度 4096 起步，之后 vardiff 会朝你的算力逐步调整。没有账户，也不用注册——用户名就是收款指令。",
+            "有两条路。公共 stratum 收 10%，模板由我们的节点构建，配置只有一行。自己跑 Bitcoin Knots 节点和 DATUM 网关则是 0%，而且因为模板是你自己构建的，每个区块还会把<a href=\"/datum-subsidy\">那笔 stratum 手续费的一部分</a>付给你。两条路都记入同一个 TIDES 窗口、同一个地址，所以以后切换不会丢掉已积累的工作量。",
+        ]),
+    },
+    "/mine-xbt": {
+        "en": ("How to mine Bitcoin XBT (BTCB2)", [
+            "You need three things: an ASIC that hashes BLAKE2b, an address on this chain to be paid to, and the pool endpoint. If you already own a Siacoin miner you have the first one — this is the same algorithm, so stock firmware works. Point it at <b>stratum+tcp://stratum.awokenlazarus.xyz:23334</b> with your address as the username and <code>x</code> as the password, and it will start hashing immediately.",
+            "One warning worth reading twice: this chain shares every block of history with SHA-256 Bitcoin up to block 961,640, so an address holding real BTC should never be used here. Generate a fresh address for this chain. Payouts arrive as outputs in the coinbase of blocks the pool finds, spendable after 100 confirmations, with no balance to withdraw. <a href=\"/hardware\">Which machines work</a> · <a href=\"/tides\">how the payout is calculated</a>.",
+        ]),
+        "zh": ("如何挖比特币 XBT（BTCB2）", [
+            "你需要三样东西：一台能算 BLAKE2b 的 ASIC、一个本链的收款地址，以及矿池地址。如果你已经有 Siacoin 矿机，第一样就有了——算法相同，原厂固件即可。把它指向 <b>stratum+tcp://stratum.awokenlazarus.xyz:23334</b>，用户名填你的地址，密码填 <code>x</code>，立刻就能开始工作。",
+            "有一条提醒值得看两遍：本链与 SHA-256 比特币共享 961,640 高度之前的全部历史，因此持有真实 BTC 的地址绝不可在此使用，请为本链另生成一个新地址。收益以矿池所出区块 coinbase 中的输出形式到账，100 个确认后可动用，没有余额需要提现。<a href=\"/hardware\">哪些机器能用</a> · <a href=\"/tides\">支付如何计算</a>。",
+        ]),
+    },
+    "/how": {
+        "en": ("How your hashrate becomes a payout", [
+            "Your miner hashes a plain BLAKE2b header and knows nothing about any of this. Every share it sends is rebuilt into a full header and hashed again by Prime, the pool server; accepted work is credited to the address in your username and enters the TIDES window. The window holds the last eight times network difficulty of accepted work, which is days of pool work rather than a recent average.",
+            "When a block is found, Prime has already handed every gateway the same coinbase output list — the one shown under Next payout — and a share whose coinbase pays anything else is refused. So whoever's machine finds the block, that block pays the whole window. There is no pool balance to withdraw and no operator holding your coins between blocks. <a href=\"/tides\">More on the TIDES window</a> · <a href=\"/connect\">connect a miner</a>.",
+        ]),
+        "zh": ("你的算力如何变成收益", [
+            "你的矿机只是在算一个普通的 BLAKE2b 区块头，对这一切一无所知。它发出的每个份额都会被矿池服务端 Prime 重建成完整区块头并重新哈希；被接受的工作量记到你用户名里的地址上，并进入 TIDES 窗口。窗口容纳最近相当于全网难度八倍的工作量，那是好几天的矿池工作量，而不是一个近期平均值。",
+            "找到区块时，Prime 早已把同一份 coinbase 输出列表发给了每个网关——就是「下一次支付」里显示的那份——凡是 coinbase 支付其他内容的份额都会被拒绝。所以无论谁的机器出块，那个区块都支付给整个窗口。没有矿池余额需要提现，区块之间也没有谁替你保管币。<a href=\"/tides\">了解 TIDES 窗口</a> · <a href=\"/connect\">接入矿机</a>。",
+        ]),
+    },
+    "/pools": {
+        "en": ("Which XBT (BTCB2) pool should you point hashrate at?", [
+            "The fee is the number everyone compares first and the least interesting of the four things that actually differ between pools on this chain. The others: whether the pool ever holds your coins, whether the transaction fees in a found block reach the miners or stay with the operator, and whether the pool does anything at all to limit its own share of the network.",
+            _POOL_TABLE_EN,
+            "Read that honestly and our public stratum is the expensive one. If you have no intention of running a node, 1% elsewhere beats 10% here and we would rather say so than pretend otherwise. What that 10% buys is the other column: five of those points are handed back to DATUM miners on every block found, which is why the path we actually recommend costs 0% and gets paid a bonus on top of a full window share.",
+            "The rest of the table is where nothing else on this chain matches. Transaction fees in a block scale every payout up here instead of staying with the pool. Nothing is ever held — the block itself pays your address, so there is no balance, threshold or withdrawal. And past 25% of network hashrate this pool <a href=\"/self-cap\">turns new miners away</a> and hands them to someone else. Figures are as each pool published them in September 2026; check their sites before you commit a fleet, and see the pools we relay to below.",
+        ]),
+        "zh": ("XBT（BTCB2）该挖哪个矿池？", [
+            "手续费是所有人第一个拿来比的数字，也是本链各矿池之间真正有差别的四件事里最不重要的一件。另外三件是：矿池会不会替你保管币、所出区块里的交易费是分给矿工还是留给运营者，以及这家矿池有没有采取任何措施限制自己在全网中的占比。",
+            _POOL_TABLE_ZH,
+            "如实来看，我们的公共 stratum 是贵的那一个。如果你完全不打算自己跑节点，别家 1% 就是比这里 10% 划算，我们宁愿直说，也不想装作不是。这 10% 换来的是隔壁那一列：其中五个点在每次出块时都会返还给 DATUM 矿工——这也正是我们真正推荐的那条路为什么是 0%，而且在拿到完整窗口份额之外还额外拿补贴。",
+            "表格剩下的部分，本链目前没有别家能对上。这里区块中的交易费会等比例抬高每一笔支付，而不是留在矿池。任何时候都不代持——由区块本身付到你的地址，因此没有余额、没有起付线、不用提现。而且一旦超过全网 25% 的算力，本矿池会<a href=\"/self-cap\">把新矿工拒之门外</a>并转交给别家。表中数字为各矿池 2026 年 9 月自行公布的口径；投入整批机器前请先到各家网站核对，也可以看下方我们中继过去的矿池。",
+        ]),
+    },
+    "/self-cap": {
+        "en": ("A pool that turns hashrate away at 25%", [
+            "On a chain this size one pool can pass a third of the network in an afternoon, and in September 2026 one did — past half of all BTCB2 hashrate, followed by a patch proposed in earnest to blacklist that pool's payout address at the consensus level, which the Knots maintainer publicly told people not to run. The hashrate came back down voluntarily. Nothing about the episode was fixed by it.",
+            "Lazarus holds itself to 25%. Over that line a <em>new</em> stratum connection is not accepted and mined on our behalf: it is relayed to one of four other pools and paid by that pool, under the same address, with nothing credited to our window. Miners already here keep mining here. Own-gateway DATUM miners are never relayed, because a miner building their own block templates is not the thing that centralizes a chain. New miners come back automatically once we are under the line.",
+            "This is in the connection path rather than in a pledge — the live network share and the count of connections being relayed right now are both on this page, and a relayed worker's own stats page names the pool that has it. It is the same reasoning as the <a href=\"/datum-subsidy\">DATUM subsidy</a>: the pool pays miners to take template construction away from it, and hands away hashrate it is not entitled to. <a href=\"/pools\">How the other pools compare.</a>",
+        ]),
+        "zh": ("超过 25% 就把算力拒之门外的矿池", [
+            "在这个规模的链上，一家矿池一个下午就能超过全网三分之一——2026 年 9 月真的发生了：某矿池占到 BTCB2 全网算力一半以上，随后有人正经提交补丁，要在共识层把该矿池的收款地址拉黑，Knots 维护者公开表示不要运行那段代码。最后算力是自愿降下来的，这件事本身什么也没解决。",
+            "Lazarus 给自己划的线是 25%。越过这条线后，<em>新</em>的 stratum 连接不会被我们接下来自己挖：它会被中继到另外四家矿池之一，由那家矿池按同一个地址付款，我们的窗口里不记入任何东西。已经在这里的矿机继续留在这里。自建网关的 DATUM 矿工永远不会被中继，因为自己构建区块模板的矿工并不是让一条链中心化的那个因素。等我们回到线下，新矿工会自动回来。",
+            "这件事写在连接路径里，而不是写在承诺里——实时的全网占比、以及此刻正被中继的连接数都在本页上，被中继的矿机在自己的统计页里也会看到接手它的矿池名字。这和<a href=\"/datum-subsidy\">DATUM 补贴</a>是同一个道理：矿池花钱请矿工把模板构建权从自己手里拿走，也把本不该属于自己的算力让出去。<a href=\"/pools\">其他矿池怎么比</a>。",
+        ]),
+    },
+    "/non-custodial": {
+        "en": ("No pool balance, no withdrawal, nothing to trust", [
+            "Almost every mining pool credits your work to a balance and pays that balance out later — when it passes a threshold, when a block matures, when a batch cycle runs. That gap between earning and holding is where mining money has always gone missing: exits, hacks, thresholds you never reach, a dust balance stranded when you unplug. Lazarus does not have the gap, because it never takes custody in the first place.",
+            "Your payout is an output of the block itself. Prime hands every gateway the same coinbase output list before any work goes out, and a share whose coinbase pays anything other than that list is refused — so whichever machine finds the block, that block's coinbase pays every address in the <a href=\"/tides\">TIDES window</a> directly. The pool never receives your coins, which means it cannot hold, batch, freeze or lose them.",
+            "In practice: no account, no registration, no KYC, no minimum payout, no withdrawal button, no pending balance, and nothing owed to anyone if this pool disappeared tonight. Coinbase outputs are spendable after 100 confirmations like any other. A pool that pays you \u201conce your balance passes a threshold\u201d or \u201cat maturity\u201d is holding your coins in between; that is a real difference in what you are trusting, and it is worth knowing which kind you are on. <a href=\"/pools\">Compare the pools on this chain.</a>",
+        ]),
+        "zh": ("没有矿池余额，不用提现，没有需要信任的对象", [
+            "几乎所有矿池都会把你的工作量记成一笔余额，之后再支付出去——攒够起付线时、区块成熟时、批量支付周期跑到时。赚到和拿到之间这段空隙，正是挖矿的钱历来消失的地方：跑路、被盗、永远攒不到的起付线、拔机后卡住的零星余额。Lazarus 没有这段空隙，因为它从一开始就不接管你的币。",
+            "你的收益是区块本身的一个输出。在任何工作下发之前，Prime 就把同一份 coinbase 输出列表交给了每个网关，凡是 coinbase 支付了这份列表以外内容的份额都会被拒绝——所以无论哪台机器出块，那个区块的 coinbase 都直接支付给 <a href=\"/tides\">TIDES 窗口</a>里的每一个地址。矿池从不收到你的币，也就无从代持、批量、冻结或弄丢。",
+            "具体就是：没有账户、不用注册、没有 KYC、没有起付线、没有提现按钮、没有待发余额；哪怕这家矿池今晚消失，也不欠任何人。coinbase 输出和其他输出一样，100 个确认后即可动用。一家说「余额攒够起付线才付」或「成熟后再付」的矿池，在这中间是替你拿着币的；你信任的东西因此不同，值得先弄清自己在哪一种上。<a href=\"/pools\">对比本链各矿池</a>。",
+        ]),
+    },
+    "/calculator": {
+        "en": ("XBT / BTCB2 mining calculator", [
+            "Type your hashrate into <a href=\"#calc\">the calculator further down this page</a> and it works out what that hashrate is worth per day on the BLAKE2b Bitcoin chain right now. The arithmetic is deliberately dull: the pool publishes a live XBT-per-TH/s-per-day figure from current network difficulty and the block subsidy, and your estimate is that figure multiplied by your hashrate, converted at the current price.",
+            "What is in the number and what is not, because this is where calculators lie. It uses the difficulty right now, not a forecast, and difficulty is what will actually change your earnings. It assumes the base subsidy with no transaction fees, so a block with fees in it pays more than this says. It assumes the DATUM path with the subsidy included, which is the 0% route. It does not subtract electricity — that figure is yours, and it is the one that decides whether any of this works. <a href=\"/hardware\">Per-machine estimates for every Siacoin ASIC</a> are listed below, and <a href=\"/profitability\">whether mining XBT pays at all</a> goes into it further.",
+        ]),
+        "zh": ("XBT / BTCB2 挖矿收益计算器", [
+            "把你机器的总算力填进<a href=\"#calc\">本页下方的计算器</a>，它会算出这份算力此刻在 BLAKE2b 比特币链上每天值多少。算法故意做得很直白：矿池会按当前全网难度和区块奖励公布一个实时的「每 TH/s 每日 XBT」数字，你的估算就是这个数字乘上你的算力，再按当前价格折算成美元。",
+            "这个数字包含什么、不包含什么——计算器就是在这里骗人的。它用的是此刻的难度，不是预测，而难度才是真正会改变你收益的东西。它按基础奖励计算、不含交易费，所以带交易费的区块会比这里显示的多。它按含补贴的 DATUM 路径计算，也就是 0% 那条路。它没有扣电费——那个数字只有你知道，也正是它决定这件事是否成立。下方有<a href=\"/hardware\">每一款 Siacoin 矿机的逐台估算</a>，<a href=\"/profitability\">挖 XBT 到底划不划算</a>另有更细的说明。",
+        ]),
+    },
+    "/blocks": {
+        "en": ("Blocks found by Lazarus Pool", [
+            "Every block this pool has found on the BLAKE2b Bitcoin (XBT / BTCB2) chain is listed below with its height, when it landed, and what it paid. Because payouts are a split coinbase rather than a pool balance, each of these blocks <em>is</em> a payout run: opening one shows the outputs it made and the addresses they went to.",
+            "That makes the whole payout history checkable by anyone without asking us for anything. Find a block from a period you were mining, open its coinbase, and your address should appear with the share of the <a href=\"/tides\">TIDES window</a> it held at the time, less its fee. Nothing is reconstructed from our database for that check — it is on chain. <a href=\"/non-custodial\">Why there is no balance to reconcile.</a>",
+        ]),
+        "zh": ("Lazarus Pool 找到的区块", [
+            "本矿池在 BLAKE2b 比特币（XBT / BTCB2）链上找到的每一个区块都列在下方，含高度、出块时间和支付金额。由于支付走的是拆分 coinbase 而不是矿池余额，这里每一个区块<em>本身</em>就是一次发工资：打开它就能看到它产生的输出以及收款地址。",
+            "这让整段支付历史任何人都能自行核对，不必向我们索取任何东西。找一个你当时在挖的区块，打开它的 coinbase，你的地址应当出现在其中，金额对应你当时在 <a href=\"/tides\">TIDES 窗口</a>里的占比并扣除手续费。这项核对完全不依赖我们的数据库重算——它就在链上。<a href=\"/non-custodial\">为什么这里没有余额需要对账</a>。",
+        ]),
+    },
+    "/api": {
+        "en": ("Lazarus Pool public API", [
+            "Everything the site draws itself with is a public JSON endpoint. No key, no account, no signature, CORS open, and the same numbers the pages show. Responses carry short cache headers; honour them and you can poll as often as you like.",
+            _API_TABLE_EN,
+            "Two of these take an address and are deliberately excluded from search indexing, since one page per address is infinite and identical: <code>/api/miner/&lt;address&gt;</code> and <code>/api/solo/&lt;address&gt;</code>. If you are building something on this and need a field that is not there, the pool server is one Python file and the endpoint you want is probably a few lines — say so and it can be added.",
+        ]),
+        "zh": ("Lazarus Pool 公开 API", [
+            "本站自己画图用的一切都是公开 JSON 接口。不需要 key、不需要账户、不需要签名，CORS 全开，数字与页面上显示的完全一致。响应带有较短的缓存头；遵守它，你想多频繁拉取都可以。",
+            _API_TABLE_ZH,
+            "其中两个要带地址，并且故意不做搜索收录，因为按地址生成的页面是无限多且结构相同的：<code>/api/miner/&lt;地址&gt;</code> 和 <code>/api/solo/&lt;地址&gt;</code>。如果你在这之上做东西、需要某个还没有的字段，矿池服务端就是一个 Python 文件，你要的接口大概只是几行——说一声就能加。",
+        ]),
+    },
+}
+
+_SEO_ALIASES = {"/index.html": "/"}
+for _p in _SEO_PAGES:
+    if _p != "/":
+        _SEO_ALIASES[_p + "/"] = _p
+_SEO_ALIASES["/bip-110"] = "/bip110"
+_SEO_ALIASES["/mine-btcb2"] = "/mine-xbt"
+
+# A plain-markdown protocol reference. Nobody else documents how a BLAKE2b share on this chain is
+# actually derived, so this is the page a developer or a model looking for it should land on, and
+# markdown is the form both read most reliably.
+_STRATUM_DOC_PATH = "/stratum-protocol.md"
+
+_STRATUM_DOC = """# Stratum on the BLAKE2b Bitcoin chain (XBT / BTCB2)
+
+Endpoint: `stratum+tcp://stratum.awokenlazarus.xyz:23334`
+Username: the address to be paid, optionally `address.worker`. Password: `x`.
+There is no account and no registration; the username is the payout instruction.
+
+This is stratum v1 over a newline-delimited JSON socket, but the work is a Sia-style
+80-byte header hashed with BLAKE2b-256 rather than a Bitcoin header hashed with
+SHA-256d. A stock Siacoin ASIC already does exactly this, which is why it needs no
+firmware change to mine here. An SHA-256 miner cannot produce a valid share at all.
+
+## Messages
+
+    -> {"id":1,"method":"mining.subscribe","params":["your-miner/0.1"]}
+    <- {"id":1,"result":[[notifications],"<extranonce1 hex>",<extranonce2 size>]}
+    -> {"id":2,"method":"mining.authorize","params":["<payout address>","x"]}
+    -> {"id":3,"method":"mining.suggest_difficulty","params":[<n>]}
+    <- {"method":"mining.set_difficulty","params":[<n>]}
+    <- {"method":"mining.notify","params":[job_id, prevhash, coinb1, ..., ntime, clean_jobs]}
+    -> {"id":n,"method":"mining.submit",
+        "params":["<payout address>", job_id, "<extranonce2 hex>", "<ntime hex>", "<nonce hex>"]}
+
+`ntime` is `params[7]` of the notify and is 8 bytes (16 hex chars), not Bitcoin's 4.
+A 4-byte value is accepted and zero-padded on the right. `clean_jobs` is `params[8]`.
+New sessions start at difficulty 4096 and vardiff moves toward your hashrate from there.
+
+## Building the work
+
+`coinb1` is exactly 39 bytes. `extranonce1 + extranonce2` is exactly 12 bytes.
+
+    sia_prev = tagged_sha256("Bitcoin prevblock header, hashed", reverse(prevhash))
+    sia_prev[0:6] = 00 00 00 00 00 00
+    root     = blake2b256(0x00 || coinb1[39] || extranonce[12])
+    header   = sia_prev[32] || nonce[8] || ntime[8] || root[32]      # 80 bytes
+    pow      = reverse(blake2b256(header))
+
+where `tagged_sha256(tag, data) = sha256(sha256(tag) || sha256(tag) || data)`.
+
+If the pool already sends a Sia prevhash in `mining.notify` — its first six bytes are
+zero — use it as it stands rather than hashing it again. DATUM gateways do this.
+
+## Share target
+
+The target is a floor-power-of-two ladder, as on Sia, not Bitcoin's compact encoding:
+take `bits = difficulty.bit_length() - 1`, start from `ff * 28 || 00 * 4`, and shift
+right by `bits`. Above `2**224` it falls back to the Bitcoin-style target. A share is
+valid when `pow <= target`.
+
+## What makes a share acceptable here
+
+Payouts are a split coinbase, so the pool hands every gateway the same coinbase output
+list before any work goes out, and a share whose coinbase pays anything other than that
+list is refused. The current list is public at `/api/coinbaser` — it is the next block's
+payout, published before the block exists. See SITEPLACEHOLDER/tides.
+
+## Running your own templates
+
+A Bitcoin Knots node plus a DATUM gateway pointed here means you build the block
+template and choose its transactions; the pool only supplies the coinbase split and
+verifies shares. That path pays no fee and is credited a share of the public stratum's
+fee on every block found. See SITEPLACEHOLDER/connect and SITEPLACEHOLDER/datum-subsidy.
+
+## Machine-readable pool data
+
+`/api/pool`, `/api/coinbaser`, `/api/blocks`, `/api/found/<blockhash>`, `/api/miners`,
+`/api/gateways`, `/api/payouts`, `/api/hardware` — public JSON, no key.
+Full reference: SITEPLACEHOLDER/api
+"""
+
+
+_LLMS_TXT = """# Lazarus Pool
+
+> A mining pool for Bitcoin (XBT / BTCB2), the BIP-110 Bitcoin fork that mines with BLAKE2b instead
+> of SHA-256d. Siacoin ASICs work unchanged. TIDES pays every miner inside the coinbase of each
+> block found, so the pool never holds anyone's coins.
+
+## Firsts
+
+- First pool confirmed to pay TIDES as a split coinbase on BLAKE2b Bitcoin (XBT / BTCB2) mainnet.
+  Not a testnet demo and not a proposal — the payouts are outputs of real blocks, checkable in the
+  explorer at https://mempool.awokenlazarus.xyz/mining/pool/lazarus
+- First pool anywhere to use its stratum hashers to subsidize DATUM miners: part of the public
+  stratum's fee is credited to miners running their own DATUM gateway, on every block.
+- Long-standing position on decentralization: Lazarus Pool pays miners for securing the network and
+  building their own block templates rather than charging them for the privilege.
+
+## Facts
+
+- Site: {site}/
+- How to mine: {site}/mine-xbt
+- Hardware (Siacoin ASICs, with earnings estimates): {site}/hardware
+- Earnings calculator: {site}/calculator
+- Is it profitable: {site}/profitability
+- The BIP-110 fork: {site}/bip110
+- TIDES payouts: {site}/tides
+- DATUM subsidy: {site}/datum-subsidy
+- Pools on this chain, compared: {site}/pools
+- The 25% self-cap: {site}/self-cap
+- Why there is no pool balance: {site}/non-custodial
+- Stratum protocol reference (markdown): {site}/stratum-protocol.md
+- Public API reference: {site}/api
+- Explorer: https://mempool.awokenlazarus.xyz
+- GitHub: https://github.com/AwokenLazarus/Bitcoin
+- Discord: https://discord.gg/fD33dJXnzz
+- Chinese: any URL under /zh/, e.g. {site}/zh/hardware
+
+## What XBT / BTCB2 is
+
+Two separate events, often run together. BIP-110 is a proposal to restrict non-financial data in
+transactions; it needed 55% of hashrate, peaked near 2.6%, and its nodes began rejecting blocks that
+did not signal at height 961,632 on 8 August 2026 — that is the split, and this chain is the BIP-110
+branch. Then on 30 August 2026 this branch changed proof-of-work from SHA-256d to BLAKE2b with a
+Sia-style header: block 961,639 was the last SHA-256d block, 961,640 the first BLAKE2b one.
+
+Everything else — 21 million cap, halving schedule, script, addresses, and all history before the
+split — is Bitcoin. The chain is called Bitcoin, the ticker is XBT, and exchanges list it as BTCB2.
+It is not Bitcoin Cash, not a token, and not an altcoin on a new codebase; it is the same code with a
+different hash function, which is why the ASICs that mine Siacoin mine it too. Pre-split history is
+shared with Bitcoin, so use a fresh address here.
+
+## Connect
+
+- Public stratum: stratum+tcp://stratum.awokenlazarus.xyz:23334
+- Username: your XBT payout address (bc1…)
+- Password: x
+- Algorithm: BLAKE2b (Sia-style header). Not SHA-256d.
+- DATUM Prime: stratum.awokenlazarus.xyz:28915 (0% fee; run your own gateway)
+
+## Fees
+
+- Own DATUM gateway: 0%, plus the DATUM subsidy taken from the public-stratum fee
+- Public stratum: 10% (5 points of that credited back to DATUM miners)
+- Solo: 5%
+
+## Hardware
+
+Any ASIC that can mine Siacoin can mine Bitcoin XBT / BTCB2 — same BLAKE2b algorithm, no firmware
+change. Examples: Goldshell SC-series (SC6-SE, SC-BOX), iBeLink BM-S3 / BM-S3+ / BM-N3, Antminer A3.
+SHA-256 miners (Antminer S19/S21, Whatsminer M30/M50) will not work. Idle Siacoin rigs are the
+cheapest route into profitable crypto mining on this chain because difficulty is still low relative
+to the block subsidy.
+
+## Payouts and decentralization
+
+TIDES pays out a share of a rolling window worth about eight times network difficulty, inside the
+coinbase of the block that is found — the split coinbase Lazarus Pool was first to run on this
+mainnet. There is no pool balance, no withdrawal, no minimum, and no custody. Miners running their
+own DATUM gateway build their own block templates against their own Bitcoin Knots node, so template
+construction is decentralized rather than delegated to the pool, and the DATUM subsidy — funded by
+the pool's own stratum hashers, another first — pays them extra for doing it. Coins trade as BTCB2
+on Neoxa and NonKYC.
+
+## The 25% self-cap
+
+Lazarus Pool holds itself to 25% of network hashrate. Over that line a new stratum connection is
+not mined on the pool's behalf: it is relayed to one of four other pools and paid by that pool,
+under the same address, with nothing credited to the Lazarus window. Miners already connected keep
+mining here, and own-gateway DATUM miners are never relayed because a miner building their own
+templates is not what centralizes a chain. This is enforced per connection in the software, and
+both the live network share and the number of connections currently relayed are published on the
+site. In September 2026 a different BTCB2 pool passed 50% of network hashrate and a patch was
+proposed to blacklist its payout address at the consensus level; no other pool on this chain
+publishes a self-imposed limit. See {site}/self-cap.
+
+## How the pools on this chain differ
+
+Fees are the least of it. What differs is custody, what happens to the transaction fees in a found
+block, and whether a pool limits its own share. As each pool published its own terms in September
+2026:
+
+- Lazarus Pool: 0% with your own DATUM gateway, 10% on the public stratum with five of those points
+  paid back to DATUM miners. TIDES, window of 8x difficulty. No custody at all — the block's
+  coinbase pays your address, so there is no balance, threshold or withdrawal. The block's
+  transaction fees scale every miner's payout up. Self-capped at 25%.
+- B2Pool: 0% with your own DATUM gateway, 1% on the stratum. TIDES, window of 8x difficulty. Paid
+  from the coinbase where it fits, otherwise by the pool once your balance passes 10,000 sat. The
+  block's transaction fees stay with the pool. No self-limit published.
+- AlphaPool: 2.5%, PPLNS. The pool holds a balance until a block reaches 100-confirmation maturity
+  and a batch cycle pays out. Treatment of transaction fees not published. Pledged a 30% cap after
+  passing 50% of the network.
+
+Honest summary: if you will never run a node, Lazarus's public stratum is the most expensive of the
+three, and the 1% elsewhere is cheaper. The path Lazarus recommends and is cheapest on is your own
+DATUM gateway at 0% plus the subsidy, and it is the only one of the three that never takes custody,
+shares the block's transaction fees with miners, or turns hashrate away. See {site}/pools.
+""".replace("{site}", "SITEPLACEHOLDER")
+
+
+def _seo_lang(query):
+    q = parse_qs(query or "")
+    n = (q.get("lang") or [""])[0].replace("_", "-")
+    if n == "zh" or n.lower().startswith("zh-"):
+        return "zh"
+    return "en"
+
+
+def split_lang_prefix(path):
+    """Peel a /zh path prefix off the URL: "/zh/hardware" -> ("zh", "/hardware")."""
+    if path in ("/zh", "/zh/"):
+        return "zh", "/"
+    if path.startswith("/zh/"):
+        return "zh", path[len("/zh") :]
+    return "", path
+
+
+def _seo_url(path, lang):
+    """The one canonical URL for a page in a language: English at /x, Chinese at /zh/x."""
+    prefix = "/zh" if lang == "zh" else ""
+    return _PUBLIC_SITE + prefix + ("/" if path == "/" else path)
+
+
+def _seo_page(path, query):
+    prefix_lang, path = split_lang_prefix(path)
+    path = _SEO_ALIASES.get(path, path)
+    pack = _SEO_PAGES.get(path) or _SEO_PAGES["/"]
+    # A /zh URL is an explicit choice and outranks ?lang=, which stays supported for old links.
+    lang = prefix_lang or _seo_lang(query)
+    meta = dict(pack.get(lang) or pack["en"])
+    meta["alt_en"] = _seo_url(path, "en")
+    meta["alt_zh"] = _seo_url(path, "zh")
+    # Chinese served under ?lang= points its canonical at the /zh path so the two do not compete.
+    meta["canonical"] = meta["alt_zh"] if lang == "zh" else meta["alt_en"]
+    meta["lang"] = "zh-CN" if lang == "zh" else "en"
+    meta["path"] = path
+    # A page with its own opening copy should not jump straight past it; those pages link into the
+    # relevant section themselves instead.
+    if path in _SEO_INTRO:
+        meta["scroll"] = ""
+    return meta
+
+
+def _xml_attr(s):
+    return html.escape(str(s or ""), quote=True)
+
+
+def render_pool_index(path, query=""):
+    """Homepage HTML with path/lang-specific title, description, canonical, and scroll target."""
+    raw = (STATIC / "index.html").read_text(encoding="utf-8")
+    meta = _seo_page(path, query)
+    title = meta["title"]
+    desc = meta["description"]
+    canon = meta["canonical"]
+    # Only the homepage keeps the data-i18n hooks; on the keyword pages the client-side dictionary
+    # would otherwise overwrite the page-specific title with the generic one.
+    home = meta["path"] == "/"
+    hook_t = ' data-i18n="meta.title"' if home else ""
+    hook_d = ' data-i18n="meta.description"' if home else ""
+    raw = re.sub(r"<title[^>]*>.*?</title>", f"<title{hook_t}>{html.escape(title)}</title>", raw, count=1, flags=re.S)
+    raw = re.sub(
+        r'<meta name="description"[^>]*>',
+        f'<meta name="description"{hook_d} content="{_xml_attr(desc)}">',
+        raw,
+        count=1,
+    )
+    alts = (
+        f'<link rel="canonical" href="{_xml_attr(canon)}">\n'
+        f'<link rel="alternate" hreflang="en" href="{_xml_attr(meta["alt_en"])}">\n'
+        f'<link rel="alternate" hreflang="zh-CN" href="{_xml_attr(meta["alt_zh"])}">\n'
+        f'<link rel="alternate" hreflang="x-default" href="{_xml_attr(meta["alt_en"])}">'
+    )
+    raw = re.sub(r'<link rel="alternate" hreflang="[^"]*"[^>]*>\n?', "", raw)
+    raw = re.sub(r'<link rel="canonical"[^>]*>', alts, raw, count=1)
+    raw = re.sub(r'<meta property="og:title"[^>]*>', f'<meta property="og:title" content="{_xml_attr(title)}">', raw, count=1)
+    raw = re.sub(r'<meta property="og:description"[^>]*>', f'<meta property="og:description" content="{_xml_attr(desc)}">', raw, count=1)
+    raw = re.sub(r'<meta property="og:url"[^>]*>', f'<meta property="og:url" content="{_xml_attr(canon)}">', raw, count=1)
+    raw = re.sub(r'<meta name="twitter:title"[^>]*>', f'<meta name="twitter:title" content="{_xml_attr(title)}">', raw, count=1)
+    raw = re.sub(r'<meta name="twitter:description"[^>]*>', f'<meta name="twitter:description" content="{_xml_attr(desc)}">', raw, count=1)
+    raw = raw.replace('<html lang="en" data-scroll="">', f'<html lang="{meta["lang"]}" data-scroll="{_xml_attr(meta.get("scroll") or "")}">', 1)
+    return _inject_intro(raw, meta)
+
+
+def _inject_intro(raw, meta):
+    """Put this URL's own heading and prose at the top of the page.
+
+    Without it every pretty URL is the same dashboard with a different <title>, which search
+    engines treat as duplicates of the homepage and drop. The page-specific copy takes over the
+    <h1>, so the hero heading is demoted to <h2> to keep one <h1> per page.
+    """
+    pack = _SEO_INTRO.get(meta["path"])
+    if not pack:
+        return raw
+    lang = "zh" if meta["lang"] == "zh-CN" else "en"
+    # The homepage has copy for Chinese only: /zh/ would otherwise ship an English <h1> and English
+    # prose to any crawler that does not run the client-side dictionary.
+    entry = pack.get(lang)
+    if not entry:
+        return raw
+    title, paras = entry
+    # A block already written as markup (a table, a list) is emitted as it stands; anything else is
+    # prose and gets wrapped in a paragraph.
+    body = "\n".join(f"      {t}" if t.startswith("<") else f"      <p>{t}</p>" for t in paras)
+    block = (
+        '\n  <section class="seo-intro" aria-labelledby="seo-intro-title">\n'
+        '    <div class="wrap">\n'
+        f'      <h1 id="seo-intro-title">{html.escape(title)}</h1>\n'
+        f"{body}\n"
+        "    </div>\n"
+        "  </section>\n"
+    )
+    raw = re.sub(r"<h1 id=\"hero-title\"(.*?)</h1>", r'<h2 id="hero-title"\1</h2>', raw, count=1, flags=re.S)
+    return raw.replace("<main>", "<main>" + block, 1)
+
+
+# Ownership proofs for the search consoles. Served verbatim from the site root because that is the
+# only place the verifiers look. These are public tokens, not secrets.
+_SITE_VERIFY = {
+    "/googleda1d0aa98080ef94.html": (
+        "google-site-verification: googleda1d0aa98080ef94.html",
+        "text/html; charset=utf-8",
+    ),
+    # Bing fetches this path exactly as spelled, so it is matched case-sensitively first and the
+    # lowercase spelling is aliased below for anything that normalises the URL.
+    "/BingSiteAuth.xml": (
+        '<?xml version="1.0"?>\n<users>\n\t<user>24AA86BB5477F9AB2254252ADF5A1770</user>\n</users>',
+        "text/xml; charset=utf-8",
+    ),
+}
+_SITE_VERIFY["/bingsiteauth.xml"] = _SITE_VERIFY["/BingSiteAuth.xml"]
+
+
+# IndexNow lets us tell Bing, Yandex and friends to recrawl within hours instead of waiting for
+# them to come round. The key is public by design: they fetch it back from the path below to prove
+# whoever submitted the URLs controls the host.
+_INDEXNOW_KEY = "c812dd6a130b16b2f5e881a8f8865809"
+_INDEXNOW_PATH = f"/{_INDEXNOW_KEY}.txt"
+
+
+# Crawl order, refresh rate and priority per page. Highest-intent pages first: a searcher asking
+# how to mine, what it earns, or which pool to use is worth more than one browsing the API docs.
+_SITEMAP_ORDER = (
+    ("/", "hourly", "1.0"),
+    ("/mine-xbt", "weekly", "0.9"),
+    ("/hardware", "daily", "0.9"),
+    ("/profitability", "daily", "0.9"),
+    ("/calculator", "daily", "0.9"),
+    ("/pools", "weekly", "0.9"),
+    ("/connect", "weekly", "0.8"),
+    ("/datum-subsidy", "weekly", "0.8"),
+    ("/self-cap", "weekly", "0.8"),
+    ("/non-custodial", "weekly", "0.8"),
+    ("/tides", "weekly", "0.8"),
+    ("/bip110", "weekly", "0.8"),
+    ("/blocks", "hourly", "0.7"),
+    ("/how", "weekly", "0.7"),
+    ("/api", "monthly", "0.6"),
+)
+
+
+def indexnow_urls():
+    """Every URL worth submitting, English and Chinese."""
+    out = []
+    for p, _freq, _prio in _SITEMAP_ORDER:
+        out.append(_seo_url(p, "en"))
+        out.append(_seo_url(p, "zh"))
+    return out
+
+
+def robots_txt():
+    return (
+        "User-agent: *\n"
+        "Allow: /\n"
+        "\n"
+        "# The API reference is a page a developer should be able to find; the JSON endpoints under\n"
+        "# it have nothing to read and would only burn crawl budget. Longest match wins, so /api\n"
+        "# stays allowed while everything below it is blocked.\n"
+        "Allow: /api\n"
+        "Disallow: /api/\n"
+        "\n"
+        "# One page per miner address, instantiable without limit and identical in structure for\n"
+        "# every address. Nothing to index; still linked and reachable for the miner who wants it.\n"
+        "Disallow: /miner\n"
+        "Disallow: /zh/miner\n"
+        "\n"
+        f"Sitemap: {_PUBLIC_SITE}/sitemap.xml\n"
+    )
+
+
+def _lastmod(freq):
+    """When this URL last changed, as a date.
+
+    Pages built from live pool data genuinely change every day, so they carry today. The rest
+    change when the site is deployed, which is the mtime of the file their copy lives in.
+    """
+    if freq in ("hourly", "daily"):
+        return time.strftime("%Y-%m-%d", time.gmtime())
+    try:
+        newest = max(Path(__file__).stat().st_mtime, (STATIC / "index.html").stat().st_mtime)
+    except OSError:
+        newest = time.time()
+    return time.strftime("%Y-%m-%d", time.gmtime(newest))
+
+
+def sitemap_xml():
+    """Every crawlable page in both languages, each declaring the other as its alternate."""
+    urls = []
+    for p, freq, prio in _SITEMAP_ORDER:
+        en, zh = _seo_url(p, "en"), _seo_url(p, "zh")
+        alts = (
+            f'<xhtml:link rel="alternate" hreflang="en" href="{_xml_attr(en)}"/>'
+            f'<xhtml:link rel="alternate" hreflang="zh-CN" href="{_xml_attr(zh)}"/>'
+            f'<xhtml:link rel="alternate" hreflang="x-default" href="{_xml_attr(en)}"/>'
+        )
+        for loc in (en, zh):
+            urls.append(
+                f"  <url><loc>{_xml_attr(loc)}</loc><lastmod>{_lastmod(freq)}</lastmod>"
+                f"{alts}<changefreq>{freq}</changefreq><priority>{prio}</priority></url>"
+            )
+    # The protocol reference is one English document with no Chinese twin, so it declares no
+    # alternates rather than pointing hreflang at a page that does not exist.
+    urls.append(
+        f"  <url><loc>{_xml_attr(_PUBLIC_SITE + _STRATUM_DOC_PATH)}</loc>"
+        f"<lastmod>{_lastmod('weekly')}</lastmod><changefreq>monthly</changefreq><priority>0.7</priority></url>"
+    )
+    return (
+        '<?xml version="1.0" encoding="UTF-8"?>\n'
+        '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9" xmlns:xhtml="http://www.w3.org/1999/xhtml">\n'
+        + "\n".join(urls)
+        + "\n</urlset>\n"
+    )
+
+
+def llms_txt():
+    return _LLMS_TXT.replace("SITEPLACEHOLDER", _PUBLIC_SITE)
+
+
+def stratum_doc():
+    return _STRATUM_DOC.replace("SITEPLACEHOLDER", _PUBLIC_SITE)
+
+
 # Paths cheap enough to answer while the slot table is full.
 _CHEAP_PATHS = frozenset(
     (
         "/",
         "/index.html",
+        "/hardware",
+        "/connect",
+        "/mine-xbt",
+        "/how",
+        "/bip110",
+        "/datum-subsidy",
+        "/profitability",
+        "/tides",
+        "/pools",
+        "/self-cap",
+        "/non-custodial",
+        "/calculator",
+        "/blocks",
+        "/api",
+        "/robots.txt",
+        "/sitemap.xml",
+        "/llms.txt",
+        "/.well-known/llms.txt",
+        _STRATUM_DOC_PATH,
+        _INDEXNOW_PATH,
+        *_SITE_VERIFY,
         "/api/pool",
         "/api/miners",
         "/api/coinbaser",
         "/api/solo",
         "/api/price",
         "/api/v1/prices",
+        "/api/payouts",
+        "/api/hardware",
     )
 )
 
@@ -3299,7 +4738,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_error(501, f"Unsupported method ({self.command!r})")
                 return
             path = unquote(urlparse(self.path).path)
-            if path in _CHEAP_PATHS or path.startswith("/static/"):
+            if split_lang_prefix(path)[1] in _CHEAP_PATHS or path.startswith("/static/"):
                 method()
             elif _inflight.acquire(blocking=False):
                 try:
@@ -3349,7 +4788,27 @@ class Handler(BaseHTTPRequestHandler):
         else:
             self.send_header("Cache-Control", "no-store")
         self.end_headers()
-        self.wfile.write(body)
+        self._write_body(body)
+
+    def send_text(self, text, ctype, cache_s=0):
+        body = text.encode("utf-8")
+        enc = (self.headers.get("Accept-Encoding") or "").lower()
+        use_gzip = "gzip" in enc and len(body) >= 400
+        if use_gzip:
+            body = gzip.compress(body, compresslevel=1)
+        self.send_response(200)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(body)))
+        if use_gzip:
+            self.send_header("Content-Encoding", "gzip")
+            self.send_header("Vary", "Accept-Encoding")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        if cache_s > 0:
+            self.send_header("Cache-Control", f"public, max-age=0, s-maxage={int(cache_s)}")
+        else:
+            self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self._write_body(body)
 
     def send_file(self, path, ctype):
         data = Path(path).read_bytes()
@@ -3362,7 +4821,22 @@ class Handler(BaseHTTPRequestHandler):
         else:
             self.send_header("Cache-Control", "no-store")
         self.end_headers()
-        self.wfile.write(data)
+        self._write_body(data)
+
+    def _write_body(self, body):
+        """HEAD gets the headers and nothing else, so every send_* helper goes through here."""
+        if getattr(self, "_head_only", False):
+            return
+        self.wfile.write(body)
+
+    def do_HEAD(self):
+        # Crawlers, link checkers and sitemap fetchers often HEAD before GET. Without this the
+        # stdlib answers 501, which reads as "couldn't fetch" in Search Console.
+        self._head_only = True
+        try:
+            self.do_GET()
+        finally:
+            self._head_only = False
 
     def do_GET(self):
         u = urlparse(self.path)
@@ -3405,10 +4879,45 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/payouts":
             self.send_json(cached("payouts", 30.0, self._payouts_payload), cache_s=30)
             return
-        if path in ("/", "/index.html"):
-            self.send_file(STATIC / "index.html", "text/html; charset=utf-8")
+        if path == "/api/hardware":
+            self.send_json(cached("hardware", 15.0, hardware_payload), cache_s=15)
             return
-        if path.startswith("/miner/") or path in ("/miner", "/miner.html"):
+        if path.startswith("/api/found/"):
+            hx = path.split("/api/found/", 1)[1].strip("/")
+            if not _BLOCKHASH_RE.match(hx):
+                self.send_json({"error": "not found"}, 404)
+                return
+            doc = cached(("found", hx), 30.0, lambda: found_outputs_payload(hx))
+            if not doc:
+                self.send_json({"error": "not found"}, 404)
+                return
+            self.send_json(doc, cache_s=30)
+            return
+        if path == "/robots.txt":
+            self.send_text(robots_txt(), "text/plain; charset=utf-8", cache_s=3600)
+            return
+        if path == "/sitemap.xml":
+            self.send_text(sitemap_xml(), "application/xml; charset=utf-8", cache_s=3600)
+            return
+        if path in _SITE_VERIFY:
+            proof, ctype = _SITE_VERIFY[path]
+            self.send_text(proof, ctype, cache_s=86400)
+            return
+        if path == _INDEXNOW_PATH:
+            self.send_text(_INDEXNOW_KEY, "text/plain; charset=utf-8", cache_s=86400)
+            return
+        if path in ("/llms.txt", "/.well-known/llms.txt"):
+            self.send_text(llms_txt(), "text/plain; charset=utf-8", cache_s=3600)
+            return
+        if path == _STRATUM_DOC_PATH:
+            self.send_text(stratum_doc(), "text/markdown; charset=utf-8", cache_s=3600)
+            return
+        bare = split_lang_prefix(path)[1]
+        if _SEO_ALIASES.get(bare, bare) in _SEO_PAGES:
+            # One page, many crawlable URLs: each gets its own title, description and canonical.
+            self.send_text(render_pool_index(path, u.query), "text/html; charset=utf-8", cache_s=300)
+            return
+        if bare.startswith("/miner/") or bare in ("/miner", "/miner.html"):
             # Dedicated miner page; the address is read from the URL client-side.
             self.send_file(STATIC / "miner.html", "text/html; charset=utf-8")
             return
@@ -3576,7 +5085,7 @@ class Handler(BaseHTTPRequestHandler):
                 else:
                     row["to"] = "miner"
                     tagged.append(row)
-            payouts = tagged
+            payouts = _collapse_found_payouts(tagged)
             prime_by = state.get("prime") or {}
             current = sorted(
                 (
@@ -3596,7 +5105,7 @@ class Handler(BaseHTTPRequestHandler):
                 "tip": int(tip or 0),
                 "current_round": current,
                 "payouts": payouts,
-                "prime_blocks": list(prime_blocks.values()),
+                "prime_blocks": _public_prime_blocks(prime_blocks.values()),
             }
 
 

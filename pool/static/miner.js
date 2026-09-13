@@ -2,7 +2,9 @@
 // (shared.js: minerCard); this file fetches, fills the summary strip and drives the tabs.
 (() => {
   const $ = (id) => document.getElementById(id);
-  const { esc, fmtHr, num, pctSmart, clock, amt, amtExact, draw, chartLegend, payStatus, minerCard, showMinerTab, MINER_TABS, EXPLORER } = window.LZ;
+  const { esc, fmtHr, num, pctSmart, clock, amt, amtExact, draw, chartLegend, payStatus, minerCard, showMinerTab, MINER_TABS, EXPLORER, t: _t } = window.LZ;
+  const t = (k, vars) => (window.LZ_I18N ? LZ_I18N.t(k, vars) : (_t ? _t(k, vars) : k));
+  const loc = () => (window.LZ_I18N && LZ_I18N.locale()) || undefined;
 
   // Address from the path: /miner/<addr>. Fall back to ?addr= and #<addr> for old links.
   const m = location.pathname.match(/^\/miner\/([^/]+)/);
@@ -38,22 +40,22 @@
     const text = (btn.getAttribute("data-copy") || "").trim();
     if (!(await copyValue(text))) return;
     btn.setAttribute("data-copied", "");
-    btn.setAttribute("aria-label", "Copied");
+    btn.setAttribute("aria-label", t("copied"));
     clearTimeout(btn._copyT);
     btn._copyT = setTimeout(() => {
       btn.removeAttribute("data-copied");
-      btn.setAttribute("aria-label", "Copy");
+      btn.setAttribute("aria-label", t("copy"));
     }, 1400);
   });
 
-  const fees = { datum: 0, stratum: 3.0 };
+  const fees = { datum: 0, stratum: 10 };
   let priceUsd = null;
   let blockInterval = 0;
   const money = (btcAmt) => {
     if (priceUsd == null) return "";
     const u = Number(btcAmt) * Number(priceUsd);
     if (!Number.isFinite(u) || !Number.isFinite(Number(priceUsd))) return "";
-    return " · $" + u.toLocaleString(undefined, { maximumFractionDigits: u >= 100 ? 0 : 2 });
+    return " · $" + u.toLocaleString(loc(), { maximumFractionDigits: u >= 100 ? 0 : 2 });
   };
   const j = async (url) => {
     const r = await fetch(url);
@@ -88,19 +90,19 @@
   function summary(d) {
     const online = !!d.online;
     const relayed = (d.relayed || []).length;
-    $("miner-status-word").textContent = !d.known && !d.solo ? "unknown address" : online ? "online" : relayed ? "relayed to another pool" : "offline";
+    $("miner-status-word").textContent = !d.known && !d.solo ? t("miner.unknown") : online ? t("miner.online") : relayed ? t("miner.relayed") : t("miner.offline");
     const hp = Number(d.hashrate_pool_percent) || 0;
     const wp = (Number(d.round_share) || 0) * 100;
     const nPending = Number(d.immature_blocks) || (d.blocks_found || []).filter((b) => payStatus(b) === "immature").length;
     chip("mc-hr", fmtHr(d.hr_ghs || 0));
     chip("mc-avg", Number(d.hr_1h_ghs) > 0 ? fmtHr(d.hr_1h_ghs) : "\u2014");
-    $("mc-avg").title = "Average of the per-minute samples over the last hour" + (Number(d.hr_24h_ghs) > 0 ? " · 24h average " + fmtHr(d.hr_24h_ghs) : "");
+    $("mc-avg").title = t("miner.avgTitle") + (Number(d.hr_24h_ghs) > 0 ? t("miner.avgTitle24", { hr: fmtHr(d.hr_24h_ghs) }) : "");
     chip("mc-share", pctSmart(hp));
     chip("mc-window", pctSmart(wp));
-    chip("mc-pending", amt(d.immature_btc), nPending ? "Pending · " + nPending + " block" + (nPending === 1 ? "" : "s") : "Pending");
+    chip("mc-pending", amt(d.immature_btc), nPending ? t(nPending === 1 ? "miner.pendingN" : "miner.pendingNs", { n: nPending }) : t("miner.pending"));
     chip("mc-paid", amt(d.paid_btc));
-    $("mc-pending").title = amtExact(d.immature_btc) + (nPending ? " in " + nPending + " block" + (nPending === 1 ? "" : "s") + " under " + num(d.maturity_confs || 100) + " confirmations" : "");
-    $("mc-paid").title = amtExact(d.paid_btc) + " matured, lifetime";
+    $("mc-pending").title = t("miner.pendingExact", { amt: amtExact(d.immature_btc), n: nPending, s: nPending === 1 ? "" : "s", need: num(d.maturity_confs || 100) });
+    $("mc-paid").title = t("miner.paidExact", { amt: amtExact(d.paid_btc) });
     $("nav-live").hidden = false;
   }
 
@@ -134,39 +136,51 @@
           .filter((b) => Number(b.ts) > 0)
           .map((b) => ({
             ts: Number(b.ts),
-            title: (b.height ? "Block " + num(b.height) : "Block") + " · " + clock(b.ts),
-            sub: amt(b.miner_btc) + " to this address" + (payStatus(b) === "immature" ? " · immature" : ""),
+            title: (b.height ? t("chart.blockN", { h: num(b.height) }) : t("chart.block")) + " · " + clock(b.ts),
+            sub: t("chart.toAddr", { amt: amt(b.miner_btc) }) + (payStatus(b) === "immature" ? t("chart.immature") : ""),
           }))
       );
-      chartLegend($("chart-legend"), $("chart"), "block paid", "blocks paid");
+      chartLegend($("chart-legend"), $("chart"), t("chart.blockPaid", { n: 1 }), t("chart.blockPaid", { n: 2 }));
     } finally {
       busy = false;
     }
   }
 
   if (!addr) {
-    $("miner-title").textContent = "No address";
-    $("miner-status-word").textContent = "nothing to show";
-    $("miner").innerHTML = '<p class="note callout">Open this page as <span class="mono">/miner/&lt;your address&gt;</span>, or <a href="/#dashboard">look one up</a> on the pool page.</p>';
-    $("chart-wrap").hidden = true;
+    const empty = () => {
+      $("miner-title").textContent = t("miner.noAddr");
+      $("miner-status-word").textContent = t("miner.nothing");
+      $("miner").innerHTML = `<p class="note callout">${t("miner.openAs")}</p>`;
+      $("chart-wrap").hidden = true;
+    };
+    empty();
+    document.addEventListener("lz:i18n", () => {
+      if (window.LZ_I18N) LZ_I18N.apply();
+      empty();
+    });
     return;
   }
-  document.title = addr.slice(0, 10) + "\u2026" + addr.slice(-6) + " — Lazarus Pool";
-  $("miner-title").innerHTML = `<span class="copyable"><span class="mono">${esc(addr)}</span><button type="button" class="copy-btn" data-copy="${esc(addr)}" aria-label="Copy address" title="Copy"></button></span>`;
+  document.title = t("meta.minerTitleAddr", { short: addr.slice(0, 10) + "\u2026" + addr.slice(-6) });
+  $("miner-title").innerHTML = `<span class="copyable"><span class="mono">${esc(addr)}</span><button type="button" class="copy-btn" data-copy="${esc(addr)}" aria-label="${esc(t("connect.copyAddr"))}" title="${esc(t("copy"))}"></button></span>`;
   $("explorer-addr").href = EXPLORER + "/address/" + encodeURIComponent(addr);
   $("api-link").href = "/api/miner/" + encodeURIComponent(addr);
   try { localStorage.setItem("lz.addr", addr); } catch (e) { /* private mode */ }
 
   refresh().catch((e) => {
     console.error(e);
-    $("miner").innerHTML = '<p class="note callout">Could not load this address right now. Try again in a moment.</p>';
+    $("miner").innerHTML = `<p class="note callout">${t("miner.fail")}</p>`;
   });
   setInterval(() => refresh().catch((e) => console.error(e)), 10000);
+  document.addEventListener("lz:i18n", () => {
+    LZ_I18N.apply();
+    document.title = t("meta.minerTitleAddr", { short: addr.slice(0, 10) + "\u2026" + addr.slice(-6) });
+    refresh().catch((e) => console.error(e));
+  });
   window.addEventListener("resize", () => {
     const c = $("chart");
     if (c && c.__hist) {
       draw(c, c.__hist, "hr_ghs", c.__marks);
-      chartLegend($("chart-legend"), c, "block paid", "blocks paid");
+      chartLegend($("chart-legend"), c, t("chart.blockPaid", { n: 1 }), t("chart.blockPaid", { n: 2 }));
     }
   });
 
