@@ -1,31 +1,37 @@
-# DATUM rebate: 3% stratum, one point credited to DATUM miners
+# DATUM rebate: 10% stratum, 5 points credited to DATUM miners
 
-Status: **live since 2026-09-09 16:04 UTC**. `stratum-fee-bps = 300`, `fee-bps = 0`,
-`datum-rebate-bps = 100`. Dedicated solo was left alone: `solo_fee_bps = 200` and
-`solo-rebate-bps = 0`. The dashboard reads every one of these numbers from primed.
+Status: **live since 2026-09-12**. `stratum-fee-bps = 1000`, `fee-bps = 0`,
+`datum-rebate-bps = 500`. Dedicated solo is a separate knob (`solo_fee_bps = 500`,
+5%) and `solo-rebate-bps = 0`. The dashboard reads the rebate numbers from primed
+and the dedicated-solo fee from the solo gateway APIs.
+
+Public-stratum miners pay 10%. 5 points of that fee (5% of stratum work) is credited
+to DATUM miners; the pool wallet keeps the other 5%. Dedicated solo is the same
+5% fee and owes nothing to the window.
 
 ## Goal
 
-Raise the public-stratum fee from 2% to 3%, keep the pool's cut at 2%, and hand the new point
-to the miners who run their own DATUM gateway. DATUM work stays at 0% fee and is credited a
-share of every block's stratum fee on top of its own share. Dedicated solo is not part of
-this: it keeps its own 2% fee and owes nothing to the window.
+Keep DATUM at 0%, charge public stratum 10%, and credit 5% of stratum work's value
+to the miners who run their own DATUM gateway. The pool nets 5% of stratum work.
+Dedicated solo is not part of this rebate: it keeps its own 5% fee and owes nothing
+to the window.
 
 ## How it works
 
 ### The point is credited, not paid in the coinbase
 
-The coinbase is the plain split at the new rate: stratum work is charged 3%, DATUM work 0%,
-and the pool output receives the whole fee. **When the block is found**, one point of stratum
-work's value is credited to the DATUM miners in the window, pro rata by DATUM work, as
-**carry** — the same per-identity balance TIDES already uses for under-floor earnings. It is
-then paid out of the pool's remainder with each miner's next output that clears `min-payout`.
+The coinbase is the plain split at the live rate: stratum work is charged 10%, DATUM
+work 0%, and the pool output receives the whole fee. **When the block is found**, 5%
+of stratum work's value is credited to the DATUM miners in the window, pro rata by
+DATUM work, as **carry** — the same per-identity balance TIDES already uses for
+under-floor earnings. It is then paid out of the pool's remainder with each miner's
+next output that clears `min-payout`.
 
 ```
 stratum_value  = value × Σstratum_work / total_work
-fee charged    = stratum_value × 3%              (in the pool output of this coinbase)
-credited       = stratum_value × 1%              (→ DATUM miners' carry, ∝ datum_work)
-pool nets      = stratum_value × 2%              (after the carry is paid out next block)
+fee charged    = stratum_value × 10%             (in the pool output of this coinbase)
+credited       = stratum_value × 5%             (→ DATUM miners' carry, ∝ datum_work)
+pool nets      = stratum_value × 5%             (after the carry is paid out next block)
 ```
 
 Why credit rather than pay: a DATUM miner too small to make a given coinbase (under the floor,
@@ -39,7 +45,7 @@ has one, so it never quietly stays with the pool.
 
 ### Solo blocks — capability, switched off
 
-Dedicated solo is deliberately outside the rebate: it stays at 2% and a solo block owes the
+Dedicated solo is deliberately outside the rebate: it stays at 5% and a solo block owes the
 window nothing. The machinery exists and is tested but is off (`solo-rebate-bps = 0`, the
 default): Prime's node poller can scan each new block one behind the tip
 (`primed/src/solo.rs`) and credit `coinbase_value × solo-rebate-bps / 10 000` from a coinbase
@@ -104,8 +110,8 @@ via carry, the pool nets the same ~6.7M. The pool output is ~9.7M in each coinba
 | `prime/primed/src/session.rs` | coinbaser keeps its credits; block-found folds them into carry and settles `rebate_owed`; log lines |
 | `prime/primed/src/state.rs` | `CoinbaserBase.rebate_owed` snapshot |
 | `prime/primed/src/stats.rs` | `pool.datum_rebate_bps/solo_rebate_bps`, `window.sample_rebate_*`, `window.rebate_owed_sats`, `window.solo_rebates`, per-miner `rebate_sats` (next block's credit) |
-| `prime/prime.toml.example` | 300 / 100 documented, `solo-rebate-bps = 0` |
-| `pool/server.py` | `fees.{datum_rebate_percent, solo_rebate_percent, datum_uplift_percent, datum_work_percent, stratum_work_percent, datum_miners, rebate_owed_btc, sample_rebate_btc}`, `ths_btc_day_datum_bonus`, coinbaser `rebate_sats/rebate_percent/rebate_owed_sats`, per-miner `rebate_btc`/`est_datum_btc_day`/`est_bonus_btc_day`/`datum_uplift_percent`; `stratum_fee_percent` fallback 3.0 |
+| `prime/prime.toml.example` | 1000 / 500 documented, `solo-rebate-bps = 0` |
+| `pool/server.py` | `fees.{datum_rebate_percent, solo_rebate_percent, datum_uplift_percent, datum_work_percent, stratum_work_percent, datum_miners, rebate_owed_btc, sample_rebate_btc}`, `ths_btc_day_datum_bonus`, coinbaser `rebate_sats/rebate_percent/rebate_owed_sats`, per-miner `rebate_btc`/`est_datum_btc_day`/`est_bonus_btc_day`/`datum_uplift_percent`; `stratum_fee_percent` fallback 10 |
 | `pool/static/{index.html,pool.js,shared.js,pool.css,miner.js,miner.html}` | the advertising (below) |
 | `node/umbrel/mempool-theme/www/theme.js` | explorer's pool paragraph names the bonus and the live uplift |
 | `README.md` | fee line |
@@ -131,7 +137,7 @@ whole campaign on or off, and the page reads exactly as it did before when off):
 | hero lede + first action | "Build your own blocks with DATUM: pay 0% and collect a share of the public stratum's fee on every block"; primary button is now **Set up DATUM** |
 | `#live-ths` chip and the first ticker cell | headline 1 TH/s/day is the DATUM figure **including** the bonus (`ths_btc_day_datum_bonus`), against the stratum figure beside it — 0.0667 vs 0.0534 XBT/day today |
 | `#live-bonus-chip` | its own live chip: `DATUM bonus +21.2%` |
-| "Two ways in · one gets paid extra" | DATUM card carries a `+21.2% DATUM bonus` line; the stratum card says one point of the 3% goes to DATUM miners |
+| "Two ways in · one gets paid extra" | DATUM card carries a live `+N% DATUM bonus` line; the stratum card says five points of the 10% goes to DATUM miners |
 | pillars, fee cards, connect tabs | the bonus pill on the DATUM rate; the stratum pane's Fee row links "run your own gateway" straight to the DATUM tab |
 | `#datum-bonus-explain` | the full mechanism in the DATUM pane, including why crediting beats paying (a gateway too small for a coinbase still earns every satoshi) and the live work split |
 | `#payout-rebate-note` under *Next payout* | "This block also credits 0.0298 XBT to the DATUM miners in the window" — and that it is not one of the outputs above |
@@ -187,10 +193,46 @@ Exercised end to end against a `stats.json` shaped like the one the new build se
   `blocks[].rebate_credited`, `carry_total_sats` up by ~3M, then back down on the next block
   as `sample_carry_paid_sats` pays it out.
 
+## Rate change 2026-09-11 (2.5% / 0.5 point)
+
+Config only; same primed binary. `kill -TERM` then `setsid nohup .../start-lazarus-prime.sh`.
+
+```toml
+fee-bps = 0
+stratum-fee-bps = 250
+datum-rebate-bps = 50
+solo-rebate-bps = 0
+```
+
+## Rate change 2026-09-12 (10% / 5 points)
+
+Config only; same primed binary. `scripts/restart-lazarus-prime.sh`.
+
+```toml
+fee-bps = 0
+stratum-fee-bps = 1000
+datum-rebate-bps = 500
+solo-rebate-bps = 0
+```
+
+Public stratum 10%, 5 points credited to DATUM miners, pool nets 5% of stratum work.
+DATUM stays 0%. Dedicated solo stays 5% and is outside the rebate.
+Pool UI fallback `stratum_fee_percent: 10`. Dedicated solo `solo_fee_bps = 500` (5%).
+
 ## Rollback
 
-Set `datum-rebate-bps = 0` (and `stratum-fee-bps = 200` if the fee itself is rolled back) and
-restart primed; the pre-deploy binary and config are on the host as
+Set `stratum-fee-bps` / `datum-rebate-bps` and restart primed. Previous schedules:
+
+- **2026-09-12 (current):** 1000 / 500 (10% stratum, 5 point DATUM subsidy, pool nets 5%)
+- **2026-09-12 earlier:** 750 / 500 (7.5% stratum, 5 point DATUM subsidy, pool nets 2.5%)
+- **2026-09-12 earlier:** 750 / 250 (7.5% stratum, 2.5 point DATUM subsidy, pool nets 5%)
+- **2026-09-11:** 500 / 150 (5% stratum, 1.5 point DATUM subsidy, pool nets 3.5%)
+- **2026-09-11 earlier:** 150 / 75 (1.5% stratum, 0.75 point DATUM subsidy, pool nets 0.75%)
+- **2026-09-11 earlier:** 250 / 50 (2.5% stratum, 0.5 point DATUM subsidy, pool nets 2%)
+- **2026-09-09:** 300 / 100 (3% stratum, 1 point DATUM subsidy)
+- **earlier:** 200 / 0 (2% stratum, no rebate)
+
+Config backups on the host are `lazarus-prime.toml.bak-fees-*` and
 `*.bak-predatum-20260909T160410Z`. Credits already in carry are still paid out
 normally (they are ordinary carry). A non-zero `rebate_owed` stays on file and is not handed
 out until re-enabled; `Ledger::set_rebate_owed` zeroes it if wanted.
@@ -203,10 +245,11 @@ out until re-enabled; `Ledger::set_rebate_owed` zeroes it if wanted.
 - **Coinbaser snapshot.** `CoinbaserBase` is rebuilt at most once a second; two blocks found
   within that second could both hand out the same `rebate_owed` (saturates at zero, bounded
   by the balance — normally 0).
-- **Mixed identities.** An address with work on both paths pays 3% on its stratum part and is
+- **Mixed identities.** An address with work on both paths pays 10% on its stratum part and is
   credited on its DATUM part; `fee_path` in stats is still the majority path.
-- **Concentration.** While DATUM is ~4.5% of the window the uplift is ≈ +21%. If that is not
-  the intent, `datum-rebate-bps` can be set lower than the extra point.
+- **Concentration.** Uplift ≈ `datum_rebate_percent × stratum_share ÷ datum_share`. At 5%
+  rebate it is larger than the 2.5-point schedule at the same DATUM share. If that is not
+  the intent, `datum-rebate-bps` can be set independently of the stratum fee (must not exceed it).
 - **Solo rebate off.** `solo-rebate-bps = 0`, so a dedicated-solo block credits the window
   nothing. Were it ever turned on, a solo block credited one behind the tip and then orphaned
   would not be un-credited; the log has the per-identity amounts for a manual reversal.

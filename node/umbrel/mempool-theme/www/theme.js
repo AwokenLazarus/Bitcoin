@@ -650,7 +650,7 @@
               '<p class="lz-kicker">Miners</p>' +
               '<p class="lz-head">Mine with Lazarus Pool, paid in the block itself</p>' +
               '<p class="lz-stats" id="lz-pool-stats"><span class="lz-dot" aria-hidden="true"></span><span class="lz-stats-text">Loading pool status…</span></p>' +
-              '<p class="lz-copy" id="lz-pool-copy">Every block found pays each miner directly in its coinbase by TIDES window share. 0% fee through your own DATUM gateway, 3% on the public stratum.</p>' +
+              '<p class="lz-copy" id="lz-pool-copy">Every block found pays each miner directly in its coinbase by TIDES window share. 0% fee through your own DATUM gateway, 10% on the public stratum.</p>' +
               '<p class="lz-actions">' +
                 '<a class="btn btn-primary btn-sm" href="' + POOL + '" target="_blank" rel="noopener">Open Lazarus Pool ↗</a>' +
                 '<a class="btn btn-secondary btn-sm" href="/mining/pool/' + POOL_SLUG + '">Blocks found by Lazarus</a>' +
@@ -677,7 +677,7 @@
         var uplift = Number(fees.datum_uplift_percent) || 0;
         c.textContent = 'Every block found pays each miner directly in its coinbase by TIDES window share. ' + pct(fees.datum_percent) + ' fee through your own DATUM gateway, ' + pct(fees.stratum_percent) + ' on the public stratum'
           + (Number(fees.datum_rebate_percent) > 0
-            ? ' — and ' + pct(fees.datum_rebate_percent) + ' of that stratum fee is credited to the DATUM miners in the window on every block'
+            ? ' — and ' + pct(fees.datum_rebate_percent) + ' of public-stratum work is credited to DATUM miners in the window on every block'
               + (uplift > 0 ? ', worth +' + pct(uplift) + ' on their share right now.' : '.')
             : '.');
       }

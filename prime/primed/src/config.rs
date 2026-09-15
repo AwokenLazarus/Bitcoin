@@ -62,7 +62,7 @@ pub struct Config {
     #[serde(default)]
     pub stratum_fee_bps: u32,
     /// Share of the house-stratum fee handed to DATUM work instead of kept, basis points of
-    /// stratum work's value (100 = one point of a 3% stratum fee). 0 (default) disables it.
+    /// stratum work's value (500 = 5 points of a 10% stratum fee). 0 (default) disables it.
     #[serde(default)]
     pub datum_rebate_bps: u32,
     /// Share of a solo block's reward owed to DATUM work when a `solo-coinbase-tag` block
@@ -340,13 +340,14 @@ require-split-gateway = true
         let c = Config::load(&p).unwrap();
         assert_eq!((c.datum_rebate_bps, c.solo_rebate_bps), (0, 0));
         assert_eq!(c.solo_coinbase_tag, "Lazarus/solo");
-        // the production shape: 3% stratum, 1 point rebated, 1% of solo blocks owed
-        std::fs::write(&p, format!("{base}\nstratum-fee-bps = 300\ndatum-rebate-bps = 100\nsolo-rebate-bps = 100\n"))
+        // production Lazarus knobs (DATUM 0% is fee-bps in the live toml; this fixture's
+        // legacy body still has fee-bps = 50) plus a solo rebate to prove that knob loads
+        std::fs::write(&p, format!("{base}\nstratum-fee-bps = 1000\ndatum-rebate-bps = 500\nsolo-rebate-bps = 100\n"))
             .unwrap();
         let c = Config::load(&p).unwrap();
-        assert_eq!((c.fee_bps, c.stratum_fee_bps, c.datum_rebate_bps, c.solo_rebate_bps), (50, 300, 100, 100));
+        assert_eq!((c.fee_bps, c.stratum_fee_bps, c.datum_rebate_bps, c.solo_rebate_bps), (50, 1000, 500, 100));
         // a rebate larger than the fee it comes out of is a config error, not a silent clamp
-        std::fs::write(&p, format!("{base}\nstratum-fee-bps = 300\ndatum-rebate-bps = 301\n")).unwrap();
+        std::fs::write(&p, format!("{base}\nstratum-fee-bps = 1000\ndatum-rebate-bps = 1001\n")).unwrap();
         assert!(Config::load(&p).unwrap_err().contains("datum-rebate-bps"));
         std::fs::remove_dir_all(&dir).unwrap();
     }
