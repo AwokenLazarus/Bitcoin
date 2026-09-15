@@ -628,15 +628,6 @@
     return (hs / 1e6).toFixed(1) + ' MH/s';
   }
   function pct(x) { return isFinite(Number(x)) ? Number(x).toLocaleString(undefined, { maximumFractionDigits: 2 }) + '%' : '—'; }
-  // DATUM bonus is N percentage *points* of public-stratum work: "1.5 points of the 5%".
-  function pointsOfFee(points, feePercent) {
-    var n = Number(points);
-    var fee = Number(feePercent);
-    if (!isFinite(n) || n <= 0 || !isFinite(fee)) return '';
-    var rounded = Math.round(n * 1000) / 1000;
-    var word = rounded === 1 ? 'one point' : rounded === 2 ? 'two points' : (String(rounded) + ' points');
-    return word + ' of the ' + pct(fee);
-  }
 
   // Dashboard card: the Electrum endpoint for wallet users and the pool for miners, in the
   // same card grid as the stock widgets. Re-inserted on every route change by apply().
@@ -659,7 +650,7 @@
               '<p class="lz-kicker">Miners</p>' +
               '<p class="lz-head">Mine with Lazarus Pool, paid in the block itself</p>' +
               '<p class="lz-stats" id="lz-pool-stats"><span class="lz-dot" aria-hidden="true"></span><span class="lz-stats-text">Loading pool status…</span></p>' +
-              '<p class="lz-copy" id="lz-pool-copy">Every block found pays each miner directly in its coinbase by TIDES window share. 0% fee through your own DATUM gateway, 5% on the public stratum — and 1.5% of public-stratum work is credited to DATUM miners in the window on every block.</p>' +
+              '<p class="lz-copy" id="lz-pool-copy">Every block found pays each miner directly in its coinbase by TIDES window share. 0% fee through your own DATUM gateway, 10% on the public stratum.</p>' +
               '<p class="lz-actions">' +
                 '<a class="btn btn-primary btn-sm" href="' + POOL + '" target="_blank" rel="noopener">Open Lazarus Pool ↗</a>' +
                 '<a class="btn btn-secondary btn-sm" href="/mining/pool/' + POOL_SLUG + '">Blocks found by Lazarus</a>' +
@@ -1465,6 +1456,9 @@
   }
 
   function start() {
+    try { localStorage.removeItem('lzdebug'); } catch (e) { /* private mode */ }
+    var leftover = document.getElementById('lz-debug');
+    if (leftover) leftover.remove();
     apply();
     // Last line of defence for the bands: whatever moves the chart -- a zoom, a resize, a
     // re-render that drops the overlay -- this notices within a tick. drawBands hashes the

@@ -27,7 +27,7 @@ LAZ_AGENT = os.environ.get("LAZ_AGENT_URL", "http://27.69.0.37:1921")
 
 POOL_FEE = float(CONF.get("pool_fee_percent", 0))
 # Public-stratum fee when primed is not answering; primed's stats.json is authoritative.
-STRATUM_FEE = float(CONF.get("stratum_fee_percent", 5.0))
+STRATUM_FEE = float(CONF.get("stratum_fee_percent", 10.0))
 STRATUM_HOST = CONF.get("stratum_host", "27.69.0.25")
 STRATUM_PORT = int(CONF.get("stratum_port", 23334))
 DATUM_URL = CONF.get("datum_url", "http://127.0.0.1:7152")
