@@ -4236,18 +4236,18 @@ _SEO_PAGES = {
     },
     "/self-cap": {
         "en": {
-            "title": "The 25% line: a mining pool that turns hashrate away — Lazarus Pool",
+            "title": "The 15% line: a mining pool that turns hashrate away — Lazarus Pool",
             "description": (
-                "No pool should hold a third of a chain. Past 25% of network hashrate Lazarus relays new "
+                "No pool should hold a third of a chain. Once its stratum passes 15% of network hashrate Lazarus relays new "
                 "stratum miners to another BTCB2 / XBT pool and lets that pool pay them. Enforced in the "
                 "software on every connection, not promised in a blog post."
             ),
             "scroll": "pools",
         },
         "zh": {
-            "title": "25% 这条线：会把算力拒之门外的矿池 — Lazarus Pool",
+            "title": "15% 这条线：会把算力拒之门外的矿池 — Lazarus Pool",
             "description": (
-                "没有哪个矿池该占一条链的三分之一。算力超过全网 25% 后，Lazarus 会把新接入的 stratum 矿工中继到"
+                "没有哪个矿池该占一条链的三分之一。自家 stratum 算力超过全网 15% 后，Lazarus 会把新接入的 stratum 矿工中继到"
                 "另一家 BTCB2 / XBT 矿池，由那家矿池付款。这是每一次连接都由软件强制执行的，不是博客里的承诺。"
             ),
             "scroll": "pools",
@@ -4339,7 +4339,7 @@ _POOL_TABLE_EN = """<div class="seo-table"><table>
         <caption>BLAKE2b Bitcoin (XBT / BTCB2) pools, as each publishes its own terms, September 2026</caption>
         <thead><tr><th scope="col">Pool</th><th scope="col">Fee</th><th scope="col">Reward scheme</th><th scope="col">Who holds your coins</th><th scope="col">The block's transaction fees</th><th scope="col">Limit on its own share</th></tr></thead>
         <tbody>
-        <tr><th scope="row">Lazarus Pool</th><td>0% own DATUM gateway · 15% public stratum, 7.5 of those points paid back to DATUM miners</td><td>TIDES, 8&times; difficulty</td><td>Nobody. The block's coinbase pays your address</td><td>Scale every miner's payout up</td><td>25%, enforced by relaying new miners elsewhere</td></tr>
+        <tr><th scope="row">Lazarus Pool</th><td>0% own DATUM gateway · 15% public stratum, 7.5 of those points paid back to DATUM miners</td><td>TIDES, 8&times; difficulty</td><td>Nobody. The block's coinbase pays your address</td><td>Scale every miner's payout up</td><td>Stratum held to 15%, enforced by relaying new miners elsewhere</td></tr>
         <tr><th scope="row">B2Pool</th><td>0% own DATUM gateway · 1% stratum</td><td>TIDES, 8&times; difficulty</td><td>Coinbase where it fits, otherwise the pool until your balance passes 10,000 sat</td><td>Stay with the pool</td><td>None published</td></tr>
         <tr><th scope="row">AlphaPool</th><td>2.5%</td><td>PPLNS</td><td>The pool, until a block reaches 100-confirmation maturity and a batch cycle pays out</td><td>Not published</td><td>30%, pledged after it passed 50% of the network</td></tr>
         </tbody>
@@ -4349,7 +4349,7 @@ _POOL_TABLE_ZH = """<div class="seo-table"><table>
         <caption>BLAKE2b 比特币（XBT / BTCB2）矿池对比，均按各家自行公布的口径，2026 年 9 月</caption>
         <thead><tr><th scope="col">矿池</th><th scope="col">手续费</th><th scope="col">奖励方式</th><th scope="col">谁替你拿着币</th><th scope="col">区块里的交易费</th><th scope="col">自身占比上限</th></tr></thead>
         <tbody>
-        <tr><th scope="row">Lazarus Pool</th><td>自建 DATUM 网关 0% · 公共 stratum 15%，其中 7.5 个点返还给 DATUM 矿工</td><td>TIDES，难度 8 倍</td><td>没有人。由区块的 coinbase 直接付到你的地址</td><td>等比例抬高每位矿工的收益</td><td>25%，超过即把新矿工中继到别家</td></tr>
+        <tr><th scope="row">Lazarus Pool</th><td>自建 DATUM 网关 0% · 公共 stratum 15%，其中 7.5 个点返还给 DATUM 矿工</td><td>TIDES，难度 8 倍</td><td>没有人。由区块的 coinbase 直接付到你的地址</td><td>等比例抬高每位矿工的收益</td><td>stratum 上限 15%，超过即把新矿工中继到别家</td></tr>
         <tr><th scope="row">B2Pool</th><td>自建 DATUM 网关 0% · stratum 1%</td><td>TIDES，难度 8 倍</td><td>能进 coinbase 就进，否则由矿池代持至余额超过 10,000 sat</td><td>留给矿池</td><td>未公布</td></tr>
         <tr><th scope="row">AlphaPool</th><td>2.5%</td><td>PPLNS</td><td>矿池代持，直到区块达到 100 确认成熟并由批量周期支付</td><td>未公布</td><td>30%，在占到全网一半以上之后承诺</td></tr>
         </tbody>
@@ -4398,7 +4398,7 @@ _SEO_INTRO = {
         "zh": ("用 Siacoin BLAKE2b 矿机挖比特币（XBT / BTCB2）", [
             "任何能挖 Siacoin 的 ASIC 都能挖这条链——同为 BLAKE2b，原厂固件即可，不用换硬件。把矿机指向 <b>stratum+tcp://stratum.awokenlazarus.xyz:23334</b>，用户名填你的收款地址，密码填 <code>x</code>。没有账户，不用注册。",
             "支付走 TIDES 拆分 coinbase：矿池找到区块时，窗口内每个地址都成为该区块的一个输出，直接付到你的地址。没有矿池余额、没有起付线、不用提现，矿池也从不持有你的币。自建 DATUM 网关 0% 手续费，并从公共 stratum 的手续费里分得补贴。",
-            "<a href=\"/zh/mine-xbt\">如何开始挖</a> · <a href=\"/zh/hardware\">哪些矿机能用</a> · <a href=\"/zh/calculator\">收益计算器</a> · <a href=\"/zh/pools\">各矿池对比</a> · <a href=\"/zh/self-cap\">为什么我们把自己限制在 25%</a>",
+            "<a href=\"/zh/mine-xbt\">如何开始挖</a> · <a href=\"/zh/hardware\">哪些矿机能用</a> · <a href=\"/zh/calculator\">收益计算器</a> · <a href=\"/zh/pools\">各矿池对比</a> · <a href=\"/zh/self-cap\">为什么我们把 stratum 限制在 15%</a>",
         ]),
     },
     "/bip110": {
@@ -4488,25 +4488,25 @@ _SEO_INTRO = {
             "The fee is the number everyone compares first and the least interesting of the four things that actually differ between pools on this chain. The others: whether the pool ever holds your coins, whether the transaction fees in a found block reach the miners or stay with the operator, and whether the pool does anything at all to limit its own share of the network.",
             _POOL_TABLE_EN,
             "Read that honestly and our public stratum is the expensive one. If you have no intention of running a node, 1% elsewhere beats 15% here and we would rather say so than pretend otherwise. What that 15% buys is the other column: 7.5 of those points are handed back to DATUM miners on every block found, which is why the path we actually recommend costs 0% and gets paid a bonus on top of a full window share.",
-            "The rest of the table is where nothing else on this chain matches. Transaction fees in a block scale every payout up here instead of staying with the pool. Nothing is ever held — the block itself pays your address, so there is no balance, threshold or withdrawal. And past 25% of network hashrate this pool <a href=\"/self-cap\">turns new miners away</a> and hands them to someone else. Figures are as each pool published them in September 2026; check their sites before you commit a fleet, and see the pools we relay to below.",
+            "The rest of the table is where nothing else on this chain matches. Transaction fees in a block scale every payout up here instead of staying with the pool. Nothing is ever held — the block itself pays your address, so there is no balance, threshold or withdrawal. And once its stratum passes 15% of network hashrate this pool <a href=\"/self-cap\">turns new miners away</a> and hands them to someone else. Figures are as each pool published them in September 2026; check their sites before you commit a fleet, and see the pools we relay to below.",
         ]),
         "zh": ("XBT（BTCB2）该挖哪个矿池？", [
             "手续费是所有人第一个拿来比的数字，也是本链各矿池之间真正有差别的四件事里最不重要的一件。另外三件是：矿池会不会替你保管币、所出区块里的交易费是分给矿工还是留给运营者，以及这家矿池有没有采取任何措施限制自己在全网中的占比。",
             _POOL_TABLE_ZH,
             "如实来看，我们的公共 stratum 是贵的那一个。如果你完全不打算自己跑节点，别家 1% 就是比这里 15% 划算，我们宁愿直说，也不想装作不是。这 15% 换来的是隔壁那一列：其中 7.5 个点在每次出块时都会返还给 DATUM 矿工——这也正是我们真正推荐的那条路为什么是 0%，而且在拿到完整窗口份额之外还额外拿补贴。",
-            "表格剩下的部分，本链目前没有别家能对上。这里区块中的交易费会等比例抬高每一笔支付，而不是留在矿池。任何时候都不代持——由区块本身付到你的地址，因此没有余额、没有起付线、不用提现。而且一旦超过全网 25% 的算力，本矿池会<a href=\"/self-cap\">把新矿工拒之门外</a>并转交给别家。表中数字为各矿池 2026 年 9 月自行公布的口径；投入整批机器前请先到各家网站核对，也可以看下方我们中继过去的矿池。",
+            "表格剩下的部分，本链目前没有别家能对上。这里区块中的交易费会等比例抬高每一笔支付，而不是留在矿池。任何时候都不代持——由区块本身付到你的地址，因此没有余额、没有起付线、不用提现。而且一旦自家 stratum 超过全网 15% 的算力，本矿池会<a href=\"/self-cap\">把新矿工拒之门外</a>并转交给别家。表中数字为各矿池 2026 年 9 月自行公布的口径；投入整批机器前请先到各家网站核对，也可以看下方我们中继过去的矿池。",
         ]),
     },
     "/self-cap": {
-        "en": ("A pool that turns hashrate away at 25%", [
+        "en": ("A pool that turns hashrate away at 15%", [
             "On a chain this size one pool can pass a third of the network in an afternoon, and in September 2026 one did — past half of all BTCB2 hashrate, followed by a patch proposed in earnest to blacklist that pool's payout address at the consensus level, which the Knots maintainer publicly told people not to run. The hashrate came back down voluntarily. Nothing about the episode was fixed by it.",
-            "Lazarus holds itself to 25%. Over that line a <em>new</em> stratum connection is not accepted and mined on our behalf: it is relayed to one of five other pools and paid by that pool, under the same address, with nothing credited to our window. Miners already here keep mining here. Own-gateway DATUM miners are never relayed, because a miner building their own block templates is not the thing that centralizes a chain. New miners come back automatically once we are under the line.",
-            "This is in the connection path rather than in a pledge — the live network share and the count of connections being relayed right now are both on this page, and a relayed worker's own stats page names the pool that has it. It is the same reasoning as the <a href=\"/datum-subsidy\">DATUM subsidy</a>: the pool pays miners to take template construction away from it, and hands away hashrate it is not entitled to. <a href=\"/pools\">How the other pools compare.</a>",
+            "Lazarus holds its stratum to 15% of the network. Only hashrate pointed at our stratum counts; hashrate behind a miner's own DATUM gateway does not, however much of it there is. Over that line a <em>new</em> stratum connection is not accepted and mined on our behalf: it is relayed to one of five other pools and paid by that pool, under the same address, with nothing credited to our window. Miners already here keep mining here. Own-gateway DATUM miners are never relayed, because a miner building their own block templates is not the thing that centralizes a chain. New miners come back automatically once our stratum is under the line.",
+            "This is in the connection path rather than in a pledge — our stratum's live network share and the count of connections being relayed right now are both on this page, and a relayed worker's own stats page names the pool that has it. It is the same reasoning as the <a href=\"/datum-subsidy\">DATUM subsidy</a>: the pool pays miners to take template construction away from it, and hands away hashrate it is not entitled to. <a href=\"/pools\">How the other pools compare.</a>",
         ]),
-        "zh": ("超过 25% 就把算力拒之门外的矿池", [
+        "zh": ("超过 15% 就把算力拒之门外的矿池", [
             "在这个规模的链上，一家矿池一个下午就能超过全网三分之一——2026 年 9 月真的发生了：某矿池占到 BTCB2 全网算力一半以上，随后有人正经提交补丁，要在共识层把该矿池的收款地址拉黑，Knots 维护者公开表示不要运行那段代码。最后算力是自愿降下来的，这件事本身什么也没解决。",
-            "Lazarus 给自己划的线是 25%。越过这条线后，<em>新</em>的 stratum 连接不会被我们接下来自己挖：它会被中继到另外五家矿池之一，由那家矿池按同一个地址付款，我们的窗口里不记入任何东西。已经在这里的矿机继续留在这里。自建网关的 DATUM 矿工永远不会被中继，因为自己构建区块模板的矿工并不是让一条链中心化的那个因素。等我们回到线下，新矿工会自动回来。",
-            "这件事写在连接路径里，而不是写在承诺里——实时的全网占比、以及此刻正被中继的连接数都在本页上，被中继的矿机在自己的统计页里也会看到接手它的矿池名字。这和<a href=\"/datum-subsidy\">DATUM 补贴</a>是同一个道理：矿池花钱请矿工把模板构建权从自己手里拿走，也把本不该属于自己的算力让出去。<a href=\"/pools\">其他矿池怎么比</a>。",
+            "Lazarus 给自家 stratum 划的线是全网的 15%。只有指向我们 stratum 的算力才计入；矿工自建 DATUM 网关后面的算力不计入，无论有多少。越过这条线后，<em>新</em>的 stratum 连接不会被我们接下来自己挖：它会被中继到另外五家矿池之一，由那家矿池按同一个地址付款，我们的窗口里不记入任何东西。已经在这里的矿机继续留在这里。自建网关的 DATUM 矿工永远不会被中继，因为自己构建区块模板的矿工并不是让一条链中心化的那个因素。等我们的 stratum 回到线下，新矿工会自动回来。",
+            "这件事写在连接路径里，而不是写在承诺里——我们 stratum 实时的全网占比、以及此刻正被中继的连接数都在本页上，被中继的矿机在自己的统计页里也会看到接手它的矿池名字。这和<a href=\"/datum-subsidy\">DATUM 补贴</a>是同一个道理：矿池花钱请矿工把模板构建权从自己手里拿走，也把本不该属于自己的算力让出去。<a href=\"/pools\">其他矿池怎么比</a>。",
         ]),
     },
     "/non-custodial": {
@@ -4666,7 +4666,7 @@ _LLMS_TXT = """# Lazarus Pool
 - TIDES payouts: {site}/tides
 - DATUM subsidy: {site}/datum-subsidy
 - Pools on this chain, compared: {site}/pools
-- The 25% self-cap: {site}/self-cap
+- The 15% stratum cap: {site}/self-cap
 - Why there is no pool balance: {site}/non-custodial
 - Stratum protocol reference (markdown): {site}/stratum-protocol.md
 - Public API reference: {site}/api
@@ -4722,14 +4722,15 @@ construction is decentralized rather than delegated to the pool, and the DATUM s
 the pool's own stratum hashers, another first — pays them extra for doing it. Coins trade as BTCB2
 on Neoxa and NonKYC.
 
-## The 25% self-cap
+## The 15% stratum cap
 
-Lazarus Pool holds itself to 25% of network hashrate. Over that line a new stratum connection is
+Lazarus Pool holds its stratum to 15% of network hashrate. Hashrate behind a miner's own DATUM
+gateway is not counted, because it builds its own templates. Over that line a new stratum connection is
 not mined on the pool's behalf: it is relayed to one of five other pools and paid by that pool,
 under the same address, with nothing credited to the Lazarus window. Miners already connected keep
 mining here, and own-gateway DATUM miners are never relayed because a miner building their own
 templates is not what centralizes a chain. This is enforced per connection in the software, and
-both the live network share and the number of connections currently relayed are published on the
+both the stratum's live network share and the number of connections currently relayed are published on the
 site. In September 2026 a different BTCB2 pool passed 50% of network hashrate and a patch was
 proposed to blacklist its payout address at the consensus level; no other pool on this chain
 publishes a self-imposed limit. See {site}/self-cap.
@@ -4743,7 +4744,7 @@ block, and whether a pool limits its own share. As each pool published its own t
 - Lazarus Pool: 0% with your own DATUM gateway, 15% on the public stratum with 7.5 of those points
   paid back to DATUM miners. TIDES, window of 8x difficulty. No custody at all — the block's
   coinbase pays your address, so there is no balance, threshold or withdrawal. The block's
-  transaction fees scale every miner's payout up. Self-capped at 25%.
+  transaction fees scale every miner's payout up. Stratum self-capped at 15%.
 - B2Pool: 0% with your own DATUM gateway, 1% on the stratum. TIDES, window of 8x difficulty. Paid
   from the coinbase where it fits, otherwise by the pool once your balance passes 10,000 sat. The
   block's transaction fees stay with the pool. No self-limit published.

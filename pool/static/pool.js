@@ -187,10 +187,10 @@
     const now = ov.proxied_sessions ? t("overflow.now", { n: ov.proxied_sessions }) : "";
     el.innerHTML = t("overflow.on", {
       share: Number.isFinite(share) ? share.toFixed(1) : "\u2014",
-      enter: Number(ov.enter_pct) || 25,
+      enter: Number(ov.enter_pct) || 15,
       ups: ups.length ? ups.join(", ") : t("overflow.upsFallback"),
       now,
-      exit: Number(ov.exit_pct) || 22,
+      exit: Number(ov.exit_pct) || 13,
     });
     el.hidden = false;
   }
@@ -205,7 +205,7 @@
       if (!share.hidden) {
         share.innerHTML = t(ov.active ? "overflow.shareOver" : "overflow.shareUnder", {
           pct: s.toFixed(1),
-          enter: Number(ov.enter_pct) || 25,
+          enter: Number(ov.enter_pct) || 15,
         });
       }
     }

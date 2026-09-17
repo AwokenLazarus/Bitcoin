@@ -184,14 +184,14 @@ window.LZ_I18N_DICTS["zh-CN"] = {
     "failed": "失败"
   },
   "overflow": {
-    "on": "<strong>溢出已开启。</strong>Lazarus 占全网算力 {share}%，超过我们给自己定的 {enter}% 上限。已经在这里的矿工继续在这里挖。指向我们 stratum 的<em>新</em>矿工会被转发到 {ups}，由那个矿池支付，而不是我们{now}。自建网关（DATUM）矿工永不转发。当我们降到 {exit}% 以下，新矿工会回到 Lazarus。<a href=\"#pools\">关于这些矿池</a>。",
+    "on": "<strong>溢出已开启。</strong>我们的 stratum 占全网算力 {share}%，超过我们给它定的 {enter}% 上限。已经在这里的矿工继续在这里挖。指向我们 stratum 的<em>新</em>矿工会被转发到 {ups}，由那个矿池支付，而不是我们{now}。自建网关（DATUM）矿工永不转发，其算力也不计入这条线。当我们的 stratum 降到 {exit}% 以下，新矿工会回到 Lazarus。<a href=\"#pools\">关于这些矿池</a>。",
     "upsFallback": "另一个 BLAKE2b 矿池",
     "now": {
       "one": " — 此刻转发 {n} 条连接。",
       "other": " — 此刻转发 {n} 条连接。"
     },
-    "shareOver": "Lazarus 此刻占全网 <b>{pct}%</b> — 已超过 {enter}% 上限，因此新的 stratum 矿工正在被转发。",
-    "shareUnder": "Lazarus 此刻占全网 <b>{pct}%</b> — 低于 {enter}% 上限，因此没有人被转发。",
+    "shareOver": "我们的 stratum 此刻占全网 <b>{pct}%</b> — 已超过 {enter}% 上限，因此新的 stratum 矿工正在被转发。",
+    "shareUnder": "我们的 stratum 此刻占全网 <b>{pct}%</b> — 低于 {enter}% 上限，因此没有人被转发。",
     "notAnswering": "无应答",
     "notAnsweringTitle": "我们的网关上次探测未能连上该矿池的 stratum",
     "relayedHere": "此处转发 {n}",
@@ -684,7 +684,7 @@ window.LZ_I18N_DICTS["zh-CN"] = {
   "pools": {
     "eyebrow": "把算力分散开",
     "title": "同样说 DATUM 和 TIDES 的其他矿池。",
-    "lede": "任何单一矿池都不该占有本链三分之一。我们把自身限制在全网的 25%——超过后，新的 stratum 连接会转发到这些矿池之一并在那边支付。每一家都允许你通过 DATUM 网关自己组块，并按 TIDES 窗口支付，所以把机群拆过去原则上没有损失。无论如何，在矿机里留一家作故障转移。",
+    "lede": "任何单一矿池都不该占有本链三分之一。我们把自家 stratum 限制在全网的 15%；矿工自建 DATUM 网关后面的算力自己组块，不计入这条线。超过后，新的 stratum 连接会转发到这些矿池之一并在那边支付。每一家都允许你通过 DATUM 网关自己组块，并按 TIDES 窗口支付，所以把机群拆过去原则上没有损失。无论如何，在矿机里留一家作故障转移。",
     "riptideFee": "<b>0%</b> DATUM · <b>1%</b> stratum",
     "riptide": "Maveth 的 TIDES 矿池。自建网关零手续费；stratum 抽成可变，其中一半返给在线矿工。偏好带最大 coinbase 补丁的 CONVOY 网关。",
     "convoyFee": "<b>1%</b> · 节点故障转移时 2%",
@@ -734,7 +734,7 @@ window.LZ_I18N_DICTS["zh-CN"] = {
     "asics": "Siacoin BLAKE2b 矿机",
     "mineXbt": "如何挖 XBT",
     "compare": "XBT 矿池对比",
-    "selfCap": "25% 自我上限",
+    "selfCap": "15% stratum 上限",
     "noncustodial": "为什么这里没有余额",
     "explorer": "浏览器",
     "mempool": "Lazarus Mempool",

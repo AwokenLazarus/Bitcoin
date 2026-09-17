@@ -184,14 +184,14 @@ window.LZ_I18N_DICTS["en"] = {
     "failed": "failed"
   },
   "overflow": {
-    "on": "<strong>Overflow is on.</strong> Lazarus holds {share}% of the network hashrate, over the {enter}% line we hold ourselves to. Miners already here keep mining here. A <em>new</em> miner pointing at our stratum is relayed to {ups} and is paid by that pool, not by us{now}. Own-gateway (DATUM) miners are never relayed. New miners come back to Lazarus once we are under {exit}%. <a href=\"#pools\">About those pools</a>.",
+    "on": "<strong>Overflow is on.</strong> Our stratum holds {share}% of the network hashrate, over the {enter}% line we hold it to. Miners already here keep mining here. A <em>new</em> miner pointing at our stratum is relayed to {ups} and is paid by that pool, not by us{now}. Own-gateway (DATUM) miners are never relayed, and their hashrate does not count toward the line. New miners come back to Lazarus once our stratum is under {exit}%. <a href=\"#pools\">About those pools</a>.",
     "upsFallback": "another BLAKE2b pool",
     "now": {
       "one": " — {n} connection relayed right now.",
       "other": " — {n} connections relayed right now."
     },
-    "shareOver": "Lazarus holds <b>{pct}%</b> of the network right now — over the {enter}% line, so new stratum miners are being relayed.",
-    "shareUnder": "Lazarus holds <b>{pct}%</b> of the network right now — under the {enter}% line, so nobody is being relayed.",
+    "shareOver": "Our stratum holds <b>{pct}%</b> of the network right now — over the {enter}% line, so new stratum miners are being relayed.",
+    "shareUnder": "Our stratum holds <b>{pct}%</b> of the network right now — under the {enter}% line, so nobody is being relayed.",
     "notAnswering": "not answering",
     "notAnsweringTitle": "Our gateway could not reach this pool's stratum on its last check",
     "relayedHere": "{n} relayed here",
@@ -684,7 +684,7 @@ window.LZ_I18N_DICTS["en"] = {
   "pools": {
     "eyebrow": "Decentralize the hashrate",
     "title": "Other pools that speak DATUM and TIDES.",
-    "lede": "No single pool should hold a third of this chain. We cap ourselves at 25% of the network — past that, new stratum connections are relayed to one of these pools and paid there. Each one lets you build your own block through a DATUM gateway and pays by a TIDES window, so splitting your fleet across them costs you nothing in principle. Keep one as a failover in your miner either way.",
+    "lede": "No single pool should hold a third of this chain. We cap our own stratum at 15% of the network; hashrate behind a miner’s own DATUM gateway builds its own blocks and is not counted. Past that line, new stratum connections are relayed to one of these pools and paid there. Each one lets you build your own block through a DATUM gateway and pays by a TIDES window, so splitting your fleet across them costs you nothing in principle. Keep one as a failover in your miner either way.",
     "riptideFee": "<b>0%</b> DATUM · <b>1%</b> stratum",
     "riptide": "Maveth’s TIDES pool. Zero fee through your own gateway; the stratum skim is variable and half of it goes back to live miners. Prefers a CONVOY gateway with the largest-coinbase patch.",
     "convoyFee": "<b>1%</b> · 2% on node failover",
@@ -734,7 +734,7 @@ window.LZ_I18N_DICTS["en"] = {
     "asics": "Siacoin BLAKE2b ASICs",
     "mineXbt": "How to mine XBT",
     "compare": "Compare XBT pools",
-    "selfCap": "The 25% self-cap",
+    "selfCap": "The 15% stratum cap",
     "noncustodial": "Why there is no balance",
     "explorer": "Explorer",
     "mempool": "Lazarus Mempool",
