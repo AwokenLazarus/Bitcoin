@@ -745,6 +745,8 @@
   @container (min-width: 40rem) { .miner-card .ticker { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
   .miner-card .ticker > * { background: var(--bg-inset); box-shadow: none; }
   @container (min-width: 52rem) { .miner-card .ticker.four { grid-template-columns: repeat(4, minmax(0, 1fr)); } }
+  /* The payouts strip grows a fifth cell while a make-good is pending for the address. */
+  @container (min-width: 52rem) { .miner-card .ticker.five { grid-template-columns: repeat(5, minmax(0, 1fr)); } }
 
   /* ---- Charts. */
   .path-hr {
@@ -1714,6 +1716,59 @@
   .payout-split .split-miners { border-left: 3px solid var(--good); }
   .payout-split .split-miners b { color: var(--ink); }
   .payout-split .split-pool { border-left: 3px solid var(--brass-dim); }
+
+  /* ---- Coinbase ledger: the hero's split, step by step, with the live numbers. */
+  .cb-flow {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 0.6rem;
+    margin: 1rem 0 0;
+    padding: 0;
+    list-style: none;
+    counter-reset: none;
+  }
+  @container (max-width: 44rem) {
+    .cb-flow { grid-template-columns: 1fr; }
+  }
+  .cb-step {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr);
+    gap: 0.75rem;
+    padding: 0.85rem 0.95rem 0.9rem;
+    border: 1px solid var(--line);
+    border-left: 3px solid color-mix(in oklch, var(--brass) 40%, var(--line));
+    border-radius: var(--r-sm);
+    background: var(--bg-inset);
+  }
+  .cb-step.is-miners { border-left-color: var(--good); }
+  .cb-step.is-datum { border-left-color: var(--brass); }
+  .cb-step.is-pool { border-left-color: var(--brass-dim); }
+  .cb-n {
+    font-family: var(--mono);
+    font-size: 0.78rem;
+    font-weight: 500;
+    line-height: 1.6;
+    letter-spacing: 0.08em;
+    color: var(--brass);
+  }
+  .cb-body { display: grid; gap: 0.3rem; min-width: 0; }
+  .cb-head {
+    display: block;
+    font-size: 0.72rem;
+    font-weight: 600;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--faint);
+  }
+  .cb-copy {
+    margin: 0;
+    font-size: 0.86rem;
+    line-height: 1.55;
+    color: color-mix(in oklch, var(--ink) 88%, var(--muted));
+  }
+  .cb-copy b { color: var(--ink); font-variant-numeric: tabular-nums; }
+  .cb-step.is-datum .cb-copy b { color: var(--brass); }
+  .cb-copy a { color: var(--brass); text-decoration: underline; text-underline-offset: 2px; }
 
   /* ---- Coinbase ring: the same split as the table below it. */
   .donut-row {

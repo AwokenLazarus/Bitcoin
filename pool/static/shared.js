@@ -85,6 +85,8 @@
   };
   // Same, from an integer sat count.
   const amtSats = (sats) => (sats == null || Number.isNaN(Number(sats)) ? "\u2014" : amt(Number(sats) / 1e8));
+  // Every satoshi, no rounding: for figures a miner will reconcile against a wallet.
+  const satsExact = (sats) => (sats == null || Number.isNaN(Number(sats)) ? "\u2014" : Math.round(Number(sats)).toLocaleString(loc()) + " sats");
   // Exact figure for tooltips: full 8-place XBT plus the sat count.
   const amtExact = (btcValue) => {
     if (btcValue == null || Number.isNaN(Number(btcValue))) return "";
@@ -104,7 +106,7 @@
     const s = String(status || "").toLowerCase();
     const key = s.replace(/\s+/g, "_");
     const label = t("status." + key, { _default: s });
-    const cls = s === "in chain" || s === "paid" || s === "submitted" || s === "spendable" ? "ok" : s === "orphaned" || s === "rejected" ? "bad" : s === "immature" || s === "pending" ? "warn" : "";
+    const cls = s === "in chain" || s === "paid" || s === "submitted" || s === "spendable" ? "ok" : s === "orphaned" || s === "rejected" || s === "failed" ? "bad" : s === "immature" || s === "pending" || s === "owed" || s === "queued" || s === "broadcast" ? "warn" : "";
     return s ? `<span class="pill ${cls}">${esc(label)}</span>` : "\u2014";
   };
   function chartLegend(el, c, one, many) {
@@ -463,6 +465,51 @@
         </div>`;
   }
 
+  // Make-goods: the split a partial or pool-only coinbase owed this address but did not
+  // place. Prime clears the carry into that debt the moment the block is found, so this is
+  // the table that shows where the money went and when it lands: signed and queued until the
+  // coinbase matures (height + 100), then broadcast, then paid.
+  const MAKEGOOD_PENDING = new Set(["owed", "queued", "broadcast"]);
+  const makegoodPending = (m) => (m.makegoods || []).filter((r) => MAKEGOOD_PENDING.has(String(r.status || "").toLowerCase()));
+  function makegoodTable(m, ctx) {
+    const rows = m.makegoods || [];
+    if (!rows.length) return "";
+    const tip = Number(m.tip_height) || 0;
+    const interval = Number(ctx.blockInterval) || 0;
+    const body = rows
+      .map((r) => {
+        const st = String(r.status || "").toLowerCase();
+        const left = Number.isFinite(Number(r.blocks_to_payable)) ? Number(r.blocks_to_payable) : Math.max(0, Number(r.payable_at) - tip);
+        const whenTxt =
+          st === "paid" ? (r.confirmations ? t("blocks.confOk", { c: num(r.confirmations) }) : t("status.paid"))
+          : st === "broadcast" ? t("miner.mgInMempool")
+          : st === "failed" ? t("miner.mgFailed")
+          : left ? (interval ? t("miner.mgPayableIn", { n: num(left), eta: "~" + dur(left * interval) }) : t("miner.mgPayableBlocks", { n: num(left) }))
+          : t("miner.mgPayableNow");
+        const tx = r.txid
+          ? `<a href="${EXPLORER}/tx/${esc(r.txid)}" target="_blank" rel="noreferrer" title="${esc(r.txid)}">${shortHash(r.txid)}</a>${st === "queued" || st === "owed" ? ` <span class="faint">${t("miner.mgTxSigned")}</span>` : ""}`
+          : "\u2014";
+        return `<tr>
+          <td class="num">${blockLink(r)}</td>
+          <td class="num" title="${amtExact(r.btc)}">${satsExact(r.sats != null ? r.sats : Number(r.btc) * 1e8)}${ctx.money ? ctx.money(r.btc) : ""}</td>
+          <td>${kindPill(r.kind)}</td>
+          <td class="num">${r.payable_at ? num(r.payable_at) : "\u2014"}</td>
+          <td>${whenTxt}</td>
+          <td>${statusPill(st)}</td>
+          <td class="mono">${tx}</td>
+        </tr>`;
+      })
+      .join("");
+    const pend = makegoodPending(m);
+    const pendSats = pend.reduce((a, r) => a + (Number(r.sats) || Math.round(Number(r.btc) * 1e8) || 0), 0);
+    return `
+        <div>
+          <p class="kicker table-label">${pend.length ? t("miner.mgLabelPending", { n: pend.length, amt: satsExact(pendSats) }) : t("miner.mgLabel")}</p>
+          <p class="note">${t("miner.mgHelp", { need: num(m.maturity_confs || 100) })}</p>
+          <div class="scroll${ctx.full ? "" : " tall"}"><table class="pending"><thead><tr><th class="num">${t("miner.thBlock")}</th><th class="num">${t("miner.thAmt")}</th><th>${t("miner.thKind")}</th><th class="num">${t("miner.thPayableAt")}</th><th>${t("miner.thLands")}</th><th>${t("miner.thStatus")}</th><th>${t("miner.thTx")}</th></tr></thead><tbody>${body}</tbody></table></div>
+        </div>`;
+  }
+
   function paidTable(m, ctx) {
     const rows = (m.blocks_found || []).filter((b) => payStatus(b) !== "immature");
     const body = rows
@@ -549,10 +596,30 @@
       }
       return t("miner.nextNow", { path });
     };
+    // Make-goods pending for this address. When there are any, the carry cell also says
+    // so: the carry that was here before that block did not vanish, it became this payment.
+    const mgPend = makegoodPending(m);
+    const mgAll = m.makegoods || [];
+    const mgPendBtc = Number(m.makegood_pending_btc) || 0;
+    const mgPaidBtc = Number(m.makegood_paid_btc) || 0;
+    const mgNextAt = Number(m.makegood_next_payable_at) || 0;
+    const mgLeft = mgPend.length ? Math.min(...mgPend.map((r) => Number(r.blocks_to_payable) || 0)) : 0;
+    const mgLatest = mgPend.length ? mgPend.reduce((a, r) => (Number(r.height) > Number(a.height) ? r : a), mgPend[0]) : null;
+    const mgPendSats = mgPend.reduce((a, r) => a + (Number(r.sats) || Math.round(Number(r.btc) * 1e8) || 0), 0);
+    const carryMakegood = mgLatest ? t("miner.carryMakegood", { amt: satsExact(mgLatest.sats != null ? mgLatest.sats : Number(mgLatest.btc) * 1e8), height: num(mgLatest.height) }) : "";
     const carryCell = (m) =>
-      carryBtc > 0
-        ? `<div><dt>${t("miner.carry")}</dt><dd title="${amtExact(carryBtc)}">${amt(carryBtc)}${money(carryBtc)}<small>${t("miner.carrySub")}</small></dd></div>`
+      carryBtc > 0 || mgLatest
+        ? `<div><dt>${t("miner.carry")}</dt><dd title="${amtExact(carryBtc)}">${amt(carryBtc)}${money(carryBtc)}<small>${t("miner.carrySub")}${carryMakegood}</small></dd></div>`
         : "";
+    const makegoodCell = () => {
+      if (!mgAll.length) return "";
+      let sub;
+      if (mgPend.some((r) => String(r.status).toLowerCase() === "broadcast")) sub = t("miner.mgCellBroadcast");
+      else if (mgPend.length) sub = mgLeft ? t("miner.mgCellSub", { n: mgPend.length, height: num(mgNextAt), left: num(mgLeft) }) : t("miner.mgCellNow", { n: mgPend.length });
+      else if (Number(m.makegood_failed_blocks) > 0) sub = t("miner.mgCellFailed");
+      else sub = t("miner.mgCellAllPaid", { amt: satsExact(Math.round(mgPaidBtc * 1e8)) });
+      return `<div><dt>${t("miner.makegood")}</dt><dd title="${amtExact(mgPendBtc)}">${amt(mgPendBtc)}${money(mgPendBtc)}<small>${sub}</small></dd></div>`;
+    };
     // The DATUM bonus for this address. On the gateway path it is money already accruing, so
     // it gets a ticker cell; on the stratum path it is money being left on the table, so it
     // gets a callout with what switching would pay. Both vanish when the rebate is off.
@@ -587,7 +654,8 @@
       if (ctx.href) return `<a role="tab" class="mtab" data-mtab="${key}" aria-selected="${on}" href="${esc(ctx.href(key))}">${inner}</a>`;
       return `<button type="button" role="tab" class="mtab" data-mtab="${key}" aria-selected="${on}">${inner}</button>`;
     };
-    const counts = { workers: nWorkers, payouts: nPending ? t("miner.pendingTab", { n: nPending }) : "" };
+    const nPayoutsPending = nPending + mgPend.length;
+    const counts = { workers: nWorkers, payouts: nPayoutsPending ? t("miner.pendingTab", { n: nPayoutsPending }) : "" };
     const tablist = `<div class="mtabs" role="tablist" aria-label="${esc(t("nav.minerViews"))}">${MINER_TABS.map((tabDef) => tabBtn(tabDef, counts[tabDef[0]])).join("")}${ctx.full ? "" : `<a class="mtab-more" href="/miner/${encodeURIComponent(m.address)}">${t("miner.full")}</a>`}</div>`;
 
     const overview = `
@@ -605,6 +673,7 @@
           ${bonusCell}
           <div><dt>${t("miner.dtNext")}</dt><dd title="${amtExact(m.block_payout_btc)}">${amt(m.block_payout_btc)}${money(m.block_payout_btc)}<small>${nextBlockNote(m)}</small></dd></div>
           ${carryCell(m)}
+          ${makegoodCell()}
           <div><dt>${t("miner.dtPending")}</dt><dd title="${amtExact(m.immature_btc)}">${amt(m.immature_btc)}${money(m.immature_btc)}<small>${nPending ? t("miner.pendingMaturing", { n: nPending }) : t("miner.pendingNone")}</small></dd></div>
           <div><dt>${t("miner.dtPaid")}</dt><dd title="${amtExact(m.paid_btc)}">${amt(m.paid_btc)}${money(m.paid_btc)}<small>${t("miner.paidSub")}</small></dd></div>
         </dl>
@@ -619,14 +688,16 @@
 
     const payoutsPanel = `
       <div class="mpanel" data-mpanel="payouts" ${tab === "payouts" ? "" : "hidden"}>
-        <dl class="ticker slim four">
+        <dl class="ticker slim ${mgAll.length ? "five" : "four"}">
           <div><dt>${t("miner.dtPending")}</dt><dd title="${amtExact(m.immature_btc)}">${amt(m.immature_btc)}${money(m.immature_btc)}<small>${nPending ? t("miner.pendingIn", { n: nPending, need: num(m.maturity_confs || 100) }) : t("miner.pendingNoneOut")}</small></dd></div>
+          ${makegoodCell()}
           <div><dt>${t("miner.dtPaid")}</dt><dd title="${amtExact(m.paid_btc)}">${amt(m.paid_btc)}${money(m.paid_btc)}<small>${t("miner.paidMatured", { n: nPaid })}</small></dd></div>
           <div><dt>${t("miner.dtNext")}</dt><dd title="${amtExact(m.block_payout_btc)}">${amt(m.block_payout_btc)}${money(m.block_payout_btc)}<small>${t("miner.nextWin", { wp: pctSmart(wp), carry: Number(m.carry_btc) > 0 ? t("miner.plusCarry") : "" })}</small></dd></div>
           <div><dt>${t("miner.dtEst")}</dt><dd title="${amtExact(estDay)}">${amt(estDay)}${money(estDay)}<small>${withBonus ? t("miner.estFeeBonus", { fee: feePct(billedFee), uplift: pctSmart(upliftPct) }) : t("miner.estFee", { fee: feePct(billedFee) })}</small></dd></div>
         </dl>
-        <p class="note callout">${t("miner.noBalance", { n: num(m.maturity_confs || 100), carry: Number(m.carry_btc) > 0 ? t("miner.carryNote", { amt: amt(m.carry_btc) }) : "" })}</p>
+        <p class="note callout">${t("miner.noBalance", { n: num(m.maturity_confs || 100), carry: Number(m.carry_btc) > 0 ? t("miner.carryNote", { amt: amt(m.carry_btc) }) : "" })}${mgPend.length ? t("miner.mgNote", { amt: satsExact(mgPendSats), n: mgPend.length, height: num(mgNextAt) }) : ""}</p>
         ${pendingTable(m, ctx)}
+        ${makegoodTable(m, ctx)}
         ${paidTable(m, ctx)}
       </div>`;
 
@@ -663,7 +734,7 @@
   window.LZ = {
     blockMarks, esc, fmtHr, num, bigNum, short, shortHash, pct, pctSmart, ago, agoS, dur, when, clock, sig4, amt, amtSats, amtExact,
     kindPill, statusPill, chartLegend, continuous, chartTip, markHover, draw, CHART_MARK,
-    EXPLORER, pathLabel, isPrimePath, sessCell, winShareCell, feePct, poolLink, payStatus, blockLink, soloCard, minerCard, showMinerTab, MINER_TABS,
+    satsExact, EXPLORER, pathLabel, isPrimePath, sessCell, winShareCell, feePct, poolLink, payStatus, blockLink, soloCard, minerCard, showMinerTab, MINER_TABS,
     t,
   };
 })();

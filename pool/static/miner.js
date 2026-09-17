@@ -103,6 +103,18 @@
     chip("mc-paid", amt(d.paid_btc));
     $("mc-pending").title = t("miner.pendingExact", { amt: amtExact(d.immature_btc), n: nPending, s: nPending === 1 ? "" : "s", need: num(d.maturity_confs || 100) });
     $("mc-paid").title = t("miner.paidExact", { amt: amtExact(d.paid_btc) });
+    // Money a partial or pool-only block owes this address, on its way from the reserved
+    // pool output. Hidden until there is any, so most miners never see the chip.
+    const mgPend = Number(d.makegood_pending_blocks) || 0;
+    const mgBtc = Number(d.makegood_pending_btc) || 0;
+    const mg = $("mc-makegood");
+    if (mg) {
+      mg.hidden = !(mgPend > 0 || (d.makegoods || []).length);
+      chip("mc-makegood", amt(mgBtc), mgPend ? t(mgPend === 1 ? "miner.makegoodN" : "miner.makegoodNs", { n: mgPend }) : t("miner.makegood"));
+      mg.title = mgPend
+        ? t("miner.makegoodExact", { amt: amtExact(mgBtc), n: mgPend, height: num(d.makegood_next_payable_at || 0) })
+        : t("miner.makegoodTitle");
+    }
     $("nav-live").hidden = false;
   }
 

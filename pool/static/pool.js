@@ -235,6 +235,14 @@
       pill.hidden = false;
     });
   }
+  // Accepted (and submitted) at the other pool, carrying that pool's own words for the last
+  // share it refused. A relay submitting steadily to a pool that rejects everything otherwise
+  // reads here exactly like a healthy one.
+  const acceptedCell = (r) => {
+    const s = num(r.accepted) + (Number(r.submits) ? ` <span class="faint">/ ${num(r.submits)}</span>` : "");
+    return r.last_reject ? `<span title="${esc(r.last_reject)}">${s}</span>` : s;
+  };
+
   function relayedTable(rows, ov) {
     const wrap = $("relayed-wrap");
     if (!wrap) return;
@@ -251,7 +259,7 @@
         esc(r.worker || "\u2014"),
         poolLink(r.upstream, r.miner_url || r.upstream_url),
         dur(Number(r.connected_s) || 0),
-        num(r.accepted) + (Number(r.submits) ? ` <span class="faint">/ ${num(r.submits)}</span>` : ""),
+        acceptedCell(r),
         esc((r.host || "").replace(/:\d+$/, "")),
       ]),
       [null, null, null, "num", "num", null],
@@ -264,11 +272,12 @@
     wrap.hidden = false;
   }
 
-  // "one point", "five points" — rebate percentages read as points of the stratum fee when we are
+  // "one point", "seven and a half points" — rebate percentages read as points of the stratum fee when we are
   // talking about a slice of it rather than a rate in its own right. `Pts` starts a sentence.
   const pts = (n) => {
     const x = Number(n) || 0;
     if (x === 0.5) return t("pts.half");
+    if (x === 7.5) return t("pts.sevenHalf");
     const list = (window.LZ_I18N && LZ_I18N.raw && LZ_I18N.raw("pts.word")) || ["zero", "one", "two", "three", "four", "five"];
     const s = Number.isInteger(x) && x < list.length ? list[x] : String(sig4(x));
     return t(x === 1 ? "pts.one" : "pts.other", { s });
@@ -719,25 +728,92 @@
     if (!$("payout-reward")) return;
     const value = Number(cb.value) || Math.round((Number(p.subsidy_btc) || 0) * 1e8);
     const minerSats = Number(cb.miner_sats) || 0;
-    const poolSats = Number(cb.pool_sats) || 0;
-    const feeSats = Number(cb.fee_sats) || 0;
     const n = Number(cb.miner_outputs) || 0;
-    const eff = Number.isFinite(Number(cb.effective_fee_percent)) ? Number(cb.effective_fee_percent) : (value ? 100 * feeSats / value : 0);
+    const rebateSats = Number(cb.rebate_sats) || 0;
     $("payout-reward").textContent = value ? amtSats(value) + money(value / 1e8) : "\u2014";
     $("payout-reward-sub").textContent = value ? t("payout.rewardSub", { h: p.height ? num(Number(p.height) + 1) : "\u2014" }) : t("payout.rewardSubWait");
     $("payout-miners-btc").textContent = value ? amtSats(minerSats) : "\u2014";
     $("payout-miners-sub").textContent = value ? t("payout.minersSub", { pct: pct(100 * minerSats / value, 1), n }) : "\u2014";
-    $("payout-pool-btc").textContent = value ? amtSats(poolSats) : "\u2014";
-    const unplaced = Number(cb.unplaced_sats) || 0;
-    const carryPaid = Number(cb.carry_paid_sats) || 0;
-    const rebateSats = Number(cb.rebate_sats) || 0;
+    $("payout-pool-btc").textContent = value ? amtSats(rebateSats) : "\u2014";
     $("payout-pool-sub").textContent = value
-      ? t("payout.blendedFee", { pct: pct(eff, 2) })
-        + (fees.datum !== fees.stratum ? t("payout.feeSplit", { datum: feePct(fees.datum), stratum: feePct(fees.stratum) }) : "")
-        + (rebateSats > 0 ? t("payout.rebateCredit", { amt: amtSats(rebateSats) }) : "")
-        + (unplaced > 1000 ? t("payout.carryFwdAmt", { amt: amtSats(unplaced) }) : "")
-        + (carryPaid > 1000 ? t("payout.carryBackAmt", { amt: amtSats(carryPaid) }) : "")
+      ? (rebateSats > 0 ? t("payout.datumSub") : t("payout.datumSubNone"))
       : "\u2014";
+    payoutFlow(p, cb, value);
+  }
+
+  // The same split as a six-step ledger: where the reward comes from, who has earned a cut and
+  // why, what each path pays, what goes out in this coinbase, what the DATUM subsidy is and
+  // why it is not an output, and what is left for the pool. Every number is the live figure
+  // from /api/coinbaser and /api/pool, so it reads as the coinbase Prime is issuing right now.
+  function payoutFlow(p, cb, value) {
+    const set = (id, html) => { const e = $(id); if (e) e.innerHTML = html; };
+    if (!$("cb-flow-reward")) return;
+    if (!value) {
+      for (const id of ["cb-flow-reward", "cb-flow-window", "cb-flow-fee", "cb-flow-paid", "cb-flow-datum", "cb-flow-pool"]) set(id, t("payout.flow.rewardWait"));
+      return;
+    }
+    const pr = p.prime || {};
+    const win = pr.window || {};
+    const minerSats = Number(cb.miner_sats) || 0;
+    const poolSats = Number(cb.pool_sats) || 0;
+    const feeSats = Number(cb.fee_sats) || 0;
+    const rebateSats = Number(cb.rebate_sats) || 0;
+    const rebateOwed = Number(cb.rebate_owed_sats) || 0;
+    const carryPaid = Number(cb.carry_paid_sats) || 0;
+    const carryTotal = Number(cb.carry_total_sats) || 0;
+    const deferred = Number(cb.deferred_sats) || 0;
+    const floor = Number(pr.min_payout_sats) || 0;
+    const n = Number(cb.miner_outputs) || 0;
+    const unpaid = (cb.unpaid || []).filter((u) => !u.reason || /floor|carried/i.test(u.reason)).length;
+    const ids = Number(win.identities) || Number(p.miners_in_window) || 0;
+    const nblocks = Number(cb.window_multiple) || Number(p.window_multiple) || 8;
+    const fill = Number.isFinite(Number(cb.window_fill_percent)) ? Number(cb.window_fill_percent) : Number(p.window_fill_percent) || 0;
+    const eff = Number.isFinite(Number(cb.effective_fee_percent)) ? Number(cb.effective_fee_percent) : (100 * feeSats / value);
+    const datumMiners = Number((p.fees || {}).datum_miners) || 0;
+
+    set("cb-flow-reward", t("payout.flow.reward", {
+      h: p.height ? num(Number(p.height) + 1) : "\u2014",
+      reward: amtSats(value) + money(value / 1e8),
+    }));
+    set("cb-flow-window", t("payout.flow.window", {
+      n: num(nblocks),
+      fill: pct(Math.min(100, fill), 0),
+      ids: num(ids),
+      datumPct: pct(fees.datumWorkPct, 1),
+      stratumPct: pct(fees.stratumWorkPct, 1),
+    }));
+    set("cb-flow-fee", fees.datum === fees.stratum
+      ? t("payout.flow.feeSame", { fee: feePct(fees.datum), feeAmt: amtSats(feeSats) })
+      : t("payout.flow.fee", { datum: feePct(fees.datum), stratum: feePct(fees.stratum), eff: pct(eff, 2), feeAmt: amtSats(feeSats) }));
+    set("cb-flow-paid", t("payout.flow.paid", {
+      minersAmt: amtSats(minerSats),
+      pct: pct(100 * minerSats / value, 1),
+      n: num(n),
+      carry: carryPaid > 1000 ? t("payout.flow.paidCarry", { carry: amtSats(carryPaid) }) : "",
+      floor: unpaid > 0 && deferred > 0 ? t("payout.flow.paidFloor", { n: unpaid, deferred: amtSats(deferred), floor: amtSats(floor) }) : "",
+    }));
+    set("cb-flow-datum", fees.rebate > 0
+      ? t("payout.flow.datum", {
+          pts: Pts(fees.rebate),
+          amt: amtSats(rebateSats) + money(rebateSats / 1e8),
+          n: num(datumMiners),
+          floor: amtSats(floor),
+          owed: rebateOwed > 1000 ? t("payout.flow.datumOwed", { owed: amtSats(rebateOwed) }) : "",
+        })
+      : t("payout.flow.datumOff"));
+    // Where the fee came from, spelled out in the pool's own step: with the gateway path at 0%
+    // nothing in this output is a cut of a gateway's share, and part of what the stratum paid
+    // leaves again as the subsidy.
+    const feeSource = fees.datum === 0
+      ? t("payout.flow.poolFeeDatumFree", {
+          stratum: feePct(fees.stratum),
+          giveBack: fees.rebate > 0 ? t("payout.flow.poolFeeGiveBack", { pts: pts(fees.rebate) }) : "",
+        })
+      : t("payout.flow.poolFeeBothPaths", { datum: feePct(fees.datum), stratum: feePct(fees.stratum) });
+    set("cb-flow-pool", poolSats > 0
+      ? t("payout.flow.pool", { amt: amtSats(poolSats), pct: pct(100 * poolSats / value, 2), source: feeSource, carryTotal: amtSats(carryTotal), holders: num(cb.carry_holders || 0) })
+      : t("payout.flow.poolNone", { source: feeSource, carryTotal: amtSats(carryTotal), holders: num(cb.carry_holders || 0) }));
+    $("cb-flow-datum")?.querySelector("[data-tab]")?.addEventListener("click", () => selectTab("tab-datum"));
   }
 
   // --------------------------------------------------------- payout donut
@@ -1152,11 +1228,11 @@
           output_count: Number(r.output_count) || outs.length,
           miner_btc: r.miner_btc != null ? Number(r.miner_btc) : outs.filter((o) => !o.pool).reduce((a, o) => a + o.btc, 0),
           pool_btc: r.pool_btc != null ? Number(r.pool_btc) : outs.filter((o) => o.pool).reduce((a, o) => a + o.btc, 0),
-          status: r.status, kind: r.kind, block_status: r.block_status, owed_sats: r.owed_sats, owed_txid: r.owed_txid, owed_resolved: r.owed_resolved, found_by: r.found_by, reward: r.reward_btc, confirmations: r.confirmations,
+          status: r.status, kind: r.kind, block_status: r.block_status, owed_sats: r.owed_sats, owed_txid: r.owed_txid, owed_resolved: r.owed_resolved, owed_status: r.owed_status, owed_payable_at: r.owed_payable_at, found_by: r.found_by, reward: r.reward_btc, confirmations: r.confirmations,
         });
         continue;
       }
-      const b = byHeight.get(key) || { height: r.height, hash: r.hash, ts: r.ts, outputs: [], miner_btc: 0, pool_btc: 0, status: r.status, kind: r.kind, block_status: r.block_status, owed_sats: r.owed_sats, owed_txid: r.owed_txid, owed_resolved: r.owed_resolved, found_by: r.found_by, reward: r.reward_btc, confirmations: r.confirmations };
+      const b = byHeight.get(key) || { height: r.height, hash: r.hash, ts: r.ts, outputs: [], miner_btc: 0, pool_btc: 0, status: r.status, kind: r.kind, block_status: r.block_status, owed_sats: r.owed_sats, owed_txid: r.owed_txid, owed_resolved: r.owed_resolved, owed_status: r.owed_status, owed_payable_at: r.owed_payable_at, found_by: r.found_by, reward: r.reward_btc, confirmations: r.confirmations };
       const combined = Number(r.miner_btc) || 0;
       if (r.to === "pool" && poolAddr && r.finder === poolAddr) {
         const parts = partsFor(r.hash, combined);
@@ -1182,7 +1258,7 @@
       if (!pb.hash || chainHashes.has(pb.hash)) continue;
       if (pb.status === "in chain") continue;
       const feeSats = pb.fee_sats != null ? pb.fee_sats : Math.max(0, (pb.pool_sats || 0) - (pb.miner_to_pool_sats || 0));
-      byHeight.set(pb.hash, { height: pb.height, hash: pb.hash, ts: pb.ts, outputs: (pb.split || []).map((o) => ({ address: o.address, btc: o.sats / 1e8 })), miner_btc: (pb.split || []).reduce((a, o) => a + o.sats, 0) / 1e8, pool_btc: feeSats / 1e8, status: pb.status, kind: pb.kind, block_status: pb.status, owed_sats: pb.owed_sats, owed_txid: pb.owed_txid, owed_resolved: pb.owed_resolved, found_by: pb.finder, reward: pb.coinbase_value / 1e8, prime_only: true });
+      byHeight.set(pb.hash, { height: pb.height, hash: pb.hash, ts: pb.ts, outputs: (pb.split || []).map((o) => ({ address: o.address, btc: o.sats / 1e8 })), miner_btc: (pb.split || []).reduce((a, o) => a + o.sats, 0) / 1e8, pool_btc: feeSats / 1e8, status: pb.status, kind: pb.kind, block_status: pb.status, owed_sats: pb.owed_sats, owed_txid: pb.owed_txid, owed_resolved: pb.owed_resolved, owed_status: pb.owed_status, owed_payable_at: pb.owed_payable_at, found_by: pb.finder, reward: pb.coinbase_value / 1e8, prime_only: true });
     }
     const blocks = [...byHeight.values()].sort((a, b) => (b.height || 0) - (a.height || 0));
     const tip = Number(pays.tip || p.height || 0);
@@ -1215,9 +1291,24 @@
       const stTitle = st === "immature" && confs
         ? t("blocks.confImm", { c: confs, need })
         : (st === "spendable" && confs ? t("blocks.confOk", { c: confs }) : "");
-      const owed = b.owed_txid
-        ? `<div class="faint">${t("blocks.windowPaid", { amt: b.owed_sats ? " " + amtSats(b.owed_sats) : "" })} · <a href="${esc(p.explorer)}/tx/${esc(b.owed_txid)}" target="_blank" rel="noreferrer" title="${esc(t("blocks.txPaidTitle"))}">tx ${shortHash(b.owed_txid)}</a></div>`
-        : (b.owed_sats ? `<div class="faint">${t("blocks.owed", { amt: amtSats(b.owed_sats) })}</div>` : "");
+      // What the block still owes the window and where the make-good stands. The fee
+      // wallet records its txid when it signs, so a txid alone does not mean paid.
+      const owedSt = String(b.owed_status || (b.owed_resolved ? "paid" : "")).toLowerCase();
+      const owedTx = b.owed_txid
+        ? ` · <a href="${esc(p.explorer)}/tx/${esc(b.owed_txid)}" target="_blank" rel="noreferrer" title="${esc(t(owedSt === "paid" ? "blocks.txPaidTitle" : "blocks.txMakegoodTitle"))}">tx ${shortHash(b.owed_txid)}</a>`
+        : "";
+      const owedAmt = b.owed_sats ? " " + amtSats(b.owed_sats) : "";
+      const owed = !b.owed_sats && !b.owed_txid
+        ? ""
+        : owedSt === "paid"
+          ? `<div class="faint">${t("blocks.windowPaid", { amt: owedAmt })}${owedTx}</div>`
+          : owedSt === "broadcast"
+            ? `<div class="faint">${t("blocks.owedBroadcast", { amt: owedAmt })}${owedTx}</div>`
+            : owedSt === "queued"
+              ? `<div class="faint">${t("blocks.owedQueued", { amt: owedAmt, height: b.owed_payable_at ? Number(b.owed_payable_at).toLocaleString() : "\u2014" })}${owedTx}</div>`
+              : owedSt === "failed"
+                ? `<div class="faint">${t("blocks.owedFailed", { amt: owedAmt })}${owedTx}</div>`
+                : `<div class="faint">${t("blocks.owed", { amt: amtSats(b.owed_sats) })}</div>`;
       return `<tr class="block-row" data-i="${i}" tabindex="0" aria-expanded="false">
         <td class="num"><span class="disclose"></span>${b.height ?? "\u2014"}</td>
         <td>${b.hash ? `<a href="${esc(p.explorer)}/block/${esc(b.hash)}" target="_blank" rel="noreferrer" title="${esc(t("blocks.openMempool"))}">${shortHash(b.hash)}</a>` : "\u2014"}</td>

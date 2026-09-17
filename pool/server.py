@@ -28,7 +28,7 @@ NO_WRITE = os.environ.get("POOL_UI_NO_WRITE") == "1"
 
 POOL_FEE = float(CONF.get("pool_fee_percent", 0))
 # Public-stratum fee when primed is not answering; primed's stats.json is authoritative.
-STRATUM_FEE = float(CONF.get("stratum_fee_percent", 10.0))
+STRATUM_FEE = float(CONF.get("stratum_fee_percent", 15.0))
 STRATUM_HOST = CONF.get("stratum_host", "27.69.0.25")
 STRATUM_PORT = int(CONF.get("stratum_port", 23334))
 DATUM_URL = CONF.get("datum_url", "http://127.0.0.1:7152")
@@ -97,6 +97,26 @@ def apply_owed_settlement(row):
     else:
         row.setdefault("owed_txid", "")
         row.setdefault("owed_resolved", False)
+    return row
+
+
+def stamp_owed_status(row, tip=None):
+    """Where a block's make-good stands (owed/queued/broadcast/paid/failed), on a block row
+    that owes the window something. The fee wallet records its txid at signing time, so a
+    txid alone does not mean paid; `owed_resolved` is made to mean exactly that."""
+    if int(row.get("owed_sats") or 0) <= 0 or not row.get("height"):
+        row.setdefault("owed_status", "")
+        row.setdefault("owed_payable_at", 0)
+        return row
+    if tip is None:
+        tip = int(rpc("getblockcount") or 0)
+    ms = makegood_status(row["height"], row.get("hash"), tip)
+    row["owed_status"] = ms["status"]
+    row["owed_payable_at"] = ms["payable_at"]
+    row["owed_blocks_to_payable"] = ms["blocks_to_payable"]
+    if ms["txid"]:
+        row["owed_txid"] = ms["txid"]
+    row["owed_resolved"] = ms["status"] == "paid"
     return row
 
 # primed's stats.json, fetched at most every few seconds and kept as the last good copy.
@@ -566,21 +586,23 @@ LEDGER_HR_WINDOW_S = int(CONF.get("ledger_hr_window_s", 600))
 _ledger_hr_cache = {"ts": 0.0, "by_addr": {}, "pool_ghs": 0.0, "age": {}}
 # Lifetime finds per gateway, from primed's blocks.jsonl (survives Prime restarts).
 _block_log_cache = {"sig": None, "found": {}, "finder": {}, "n": 0}
+_block_log_latest_cache = {"sig": None, "latest": {}}
 
 
-def gateway_finds_from_log():
-    """Non-orphan finds per gateway signing-key prefix, latest line per block hash.
+def _block_log_latest():
+    """(signature, hash -> latest record) from primed's blocks.jsonl.
 
-    primed's in-memory client.block_candidates resets on restart; this file does not.
-    """
+    The log is append-only and primed writes a line per state change (pending, submitted,
+    settled), so the last line for a hash is the one that counts. Parsed once per change of
+    the file; every reader below shares this copy."""
     try:
         st = BLOCKS_LOG.stat()
         sig = (st.st_mtime_ns, st.st_size)
     except OSError:
-        return {}, {}, 0
-    cached = _block_log_cache
-    if cached["sig"] == sig:
-        return cached["found"], cached["finder"], cached["n"]
+        return None, {}
+    c = _block_log_latest_cache
+    if c["sig"] == sig:
+        return sig, c["latest"]
     latest = {}
     try:
         with BLOCKS_LOG.open() as f:
@@ -596,7 +618,22 @@ def gateway_finds_from_log():
                 if h:
                     latest[h] = rec
     except OSError:
+        return None, {}
+    c.update(sig=sig, latest=latest)
+    return sig, latest
+
+
+def gateway_finds_from_log():
+    """Non-orphan finds per gateway signing-key prefix, latest line per block hash.
+
+    primed's in-memory client.block_candidates resets on restart; this file does not.
+    """
+    sig, latest = _block_log_latest()
+    if sig is None:
         return {}, {}, 0
+    cached = _block_log_cache
+    if cached["sig"] == sig:
+        return cached["found"], cached["finder"], cached["n"]
     found = {}
     finder = {}
     last_ts = {}
@@ -615,6 +652,276 @@ def gateway_finds_from_log():
     n = sum(found.values())
     cached.update(sig=sig, found=found, finder=finder, n=n)
     return found, finder, n
+
+
+# --- Make-goods: what a partial or pool-only coinbase still owes each identity -------------
+# A gateway that publishes a coinbase with fewer outputs than the split Prime issued (a
+# "partial"), or with none at all ("pool-only"), leaves the dropped payees unpaid by that
+# block. primed records the issued split and the shortfall (`owed_sats`) in blocks.jsonl and
+# clears those payees' carry there and then; the fee wallet signs a make-good spending the
+# reserved pool output back to them, parks it in makegood-queue/pending until the coinbase
+# matures at height + 100, and makegood-queue.py broadcasts it. From the miner's side that
+# used to look like carry vanishing with no output to show for it, so every step is a row
+# here: owed -> queued -> broadcast -> paid.
+MAKEGOOD_QUEUE = Path(CONF.get("makegood_queue", "/home/umbrel/blake2b/makegood-queue"))
+MAKEGOOD_KINDS = ("partial", "pool-only")
+# Statuses that still count as money on its way; "paid" and "failed" do not.
+MAKEGOOD_PENDING = ("owed", "queued", "broadcast")
+_makegood_owed_cache = {"sig": None, "rows": []}
+_makegood_jobs_cache = {"sig": None, "jobs": {}}
+_makegood_tx_cache = {}  # txid -> (checked_at, confirmations or None)
+
+
+def _split_items(rec):
+    """[(address, sats)] of the split primed issued for a block, in coinbase order."""
+    items = []
+    for x in rec.get("split") or []:
+        try:
+            if isinstance(x, dict):
+                a, s = x.get("address") or x.get("identity") or "", x.get("sats") or 0
+            else:
+                a, s = x[0], x[1]
+            a, s = str(a or ""), int(s or 0)
+        except (TypeError, ValueError, IndexError):
+            continue
+        if a and s > 0:
+            items.append((a, s))
+    return items
+
+
+def makegood_unpaid(rec, onchain_sats, pool_addr):
+    """(address, sats) the block's coinbase left unpaid out of the split primed issued.
+
+    The same rule the fee wallet signs by, so what this page promises is what the make-good
+    pays: walk the issued split in order, and an entry is unpaid when its address has no
+    on-chain coinbase value left to cover it. The pool's own share is never owed to anyone.
+    A pool-only coinbase has no miner outputs, so everything but the pool share is unpaid."""
+    remaining = dict(onchain_sats or {})
+    unpaid = []
+    for addr, sats in _split_items(rec):
+        if addr == pool_addr:
+            continue
+        if remaining.get(addr, 0) <= 0:
+            unpaid.append((addr, sats))
+        else:
+            remaining[addr] -= sats
+    return unpaid
+
+
+def makegood_owed_rows():
+    """One row per (block, address) that a partial or pool-only block owes: primed's record
+    of the issued split, against what the coinbase actually paid. Cached on blocks.jsonl."""
+    sig, latest = _block_log_latest()
+    if sig is None:
+        return []
+    c = _makegood_owed_cache
+    if c["sig"] == sig:
+        return c["rows"]
+    prime_pool = str(((prime_doc().get("pool") or {}).get("address")) or "")
+    rows = []
+    complete = True
+    for rec in latest.values():
+        kind = str(rec.get("kind") or "")
+        owed = int(rec.get("owed_sats") or 0)
+        if kind not in MAKEGOOD_KINDS or owed <= 0:
+            continue
+        h = str(rec.get("hash") or "")
+        height = int(rec.get("height") or 0)
+        if not h or not height:
+            continue
+        by = coinbase_splits(h)
+        if by is None:
+            complete = False  # RPC miss: answer with what we have, do not cache it as the truth
+            continue
+        onchain = {a: int(round(float(b) * 1e8)) for a, b in by.items()}
+        # A pool-only coinbase names the pool address itself; use it when Prime is not up.
+        pool_addr = prime_pool or (next(iter(onchain)) if kind == "pool-only" and len(onchain) == 1 else "")
+        unpaid = makegood_unpaid(rec, {} if kind == "pool-only" else onchain, pool_addr)
+        total = sum(s for _, s in unpaid)
+        # primed books a pool-only block's whole issued split as owed, the pool's own share
+        # included (it is repaid to the pool as change); a partial's `owed_sats` is the
+        # dropped payees alone. Same identity the fee wallet checks before signing.
+        if kind == "pool-only":
+            total += sum(s for a, s in _split_items(rec) if a == pool_addr)
+        for addr, sats in unpaid:
+            rows.append(
+                {
+                    "height": height,
+                    "hash": h,
+                    "ts": int(rec.get("ts") or 0),
+                    "kind": kind,
+                    "address": addr,
+                    "sats": sats,
+                    # The unpaid tail summing to primed's own `owed_sats` is the check the fee
+                    # wallet makes before it signs; when it fails this row is an estimate.
+                    "verified": total == owed,
+                }
+            )
+    if complete:
+        c.update(sig=sig, rows=rows)
+    return rows
+
+
+def makegood_jobs():
+    """makegood-<height> -> the fee wallet's queue job, with `state` pending|sent|failed.
+
+    The job files are small and a job moves between the three folders exactly once, so the
+    folders' mtimes are the cache key."""
+    sig = []
+    for folder in ("pending", "sent", "failed"):
+        try:
+            sig.append((folder, (MAKEGOOD_QUEUE / folder).stat().st_mtime_ns))
+        except OSError:
+            sig.append((folder, None))
+    sig = tuple(sig)
+    c = _makegood_jobs_cache
+    if c["sig"] == sig:
+        return c["jobs"]
+    jobs = {}
+    for folder, mtime in sig:
+        if mtime is None:
+            continue
+        for p in sorted((MAKEGOOD_QUEUE / folder).glob("makegood-*.json")):
+            try:
+                job = json.loads(p.read_text())
+            except (OSError, ValueError):
+                continue
+            if not isinstance(job, dict):
+                continue
+            job = dict(job)
+            job["state"] = folder
+            jobs[str(job.get("id") or p.stem)] = job
+    c.update(sig=sig, jobs=jobs)
+    return jobs
+
+
+def tx_confirmations(txid):
+    """Confirmations of a transaction, 0 while it sits in the mempool, None if nothing knows
+    it yet. The node answers for the mempool and, with txindex, for the chain; the explorer
+    covers the rest. Cached, longer once the answer can no longer change much."""
+    txid = str(txid or "").lower()
+    if not _BLOCKHASH_RE.match(txid):
+        return None
+    now = time.time()
+    hit = _makegood_tx_cache.get(txid)
+    if hit and now - hit[0] < (600.0 if (hit[1] or 0) >= 6 else 60.0):
+        return hit[1]
+    confs = None
+    raw = rpc("getrawtransaction", [txid, True])
+    if isinstance(raw, dict):
+        confs = int(raw.get("confirmations") or 0)
+    else:
+        try:
+            st = json.loads(curl(f"{MEMPOOL_API.rstrip('/')}/api/tx/{txid}/status", timeout=3) or "null")
+        except (ValueError, TypeError):
+            st = None
+        if isinstance(st, dict):
+            if st.get("confirmed") and st.get("block_height"):
+                tip = int(rpc("getblockcount") or 0)
+                confs = max(1, tip - int(st["block_height"]) + 1) if tip else 1
+            else:
+                confs = 0
+    _makegood_tx_cache[txid] = (now, confs)
+    return confs
+
+
+def makegood_status(height, blockhash, tip, jobs=None, settlements=None):
+    """Where the make-good for one block stands.
+
+    owed      primed has booked the debt; the fee wallet has not signed a payment yet
+              (it normally does within a minute of the block).
+    queued    signed and waiting: a coinbase output cannot be spent before height + 100.
+    broadcast sent to the network, not yet in a block.
+    paid      confirmed on chain.
+    failed    the node refused the transaction; needs an operator."""
+    jobs = makegood_jobs() if jobs is None else jobs
+    settlements = owed_settlements() if settlements is None else settlements
+    payable_at = int(height) + MATURITY_CONFS
+    out = {
+        "payable_at": payable_at,
+        "blocks_to_payable": max(0, payable_at - int(tip)) if tip else MATURITY_CONFS,
+        "status": "owed",
+        "txid": "",
+        "confirmations": 0,
+        "sent_at": None,
+    }
+    job = jobs.get(f"makegood-{int(height)}")
+    settlement = settlements.get(str(blockhash or "").lower())
+    check = False
+    if job:
+        out["txid"] = str(job.get("txid") or job.get("expected_txid") or "")
+        out["sent_at"] = job.get("sent_at")
+        state = job.get("state")
+        if state == "failed":
+            out["status"] = "failed"
+        elif state == "sent":
+            out["status"], check = "broadcast", True
+        else:
+            out["status"] = "queued"
+    elif settlement:
+        # Recorded by hand or by the fee wallet at signing time; the chain says the rest.
+        out["txid"] = str(settlement.get("txid") or "")
+        out["status"], check = "queued", True
+    if check and out["txid"]:
+        confs = tx_confirmations(out["txid"])
+        if confs is not None:
+            out["confirmations"] = confs
+            out["status"] = "paid" if confs >= 1 else "broadcast"
+    return out
+
+
+def makegood_rows_for(address, tip=None):
+    """This address's make-goods, newest first, each with where its payment stands."""
+    rows = [dict(r) for r in makegood_owed_rows() if r["address"] == address]
+    if not rows:
+        return []
+    if tip is None:
+        tip = int(rpc("getblockcount") or 0)
+    jobs = makegood_jobs()
+    settlements = owed_settlements()
+    for r in rows:
+        r.update(makegood_status(r["height"], r["hash"], tip, jobs, settlements))
+        r["btc"] = r["sats"] / 1e8
+    rows.sort(key=lambda r: -r["height"])
+    return rows
+
+
+def makegoods_payload():
+    """Every make-good the pool owes or has paid, one row per block, for /api/makegoods."""
+    tip = int(rpc("getblockcount") or 0)
+    jobs = makegood_jobs()
+    settlements = owed_settlements()
+    by_block = {}
+    for r in makegood_owed_rows():
+        b = by_block.get(r["hash"])
+        if b is None:
+            b = by_block[r["hash"]] = {
+                "height": r["height"],
+                "hash": r["hash"],
+                "ts": r["ts"],
+                "kind": r["kind"],
+                "owed_sats": 0,
+                "payees": 0,
+                "verified": True,
+            }
+        b["owed_sats"] += r["sats"]
+        b["payees"] += 1
+        b["verified"] = b["verified"] and bool(r["verified"])
+    blocks = []
+    for b in by_block.values():
+        b.update(makegood_status(b["height"], b["hash"], tip, jobs, settlements))
+        blocks.append(b)
+    blocks.sort(key=lambda b: -b["height"])
+    pending = [b for b in blocks if b["status"] in MAKEGOOD_PENDING]
+    return {
+        "tip": tip,
+        "maturity_confs": MATURITY_CONFS,
+        "pending_sats": sum(b["owed_sats"] for b in pending),
+        "pending_blocks": len(pending),
+        "paid_sats": sum(b["owed_sats"] for b in blocks if b["status"] == "paid"),
+        "failed_blocks": sum(1 for b in blocks if b["status"] == "failed"),
+        "blocks": blocks,
+    }
 
 
 def _merge_persistent_gateway_finds(clients):
@@ -1651,6 +1958,10 @@ def _fetch_overflow():
                 "connected_s": int(p.get("connected_s") or 0),
                 "submits": int(p.get("submits") or 0),
                 "accepted": int(p.get("accepted") or 0),
+                "rejected": int(p.get("rejected") or 0),
+                # The upstream's own words for the last share it refused. Without it a relay
+                # that is submitting steadily and being rejected reads as a healthy one.
+                "last_reject": str(p.get("last_reject") or ""),
                 "via": "relayed",
                 "online": True,
             }
@@ -1907,7 +2218,7 @@ def pool_output_parts(pool_addr, on_chain_btc, pb, reward_btc=None):
     """Split a pool-address coinbase output into miner TIDES share vs fee.
 
     Anyone who mines to the pool wallet (the S11 does) lands in the same
-    script as the 0.5% fee. On-chain those are one output; the issued
+    script as the pool fee. On-chain those are one output; the issued
     split still knows the miner share, so the fee is the remainder.
     """
     total = float(on_chain_btc or 0)
@@ -2849,10 +3160,12 @@ def prime_summary():
     blocks = [_block_row(b) for b in meta.get("blocks") or []]
     blocks.sort(key=lambda b: -(b["height"] or 0))
     pool_addr = pool.get("address") or ""
+    tip = int(rpc("getblockcount") or 0) if any(int(b.get("owed_sats") or 0) > 0 for b in blocks) else 0
     for b in blocks:
         miner_to_pool = sum(int(o.get("sats") or 0) for o in b["split"] if o.get("address") == pool_addr)
         b["miner_to_pool_sats"] = miner_to_pool
         b["fee_sats"] = max(0, int(b.get("pool_sats") or 0) - miner_to_pool)
+        stamp_owed_status(b, tip)
     try:
         fee_bps = _bps_or(pool.get("fee_bps"), POOL_FEE * 100)
     except (TypeError, ValueError):
@@ -3379,8 +3692,8 @@ def miner_payload(address):
     share = (hr / net_ghs) if net_ghs else 0
     miner_need = hashes_per_block(node.get("difficulty"))
     miner_hs = float(hr or 0) * 1e9
-    # Billed at the rate for the path this address's window work is on (2% public
-    # stratum, 0.5% own gateway), not the DATUM rate for everyone.
+    # Billed at the rate for the path this address's window work is on (15% public
+    # stratum, 0% own gateway), not a single rate for everyone.
     path_fee = _fee_percent_for_path(
         pinfo.get("fee_path") or ("stratum" if any((m.get("via") or "stratum") == "stratum" for m in recs) else "datum")
     )
@@ -3430,7 +3743,7 @@ def miner_payload(address):
         if amt <= 0:
             continue
         reward_split = sum(splits.values()) or 1.0
-        # Mining to the pool wallet must not count the 0.5% fee as miner earnings.
+        # Mining to the pool wallet must not count the pool fee as miner earnings.
         pool_addr = ((prime_doc().get("pool") or {}).get("address") or "")
         if pool_addr and address == pool_addr:
             pb = next((b for b in (prime_doc().get("blocks") or []) if b.get("hash") == fb["hash"]), None)
@@ -3546,6 +3859,12 @@ def miner_payload(address):
     if best >= _PRIME_HR_CAP_GHS:
         best = hr
     win = tides_window_snapshot()
+    # What partial and pool-only blocks still owe this address, and where each payment
+    # stands. A payee those coinbases dropped had its carry cleared into the debt, so
+    # without these rows the balance looked wiped; with them every satoshi has a row.
+    makegoods = makegood_rows_for(address, tip) if address else []
+    mg_pending = [r for r in makegoods if r["status"] in MAKEGOOD_PENDING]
+    known = known or bool(makegoods)
     out = {
         "address": address if known else "",
         "known": known,
@@ -3598,6 +3917,15 @@ def miner_payload(address):
         "unpaid_btc": 0.0,
         "immature_btc": immature_btc,
         "immature_blocks": immature_blocks,
+        # Make-goods: the split a partial or pool-only coinbase owed this address but did
+        # not place, paid later from the pool's reserved output. `makegoods` is the full
+        # ledger; the totals are the pending (owed, queued or broadcast) and paid sums.
+        "makegoods": makegoods,
+        "makegood_pending_btc": sum(r["sats"] for r in mg_pending) / 1e8,
+        "makegood_pending_blocks": len(mg_pending),
+        "makegood_next_payable_at": min((r["payable_at"] for r in mg_pending), default=0),
+        "makegood_paid_btc": sum(r["sats"] for r in makegoods if r["status"] == "paid") / 1e8,
+        "makegood_failed_blocks": sum(1 for r in makegoods if r["status"] == "failed"),
         "tip_height": int(tip or 0),
         "maturity_confs": MATURITY_CONFS,
         "hr_1h_ghs": hr_1h,
@@ -3678,6 +4006,8 @@ def _collapse_found_payouts(rows):
                 "owed_sats": row.get("owed_sats") or 0,
                 "owed_txid": row.get("owed_txid") or "",
                 "owed_resolved": bool(row.get("owed_resolved")),
+                "owed_status": row.get("owed_status") or "",
+                "owed_payable_at": row.get("owed_payable_at") or 0,
                 "found_by": row.get("found_by") or "",
                 "gateway": row.get("gateway") or "",
                 "reward_btc": row.get("reward_btc"),
@@ -3733,7 +4063,7 @@ _SEO_PAGES = {
                 "Mine Bitcoin (XBT / BTCB2) with any Siacoin BLAKE2b ASIC — Goldshell SC, iBeLink BM-S3, "
                 "Antminer A3. The first pool to pay TIDES as a split coinbase on this BIP-110 Bitcoin fork's "
                 "mainnet, and the first to subsidize DATUM miners with its own stratum hashers. 0% via DATUM, "
-                "10% public stratum (stratum+tcp://stratum.awokenlazarus.xyz:23334)."
+                "15% public stratum (stratum+tcp://stratum.awokenlazarus.xyz:23334)."
             ),
             "scroll": "",
         },
@@ -3742,7 +4072,7 @@ _SEO_PAGES = {
             "description": (
                 "用任何能挖 Siacoin 的 BLAKE2b ASIC 挖比特币（XBT / BTCB2）——金贝 SC、iBeLink BM-S3、蚂蚁 A3。"
                 "本矿池是这条 BIP-110 比特币分叉主网上第一家用 TIDES 拆分 coinbase 支付的矿池，也是第一家"
-                "用自有 stratum 算力补贴 DATUM 矿工的矿池。自建 DATUM 0%，公共 stratum 10%"
+                "用自有 stratum 算力补贴 DATUM 矿工的矿池。自建 DATUM 0%，公共 stratum 15%"
                 "（stratum+tcp://stratum.awokenlazarus.xyz:23334）。"
             ),
             "scroll": "",
@@ -4009,7 +4339,7 @@ _POOL_TABLE_EN = """<div class="seo-table"><table>
         <caption>BLAKE2b Bitcoin (XBT / BTCB2) pools, as each publishes its own terms, September 2026</caption>
         <thead><tr><th scope="col">Pool</th><th scope="col">Fee</th><th scope="col">Reward scheme</th><th scope="col">Who holds your coins</th><th scope="col">The block's transaction fees</th><th scope="col">Limit on its own share</th></tr></thead>
         <tbody>
-        <tr><th scope="row">Lazarus Pool</th><td>0% own DATUM gateway · 10% public stratum, five of those points paid back to DATUM miners</td><td>TIDES, 8&times; difficulty</td><td>Nobody. The block's coinbase pays your address</td><td>Scale every miner's payout up</td><td>25%, enforced by relaying new miners elsewhere</td></tr>
+        <tr><th scope="row">Lazarus Pool</th><td>0% own DATUM gateway · 15% public stratum, 7.5 of those points paid back to DATUM miners</td><td>TIDES, 8&times; difficulty</td><td>Nobody. The block's coinbase pays your address</td><td>Scale every miner's payout up</td><td>25%, enforced by relaying new miners elsewhere</td></tr>
         <tr><th scope="row">B2Pool</th><td>0% own DATUM gateway · 1% stratum</td><td>TIDES, 8&times; difficulty</td><td>Coinbase where it fits, otherwise the pool until your balance passes 10,000 sat</td><td>Stay with the pool</td><td>None published</td></tr>
         <tr><th scope="row">AlphaPool</th><td>2.5%</td><td>PPLNS</td><td>The pool, until a block reaches 100-confirmation maturity and a batch cycle pays out</td><td>Not published</td><td>30%, pledged after it passed 50% of the network</td></tr>
         </tbody>
@@ -4019,7 +4349,7 @@ _POOL_TABLE_ZH = """<div class="seo-table"><table>
         <caption>BLAKE2b 比特币（XBT / BTCB2）矿池对比，均按各家自行公布的口径，2026 年 9 月</caption>
         <thead><tr><th scope="col">矿池</th><th scope="col">手续费</th><th scope="col">奖励方式</th><th scope="col">谁替你拿着币</th><th scope="col">区块里的交易费</th><th scope="col">自身占比上限</th></tr></thead>
         <tbody>
-        <tr><th scope="row">Lazarus Pool</th><td>自建 DATUM 网关 0% · 公共 stratum 10%，其中五个点返还给 DATUM 矿工</td><td>TIDES，难度 8 倍</td><td>没有人。由区块的 coinbase 直接付到你的地址</td><td>等比例抬高每位矿工的收益</td><td>25%，超过即把新矿工中继到别家</td></tr>
+        <tr><th scope="row">Lazarus Pool</th><td>自建 DATUM 网关 0% · 公共 stratum 15%，其中 7.5 个点返还给 DATUM 矿工</td><td>TIDES，难度 8 倍</td><td>没有人。由区块的 coinbase 直接付到你的地址</td><td>等比例抬高每位矿工的收益</td><td>25%，超过即把新矿工中继到别家</td></tr>
         <tr><th scope="row">B2Pool</th><td>自建 DATUM 网关 0% · stratum 1%</td><td>TIDES，难度 8 倍</td><td>能进 coinbase 就进，否则由矿池代持至余额超过 10,000 sat</td><td>留给矿池</td><td>未公布</td></tr>
         <tr><th scope="row">AlphaPool</th><td>2.5%</td><td>PPLNS</td><td>矿池代持，直到区块达到 100 确认成熟并由批量周期支付</td><td>未公布</td><td>30%，在占到全网一半以上之后承诺</td></tr>
         </tbody>
@@ -4096,11 +4426,11 @@ _SEO_INTRO = {
     "/datum-subsidy": {
         "en": ("The DATUM subsidy: getting paid to decentralize", [
             "Running your own DATUM gateway against your own Bitcoin Knots node means you build the block template and choose the transactions in it. The pool only supplies the coinbase split and verifies your shares. That work costs you nothing in fees here — DATUM miners pay 0% — and it moves template construction out of the pool's hands, which is the part of mining centralization that actually matters.",
-            "Lazarus Pool is the first pool anywhere to fund a subsidy for that from its own stratum hashers. The public stratum charges 10%, and five of those points are not kept: on every block found they are credited pro rata to every DATUM miner holding work in the window, whether or not that miner's template produced the block. Decentralizing the network pays better than using the pool's own stratum, which is the incentive the right way round. <a href=\"/connect\">Gateway setup and the config to copy.</a>",
+            "Lazarus Pool is the first pool anywhere to fund a subsidy for that from its own stratum hashers. The public stratum charges 15%, and 7.5 of those points are not kept: on every block found they are credited pro rata to every DATUM miner holding work in the window, whether or not that miner's template produced the block. Decentralizing the network pays better than using the pool's own stratum, which is the incentive the right way round. <a href=\"/connect\">Gateway setup and the config to copy.</a>",
         ]),
         "zh": ("DATUM 补贴：为去中心化拿钱", [
             "用自己的 Bitcoin Knots 节点跑自己的 DATUM 网关，意味着区块模板由你构建、交易由你挑选，矿池只提供 coinbase 拆分并校验你的份额。在这里这件事不收你一分手续费——DATUM 矿工 0%——而且它把模板构建权从矿池手里移走，那才是挖矿中心化真正要紧的一环。",
-            "Lazarus Pool 是全网第一家用自有 stratum 算力为此出资补贴的矿池。公共 stratum 收 10%，其中五个点并不留下：每找到一个区块，就按比例记给窗口内每一位 DATUM 矿工，无论那个区块是不是由他的模板产出。让网络去中心化比用矿池的 stratum 更赚钱——激励方向本该如此。<a href=\"/connect\">网关配置与可直接复制的 config。</a>",
+            "Lazarus Pool 是全网第一家用自有 stratum 算力为此出资补贴的矿池。公共 stratum 收 15%，其中 7.5 个点并不留下：每找到一个区块，就按比例记给窗口内每一位 DATUM 矿工，无论那个区块是不是由他的模板产出。让网络去中心化比用矿池的 stratum 更赚钱——激励方向本该如此。<a href=\"/connect\">网关配置与可直接复制的 config。</a>",
         ]),
     },
     "/profitability": {
@@ -4126,11 +4456,11 @@ _SEO_INTRO = {
     "/connect": {
         "en": ("Connect a miner to Lazarus Pool", [
             "Point the miner at <b>stratum+tcp://stratum.awokenlazarus.xyz:23334</b>, set the username to the address you want paid — optionally <code>address.worker</code> — and the password to <code>x</code>. The algorithm is BLAKE2b with a Sia-style header, not SHA-256d. New sessions start at difficulty 4096 and vardiff steps up toward your hashrate from there. There is no account and no registration; the username is the payout instruction.",
-            "There are two ways in. The public stratum charges 10% and our node builds the templates, which is the one-line setup. Running your own Bitcoin Knots node and DATUM gateway costs 0% and pays you a <a href=\"/datum-subsidy\">share of that stratum fee</a> on every block, because you are building the templates yourself. Both land in the same TIDES window under your address, so switching later keeps the accepted work you already have.",
+            "There are two ways in. The public stratum charges 15% and our node builds the templates, which is the one-line setup. Running your own Bitcoin Knots node and DATUM gateway costs 0% and pays you a <a href=\"/datum-subsidy\">share of that stratum fee</a> on every block, because you are building the templates yourself. Both land in the same TIDES window under your address, so switching later keeps the accepted work you already have. For a longer Knots + DATUM walkthrough, use <a href=\"https://convoy.xyz/getstarted\">CONVOY’s get-started guide</a> (also in <a href=\"https://convoy.xyz/getstarted?lang=zh\">中文</a>), then come back here for this pool’s host, port, and pubkey.",
         ]),
         "zh": ("把矿机接入 Lazarus Pool", [
             "把矿机指向 <b>stratum+tcp://stratum.awokenlazarus.xyz:23334</b>，用户名填你要收款的地址（也可以写成 <code>地址.worker</code>），密码填 <code>x</code>。算法是 BLAKE2b（Sia 风格区块头），不是 SHA-256d。新会话从难度 4096 起步，之后 vardiff 会朝你的算力逐步调整。没有账户，也不用注册——用户名就是收款指令。",
-            "有两条路。公共 stratum 收 10%，模板由我们的节点构建，配置只有一行。自己跑 Bitcoin Knots 节点和 DATUM 网关则是 0%，而且因为模板是你自己构建的，每个区块还会把<a href=\"/datum-subsidy\">那笔 stratum 手续费的一部分</a>付给你。两条路都记入同一个 TIDES 窗口、同一个地址，所以以后切换不会丢掉已积累的工作量。",
+            "有两条路。公共 stratum 收 15%，模板由我们的节点构建，配置只有一行。自己跑 Bitcoin Knots 节点和 DATUM 网关则是 0%，而且因为模板是你自己构建的，每个区块还会把<a href=\"/datum-subsidy\">那笔 stratum 手续费的一部分</a>付给你。两条路都记入同一个 TIDES 窗口、同一个地址，所以以后切换不会丢掉已积累的工作量。更完整的 Knots + DATUM 说明见 <a href=\"https://convoy.xyz/getstarted?lang=zh\">CONVOY 入门指南（中文）</a>（<a href=\"https://convoy.xyz/getstarted\">English</a>），然后回到本页填写本池的主机、端口和公钥。",
         ]),
     },
     "/mine-xbt": {
@@ -4157,25 +4487,25 @@ _SEO_INTRO = {
         "en": ("Which XBT (BTCB2) pool should you point hashrate at?", [
             "The fee is the number everyone compares first and the least interesting of the four things that actually differ between pools on this chain. The others: whether the pool ever holds your coins, whether the transaction fees in a found block reach the miners or stay with the operator, and whether the pool does anything at all to limit its own share of the network.",
             _POOL_TABLE_EN,
-            "Read that honestly and our public stratum is the expensive one. If you have no intention of running a node, 1% elsewhere beats 10% here and we would rather say so than pretend otherwise. What that 10% buys is the other column: five of those points are handed back to DATUM miners on every block found, which is why the path we actually recommend costs 0% and gets paid a bonus on top of a full window share.",
+            "Read that honestly and our public stratum is the expensive one. If you have no intention of running a node, 1% elsewhere beats 15% here and we would rather say so than pretend otherwise. What that 15% buys is the other column: 7.5 of those points are handed back to DATUM miners on every block found, which is why the path we actually recommend costs 0% and gets paid a bonus on top of a full window share.",
             "The rest of the table is where nothing else on this chain matches. Transaction fees in a block scale every payout up here instead of staying with the pool. Nothing is ever held — the block itself pays your address, so there is no balance, threshold or withdrawal. And past 25% of network hashrate this pool <a href=\"/self-cap\">turns new miners away</a> and hands them to someone else. Figures are as each pool published them in September 2026; check their sites before you commit a fleet, and see the pools we relay to below.",
         ]),
         "zh": ("XBT（BTCB2）该挖哪个矿池？", [
             "手续费是所有人第一个拿来比的数字，也是本链各矿池之间真正有差别的四件事里最不重要的一件。另外三件是：矿池会不会替你保管币、所出区块里的交易费是分给矿工还是留给运营者，以及这家矿池有没有采取任何措施限制自己在全网中的占比。",
             _POOL_TABLE_ZH,
-            "如实来看，我们的公共 stratum 是贵的那一个。如果你完全不打算自己跑节点，别家 1% 就是比这里 10% 划算，我们宁愿直说，也不想装作不是。这 10% 换来的是隔壁那一列：其中五个点在每次出块时都会返还给 DATUM 矿工——这也正是我们真正推荐的那条路为什么是 0%，而且在拿到完整窗口份额之外还额外拿补贴。",
+            "如实来看，我们的公共 stratum 是贵的那一个。如果你完全不打算自己跑节点，别家 1% 就是比这里 15% 划算，我们宁愿直说，也不想装作不是。这 15% 换来的是隔壁那一列：其中 7.5 个点在每次出块时都会返还给 DATUM 矿工——这也正是我们真正推荐的那条路为什么是 0%，而且在拿到完整窗口份额之外还额外拿补贴。",
             "表格剩下的部分，本链目前没有别家能对上。这里区块中的交易费会等比例抬高每一笔支付，而不是留在矿池。任何时候都不代持——由区块本身付到你的地址，因此没有余额、没有起付线、不用提现。而且一旦超过全网 25% 的算力，本矿池会<a href=\"/self-cap\">把新矿工拒之门外</a>并转交给别家。表中数字为各矿池 2026 年 9 月自行公布的口径；投入整批机器前请先到各家网站核对，也可以看下方我们中继过去的矿池。",
         ]),
     },
     "/self-cap": {
         "en": ("A pool that turns hashrate away at 25%", [
             "On a chain this size one pool can pass a third of the network in an afternoon, and in September 2026 one did — past half of all BTCB2 hashrate, followed by a patch proposed in earnest to blacklist that pool's payout address at the consensus level, which the Knots maintainer publicly told people not to run. The hashrate came back down voluntarily. Nothing about the episode was fixed by it.",
-            "Lazarus holds itself to 25%. Over that line a <em>new</em> stratum connection is not accepted and mined on our behalf: it is relayed to one of four other pools and paid by that pool, under the same address, with nothing credited to our window. Miners already here keep mining here. Own-gateway DATUM miners are never relayed, because a miner building their own block templates is not the thing that centralizes a chain. New miners come back automatically once we are under the line.",
+            "Lazarus holds itself to 25%. Over that line a <em>new</em> stratum connection is not accepted and mined on our behalf: it is relayed to one of five other pools and paid by that pool, under the same address, with nothing credited to our window. Miners already here keep mining here. Own-gateway DATUM miners are never relayed, because a miner building their own block templates is not the thing that centralizes a chain. New miners come back automatically once we are under the line.",
             "This is in the connection path rather than in a pledge — the live network share and the count of connections being relayed right now are both on this page, and a relayed worker's own stats page names the pool that has it. It is the same reasoning as the <a href=\"/datum-subsidy\">DATUM subsidy</a>: the pool pays miners to take template construction away from it, and hands away hashrate it is not entitled to. <a href=\"/pools\">How the other pools compare.</a>",
         ]),
         "zh": ("超过 25% 就把算力拒之门外的矿池", [
             "在这个规模的链上，一家矿池一个下午就能超过全网三分之一——2026 年 9 月真的发生了：某矿池占到 BTCB2 全网算力一半以上，随后有人正经提交补丁，要在共识层把该矿池的收款地址拉黑，Knots 维护者公开表示不要运行那段代码。最后算力是自愿降下来的，这件事本身什么也没解决。",
-            "Lazarus 给自己划的线是 25%。越过这条线后，<em>新</em>的 stratum 连接不会被我们接下来自己挖：它会被中继到另外四家矿池之一，由那家矿池按同一个地址付款，我们的窗口里不记入任何东西。已经在这里的矿机继续留在这里。自建网关的 DATUM 矿工永远不会被中继，因为自己构建区块模板的矿工并不是让一条链中心化的那个因素。等我们回到线下，新矿工会自动回来。",
+            "Lazarus 给自己划的线是 25%。越过这条线后，<em>新</em>的 stratum 连接不会被我们接下来自己挖：它会被中继到另外五家矿池之一，由那家矿池按同一个地址付款，我们的窗口里不记入任何东西。已经在这里的矿机继续留在这里。自建网关的 DATUM 矿工永远不会被中继，因为自己构建区块模板的矿工并不是让一条链中心化的那个因素。等我们回到线下，新矿工会自动回来。",
             "这件事写在连接路径里，而不是写在承诺里——实时的全网占比、以及此刻正被中继的连接数都在本页上，被中继的矿机在自己的统计页里也会看到接手它的矿池名字。这和<a href=\"/datum-subsidy\">DATUM 补贴</a>是同一个道理：矿池花钱请矿工把模板构建权从自己手里拿走，也把本不该属于自己的算力让出去。<a href=\"/pools\">其他矿池怎么比</a>。",
         ]),
     },
@@ -4298,6 +4628,8 @@ A Bitcoin Knots node plus a DATUM gateway pointed here means you build the block
 template and choose its transactions; the pool only supplies the coinbase split and
 verifies shares. That path pays no fee and is credited a share of the public stratum's
 fee on every block found. See SITEPLACEHOLDER/connect and SITEPLACEHOLDER/datum-subsidy.
+A longer Knots + DATUM walkthrough is at https://convoy.xyz/getstarted
+(Chinese: https://convoy.xyz/getstarted?lang=zh).
 
 ## Machine-readable pool data
 
@@ -4364,12 +4696,13 @@ shared with Bitcoin, so use a fresh address here.
 - Password: x
 - Algorithm: BLAKE2b (Sia-style header). Not SHA-256d.
 - DATUM Prime: stratum.awokenlazarus.xyz:28915 (0% fee; run your own gateway)
+- Longer Knots + DATUM setup: https://convoy.xyz/getstarted (Chinese: https://convoy.xyz/getstarted?lang=zh)
 
 ## Fees
 
 - Own DATUM gateway: 0%, plus the DATUM subsidy taken from the public-stratum fee
-- Public stratum: 10% (5 points of that credited back to DATUM miners)
-- Solo: 5%
+- Public stratum: 15% (7.5 points of that credited back to DATUM miners)
+- Solo: 7.5%
 
 ## Hardware
 
@@ -4392,7 +4725,7 @@ on Neoxa and NonKYC.
 ## The 25% self-cap
 
 Lazarus Pool holds itself to 25% of network hashrate. Over that line a new stratum connection is
-not mined on the pool's behalf: it is relayed to one of four other pools and paid by that pool,
+not mined on the pool's behalf: it is relayed to one of five other pools and paid by that pool,
 under the same address, with nothing credited to the Lazarus window. Miners already connected keep
 mining here, and own-gateway DATUM miners are never relayed because a miner building their own
 templates is not what centralizes a chain. This is enforced per connection in the software, and
@@ -4407,7 +4740,7 @@ Fees are the least of it. What differs is custody, what happens to the transacti
 block, and whether a pool limits its own share. As each pool published its own terms in September
 2026:
 
-- Lazarus Pool: 0% with your own DATUM gateway, 10% on the public stratum with five of those points
+- Lazarus Pool: 0% with your own DATUM gateway, 15% on the public stratum with 7.5 of those points
   paid back to DATUM miners. TIDES, window of 8x difficulty. No custody at all — the block's
   coinbase pays your address, so there is no balance, threshold or withdrawal. The block's
   transaction fees scale every miner's payout up. Self-capped at 25%.
@@ -4879,6 +5212,9 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/payouts":
             self.send_json(cached("payouts", 30.0, self._payouts_payload), cache_s=30)
             return
+        if path == "/api/makegoods":
+            self.send_json(cached("makegoods", 15.0, makegoods_payload), cache_s=15)
+            return
         if path == "/api/hardware":
             self.send_json(cached("hardware", 15.0, hardware_payload), cache_s=15)
             return
@@ -5062,6 +5398,7 @@ class Handler(BaseHTTPRequestHandler):
                 row["found_by"] = pb["finder"] if pb else ""
                 if not row.get("owed_txid"):
                     apply_owed_settlement(row)
+                stamp_owed_status(row, tip)
                 if pool_addr and row.get("finder") == pool_addr:
                     miner_btc, fee_btc = pool_output_parts(pool_addr, row.get("miner_btc"), pb, row.get("reward_btc"))
                     reward = float(row.get("reward_btc") or 0) or 1.0
