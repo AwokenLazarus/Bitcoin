@@ -1,9 +1,11 @@
 //! Network-share overflow for the house stratum.
 //!
-//! Lazarus does not want more than ~30% of BLAKE2b network hashrate. The meter here is
-//! everything Prime credits — house stratum *and* remote DATUM gateways — against the
-//! node's network hashrate. While the pool is over the line, miners that are already
-//! ours (an identity or source IP that has had a share accepted recently, or that sits
+//! Lazarus does not want its house stratum to hold more than ~15% of BLAKE2b network
+//! hashrate. The meter is this gateway's own live stratum sum against the node's network
+//! hashrate. DATUM is left out of it on purpose: a DATUM gateway builds its own templates,
+//! so that hashrate is already decentralized however much of it there is, and it must never
+//! be the reason a stratum miner is turned away. While the house stratum is over the line,
+//! miners that are already ours (an identity or source IP that has had a share accepted recently, or that sits
 //! in the TIDES window) keep connecting locally; a miner we have never seen is relayed,
 //! from its very first `mining.subscribe`, to another BLAKE2b pool. The relay is a plain
 //! line pump: the upstream's extranonce, difficulty and jobs go straight to the miner and
@@ -17,7 +19,7 @@
 //! `exit_pct`. A session that has been relayed stays relayed until the miner reconnects;
 //! a local session is never spliced mid-stream (its extranonce and job ids belong to us).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{IpAddr, Shutdown, TcpStream, ToSocketAddrs};
 use std::path::{Path, PathBuf};
@@ -74,8 +76,8 @@ pub struct OverflowCfg {
     pub upstreams: Vec<UpstreamCfg>,
 }
 fn d_mode() -> String { "off".into() }
-fn d_enter() -> f64 { 32.0 }
-fn d_exit() -> f64 { 27.0 }
+fn d_enter() -> f64 { 15.0 }
+fn d_exit() -> f64 { 13.0 }
 fn d_hold() -> u32 { 3 }
 fn d_poll() -> u64 { 30 }
 fn d_gf_hours() -> u64 { 24 }
@@ -216,13 +218,18 @@ pub struct Upstream {
     healthy: AtomicBool,
     sessions: AtomicUsize,
     total: AtomicU64,
-    /// Shares relayed miners sent this pool and the `result: true` replies that came back,
-    /// summed over finished relays. The probe only proves the pool answers a subscribe; a
-    /// pool that answers and then refuses every share looks healthy without these.
+    /// Shares relayed miners sent this pool and the replies that came back, matched by
+    /// request id, summed over finished relays. The probe only proves the pool answers a
+    /// subscribe; a pool that answers and then refuses every share looks healthy without
+    /// these.
     submits: AtomicU64,
     accepted: AtomicU64,
+    rejected: AtomicU64,
     checked_unix: AtomicU64,
     last_err: Mutex<String>,
+    /// Why this pool last refused a relayed share, verbatim from its `error` field. Without
+    /// it a rejecting upstream is indistinguishable from a healthy one.
+    last_reject: Mutex<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -239,11 +246,16 @@ pub struct ProxySession {
     pub since_unix: u64,
     pub submits: u64,
     pub accepted: u64,
+    pub rejected: u64,
+    /// The upstream's own words for the last refused share on this session.
+    pub last_reject: String,
 }
 
 #[derive(Clone, Debug, Default)]
 pub struct Meter {
+    /// House stratum as a percent of network. The only number the valve looks at.
     pub share_pct: f64,
+    /// Everything Prime credits, stratum and DATUM. Reported, never metered.
     pub pool_hs: f64,
     pub stratum_hs: f64,
     pub net_hs: f64,
@@ -271,6 +283,15 @@ pub struct Overflow {
     /// Relays we ended on purpose: the authorize named an identity that is ours, so the
     /// miner was hung up on to reconnect here. Short and shareless by design, not churn.
     relays_bounced: AtomicU64,
+    /// Sessions we refused to relay, or stopped relaying, because the username is not one
+    /// any pool can pay. Relaying these is what made a peer reject every share.
+    relays_unpayable: AtomicU64,
+    /// Sources whose last authorize named an unpayable username, with the unix time we saw
+    /// it. Firmware that waits for the subscribe reply only authorizes once the relay is
+    /// already up, so without this every retry costs a peer another connection and another
+    /// refused authorize. Such a miner has no accepted hashrate here either, so holding it
+    /// local does not move our network share.
+    unpayable_ips: Mutex<HashMap<IpAddr, u64>>,
     shadow_would: AtomicU64,
     fail_open: AtomicU64,
     state_file: PathBuf,
@@ -294,6 +315,11 @@ const CHURN_SECS: u64 = 10;
 const BLACKHOLE_SUBMITS: u64 = 20;
 /// Lines we will hold while waiting for the authorize.
 const GATE_MAX_LINES: usize = 6;
+/// How long a source that authorized with an unpayable username is served locally rather
+/// than relayed. Short, so a miner that fixes its config is eligible again soon.
+const UNPAYABLE_LOCAL_SECS: u64 = 600;
+/// Cap on that set, so a spray of forged source addresses cannot grow it without bound.
+const UNPAYABLE_IPS_MAX: usize = 4096;
 const UPSTREAM_CONNECT: Duration = Duration::from_secs(5);
 const HEALTH_EVERY: Duration = Duration::from_secs(60);
 const SAVE_EVERY: Duration = Duration::from_secs(60);
@@ -340,8 +366,10 @@ impl Overflow {
                 total: AtomicU64::new(0),
                 submits: AtomicU64::new(0),
                 accepted: AtomicU64::new(0),
+                rejected: AtomicU64::new(0),
                 checked_unix: AtomicU64::new(0),
                 last_err: Mutex::new(String::new()),
+                last_reject: Mutex::new(String::new()),
             })
             .collect();
         Overflow {
@@ -359,6 +387,8 @@ impl Overflow {
             proxied_total: AtomicU64::new(0),
             relays_churned: AtomicU64::new(0),
             relays_bounced: AtomicU64::new(0),
+            relays_unpayable: AtomicU64::new(0),
+            unpayable_ips: Mutex::new(HashMap::new()),
             shadow_would: AtomicU64::new(0),
             fail_open: AtomicU64::new(0),
             state_file,
@@ -397,6 +427,22 @@ impl Overflow {
     }
     pub fn ident_grandfathered(&self, ident: &str) -> bool {
         !ident.is_empty() && lk(&self.grandfather).has_ident(ident, unix_now(), self.ttl())
+    }
+    /// Remember that this source authorized with a username no pool can pay.
+    fn note_unpayable_ip(&self, ip: IpAddr) {
+        let now = unix_now();
+        let mut m = lk(&self.unpayable_ips);
+        m.retain(|_, t| now.saturating_sub(*t) <= UNPAYABLE_LOCAL_SECS);
+        if m.len() < UNPAYABLE_IPS_MAX {
+            m.insert(ip, now);
+        }
+    }
+    fn ip_unpayable(&self, ip: IpAddr) -> bool {
+        let now = unix_now();
+        lk(&self.unpayable_ips)
+            .get(&ip)
+            .map(|t| now.saturating_sub(*t) <= UNPAYABLE_LOCAL_SECS)
+            .unwrap_or(false)
     }
     /// An accepted share on a local session makes this miner ours.
     pub fn note_share(&self, ident: &str, ip: IpAddr) {
@@ -459,27 +505,23 @@ impl Overflow {
         self.apply_meter(net_hs, stratum_hs, pool_ghs);
     }
 
-    /// Apply a share reading. `pool_ghs` is Prime's credited GH/s (stratum + DATUM);
-    /// `None` means Prime was unreachable and the stratum sum is incomplete.
+    /// Apply a share reading. The valve meters `stratum_hs` alone. `pool_ghs` is Prime's
+    /// credited GH/s (stratum + DATUM), kept only so the status can show the DATUM side;
+    /// `None` means Prime was unreachable, which costs the report and not the decision.
     fn apply_meter(&self, net_hs: Option<f64>, stratum_hs: f64, pool_ghs: Option<f64>) {
         let mut m = Meter { stratum_hs, updated_unix: unix_now(), ..Default::default() };
-        let prime_ok = pool_ghs.is_some();
-        match (pool_ghs, net_hs) {
-            (Some(pg), Some(net)) if net > 0.0 => {
-                m.pool_hs = pg * 1e9;
-                m.net_hs = net;
-                m.share_pct = 100.0 * m.pool_hs / net;
-                m.ok = true;
-            }
-            (None, Some(net)) if net > 0.0 => {
-                // Prime stats down: this is the gateway's live session sum, not Prime's
-                // credited pool. It misses DATUM, and it can also over-count vs the
-                // credited window. Incomplete — do not treat it as the pool share.
-                m.pool_hs = stratum_hs;
+        match net_hs {
+            Some(net) if net > 0.0 => {
                 m.net_hs = net;
                 m.share_pct = 100.0 * stratum_hs / net;
                 m.ok = true;
-                m.last_err = "prime stats unreachable; share is stratum-only".into();
+                match pool_ghs {
+                    Some(pg) => m.pool_hs = pg * 1e9,
+                    None => {
+                        m.pool_hs = stratum_hs;
+                        m.last_err = "prime stats unreachable; pool and DATUM hashrate not reported (the valve meters stratum only)".into();
+                    }
+                }
             }
             _ => {
                 m.last_err = "network hashrate unavailable".into();
@@ -488,29 +530,21 @@ impl Overflow {
         if m.ok {
             let active = self.is_active();
             let hold = self.hold.load(Ordering::Relaxed);
-            // Incomplete pool number must not flip overflow *off*. DATUM we cannot
-            // see might still have us over the line. Entering on a stratum-only
-            // reading is still safe — if house stratum alone is over `enter_pct`, we
-            // are over.
-            let (na, nh) = if !prime_ok && active {
-                (true, 0)
-            } else {
-                hysteresis(active, hold, m.share_pct, self.cfg.enter_pct, self.cfg.exit_pct, self.cfg.hold_polls)
-            };
+            let (na, nh) = hysteresis(active, hold, m.share_pct, self.cfg.enter_pct, self.cfg.exit_pct, self.cfg.hold_polls);
             self.hold.store(nh, Ordering::Relaxed);
             if na != active {
                 self.active.store(na, Ordering::Relaxed);
                 self.flips.fetch_add(1, Ordering::Relaxed);
                 self.active_since.store(if na { unix_now() } else { 0 }, Ordering::Relaxed);
                 log::warn!(
-                    "overflow: {} at {:.1}% of network (pool {:.2} PH/s, net {:.2} PH/s, mode {})",
+                    "overflow: {} with house stratum at {:.1}% of network (stratum {:.2} PH/s, net {:.2} PH/s, mode {})",
                     if na { "ON — new house-stratum miners will be relayed" } else { "OFF — new miners come to Lazarus again" },
-                    m.share_pct, m.pool_hs / 1e15, m.net_hs / 1e15, self.mode().as_str()
+                    m.share_pct, m.stratum_hs / 1e15, m.net_hs / 1e15, self.mode().as_str()
                 );
             } else {
                 let (total, churned) = (self.proxied_total.load(Ordering::Relaxed), self.relays_churned.load(Ordering::Relaxed));
-                log::info!("overflow: share {:.1}% (pool {:.2} PH/s, net {:.2} PH/s) active={} hold={} proxied={} relays={} churned={}",
-                    m.share_pct, m.pool_hs / 1e15, m.net_hs / 1e15, na, nh, lk(&self.proxied).len(), total, churned);
+                log::info!("overflow: stratum share {:.1}% (stratum {:.2} PH/s, datum {:.2} PH/s unmetered, net {:.2} PH/s) active={} hold={} proxied={} relays={} churned={}",
+                    m.share_pct, m.stratum_hs / 1e15, (m.pool_hs - m.stratum_hs).max(0.0) / 1e15, m.net_hs / 1e15, na, nh, lk(&self.proxied).len(), total, churned);
                 if total >= 10 && churned * 2 > total {
                     log::warn!("overflow: {churned} of {total} relays died within {}s with no share; relayed miners are not mining anywhere. Check the handshake or set mode=off.", CHURN_SECS);
                 }
@@ -578,6 +612,7 @@ impl Overflow {
     /// Run at a session's first `mining.subscribe`, before anything is answered.
     /// Returns the lines read past `first` that the caller must still process locally,
     /// or `Gate::Relayed` once the relay has run to completion.
+    #[allow(clippy::too_many_arguments)]
     pub fn gate(
         self: &Arc<Self>,
         id: u64,
@@ -588,8 +623,9 @@ impl Overflow {
         host: &str,
         idle: Duration,
         canon: &dyn Fn(&str) -> String,
+        payable: &dyn Fn(&str) -> bool,
     ) -> Gate {
-        if !self.considering() || self.ip_grandfathered(ip) {
+        if !self.considering() || self.ip_grandfathered(ip) || self.ip_unpayable(ip) {
             return Gate::Local(Vec::new());
         }
         // Hold the subscribe reply until the authorize names the miner.
@@ -629,6 +665,19 @@ impl Overflow {
             }
         }
         let _ = sock.set_read_timeout(Some(idle));
+        // A relay only helps a miner if the pool at the other end can pay it, and every
+        // upstream pays the username we forward. A name we would answer `BadUsername`
+        // ourselves is one no pool can pay: some refuse the authorize outright, the rest
+        // authorize it and then reject every share. Keep it local so the miner gets that
+        // answer from us and can see what is wrong with its config.
+        if !user.is_empty() && !payable(&user) {
+            self.relays_unpayable.fetch_add(1, Ordering::Relaxed);
+            log::info!(
+                "overflow: not relaying {host}: user={} is not a payable address, so no upstream could credit it; serving locally to answer BadUsername",
+                short(&user)
+            );
+            return Gate::Local(buf);
+        }
         let ident = canon(&user);
         let grandfathered = self.ident_grandfathered(&ident);
         let mode = self.mode();
@@ -665,6 +714,7 @@ impl Overflow {
         let sess = ProxySession {
             id, host: host.to_string(), ip: ip.to_string(), user: user.clone(), identity: ident, worker, ua,
             upstream: idx, upstream_name: name.clone(), since_unix: unix_now(), submits: 0, accepted: 0,
+            rejected: 0, last_reject: String::new(),
         };
         lk(&self.proxied).insert(id, sess);
         self.upstreams[idx].sessions.fetch_add(1, Ordering::Relaxed);
@@ -678,7 +728,7 @@ impl Overflow {
             .cfg
             .message
             .clone()
-            .unwrap_or_else(|| "Lazarus is at capacity (holding under {pct}% of BLAKE2b network hashrate). This connection is relayed to {upstream}, which is the pool paying you for it. Reconnect later to return to Lazarus.".into())
+            .unwrap_or_else(|| "Lazarus stratum is at capacity (holding it under {pct}% of BLAKE2b network hashrate). This connection is relayed to {upstream}, which is the pool paying you for it. Reconnect later to return to Lazarus.".into())
             .replace("{upstream}", &name)
             .replace("{pct}", &fmt_pct(self.cfg.enter_pct));
         let stats = Arc::new(RelayStats::default());
@@ -696,6 +746,8 @@ impl Overflow {
             if let Some(p) = lk(&ov.proxied).get_mut(&sid) {
                 p.submits = s2.submits.load(Ordering::Relaxed);
                 p.accepted = s2.accepted.load(Ordering::Relaxed);
+                p.rejected = s2.rejected.load(Ordering::Relaxed);
+                p.last_reject = lk(&s2.last_reject).clone();
             }
         });
         // Firmware that waited for the subscribe reply sends its authorize now, through the
@@ -703,6 +755,7 @@ impl Overflow {
         // miner. If it turns out to be one of ours on an IP we had not seen, mark the IP
         // and hang up: the miner's retry lands on Lazarus.
         let bounced = AtomicBool::new(false);
+        let refused = AtomicBool::new(false);
         let on_authorize = |u: &str| -> bool {
             let ident = canon(u);
             let worker = u.split_once('.').map(|(_, w)| w.to_string()).unwrap_or_default();
@@ -718,6 +771,19 @@ impl Overflow {
                 bounced.store(true, Ordering::Relaxed);
                 return false;
             }
+            // The name only arrives now on firmware that waits for the subscribe reply, so
+            // this is the first chance to see it is unpayable. Do not forward the authorize:
+            // the upstream would either refuse it or take shares it can never credit.
+            if !payable(u) {
+                self.relays_unpayable.fetch_add(1, Ordering::Relaxed);
+                self.note_unpayable_ip(ip);
+                log::info!(
+                    "overflow: {host} authorized as {} mid-relay, which no pool can pay; closing before {name} sees a share, and serving this source locally for {}s",
+                    short(u), UNPAYABLE_LOCAL_SECS
+                );
+                refused.store(true, Ordering::Relaxed);
+                return false;
+            }
             log::info!("overflow: relay {host} authorized user={} -> {name}", short(u));
             true
         };
@@ -729,21 +795,39 @@ impl Overflow {
         let lasted = unix_now().saturating_sub(since);
         let submits = stats.submits.load(Ordering::Relaxed);
         let accepted = stats.accepted.load(Ordering::Relaxed);
+        let rejected = stats.rejected.load(Ordering::Relaxed);
+        let last_reject = lk(&stats.last_reject).clone();
         let was_bounced = bounced.load(Ordering::Relaxed);
+        let was_refused = refused.load(Ordering::Relaxed);
         if was_bounced {
             self.relays_bounced.fetch_add(1, Ordering::Relaxed);
-        } else if lasted < CHURN_SECS && submits == 0 {
+        } else if !was_refused && lasted < CHURN_SECS && submits == 0 {
+            // A relay we ended ourselves is not the miner hanging up on the handshake.
             self.relays_churned.fetch_add(1, Ordering::Relaxed);
         }
         let up = &self.upstreams[idx];
         let up_submits = up.submits.fetch_add(submits, Ordering::Relaxed) + submits;
         let up_accepted = up.accepted.fetch_add(accepted, Ordering::Relaxed) + accepted;
-        log::info!("overflow: relay ended {host} user={} -> {} after {}s, {} submits / {} accepted{}",
+        up.rejected.fetch_add(rejected, Ordering::Relaxed);
+        if !last_reject.is_empty() {
+            *lk(&up.last_reject) = last_reject.clone();
+        }
+        let ending = if was_bounced {
+            " (bounced home)"
+        } else if was_refused {
+            " (closed: unpayable username)"
+        } else {
+            ""
+        };
+        log::info!("overflow: relay ended {host} user={} -> {} after {}s, {} submits / {} accepted / {} rejected{}{}",
             if user.is_empty() { "(never authorized)" } else { &user }, name, lasted,
-            submits, accepted, if was_bounced { " (bounced home)" } else { "" });
+            submits, accepted, rejected, ending,
+            if last_reject.is_empty() { String::new() } else { format!(", last reject: {last_reject}") });
         if up_submits >= BLACKHOLE_SUBMITS && up_accepted == 0 {
+            let why = lk(&up.last_reject).clone();
             log::warn!(
-                "overflow: {name} has taken {up_submits} shares from relayed miners and accepted none; it answers the probe but may not be paying anyone. Check its username format, or drop it from upstreams."
+                "overflow: {name} has taken {up_submits} shares from relayed miners and accepted none; it answers the probe but may not be paying anyone. It says: {}. Check its username format, or drop it from upstreams.",
+                if why.is_empty() { "nothing (no reply carried an error)" } else { &why }
             );
         }
         Gate::Relayed
@@ -761,7 +845,8 @@ impl Overflow {
                 "healthy": u.healthy.load(Ordering::Relaxed), "sessions": u.sessions.load(Ordering::Relaxed),
                 "total_sessions": u.total.load(Ordering::Relaxed), "checked_unix": u.checked_unix.load(Ordering::Relaxed),
                 "submits": u.submits.load(Ordering::Relaxed), "accepted": u.accepted.load(Ordering::Relaxed),
-                "last_error": lk(&u.last_err).clone(),
+                "rejected": u.rejected.load(Ordering::Relaxed),
+                "last_error": lk(&u.last_err).clone(), "last_reject": lk(&u.last_reject).clone(),
             }))
             .collect();
         json!({
@@ -772,13 +857,19 @@ impl Overflow {
             "flips": self.flips.load(Ordering::Relaxed),
             "enter_pct": self.cfg.enter_pct, "exit_pct": self.cfg.exit_pct, "hold_polls": self.cfg.hold_polls,
             "poll_secs": self.cfg.poll_secs, "grandfather_hours": self.cfg.grandfather_hours,
-            "share_pct": m.share_pct, "pool_hs": m.pool_hs, "stratum_hs": m.stratum_hs,
+            // `share_pct` is what the valve meters: house stratum over network. The pool-wide
+            // figure, DATUM included, is reported beside it and decides nothing.
+            "share_pct": m.share_pct, "metered": "stratum",
+            "pool_share_pct": if m.net_hs > 0.0 { 100.0 * m.pool_hs / m.net_hs } else { 0.0 },
+            "pool_hs": m.pool_hs, "stratum_hs": m.stratum_hs,
             "datum_hs": (m.pool_hs - m.stratum_hs).max(0.0), "net_hs": m.net_hs,
             "meter_ok": m.ok, "meter_updated_unix": m.updated_unix, "meter_error": m.last_err,
             "grandfathered_identities": gi, "grandfathered_ips": gip,
             "proxied_sessions": proxied.len(), "proxied_total": self.proxied_total.load(Ordering::Relaxed),
             "relays_churned": self.relays_churned.load(Ordering::Relaxed),
             "relays_bounced": self.relays_bounced.load(Ordering::Relaxed),
+            "relays_unpayable": self.relays_unpayable.load(Ordering::Relaxed),
+            "unpayable_sources": lk(&self.unpayable_ips).len(),
             "shadow_would_relay": self.shadow_would.load(Ordering::Relaxed), "fail_open": self.fail_open.load(Ordering::Relaxed),
             "upstreams": ups,
         })
@@ -796,7 +887,8 @@ impl Overflow {
                     "id": s.id, "host": s.host, "ip": s.ip, "user": s.user, "identity": s.identity, "worker": s.worker, "ua": s.ua,
                     "upstream": u.name, "upstream_host": u.host, "upstream_port": u.port, "upstream_url": u.url, "miner_url": miner_url,
                     "since_unix": s.since_unix, "connected_s": unix_now().saturating_sub(s.since_unix),
-                    "submits": s.submits, "accepted": s.accepted,
+                    "submits": s.submits, "accepted": s.accepted, "rejected": s.rejected,
+                    "last_reject": s.last_reject,
                 })
             })
             .collect();
@@ -841,9 +933,70 @@ impl Drop for ProxyGuard {
 pub struct RelayStats {
     pub submits: AtomicU64,
     pub accepted: AtomicU64,
+    pub rejected: AtomicU64,
     pub miner_lines: AtomicU64,
     pub upstream_lines: AtomicU64,
     pub done: AtomicBool,
+    /// Ids of `mining.submit` lines sent up and not yet answered, oldest first. A reply is
+    /// a verdict on a share only if its id is in here, which is what separates a real
+    /// accept from the `result: true` of the handshake.
+    pending: Mutex<VecDeque<Value>>,
+    /// The upstream's `error` for the last refused share.
+    pub last_reject: Mutex<String>,
+}
+
+/// Outstanding submit ids we will remember per relay. A miner keeps a couple in flight; the
+/// bound only matters for an upstream that takes shares and never answers.
+const MAX_PENDING_SUBMITS: usize = 256;
+
+impl RelayStats {
+    /// Note a `mining.submit` on its way up. Returns false if the line was not a submit.
+    fn note_submit(&self, line: &str) -> bool {
+        let Ok(v) = serde_json::from_str::<Value>(line) else { return false };
+        if v.get("method").and_then(|m| m.as_str()) != Some("mining.submit") {
+            return false;
+        }
+        self.submits.fetch_add(1, Ordering::Relaxed);
+        let Some(id) = v.get("id").filter(|i| !i.is_null()) else { return true };
+        let mut q = lk(&self.pending);
+        if q.len() >= MAX_PENDING_SUBMITS {
+            q.pop_front();
+        }
+        q.push_back(id.clone());
+        true
+    }
+
+    /// A reply coming down from the upstream. `Some(true)` if it answered a share we sent
+    /// and accepted it, `Some(false)` if it refused one, `None` if it was anything else.
+    fn note_reply(&self, line: &str) -> Option<bool> {
+        let v = serde_json::from_str::<Value>(line).ok()?;
+        if v.get("method").is_some() {
+            return None;
+        }
+        let id = v.get("id").filter(|i| !i.is_null())?;
+        {
+            let mut q = lk(&self.pending);
+            let at = q.iter().position(|p| p == id)?;
+            q.remove(at);
+        }
+        if v.get("result").and_then(|r| r.as_bool()) == Some(true) {
+            self.accepted.fetch_add(1, Ordering::Relaxed);
+            return Some(true);
+        }
+        self.rejected.fetch_add(1, Ordering::Relaxed);
+        let why = match v.get("error") {
+            Some(Value::Null) | None => "refused with no reason given".to_string(),
+            Some(Value::Array(a)) => a
+                .get(1)
+                .and_then(|m| m.as_str())
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| Value::Array(a.clone()).to_string()),
+            Some(Value::String(s)) => s.clone(),
+            Some(other) => other.to_string(),
+        };
+        *lk(&self.last_reject) = why.chars().filter(|c| c.is_ascii_graphic() || *c == ' ').take(160).collect();
+        Some(false)
+    }
 }
 
 fn connect(host: &str, port: u16) -> Result<TcpStream, String> {
@@ -916,9 +1069,7 @@ pub fn pump(
         if up_w.write_all(l.as_bytes()).is_err() {
             return;
         }
-        if l.contains("mining.submit") {
-            stats.submits.fetch_add(1, Ordering::Relaxed);
-        }
+        stats.note_submit(l);
     }
     let mut miner_w = match miner.try_clone() {
         Ok(m) => m,
@@ -951,9 +1102,7 @@ pub fn pump(
                 Ok(_) => {}
             }
             down_stats.upstream_lines.fetch_add(1, Ordering::Relaxed);
-            if is_accept(&line) {
-                down_stats.accepted.fetch_add(1, Ordering::Relaxed);
-            }
+            down_stats.note_reply(&line);
             if miner_w.write_all(line.as_bytes()).is_err() {
                 break;
             }
@@ -981,9 +1130,7 @@ pub fn pump(
             Ok(_) => {}
         }
         stats.miner_lines.fetch_add(1, Ordering::Relaxed);
-        if line.contains("mining.submit") {
-            stats.submits.fetch_add(1, Ordering::Relaxed);
-        }
+        stats.note_submit(&line);
         if let Some(cb) = on_authorize {
             if let Some(u) = authorize_user(&line) {
                 if !cb(&u) {
@@ -999,9 +1146,6 @@ pub fn pump(
     let _ = miner.shutdown(Shutdown::Both);
 }
 
-/// A `{"id": n, "result": true}` after the handshake is an accepted share. The first two
-/// ids are subscribe/authorize on every firmware we know, but a miner may number them
-/// differently, so this is an estimate for the status row, not accounting.
 /// A reply with an id whose result is literally `true`: the authorize answer during the
 /// handshake, a share accept afterwards. Either way the miner is past `initiate_stratum`.
 fn is_true_result(line: &str) -> bool {
@@ -1009,23 +1153,6 @@ fn is_true_result(line: &str) -> bool {
     v.get("method").is_none()
         && v.get("id").map(|i| !i.is_null()).unwrap_or(false)
         && v.get("result").and_then(|r| r.as_bool()) == Some(true)
-}
-
-fn is_accept(line: &str) -> bool {
-    let Ok(v) = serde_json::from_str::<Value>(line) else { return false };
-    if v.get("method").is_some() {
-        return false;
-    }
-    let Some(id) = v.get("id") else { return false };
-    if id.is_null() {
-        return false;
-    }
-    if let Some(n) = id.as_u64() {
-        if n <= 2 {
-            return false;
-        }
-    }
-    v.get("result").and_then(|r| r.as_bool()) == Some(true)
 }
 
 fn short(s: &str) -> String {
@@ -1148,13 +1275,50 @@ mod tests {
     }
 
     #[test]
-    fn accept_detection_skips_handshake_and_notifies() {
-        assert!(is_accept(r#"{"id":7,"result":true,"error":null}"#));
-        assert!(!is_accept(r#"{"id":1,"result":[[["mining.notify","x"]],"aa",8],"error":null}"#));
-        assert!(!is_accept(r#"{"id":2,"result":true,"error":null}"#));
-        assert!(!is_accept(r#"{"id":null,"method":"mining.notify","params":[]}"#));
-        assert!(!is_accept(r#"{"id":9,"result":false,"error":[23,"low",null]}"#));
-        assert!(!is_accept("garbage"));
+    fn share_verdicts_are_matched_to_the_submit_they_answer() {
+        let s = RelayStats::default();
+        // Handshake: neither line is a share, so neither is a verdict on one. Firmware that
+        // opens with `mining.configure` numbers its authorize 3, which an id threshold would
+        // have miscounted as an accepted share.
+        assert!(!s.note_submit(r#"{"id":1,"method":"mining.configure","params":[[],{}]}"#));
+        assert!(!s.note_submit(r#"{"id":2,"method":"mining.subscribe","params":["bmminer"]}"#));
+        assert!(!s.note_submit(r#"{"id":3,"method":"mining.authorize","params":["bc1q","x"]}"#));
+        assert_eq!(s.note_reply(r#"{"id":2,"result":[[["mining.notify","x"]],"aa",8],"error":null}"#), None);
+        assert_eq!(s.note_reply(r#"{"id":3,"result":true,"error":null}"#), None);
+        assert_eq!(s.note_reply(r#"{"id":null,"method":"mining.notify","params":[]}"#), None);
+        assert_eq!(s.accepted.load(Ordering::Relaxed), 0, "the authorize reply is not a share");
+        assert_eq!(s.rejected.load(Ordering::Relaxed), 0);
+
+        // Shares: each verdict is tied to the id of the submit it answers.
+        assert!(s.note_submit(r#"{"id":4,"method":"mining.submit","params":["u","j","e","t","n"]}"#));
+        assert!(s.note_submit(r#"{"id":5,"method":"mining.submit","params":["u","j","e","t","n"]}"#));
+        assert_eq!(s.submits.load(Ordering::Relaxed), 2);
+        assert_eq!(s.note_reply(r#"{"id":5,"result":true,"error":null}"#), Some(true), "out of order is still a verdict");
+        assert_eq!(s.note_reply(r#"{"id":4,"result":false,"error":[23,"Low difficulty share",null]}"#), Some(false));
+        assert_eq!(s.accepted.load(Ordering::Relaxed), 1);
+        assert_eq!(s.rejected.load(Ordering::Relaxed), 1);
+        assert_eq!(*lk(&s.last_reject), "Low difficulty share", "the upstream's own words");
+        // A reply to an id we never sent, a repeat of one already settled, or garbage.
+        assert_eq!(s.note_reply(r#"{"id":99,"result":true,"error":null}"#), None);
+        assert_eq!(s.note_reply(r#"{"id":4,"result":true,"error":null}"#), None);
+        assert_eq!(s.note_reply("garbage"), None);
+        assert_eq!(s.accepted.load(Ordering::Relaxed), 1);
+
+        // A refusal with no error field still counts, with a reason that says so.
+        assert!(s.note_submit(r#"{"id":6,"method":"mining.submit","params":[]}"#));
+        assert_eq!(s.note_reply(r#"{"id":6,"result":false,"error":null}"#), Some(false));
+        assert_eq!(*lk(&s.last_reject), "refused with no reason given");
+    }
+
+    #[test]
+    fn outstanding_submits_are_bounded() {
+        // An upstream that takes shares and never answers must not grow the set forever.
+        let s = RelayStats::default();
+        for i in 0..MAX_PENDING_SUBMITS * 3 {
+            s.note_submit(&format!(r#"{{"id":{i},"method":"mining.submit","params":[]}}"#));
+        }
+        assert_eq!(lk(&s.pending).len(), MAX_PENDING_SUBMITS);
+        assert_eq!(s.submits.load(Ordering::Relaxed), (MAX_PENDING_SUBMITS * 3) as u64);
     }
 
     fn overflow_for_test(upstreams: Vec<UpstreamCfg>, mode: &str) -> Arc<Overflow> {
@@ -1247,7 +1411,7 @@ mod tests {
             let mut rdr = BufReader::new(sock.try_clone().unwrap());
             let mut first = String::new();
             rdr.read_line(&mut first).unwrap();
-            ov2.gate(7, &mut sock, &mut rdr, &first, ip, "203.0.113.9:5000", Duration::from_secs(30), &|u| u.split('.').next().unwrap_or("").to_string())
+            ov2.gate(7, &mut sock, &mut rdr, &first, ip, "203.0.113.9:5000", Duration::from_secs(30), &|u| u.split('.').next().unwrap_or("").to_string(), &|_| true)
         });
         // the miner: subscribe + authorize in one go, like real firmware
         miner.write_all(b"{\"id\":1,\"method\":\"mining.subscribe\",\"params\":[\"cgminer/4.10\"]}\n").unwrap();
@@ -1321,7 +1485,7 @@ mod tests {
             let mut rdr = BufReader::new(sock.try_clone().unwrap());
             let mut first = String::new();
             rdr.read_line(&mut first).unwrap();
-            ov2.gate(8, &mut sock, &mut rdr, &first, ip, "h", Duration::from_secs(30), &|u| u.split('.').next().unwrap_or("").to_string())
+            ov2.gate(8, &mut sock, &mut rdr, &first, ip, "h", Duration::from_secs(30), &|u| u.split('.').next().unwrap_or("").to_string(), &|_| true)
         });
         miner.write_all(b"{\"id\":1,\"method\":\"mining.subscribe\",\"params\":[\"x\"]}\n").unwrap();
         miner.write_all(b"{\"id\":2,\"method\":\"mining.authorize\",\"params\":[\"bc1qours.rig9\",\"x\"]}\n").unwrap();
@@ -1342,7 +1506,7 @@ mod tests {
             let mut rdr = BufReader::new(sock.try_clone().unwrap());
             let mut first = String::new();
             rdr.read_line(&mut first).unwrap();
-            ov2.gate(9, &mut sock, &mut rdr, &first, "192.0.2.1".parse().unwrap(), "h", Duration::from_secs(30), &|u| u.to_string())
+            ov2.gate(9, &mut sock, &mut rdr, &first, "192.0.2.1".parse().unwrap(), "h", Duration::from_secs(30), &|u| u.to_string(), &|_| true)
         });
         miner.write_all(b"{\"id\":1,\"method\":\"mining.subscribe\",\"params\":[\"x\"]}\n").unwrap();
         match h.join().unwrap() {
@@ -1366,7 +1530,7 @@ mod tests {
                 let mut rdr = BufReader::new(sock.try_clone().unwrap());
                 let mut first = String::new();
                 rdr.read_line(&mut first).unwrap();
-                ov2.gate(1, &mut sock, &mut rdr, &first, "203.0.113.1".parse().unwrap(), "h", Duration::from_secs(30), &|u| u.to_string())
+                ov2.gate(1, &mut sock, &mut rdr, &first, "203.0.113.1".parse().unwrap(), "h", Duration::from_secs(30), &|u| u.to_string(), &|_| true)
             });
             miner.write_all(b"{\"id\":1,\"method\":\"mining.subscribe\",\"params\":[\"x\"]}\n").unwrap();
             miner.write_all(b"{\"id\":2,\"method\":\"mining.authorize\",\"params\":[\"bc1qnew\",\"x\"]}\n").unwrap();
@@ -1390,7 +1554,7 @@ mod tests {
             let mut rdr = BufReader::new(sock.try_clone().unwrap());
             let mut first = String::new();
             rdr.read_line(&mut first).unwrap();
-            ov2.gate(1, &mut sock, &mut rdr, &first, "203.0.113.2".parse().unwrap(), "h", Duration::from_secs(30), &|u| u.to_string())
+            ov2.gate(1, &mut sock, &mut rdr, &first, "203.0.113.2".parse().unwrap(), "h", Duration::from_secs(30), &|u| u.to_string(), &|_| true)
         });
         miner.write_all(b"{\"id\":1,\"method\":\"mining.subscribe\",\"params\":[\"x\"]}\n").unwrap();
         miner.write_all(b"{\"id\":2,\"method\":\"mining.authorize\",\"params\":[\"bc1qnew\",\"x\"]}\n").unwrap();
@@ -1415,7 +1579,7 @@ mod tests {
             let mut rdr = BufReader::new(sock.try_clone().unwrap());
             let mut first = String::new();
             rdr.read_line(&mut first).unwrap();
-            ov2.gate(1, &mut sock, &mut rdr, &first, "203.0.113.3".parse().unwrap(), "h", Duration::from_secs(30), &|u| u.to_string())
+            ov2.gate(1, &mut sock, &mut rdr, &first, "203.0.113.3".parse().unwrap(), "h", Duration::from_secs(30), &|u| u.to_string(), &|_| true)
         });
         miner.write_all(b"{\"id\":1,\"method\":\"mining.subscribe\",\"params\":[\"x\"]}\n").unwrap();
         // no authorize: after AUTHORIZE_WAIT the stranger is relayed anyway
@@ -1446,7 +1610,7 @@ mod tests {
             let mut rdr = BufReader::new(sock.try_clone().unwrap());
             let mut first = String::new();
             rdr.read_line(&mut first).unwrap();
-            ov2.gate(11, &mut sock, &mut rdr, &first, "203.0.113.11".parse().unwrap(), "203.0.113.11:6000", Duration::from_secs(30), &|u| u.split('.').next().unwrap_or("").to_string())
+            ov2.gate(11, &mut sock, &mut rdr, &first, "203.0.113.11".parse().unwrap(), "203.0.113.11:6000", Duration::from_secs(30), &|u| u.split('.').next().unwrap_or("").to_string(), &|_| true)
         });
         miner.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
         let mut rdr = BufReader::new(miner.try_clone().unwrap());
@@ -1504,7 +1668,7 @@ mod tests {
             let mut rdr = BufReader::new(sock.try_clone().unwrap());
             let mut first = String::new();
             rdr.read_line(&mut first).unwrap();
-            ov2.gate(21, &mut sock, &mut rdr, &first, "203.0.113.21".parse().unwrap(), "h", Duration::from_secs(30), &|u| u.split('.').next().unwrap_or("").to_string())
+            ov2.gate(21, &mut sock, &mut rdr, &first, "203.0.113.21".parse().unwrap(), "h", Duration::from_secs(30), &|u| u.split('.').next().unwrap_or("").to_string(), &|_| true)
         });
         miner.write_all(b"{\"id\":1,\"method\":\"mining.subscribe\",\"params\":[\"x\"]}\n").unwrap();
         // first half lands inside the wait, the rest after it has run out
@@ -1542,7 +1706,7 @@ mod tests {
             let mut rdr = BufReader::new(sock.try_clone().unwrap());
             let mut first = String::new();
             rdr.read_line(&mut first).unwrap();
-            ov2.gate(12, &mut sock, &mut rdr, &first, new_ip, "203.0.113.77:6001", Duration::from_secs(30), &|u| u.split('.').next().unwrap_or("").to_string())
+            ov2.gate(12, &mut sock, &mut rdr, &first, new_ip, "203.0.113.77:6001", Duration::from_secs(30), &|u| u.split('.').next().unwrap_or("").to_string(), &|_| true)
         });
         miner.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
         let mut rdr = BufReader::new(miner.try_clone().unwrap());
@@ -1579,10 +1743,108 @@ mod tests {
             let mut rdr = BufReader::new(sock.try_clone().unwrap());
             let mut first = String::new();
             rdr.read_line(&mut first).unwrap();
-            ov3.gate(13, &mut sock, &mut rdr, &first, new_ip, "203.0.113.77:6002", Duration::from_secs(30), &|u| u.to_string())
+            ov3.gate(13, &mut sock, &mut rdr, &first, new_ip, "203.0.113.77:6002", Duration::from_secs(30), &|u| u.to_string(), &|_| true)
         });
         miner2.write_all(b"{\"id\":1,\"method\":\"mining.subscribe\",\"params\":[\"cgminer/6.0.44\"]}\n").unwrap();
         assert!(matches!(h2.join().unwrap(), Gate::Local(_)));
+    }
+
+    /// Stands in for the gateway's `payable_user`: only an address-shaped name can be paid.
+    fn payable_stub(u: &str) -> bool {
+        u.starts_with("bc1q")
+    }
+
+    /// A name Lazarus answers `BadUsername` is a name no pool can credit, so relaying it
+    /// cannot pay the miner. On 14 Sep 2026 a farm authorizing as `184361541.01` was
+    /// relayed anyway: two peers took ~2100 shares from it and accepted none, and three
+    /// more refused the authorize outright. Keep it local so we can tell the miner why.
+    #[test]
+    fn an_unpayable_username_is_never_relayed() {
+        let (port, seen) = fake_upstream();
+        let ov = overflow_for_test(vec![up("riptide", port)], "force");
+        let (mut miner, gw_side) = miner_pair();
+        let ov2 = ov.clone();
+        let h = thread::spawn(move || {
+            let mut sock = gw_side;
+            let mut rdr = BufReader::new(sock.try_clone().unwrap());
+            let mut first = String::new();
+            rdr.read_line(&mut first).unwrap();
+            ov2.gate(31, &mut sock, &mut rdr, &first, "203.0.113.31".parse().unwrap(), "h", Duration::from_secs(30), &|u| u.split('.').next().unwrap_or("").to_string(), &payable_stub)
+        });
+        miner.write_all(b"{\"id\":1,\"method\":\"mining.subscribe\",\"params\":[\"Antminer S19k Pro\"]}\n").unwrap();
+        miner.write_all(b"{\"id\":2,\"method\":\"mining.authorize\",\"params\":[\"184361541.01\",\"x\"]}\n").unwrap();
+        match h.join().unwrap() {
+            Gate::Local(lines) => assert!(
+                lines.iter().any(|l| l.contains("184361541.01")),
+                "the authorize comes back so the local handler can refuse it: {lines:?}"
+            ),
+            Gate::Relayed => panic!("a username no pool can pay must not be relayed"),
+        }
+        assert!(seen.lock().unwrap().is_empty(), "no peer was contacted at all: {:?}", seen.lock().unwrap());
+        let st = ov.status_json();
+        assert_eq!(st["relays_unpayable"], 1);
+        assert_eq!(st["proxied_total"], 0, "it never became a relay");
+    }
+
+    /// Firmware that waits for the subscribe reply only names itself once the relay is up,
+    /// so the check has to run there too. The source is then held local for a while: without
+    /// that, every retry costs a peer another connection and another refused authorize.
+    #[test]
+    fn an_unpayable_username_learned_mid_relay_closes_the_relay_and_holds_the_source_local() {
+        let (port, seen) = fake_upstream();
+        let ov = overflow_for_test(vec![up("riptide", port)], "force");
+        let ip: IpAddr = "203.0.113.32".parse().unwrap();
+        let (mut miner, gw_side) = miner_pair();
+        let ov2 = ov.clone();
+        let h = thread::spawn(move || {
+            let mut sock = gw_side;
+            let mut rdr = BufReader::new(sock.try_clone().unwrap());
+            let mut first = String::new();
+            rdr.read_line(&mut first).unwrap();
+            ov2.gate(32, &mut sock, &mut rdr, &first, ip, "203.0.113.32:6001", Duration::from_secs(30), &|u| u.split('.').next().unwrap_or("").to_string(), &payable_stub)
+        });
+        miner.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        let mut rdr = BufReader::new(miner.try_clone().unwrap());
+        miner.write_all(b"{\"id\":1,\"method\":\"mining.subscribe\",\"params\":[\"Antminer S19k Pro\"]}\n").unwrap();
+        loop {
+            let mut l = String::new();
+            assert!(rdr.read_line(&mut l).unwrap() > 0, "the relay must pass the subscribe result down");
+            if l.contains("\"id\":1") { break; }
+        }
+        miner.write_all(b"{\"id\":2,\"method\":\"mining.authorize\",\"params\":[\"184361541.04\",\"x\"]}\n").unwrap();
+        let mut eof = false;
+        for _ in 0..20 {
+            let mut l = String::new();
+            match rdr.read_line(&mut l) {
+                Ok(0) => { eof = true; break; }
+                Ok(_) => continue,
+                Err(_) => break,
+            }
+        }
+        assert!(eof, "the relay is closed once the name turns out to be unpayable");
+        assert!(matches!(h.join().unwrap(), Gate::Relayed));
+        let saw = seen.lock().unwrap().clone();
+        assert!(!saw.iter().any(|l| l.contains("184361541")), "the unpayable authorize was never forwarded: {saw:?}");
+        assert!(!saw.iter().any(|l| l.contains("mining.submit")), "and the peer was never asked to judge a share: {saw:?}");
+        let st = ov.status_json();
+        assert_eq!(st["relays_unpayable"], 1);
+        assert_eq!(st["relays_bounced"], 0, "this is not one of ours being sent home");
+        assert_eq!(st["relays_churned"], 0, "we ended it, so it is not the miner hanging up on the handshake");
+        assert_eq!(st["unpayable_sources"], 1);
+        // The retry is served locally, without a peer connection.
+        let before = seen.lock().unwrap().len();
+        let (mut miner2, gw2) = miner_pair();
+        let ov3 = ov.clone();
+        let h2 = thread::spawn(move || {
+            let mut sock = gw2;
+            let mut rdr = BufReader::new(sock.try_clone().unwrap());
+            let mut first = String::new();
+            rdr.read_line(&mut first).unwrap();
+            ov3.gate(33, &mut sock, &mut rdr, &first, ip, "203.0.113.32:6002", Duration::from_secs(30), &|u| u.to_string(), &payable_stub)
+        });
+        miner2.write_all(b"{\"id\":1,\"method\":\"mining.subscribe\",\"params\":[\"Antminer S19k Pro\"]}\n").unwrap();
+        assert!(matches!(h2.join().unwrap(), Gate::Local(_)), "the retry is served locally");
+        assert_eq!(seen.lock().unwrap().len(), before, "and cost the peer nothing");
     }
 
     #[test]
@@ -1596,7 +1858,7 @@ mod tests {
             let mut rdr = BufReader::new(sock.try_clone().unwrap());
             let mut first = String::new();
             rdr.read_line(&mut first).unwrap();
-            ov2.gate(1, &mut sock, &mut rdr, &first, "203.0.113.4".parse().unwrap(), "h", Duration::from_secs(30), &|u| u.to_string())
+            ov2.gate(1, &mut sock, &mut rdr, &first, "203.0.113.4".parse().unwrap(), "h", Duration::from_secs(30), &|u| u.to_string(), &|_| true)
         });
         miner.write_all(b"{\"id\":1,\"method\":\"mining.subscribe\",\"params\":[\"x\"]}\n").unwrap();
         miner.write_all(b"{\"id\":2,\"method\":\"mining.authorize\",\"params\":[\"bc1qnew\",\"x\"]}\n").unwrap();
@@ -1623,14 +1885,15 @@ mod tests {
     #[test]
     fn tick_meters_and_flips_with_hysteresis() {
         let ov = overflow_for_test(vec![], "auto");
-        // prime stats unreachable in tests: stratum sum stands in, flagged; can enter
+        // Prime stats are unreachable in tests. The valve does not need them.
         for _ in 0..2 {
             ov.tick(Some(10e15), 4e15);
             assert!(!ov.is_active());
         }
         let m = ov.status_json();
         assert!((m["share_pct"].as_f64().unwrap() - 40.0).abs() < 1e-9);
-        assert!(m["meter_error"].as_str().unwrap().contains("stratum-only"));
+        assert_eq!(m["metered"], "stratum");
+        assert!(m["meter_error"].as_str().unwrap().contains("stratum only"));
         ov.tick(Some(10e15), 4e15);
         assert!(ov.is_active(), "third poll over the line turns it on");
         assert_eq!(ov.status_json()["flips"], 1);
@@ -1638,18 +1901,36 @@ mod tests {
         ov.tick(None, 4e15);
         assert!(ov.is_active());
         assert_eq!(ov.status_json()["meter_ok"], false);
-        // stratum-only 20% must NOT exit: the number is incomplete without Prime
+        // stratum under the exit line for three polls turns it off, Prime or no Prime
         for _ in 0..3 {
             ov.tick(Some(10e15), 2e15);
         }
-        assert!(ov.is_active(), "incomplete meter while Prime is down must not flip overflow off");
-        assert_eq!(ov.status_json()["flips"], 1);
-        // a full Prime reading below exit for three polls does turn it off
-        for _ in 0..3 {
-            ov.apply_meter(Some(10e15), 2e15, Some(2e6)); // 2e6 GH/s = 2e15 H/s = 20%
-        }
-        assert!(!ov.is_active(), "20% from Prime for three polls turns it off");
+        assert!(!ov.is_active(), "stratum at 20% for three polls turns it off without Prime");
         assert_eq!(ov.status_json()["flips"], 2);
+    }
+
+    #[test]
+    fn datum_hashrate_never_moves_the_valve() {
+        let ov = overflow_for_test(vec![], "auto"); // enter 32, exit 27
+        // Stratum 10% of network, DATUM another 60%: the pool is at 70% and nobody is relayed.
+        for _ in 0..6 {
+            ov.apply_meter(Some(10e15), 1e15, Some(7e6)); // 7e6 GH/s = 7e15 H/s
+        }
+        assert!(!ov.is_active(), "DATUM hashrate must not start overflow");
+        let m = ov.status_json();
+        assert!((m["share_pct"].as_f64().unwrap() - 10.0).abs() < 1e-9);
+        assert!((m["pool_share_pct"].as_f64().unwrap() - 70.0).abs() < 1e-9);
+        assert!((m["datum_hs"].as_f64().unwrap() - 6e15).abs() < 1.0);
+        // Stratum alone over the line starts it, with no DATUM at all.
+        for _ in 0..3 {
+            ov.apply_meter(Some(10e15), 4e15, Some(4e6));
+        }
+        assert!(ov.is_active(), "stratum at 40% starts overflow");
+        // DATUM piling in while stratum falls under the exit line does not hold it on.
+        for _ in 0..3 {
+            ov.apply_meter(Some(10e15), 2e15, Some(9e6));
+        }
+        assert!(!ov.is_active(), "stratum at 20% ends overflow even with the pool at 90%");
     }
 
     #[test]

@@ -15,8 +15,8 @@
   "verify_shares": "enforce",
   "overflow": {
     "mode": "auto",
-    "enter_pct": 25,
-    "exit_pct": 22,
+    "enter_pct": 15,
+    "exit_pct": 13,
     "hold_polls": 3,
     "poll_secs": 30,
     "grandfather_hours": 24,
@@ -26,6 +26,7 @@
       {"name": "Riptide", "host": "sv1.riptide.maveth.ca", "port": 23337, "url": "https://riptide.maveth.ca/"},
       {"name": "Convoy", "host": "mine.convoy.xyz", "port": 3333, "url": "https://convoy.xyz/"},
       {"name": "B2Pool", "host": "ord.b2pool.io", "port": 3333, "url": "https://b2pool.io/"},
+      {"name": "Xorpool", "host": "datum.xorpool.com", "port": 23335, "url": "https://xorpool.com/"},
       {"name": "iohzrd", "host": "gateway.iohzrd.tech", "port": 23334, "url": "https://gateway.iohzrd.tech/"}
     ]
   }

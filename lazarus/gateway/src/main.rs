@@ -154,6 +154,13 @@ const MAX_CONNS_PER_IP: usize = 1024;
 fn clean_user(u: &str) -> bool {
     !u.is_empty() && u.len() <= MAX_USER && u.bytes().all(|b| (0x21..0x7f).contains(&b))
 }
+/// A username that can actually be paid: printable, bounded, and an identity that resolves
+/// to an output script. `mining.authorize` and the overflow gate must agree on this, because
+/// a relay forwards the name verbatim and the upstream pays whoever it names. A name we
+/// answer `BadUsername` is a name no pool can credit either.
+fn payable_user(u: &str) -> bool {
+    clean_user(u) && identity_script(&canon_identity(u)).is_some()
+}
 /// Attacker-supplied text for a log line.
 fn short(s: &str) -> String {
     s.chars().filter(|c| c.is_ascii_graphic()).take(48).collect()
@@ -1315,7 +1322,7 @@ fn handle_miner(mut sock: TcpStream, st: Arc<Shared>, ip: IpAddr) {
                         if ov.considering() {
                             // Not a local miner until the gate says so.
                             lk(&st.miners).remove(&id);
-                            match ov.gate(id, &mut sock, &mut rdr, &line, ip, &host_label, IDLE_TIMEOUT, &canon_identity) {
+                            match ov.gate(id, &mut sock, &mut rdr, &line, ip, &host_label, IDLE_TIMEOUT, &canon_identity, &payable_user) {
                                 Gate::Relayed => return,
                                 Gate::Local(extra) => {
                                     pending.extend(extra);
@@ -1347,7 +1354,7 @@ fn handle_miner(mut sock: TcpStream, st: Arc<Shared>, ip: IpAddr) {
             "mining.authorize" => {
                 let raw = msg.get("params").and_then(|p| p.as_array()).and_then(|a| a.first()).and_then(|x| x.as_str()).unwrap_or("");
                 let ident = canon_identity(raw);
-                let ok = clean_user(raw) && identity_script(&ident).is_some();
+                let ok = payable_user(raw);
                 if ok { user = raw.to_string(); } else { user.clear(); }
                 send_line(&mut sock, &json!({"id": mid, "result": ok, "error": if ok { Value::Null } else { json!([14, "BadUsername", null]) }}));
                 if let Some(m) = lk(&st.miners).get_mut(&id) {
@@ -1594,6 +1601,12 @@ fn handle_miner(mut sock: TcpStream, st: Arc<Shared>, ip: IpAddr) {
                 }
                 send_line(&mut sock, &json!({"id": mid, "result": true, "error": null}));
             }
+            // BIP310 version rolling, which arrives before the subscribe. The submit path
+            // rebuilds the header from the job's own version, so a rolled version would miss
+            // the target here and at any pool the session is relayed to. Decline in the
+            // shape the BIP defines; the catch-all's `result: null` is not a configure reply
+            // at all and leaves the firmware to decide for itself what was negotiated.
+            "mining.configure" => send_line(&mut sock, &json!({"id": mid, "result": {"version-rolling": false}, "error": null})),
             _ => send_line(&mut sock, &json!({"id": mid, "result": null, "error": null})),
         }
     }
@@ -2120,7 +2133,8 @@ fn main() {
             let auth = cookie_auth(&cookie)?;
             rpc(&rpc_url, &auth, "getnetworkhashps", json!([nblocks, -1])).and_then(|v| v.as_f64())
         };
-        let stratum_hs = move || lk(&s.miners).values().map(miner_hs).sum::<f64>();
+        // `+ 0.0`: an empty sum is -0.0, which the status would print as "-0.0%".
+        let stratum_hs = move || lk(&s.miners).values().map(miner_hs).sum::<f64>() + 0.0;
         let o1 = ov.clone();
         thread::Builder::new().name("overflow-meter".into()).spawn(move || o1.run_meter(net_hs, stratum_hs)).expect("overflow meter thread");
         let o2 = ov.clone();
