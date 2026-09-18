@@ -1203,6 +1203,9 @@ def attach_share_fields(rec):
             rec["shares_lifetime"] = ww
             rec["shares_acc"] = ww
     display = phr if phr > 1e-6 else (gwh if gwh > 1e-6 else rec["firmware_hr_ghs"])
+    if rec.get("path_hr_ghs") is not None:
+        # The DATUM side of a mixed address: this row is one path, not the whole identity.
+        display = float(rec.get("path_hr_ghs") or 0)
     if display > 1e-6:
         rec["hr_ghs"] = display
         if gwh > 1e-6 and rec.get("last_share_s") is not None:
@@ -1210,6 +1213,71 @@ def attach_share_fields(rec):
         elif info.get("last_share_s") is not None:
             rec["last_share_s"] = _share_age_s(info.get("last_share_s"), missing=0.0)
     return rec
+
+
+def datum_portion_ghs(addr, credited_ghs, gateway_ghs):
+    """The part of an address's credited rate that did not come through the house stratum.
+
+    Prime credits one rate per identity whichever path the work took; the house stratum's
+    accepted-diff rate is what arrived here. The difference is the miner's own gateway."""
+    return max(0.0, float(credited_ghs or 0) - float(gateway_ghs or 0))
+
+
+def datum_side_of_stratum_miner(info, credited_ghs, gateway_ghs):
+    """GH/s an address on the house stratum is *also* delivering through a DATUM gateway
+    right now, or 0.0 when it is a plain stratum miner.
+
+    Prime's client list cannot answer this: an operator's gateway passes its users' own
+    addresses through, so the identity on a live client is the operator's, not the
+    miner's. What Prime does report per identity is the credited rate over every path and
+    how much of the window's work came in on the stratum. Both have to agree before a
+    stratum miner is called mixed: window work on the gateway path, and a credited rate
+    the house stratum's own accepted-diff rate does not account for. The rate check keeps a
+    miner who switched to the stratum hours ago from staying "both" until its old gateway
+    work leaves the window; the work check keeps rate-estimate noise on a pure stratum
+    miner from inventing a gateway."""
+    ww = int(info.get("window_work") or 0)
+    sw = min(int(info.get("stratum_work") or 0), ww)
+    if ww <= 0 or ww - sw < ww * 0.02:
+        return 0.0
+    phr = float(credited_ghs or 0)
+    dhr = datum_portion_ghs(None, phr, gateway_ghs)
+    if dhr < max(phr * 0.10, 1.0):
+        return 0.0
+    return dhr
+
+
+def datum_side_record(addr, gw, info, path_hr, last_s=None):
+    """A worker row for the DATUM side of an address that is also on the house stratum, so
+    the miner page lists both paths instead of only the stratum sessions."""
+    ww = int(info.get("window_work") or 0)
+    return {
+        "address": addr,
+        "worker": gw.get("name") or "gateway",
+        "user": addr,
+        "host": "",
+        "hr_ghs": path_hr,
+        # The rate this row alone stands for. attach_share_fields rewrites hr_ghs to the
+        # address-level credited figure; this survives so the workers table can show the split.
+        "path_hr_ghs": path_hr,
+        "vdiff": 0,
+        "diff_acc": ww,
+        "shares_acc": ww,
+        "shares_session": 0,
+        "shares_lifetime": ww,
+        "diff_rej": 0,
+        "shares_rej": 0,
+        "last_share_s": _share_age_s(last_s if last_s is not None else gw.get("last_share_s"), missing=0.0),
+        "ua": "DATUM gateway",
+        "online": True,
+        "via": "prime",
+        "gateway_name": gw.get("name") or "",
+        "gateway": gw.get("gateway") or "",
+        "window_work": ww,
+        "window_percent": float(info.get("window_percent") or 0),
+        "window_sats": int(info.get("window_sats") or 0),
+        "window_shares": int(info.get("window_shares") or info.get("credits") or 0),
+    }
 
 
 def merge_prime_online(miners):
@@ -1235,6 +1303,22 @@ def merge_prime_online(miners):
                 m["via"] = "stratum"
         attach_share_fields(m)
     extras = []
+    # An address hashing through its own DATUM gateway *and* the house stratum at once. The
+    # stratum sessions are already in `miners`; without this row the gateway side is
+    # invisible, the page calls the miner "stratum" while the window bills it "datum", and
+    # the workers add up to a fraction of the credited rate.
+    stratum_here = {m.get("address") for m in miners if (m.get("via") or "stratum") == "stratum"}
+    names = None
+    for addr in have & set(by) & stratum_here:
+        info = by.get(addr) or {}
+        dhr = datum_side_of_stratum_miner(info, info.get("hr_ghs"), (state.get("gateway_hr") or {}).get(addr))
+        if dhr <= 0:
+            continue
+        if names is None:
+            names = gateway_names_by_address()
+        rec = datum_side_record(addr, names.get(addr) or {}, info, dhr, last_s=info.get("last_share_s"))
+        attach_share_fields(rec)
+        extras.append(rec)
     for addr, info in by.items():
         if addr in have:
             continue
@@ -2132,6 +2216,17 @@ def scrape():
     gw_n = 0
     for addr, info in prime_by.items():
         if addr in stratum_addrs:
+            # On the house stratum and, if it also runs its own gateway, sampled once more
+            # here for the part that did not come through the stratum. Otherwise the history
+            # would show only the stratum sessions while one is connected and the whole
+            # credited rate the moment it drops, and swing between the two on every switch.
+            dhr = datum_side_of_stratum_miner(info, info.get("hr_ghs"), gateway_hr.get(addr))
+            if dhr > 0:
+                db(
+                    "INSERT INTO samples(ts,address,worker,hr_ghs,vdiff,shares_acc,shares_rej,diff_acc,last_share_s) VALUES(?,?,?,?,?,?,?,?,?)",
+                    (ts, addr, "gateway", dhr, 0, 0, 0, int(info.get("window_work") or 0), float(info.get("last_share_s") or 0)),
+                    write=True,
+                )
             continue
         hr = float(info.get("hr_ghs") or 0)
         gw_hr += hr
@@ -3344,7 +3439,16 @@ def _path_hashrate(miners):
         hr = float(m.get("credited_hr_ghs") or 0)
         if hr < 1e-6:
             hr = float(m.get("hr_ghs") or 0)
-        if _hasher_path(m) == "datum":
+        via = str(m.get("via") or "").lower()
+        if via == "both":
+            # Own gateway and house stratum at once: the stratum's accepted-diff rate is the
+            # part that came here, the rest arrived through the miner's gateway.
+            here = min(hr, float(m.get("gateway_hr_ghs") or 0))
+            stratum += here
+            datum += hr - here
+            n_stratum += 1
+            n_datum += 1
+        elif _hasher_path(m) == "datum":
             datum += hr
             n_datum += 1
         else:
@@ -3640,6 +3744,8 @@ def rollup_online_by_address(online):
             order.append(addr)
             continue
         cur = by[addr]
+        if _hasher_path(cur) != _hasher_path(m):
+            cur["via"] = "both"
         cur["sessions"] = int(cur.get("sessions") or 1) + 1
         cur["diff_acc"] = int(cur.get("diff_acc") or 0) + int(m.get("diff_acc") or 0)
         cur["shares_acc"] = int(cur.get("shares_acc") or 0) + int(m.get("shares_acc") or 0)
@@ -3692,11 +3798,17 @@ def miner_payload(address):
     share = (hr / net_ghs) if net_ghs else 0
     miner_need = hashes_per_block(node.get("difficulty"))
     miner_hs = float(hr or 0) * 1e9
-    # Billed at the rate for the path this address's window work is on (15% public
-    # stratum, 0% own gateway), not a single rate for everyone.
+    # Billed at the rate for the path this address's window work is on (public stratum vs
+    # own gateway), not a single rate for everyone. primed charges each unit of work at its
+    # own path's rate, so window work that arrived both ways is billed at the blend, not at
+    # whichever path happens to hold the majority.
     path_fee = _fee_percent_for_path(
         pinfo.get("fee_path") or ("stratum" if any((m.get("via") or "stratum") == "stratum" for m in recs) else "datum")
     )
+    _ww = int(pinfo.get("window_work") or 0)
+    _sw = min(int(pinfo.get("stratum_work") or 0), _ww)
+    if 0 < _sw < _ww:
+        path_fee = _fee_percent_for_path("stratum") * _sw / _ww + _fee_percent_for_path("datum") * (_ww - _sw) / _ww
     gross_day = ((miner_hs * 86400.0 / miner_need) * SUBSIDY) if miner_need and miner_hs else 0.0
     est = gross_day * (1 - path_fee / 100.0)
     # The DATUM case for this address, at today's window split: 0% fee plus the rebate
@@ -4336,22 +4448,30 @@ _SEO_PAGES = {
 # checkable and stays fair when they change it; our own most expensive number is in there too,
 # because a comparison that only flatters the host is worth nothing to the person reading it.
 _POOL_TABLE_EN = """<div class="seo-table"><table>
-        <caption>BLAKE2b Bitcoin (XBT / BTCB2) pools, as each publishes its own terms, September 2026</caption>
+        <caption>BLAKE2b Bitcoin (XBT / BTCB2) pools, as each publishes its own terms, 18 September 2026</caption>
         <thead><tr><th scope="col">Pool</th><th scope="col">Fee</th><th scope="col">Reward scheme</th><th scope="col">Who holds your coins</th><th scope="col">The block's transaction fees</th><th scope="col">Limit on its own share</th></tr></thead>
         <tbody>
         <tr><th scope="row">Lazarus Pool</th><td>0% own DATUM gateway · 15% public stratum, 7.5 of those points paid back to DATUM miners</td><td>TIDES, 8&times; difficulty</td><td>Nobody. The block's coinbase pays your address</td><td>Scale every miner's payout up</td><td>Stratum held to 15%, enforced by relaying new miners elsewhere</td></tr>
-        <tr><th scope="row">B2Pool</th><td>0% own DATUM gateway · 1% stratum</td><td>TIDES, 8&times; difficulty</td><td>Coinbase where it fits, otherwise the pool until your balance passes 10,000 sat</td><td>Stay with the pool</td><td>None published</td></tr>
-        <tr><th scope="row">AlphaPool</th><td>2.5%</td><td>PPLNS</td><td>The pool, until a block reaches 100-confirmation maturity and a batch cycle pays out</td><td>Not published</td><td>30%, pledged after it passed 50% of the network</td></tr>
+        <tr><th scope="row">Riptide</th><td>0% own DATUM · 1% stratum (variable; currently 1%, half the skim to live DATUM miners)</td><td>TIDES</td><td>Coinbase</td><td>Not published separately</td><td>None published</td></tr>
+        <tr><th scope="row">CONVOY</th><td>1% DATUM · 2% failover stratum</td><td>TIDES</td><td>Generation transaction when it fits; otherwise a balance until 0.01048576 BTC</td><td>Included in the TIDES split</td><td>None published</td></tr>
+        <tr><th scope="row">B2Pool</th><td>0% own DATUM · 1% TIDES stratum</td><td>TIDES, 4&times; difficulty</td><td>Coinbase where it fits, otherwise the pool until your balance passes 10,000 sat</td><td>Stay with the pool (only the subsidy is shared)</td><td>None published</td></tr>
+        <tr><th scope="row">Xorpool</th><td>1% own DATUM · 2% pooled stratum (they build the template)</td><td>TIDES</td><td>Nobody. The block's coinbase pays your address</td><td>Scale every miner's payout up</td><td>None published</td></tr>
+        <tr><th scope="row">iohzrd</th><td>0% own DATUM · 10% their public gateway</td><td>TIDES, 8&times; difficulty</td><td>Coinbase</td><td>Scale every miner's payout up</td><td>Network share limit on their dashboard</td></tr>
+        <tr><th scope="row">AlphaPool</th><td>2.95% PPLNS · DATUM fee advertised as half of that</td><td>PPLNS</td><td>The pool, until a block reaches 100-confirmation maturity and a batch cycle pays out</td><td>Not published</td><td>30%, pledged after it passed 50% of the network</td></tr>
         </tbody>
       </table></div>"""
 
 _POOL_TABLE_ZH = """<div class="seo-table"><table>
-        <caption>BLAKE2b 比特币（XBT / BTCB2）矿池对比，均按各家自行公布的口径，2026 年 9 月</caption>
+        <caption>BLAKE2b 比特币（XBT / BTCB2）矿池对比，均按各家自行公布的口径，2026 年 9 月 18 日</caption>
         <thead><tr><th scope="col">矿池</th><th scope="col">手续费</th><th scope="col">奖励方式</th><th scope="col">谁替你拿着币</th><th scope="col">区块里的交易费</th><th scope="col">自身占比上限</th></tr></thead>
         <tbody>
         <tr><th scope="row">Lazarus Pool</th><td>自建 DATUM 网关 0% · 公共 stratum 15%，其中 7.5 个点返还给 DATUM 矿工</td><td>TIDES，难度 8 倍</td><td>没有人。由区块的 coinbase 直接付到你的地址</td><td>等比例抬高每位矿工的收益</td><td>stratum 上限 15%，超过即把新矿工中继到别家</td></tr>
-        <tr><th scope="row">B2Pool</th><td>自建 DATUM 网关 0% · stratum 1%</td><td>TIDES，难度 8 倍</td><td>能进 coinbase 就进，否则由矿池代持至余额超过 10,000 sat</td><td>留给矿池</td><td>未公布</td></tr>
-        <tr><th scope="row">AlphaPool</th><td>2.5%</td><td>PPLNS</td><td>矿池代持，直到区块达到 100 确认成熟并由批量周期支付</td><td>未公布</td><td>30%，在占到全网一半以上之后承诺</td></tr>
+        <tr><th scope="row">Riptide</th><td>自建 DATUM 0% · stratum 1%（可变，目前 1%，抽成一半给在线 DATUM 矿工）</td><td>TIDES</td><td>coinbase</td><td>未单独公布</td><td>未公布</td></tr>
+        <tr><th scope="row">CONVOY</th><td>DATUM 1% · 故障转移 stratum 2%</td><td>TIDES</td><td>能进 coinbase 就进，否则代持至 0.01048576 BTC</td><td>计入 TIDES 分配</td><td>未公布</td></tr>
+        <tr><th scope="row">B2Pool</th><td>自建 DATUM 0% · TIDES stratum 1%</td><td>TIDES，难度 4 倍</td><td>能进 coinbase 就进，否则由矿池代持至余额超过 10,000 sat</td><td>留给矿池（只分享区块补贴）</td><td>未公布</td></tr>
+        <tr><th scope="row">Xorpool</th><td>自建 DATUM 1% · 由他们组模板的公共 stratum 2%</td><td>TIDES</td><td>没有人。由区块的 coinbase 直接付到你的地址</td><td>等比例抬高每位矿工的收益</td><td>未公布</td></tr>
+        <tr><th scope="row">iohzrd</th><td>自建 DATUM 0% · 他们的公共网关 10%</td><td>TIDES，难度 8 倍</td><td>coinbase</td><td>等比例抬高每位矿工的收益</td><td>仪表盘上有全网占比限制</td></tr>
+        <tr><th scope="row">AlphaPool</th><td>PPLNS 2.95% · 其 DATUM 手续费按减半公布</td><td>PPLNS</td><td>矿池代持，直到区块达到 100 确认成熟并由批量周期支付</td><td>未公布</td><td>30%，在占到全网一半以上之后承诺</td></tr>
         </tbody>
       </table></div>"""
 
@@ -4488,13 +4608,13 @@ _SEO_INTRO = {
             "The fee is the number everyone compares first and the least interesting of the four things that actually differ between pools on this chain. The others: whether the pool ever holds your coins, whether the transaction fees in a found block reach the miners or stay with the operator, and whether the pool does anything at all to limit its own share of the network.",
             _POOL_TABLE_EN,
             "Read that honestly and our public stratum is the expensive one. If you have no intention of running a node, 1% elsewhere beats 15% here and we would rather say so than pretend otherwise. What that 15% buys is the other column: 7.5 of those points are handed back to DATUM miners on every block found, which is why the path we actually recommend costs 0% and gets paid a bonus on top of a full window share.",
-            "The rest of the table is where nothing else on this chain matches. Transaction fees in a block scale every payout up here instead of staying with the pool. Nothing is ever held — the block itself pays your address, so there is no balance, threshold or withdrawal. And once its stratum passes 15% of network hashrate this pool <a href=\"/self-cap\">turns new miners away</a> and hands them to someone else. Figures are as each pool published them in September 2026; check their sites before you commit a fleet, and see the pools we relay to below.",
+            "The rest of the table is where nothing else on this chain matches. Transaction fees in a block scale every payout up here instead of staying with the pool. Nothing is ever held — the block itself pays your address, so there is no balance, threshold or withdrawal. And once its stratum passes 15% of network hashrate this pool <a href=\"/self-cap\">turns new miners away</a> and hands them to someone else. The five pools we relay to are grouped in the table with Lazarus; figures are as each pool published them on 18 September 2026 — check their sites before you commit a fleet.",
         ]),
         "zh": ("XBT（BTCB2）该挖哪个矿池？", [
             "手续费是所有人第一个拿来比的数字，也是本链各矿池之间真正有差别的四件事里最不重要的一件。另外三件是：矿池会不会替你保管币、所出区块里的交易费是分给矿工还是留给运营者，以及这家矿池有没有采取任何措施限制自己在全网中的占比。",
             _POOL_TABLE_ZH,
             "如实来看，我们的公共 stratum 是贵的那一个。如果你完全不打算自己跑节点，别家 1% 就是比这里 15% 划算，我们宁愿直说，也不想装作不是。这 15% 换来的是隔壁那一列：其中 7.5 个点在每次出块时都会返还给 DATUM 矿工——这也正是我们真正推荐的那条路为什么是 0%，而且在拿到完整窗口份额之外还额外拿补贴。",
-            "表格剩下的部分，本链目前没有别家能对上。这里区块中的交易费会等比例抬高每一笔支付，而不是留在矿池。任何时候都不代持——由区块本身付到你的地址，因此没有余额、没有起付线、不用提现。而且一旦自家 stratum 超过全网 15% 的算力，本矿池会<a href=\"/self-cap\">把新矿工拒之门外</a>并转交给别家。表中数字为各矿池 2026 年 9 月自行公布的口径；投入整批机器前请先到各家网站核对，也可以看下方我们中继过去的矿池。",
+            "表格剩下的部分，本链目前没有别家能对上。这里区块中的交易费会等比例抬高每一笔支付，而不是留在矿池。任何时候都不代持——由区块本身付到你的地址，因此没有余额、没有起付线、不用提现。而且一旦自家 stratum 超过全网 15% 的算力，本矿池会<a href=\"/self-cap\">把新矿工拒之门外</a>并转交给别家。我们转发到的五家矿池和 Lazarus 列在同一张表里；表中数字为各矿池 2026 年 9 月 18 日自行公布的口径，投入整批机器前请先到各家网站核对。",
         ]),
     },
     "/self-cap": {
@@ -4738,24 +4858,31 @@ publishes a self-imposed limit. See {site}/self-cap.
 ## How the pools on this chain differ
 
 Fees are the least of it. What differs is custody, what happens to the transaction fees in a found
-block, and whether a pool limits its own share. As each pool published its own terms in September
+block, and whether a pool limits its own share. As each pool published its own terms on 18 September
 2026:
 
 - Lazarus Pool: 0% with your own DATUM gateway, 15% on the public stratum with 7.5 of those points
   paid back to DATUM miners. TIDES, window of 8x difficulty. No custody at all — the block's
   coinbase pays your address, so there is no balance, threshold or withdrawal. The block's
   transaction fees scale every miner's payout up. Stratum self-capped at 15%.
-- B2Pool: 0% with your own DATUM gateway, 1% on the stratum. TIDES, window of 8x difficulty. Paid
+- Riptide (overflow): 0% own DATUM, 1% stratum (variable; currently 1%, half the skim to live DATUM
+  miners). TIDES. Coinbase payouts.
+- CONVOY (overflow): 1% DATUM, 2% on their failover stratum. TIDES. Generation transaction when it
+  fits, otherwise a balance until 0.01048576 BTC.
+- B2Pool (overflow): 0% own DATUM, 1% on the TIDES stratum. TIDES, window of 4x difficulty. Paid
   from the coinbase where it fits, otherwise by the pool once your balance passes 10,000 sat. The
-  block's transaction fees stay with the pool. No self-limit published.
-- AlphaPool: 2.5%, PPLNS. The pool holds a balance until a block reaches 100-confirmation maturity
-  and a batch cycle pays out. Treatment of transaction fees not published. Pledged a 30% cap after
-  passing 50% of the network.
+  block's transaction fees stay with the pool (only the subsidy is shared). No self-limit published.
+- Xorpool (overflow): 1% own DATUM, 2% on their pooled stratum (they build the template). TIDES.
+  Coinbase-direct, no custody.
+- iohzrd (overflow): 0% own DATUM, 10% on their public gateway. TIDES, window of 8x difficulty.
+  Coinbase payouts.
+- AlphaPool: 2.95% PPLNS (DATUM fee advertised as half of that). The pool holds a balance until a
+  block reaches 100-confirmation maturity and a batch cycle pays out. Treatment of transaction fees
+  not published. Pledged a 30% cap after passing 50% of the network.
 
-Honest summary: if you will never run a node, Lazarus's public stratum is the most expensive of the
-three, and the 1% elsewhere is cheaper. The path Lazarus recommends and is cheapest on is your own
-DATUM gateway at 0% plus the subsidy, and it is the only one of the three that never takes custody,
-shares the block's transaction fees with miners, or turns hashrate away. See {site}/pools.
+Honest summary: if you will never run a node, Lazarus's public stratum is the most expensive of
+these, and 1% elsewhere is cheaper. The path Lazarus recommends and is cheapest on is your own
+DATUM gateway at 0% plus the subsidy. See {site}/pools.
 """.replace("{site}", "SITEPLACEHOLDER")
 
 

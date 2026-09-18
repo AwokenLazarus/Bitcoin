@@ -542,7 +542,9 @@
     const feeForPath = (path) => (String(path || "").toLowerCase() === "stratum" ? fees.stratum : fees.datum);
     const tab = MINER_TABS.some(([k]) => k === ctx.tab) ? ctx.tab : "overview";
 
-    const workerHr = (w) => (w.via === "stratum" ? (Number(w.firmware_hr_ghs) > 0 ? w.firmware_hr_ghs : null) : w.hr_ghs);
+    // A row's own rate: the firmware figure for a stratum session, the path's share for the
+    // gateway side of an address that is also on the stratum, else the credited figure.
+    const workerHr = (w) => (w.via === "stratum" ? (Number(w.firmware_hr_ghs) > 0 ? w.firmware_hr_ghs : null) : Number(w.path_hr_ghs) > 0 ? w.path_hr_ghs : w.hr_ghs);
     const relayed = m.relayed || [];
     const workers = (m.workers || [])
       .map(
