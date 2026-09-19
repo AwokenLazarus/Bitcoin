@@ -189,18 +189,58 @@ fn settle(
     };
     let full_split = matches!(kind, CoinbaseKind::Split);
     let pool_only = matches!(kind, CoinbaseKind::PoolOnly);
-    // A pool-only coinbase can carry a different reward than the coinbaser assumed.
-    let amount = |p: &Payee| if pool_only { scale(p.sats, coinbase_value, cb.value) } else { p.sats };
     let placed = |p: &Payee| !pool_only && paid_to(&p.script) > 0;
+    let carry_delta = tides::split::carry_delta(cb.payees, cb.unpaid, cb.rebate_credits, |_| true);
+    let rebate_delta = tides::split::rebate_delta(cb.rebate_owed_credited, cb.rebate_deferred);
+
+    // The coinbaser was priced for the value the gateway asked about, and that is the gateway's
+    // number: nothing ties it to the template it then mined. Close to it (a template that
+    // gained a few fees since), the split's own figures stand, as they always have.
+    // A pool-only coinbase paid nobody and owes every figure, so it is always priced for
+    // the reward it carried.
+    if !pool_only && reward_matches(coinbase_value, cb.value) {
+        return Settlement {
+            kind: name,
+            owed: if full_split { 0 } else { cb.payees.iter().filter(|p| !placed(p)).map(|p| p.sats).sum() },
+            split: cb.payees.iter().map(|p| (p.identity.clone(), p.sats)).collect(),
+            carry_paid: cb.payees.iter().filter(|p| full_split || placed(p)).map(|p| p.carry).sum(),
+            carry_delta,
+            rebate_credited: cb.rebate_credits.iter().map(|r| r.1).sum(),
+            rebate_delta,
+        };
+    }
+
+    // Far from it, the split's figures describe a block that was not mined. Asked about at a
+    // hundredth of the real reward, a coinbase paying every miner its dust and the pool the
+    // rest "is the split, in full": nothing owed, while the window got nothing. Asked about at
+    // a hundred times it, every output scales down to a hundredth and each payee's whole carry
+    // is written off against a payment that covered a sliver of it. So price the block for
+    // what it was: a miner's earned share moves with the reward, carry is a fixed debt, and
+    // whatever the coinbase did not pay of that is owed (which is also what discharges the
+    // carry, as for a dropped payee). Earnings and rebate the split deferred move with the
+    // reward too.
+    let rescale = |sats: u64| scale(sats, coinbase_value, cb.value);
+    let entitled = |p: &Payee| rescale(p.sats.saturating_sub(p.carry)).saturating_add(p.carry);
+    let paid = |p: &Payee| if pool_only { 0 } else { paid_to(&p.script).min(entitled(p)) };
     Settlement {
         kind: name,
-        owed: if full_split { 0 } else { cb.payees.iter().filter(|p| !placed(p)).map(|p| amount(p)).sum() },
-        split: cb.payees.iter().map(|p| (p.identity.clone(), amount(p))).collect(),
-        carry_paid: cb.payees.iter().filter(|p| full_split || placed(p)).map(|p| p.carry).sum(),
-        carry_delta: tides::split::carry_delta(cb.payees, cb.unpaid, cb.rebate_credits, |_| true),
-        rebate_credited: cb.rebate_credits.iter().map(|r| r.1).sum(),
-        rebate_delta: tides::split::rebate_delta(cb.rebate_owed_credited, cb.rebate_deferred),
+        owed: cb.payees.iter().map(|p| entitled(p) - paid(p)).sum(),
+        split: cb.payees.iter().map(|p| (p.identity.clone(), entitled(p))).collect(),
+        carry_paid: cb.payees.iter().filter(|p| placed(p)).map(|p| p.carry.min(paid(p))).sum(),
+        carry_delta: carry_delta
+            .into_iter()
+            .map(|(i, d)| if d > 0 { (i, rescale(d as u64).min(i64::MAX as u64) as i64) } else { (i, d) })
+            .collect(),
+        rebate_credited: cb.rebate_credits.iter().map(|r| rescale(r.1)).sum(),
+        rebate_delta,
     }
+}
+
+/// Whether a coinbase worth `actual` is the template a coinbaser issued for `issued` was asked
+/// about: no less, and no more than a sixteenth more (fees that arrived since; the same band
+/// `classify_coinbase` allows a gateway's own script to take).
+fn reward_matches(actual: u64, issued: u64) -> bool {
+    issued == 0 || (actual >= issued && actual - issued <= issued / 16)
 }
 
 /// How a coinbaser request gets answered. Deliberately has no "drop" variant: a request left
@@ -1631,6 +1671,60 @@ mod tests {
         s.carry_delta.iter().map(|(i, d)| (i.as_str(), *d)).collect()
     }
 
+    /// A coinbaser is priced for the value the gateway asked about, which is the gateway's
+    /// number. A block is settled for the reward it actually carried.
+    #[test]
+    fn a_block_is_settled_for_the_reward_it_carried_not_the_one_asked_about() {
+        let real = 312_500_000u64;
+        // earned 1 000 000 / 500 000 of a block worth `asked`, plus A's 400 000 of carry
+        let split_at = |asked: u64| vec![payee("A", asked / 250 + 400_000, 400_000, 1), payee("B", asked / 500, 0, 2)];
+
+        // near enough (a template that gained fees since) is settled on the split's own figures
+        let payees = split_at(real);
+        let s = settle(&CoinbaseKind::Split, Some(coinbaser(real, &payees)), real + real / 100, |_| 1);
+        assert_eq!((s.owed, s.carry_paid), (0, 400_000));
+        assert_eq!(s.split, vec![("A".to_string(), 1_650_000), ("B".to_string(), 625_000)]);
+
+        // Asked about at a hundredth of the reward: each miner gets its dust, the pool the rest,
+        // and that classifies as the split in full. The window is owed the difference.
+        let tiny = split_at(real / 100);
+        let paid_dust = |script: &[u8]| tiny.iter().find(|p| p.script == script).map_or(0, |p| p.sats);
+        let s = settle(&CoinbaseKind::Split, Some(coinbaser(real / 100, &tiny)), real, paid_dust);
+        assert_eq!(
+            s.split,
+            vec![("A".to_string(), 1_650_000), ("B".to_string(), 625_000)],
+            "what they earned of the real block"
+        );
+        assert_eq!(s.owed, (1_650_000 - 412_500) + (625_000 - 6_250), "less the dust they were paid");
+        assert_eq!(cleared(&s).get("A"), Some(&-400_000), "A's carry is discharged: paid in part, owed the rest");
+
+        // Asked about at a hundred times the reward and scaled down to fit: A is paid a
+        // hundredth of an output that was mostly carry. What is left of it is still owed.
+        let huge = split_at(real * 100);
+        let scaled = |script: &[u8]| huge.iter().find(|p| p.script == script).map_or(0, |p| p.sats / 100);
+        let s = settle(&CoinbaseKind::Split, Some(coinbaser(real * 100, &huge)), real, scaled);
+        assert_eq!(s.split, vec![("A".to_string(), 1_650_000), ("B".to_string(), 625_000)]);
+        let a_paid = (real * 100 / 250 + 400_000) / 100;
+        assert_eq!(s.owed, 1_650_000 - a_paid, "B was paid in full; A's carry was not");
+        assert_eq!(s.carry_paid, 400_000.min(a_paid));
+
+        // earnings the split deferred, and rebate it credited, move with the reward as well
+        let unpaid = [tides::Unpaid {
+            identity: "C".into(),
+            sats: 30_000,
+            earned: 30_000,
+            reason: tides::UnpaidReason::BelowMinimum,
+        }];
+        let credits = [("D".to_string(), 50_000u64)];
+        let cb = Coinbaser { unpaid: &unpaid, rebate_credits: &credits, ..coinbaser(real * 100, &huge) };
+        let s = settle(&CoinbaseKind::Split, Some(cb), real, scaled);
+        assert_eq!((cleared(&s).get("C"), cleared(&s).get("D")), (Some(&300), Some(&500)));
+        assert_eq!(s.rebate_credited, 500);
+
+        assert!(reward_matches(real, real) && reward_matches(real + real / 16, real) && reward_matches(5, 0));
+        assert!(!reward_matches(real - 1, real) && !reward_matches(real + real / 16 + 1, real));
+    }
+
     /// The bug that cost about 1.15 XBT between 969973 and 971795. A gateway that carries only
     /// the head of the coinbase leaves the rest to the make-good, which pays each dropped payee
     /// their whole output — carry included. If that carry stays on the books the next coinbaser
@@ -1661,8 +1755,11 @@ mod tests {
     fn a_pool_only_discharges_every_carry_and_scales_what_it_owes() {
         let payees = vec![payee("A", 1_000_000, 400_000, 1), payee("B", 800_000, 300_000, 2)];
         let s = settle(&CoinbaseKind::PoolOnly, Some(coinbaser(200_000_000, &payees)), 100_000_000, |_| 0);
-        assert_eq!((s.kind, s.owed, s.carry_paid), ("pool-only", 900_000, 0), "half the assumed reward, nobody paid");
-        assert_eq!(s.split, vec![("A".to_string(), 500_000), ("B".to_string(), 400_000)]);
+        // Half the assumed reward, nobody paid. What each earned of this block halves with it;
+        // the carry riding the same output is a debt from earlier blocks and does not. Scaling
+        // the whole output while clearing the whole carry wrote half of that debt off.
+        assert_eq!((s.kind, s.owed, s.carry_paid), ("pool-only", 1_250_000, 0));
+        assert_eq!(s.split, vec![("A".to_string(), 300_000 + 400_000), ("B".to_string(), 250_000 + 300_000)]);
         assert_eq!(cleared(&s).values().sum::<i64>(), -700_000, "all of it discharged");
     }
 
