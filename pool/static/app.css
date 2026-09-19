@@ -313,7 +313,9 @@ html.app { scroll-padding-top: calc(var(--mast-full, 7.5rem) + 14px); }
 /* ------------------------------------------------------------------ header + hero fit */
 /* Outbound links live in the footer and in the / palette; the header keeps to the six views. */
 .app .site-header .nav-out { display: none; }
-.app .nav.views > a:not([data-view-link]) { color: var(--faint); font-size: 0.82rem; }
+/* The header is the six views and nothing else. "Solo" is a part of Miners and "Payouts" a tab of
+   My stats; both are reached from inside those views, where a click lands where its label says. */
+.app .nav.views > a:not([data-view-link]) { display: none; }
 .app .hero-grid > .hx-card { grid-column: 1 / -1; margin-top: 0.4rem; }
 .hx-range:disabled { opacity: 0.35; cursor: not-allowed; }
 
@@ -380,3 +382,9 @@ html.app { scroll-padding-top: calc(var(--mast-full, 7.5rem) + 14px); }
 .learn-path code { font: 0.86em var(--mono); color: var(--ink); background: var(--bg-inset); padding: 0.05em 0.35em; border-radius: 5px; }
 .app main > section.seo-intro { padding-block: clamp(1.6rem, 3.5vw, 2.6rem) 0.4rem; }
 .subnav .scroller > .wrap { padding-inline: max(var(--space), 0.9rem); }
+
+.hx-wrap[hidden] { display: none; }
+.hx-wrap .hx-card { margin-top: 1rem; }
+.hx-split li.is-you a { color: var(--brass); }
+.hx-split li.is-you a::after { content: " ◆"; font-size: 0.7em; }
+.hx-split li.is-you .hx-bar i { background: var(--brass); }

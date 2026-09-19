@@ -41,12 +41,17 @@
   }
 
   class HashChart {
-    constructor(root) {
+    // mode "pool": reads /api/history. mode "miner": is handed one address's day of samples and
+    // the blocks that paid it (setData), and cuts the shorter ranges out of that day itself.
+    constructor(root, mode) {
       this.root = root;
+      this.mode = mode === "miner" ? "miner" : "pool";
+      this.ranges = this.mode === "miner" ? ["1h", "6h", "24h"] : RANGES;
+      this.storeKey = "lz.chart.range." + this.mode;
       this.range = "24h";
       try {
-        const saved = localStorage.getItem("lz.chart.range");
-        if (RANGES.includes(saved)) this.range = saved;
+        const saved = localStorage.getItem(this.storeKey);
+        if (this.ranges.includes(saved)) this.range = saved;
       } catch (e) { /* private mode */ }
       this.data = null;
       this.cache = {};
@@ -55,7 +60,44 @@
       this.showMiners = false;
       this.build();
       this.observe();
-      this.load();
+      if (this.mode === "pool") this.load();
+    }
+
+    // Strings: a miner chart uses app.chart.m.* where one exists, and the pool's wording otherwise.
+    t(k, v) {
+      // data-neutral: the standalone /miner/<address> page, where the address may be anyone's.
+      if (this.mode === "miner" && this.root.dataset.neutral != null && window.LZ_I18N && window.LZ_I18N.raw("app.chart.n." + k) != null) return LZ.t("app.chart.n." + k, v);
+      if (this.mode === "miner" && window.LZ_I18N && window.LZ_I18N.raw("app.chart.m." + k) != null) return LZ.t("app.chart.m." + k, v);
+      return LZ.t("app.chart." + k, v);
+    }
+
+    // Miner mode: `m` is the /api/miner/<address> document. Called on every refresh.
+    setData(m) {
+      this.address = m.address || this.address || "";
+      this.raw = {
+        history: (m.history || []).map((h) => [Number(h.ts), Number(h.hr_ghs) || 0, 0]),
+        blocks: (m.blocks_found || []).filter((b) => Number(b.ts) > 0).map((b) => ({
+          height: b.height, hash: b.hash, ts: Number(b.ts), reward_btc: Number(b.miner_btc) || 0, status: b.status || "", kind: "", gateway: "",
+        })).sort((a, b) => a.ts - b.ts),
+      };
+      const first = !this.data;
+      this.slice();
+      if (first) this.animateIn(); else this.draw();
+    }
+    slice() {
+      if (!this.raw) return;
+      const span = { "1h": 3600, "6h": 21600, "24h": 86400 }[this.range], step = { "1h": 60, "6h": 120, "24h": 300 }[this.range];
+      const until = Math.floor(Date.now() / 1000), since = until - span, buckets = new Map();
+      for (const [ts, hr] of this.raw.history) {
+        if (ts < since) continue;
+        const k = Math.floor(ts / step) * step, b = buckets.get(k) || [0, 0];
+        b[0] += hr; b[1]++;
+        buckets.set(k, b);
+      }
+      const points = [...buckets.entries()].sort((a, b) => a[0] - b[0]).map(([ts, b]) => [ts, b[0] / b[1], 0]);
+      this.data = { range: this.range, since, until, step_s: step, points, blocks: this.raw.blocks.filter((b) => b.ts >= (points.length ? points[0][0] : since)) };
+      this.prepare();
+      this.renderStats();
     }
 
     build() {
@@ -67,7 +109,7 @@
       const tools = el("div", "hx-tools");
       this.pills = el("div", "hx-ranges");
       this.pills.setAttribute("role", "group");
-      for (const k of RANGES) {
+      for (const k of this.ranges) {
         const b = el("button", "hx-range");
         b.type = "button";
         b.dataset.range = k;
@@ -81,7 +123,8 @@
         this.minersBtn.setAttribute("aria-pressed", String(this.showMiners));
         this.draw();
       });
-      tools.append(this.pills, this.minersBtn);
+      tools.append(this.pills);
+      if (this.mode === "pool") tools.append(this.minersBtn);
       head.append(this.titleEl, tools);
 
       this.statsEl = el("dl", "hx-stats");
@@ -115,18 +158,18 @@
     }
 
     labels() {
-      this.titleEl.textContent = t("title");
-      this.pills.setAttribute("aria-label", t("rangeAria"));
+      this.titleEl.textContent = this.t("title");
+      this.pills.setAttribute("aria-label", this.t("rangeAria"));
       for (const b of this.pills.children) {
-        b.textContent = t("range." + b.dataset.range);
+        b.textContent = this.t("range." + b.dataset.range);
         b.setAttribute("aria-pressed", String(b.dataset.range === this.range));
         b.disabled = !!this.legacy && b.dataset.range !== "24h";
-        b.title = b.disabled ? t("rangeSoon") : "";
+        b.title = b.disabled ? this.t("rangeSoon") : "";
       }
-      this.minersBtn.textContent = t("miners");
+      this.minersBtn.textContent = this.t("miners");
       this.minersBtn.setAttribute("aria-pressed", String(this.showMiners));
-      this.hint.textContent = t("hint");
-      this.empty.textContent = t("empty");
+      this.hint.textContent = this.t("hint");
+      this.empty.textContent = this.t("empty");
     }
 
     observe() {
@@ -144,7 +187,7 @@
     }
 
     maybeRefresh() {
-      if (document.hidden || !this.visible || this.loading) return;
+      if (this.mode !== "pool" || document.hidden || !this.visible || this.loading) return;
       const c = this.cache[this.range];
       if (!c || Date.now() - c.at > REFRESH_S[this.range] * 1000) this.load();
     }
@@ -152,11 +195,12 @@
     setRange(k) {
       if (k === this.range) return;
       this.range = k;
-      try { localStorage.setItem("lz.chart.range", k); } catch (e) { /* private mode */ }
+      try { localStorage.setItem(this.storeKey, k); } catch (e) { /* private mode */ }
       this.closePop();
       this.hover = null;
       this.tip.hidden = true;
       this.labels();
+      if (this.mode === "miner") { this.slice(); this.animateIn(); return; }
       const c = this.cache[k];
       if (c) { this.data = c.data; this.prepare(); this.renderStats(); this.animateIn(); }
       this.load();
@@ -191,7 +235,7 @@
         this.renderStats();
         if (first) this.animateIn(); else this.draw();
       } catch (e) {
-        if (!this.data) { this.empty.hidden = false; this.empty.textContent = t("error"); }
+        if (!this.data) { this.empty.hidden = false; this.empty.textContent = this.t("error"); }
       } finally {
         this.loading = false;
         this.root.classList.remove("is-loading");
@@ -242,21 +286,21 @@
         reward: this.blocks.reduce((a, b) => a + (b.reward_btc || 0), 0),
       };
       this.empty.hidden = pts.length > 1;
-      if (pts.length <= 1) this.empty.textContent = t("empty");
+      if (pts.length <= 1) this.empty.textContent = this.t("empty");
     }
 
     renderStats() {
       if (!this.summary) return;
       const s = this.summary;
-      const cell = (k, v, sub) => `<div><dt>${LZ.esc(t(k))}</dt><dd>${v}${sub ? `<small>${sub}</small>` : ""}</dd></div>`;
+      const cell = (k, v, sub) => `<div><dt>${LZ.esc(this.t(k))}</dt><dd>${v}${sub ? `<small>${sub}</small>` : ""}</dd></div>`;
       this.statsEl.innerHTML =
         cell("now", LZ.fmtHr(s.now)) +
         cell("avg", LZ.fmtHr(s.avg)) +
         cell("peak", LZ.fmtHr(s.peak), s.peakTs ? LZ.esc(this.fmtTime(s.peakTs, true)) : "") +
-        cell("blocks", LZ.num(s.blocks), LZ.esc(t("perDay", { n: s.perDay >= 10 ? Math.round(s.perDay) : s.perDay.toFixed(1) }))) +
+        cell("blocks", LZ.num(s.blocks), LZ.esc(this.t("perDay", { n: s.perDay >= 10 ? Math.round(s.perDay) : s.perDay.toFixed(1) }))) +
         cell("reward", LZ.amt(s.reward));
-      this.canvas.setAttribute("aria-label", t("aria", {
-        range: t("range." + this.range), now: LZ.fmtHr(s.now), avg: LZ.fmtHr(s.avg), peak: LZ.fmtHr(s.peak), blocks: s.blocks,
+      this.canvas.setAttribute("aria-label", this.t("aria", {
+        range: this.t("range." + this.range), now: LZ.fmtHr(s.now), avg: LZ.fmtHr(s.avg), peak: LZ.fmtHr(s.peak), blocks: s.blocks,
       }));
     }
 
@@ -484,23 +528,23 @@
     pointTip(p) {
       const near = this.blocks.filter((b) => Math.abs(b.ts - p[0]) <= (this.data.step_s || 60) / 2 + 1);
       return `<b>${LZ.fmtHr(p[1])}</b><span>${LZ.esc(this.fmtTime(p[0], true))}</span>` +
-        `<span>${LZ.esc(t("minersN", { n: LZ.num(p[2]) }))}</span>` +
-        (near.length ? `<span class="hx-tip-block">◆ ${LZ.esc(t("foundHere", { n: near.length, h: LZ.num(near[near.length - 1].height) }))}</span>` : "");
+        (this.mode === "pool" ? `<span>${LZ.esc(this.t("minersN", { n: LZ.num(p[2]) }))}</span>` : "") +
+        (near.length ? `<span class="hx-tip-block">◆ ${LZ.esc(this.t("foundHere", { n: near.length, h: LZ.num(near[near.length - 1].height) }))}</span>` : "");
     }
     clusterTip(c) {
       const bs = c.blocks;
       if (bs.length === 1) {
         const b = bs[0];
-        return `<b>◆ ${LZ.esc(t("block", { h: LZ.num(b.height) }))}</b><span>${LZ.esc(this.fmtTime(b.ts, true))} · ${LZ.esc(LZ.ago(b.ts))}</span>` +
-          `<span>${LZ.amt(b.reward_btc)}${b.kind ? " · " + LZ.esc(this.via(b)) : ""}</span><span class="hx-tip-cta">${LZ.esc(t("clickSplit"))}</span>`;
+        return `<b>◆ ${LZ.esc(this.t("block", { h: LZ.num(b.height) }))}</b><span>${LZ.esc(this.fmtTime(b.ts, true))} · ${LZ.esc(LZ.ago(b.ts))}</span>` +
+          `<span>${this.mode === "miner" ? LZ.esc(this.t("toYou", { amt: "" })) : ""}${LZ.amt(b.reward_btc)}${b.kind ? " · " + LZ.esc(this.via(b)) : ""}${this.mode === "miner" && b.status === "immature" ? " · " + LZ.esc(this.t("immature")) : ""}</span><span class="hx-tip-cta">${LZ.esc(this.t("clickSplit"))}</span>`;
       }
       const sum = bs.reduce((a, b) => a + (b.reward_btc || 0), 0);
-      return `<b>◆ ${LZ.esc(t("nBlocks", { n: bs.length }))}</b><span>${LZ.num(bs[0].height)} – ${LZ.num(bs[bs.length - 1].height)}</span>` +
-        `<span>${LZ.amt(sum)}</span><span class="hx-tip-cta">${LZ.esc(t("clickList"))}</span>`;
+      return `<b>◆ ${LZ.esc(this.t("nBlocks", { n: bs.length }))}</b><span>${LZ.num(bs[0].height)} – ${LZ.num(bs[bs.length - 1].height)}</span>` +
+        `<span>${LZ.amt(sum)}</span><span class="hx-tip-cta">${LZ.esc(this.t("clickList"))}</span>`;
     }
     via(b) {
-      if (b.kind === "datum" || b.gateway) return b.gateway ? t("viaGw", { gw: b.gateway }) : t("viaDatum");
-      if (b.kind) return t("viaStratum");
+      if (b.kind === "datum" || b.gateway) return b.gateway ? this.t("viaGw", { gw: b.gateway }) : this.t("viaDatum");
+      if (b.kind) return this.t("viaStratum");
       return "";
     }
     showTip(px, py, html) {
@@ -533,8 +577,8 @@
     openList(c) {
       const rows = c.blocks.slice().reverse().slice(0, 12).map((b) =>
         `<li><button type="button" data-h="${LZ.esc(b.hash)}"><b>${LZ.num(b.height)}</b><span>${LZ.esc(this.fmtTime(b.ts, true))}</span><span>${LZ.amt(b.reward_btc)}</span></button></li>`).join("");
-      this.pop.innerHTML = `<header><b>${LZ.esc(t("nBlocks", { n: c.blocks.length }))}</b><button type="button" class="hx-x" aria-label="${LZ.esc(t("close"))}">×</button></header><ul class="hx-list">${rows}</ul>` +
-        (c.blocks.length > 12 ? `<p class="hx-more">${LZ.esc(t("moreZoom", { n: c.blocks.length - 12 }))}</p>` : "");
+      this.pop.innerHTML = `<header><b>${LZ.esc(this.t("nBlocks", { n: c.blocks.length }))}</b><button type="button" class="hx-x" aria-label="${LZ.esc(this.t("close"))}">×</button></header><ul class="hx-list">${rows}</ul>` +
+        (c.blocks.length > 12 ? `<p class="hx-more">${LZ.esc(this.t("moreZoom", { n: c.blocks.length - 12 }))}</p>` : "");
       this.pop.querySelector(".hx-x").addEventListener("click", () => this.closePop());
       this.pop.querySelectorAll("[data-h]").forEach((btn) => btn.addEventListener("click", () => {
         const b = c.blocks.find((x) => x.hash === btn.dataset.h);
@@ -543,17 +587,17 @@
       this.placePop(c);
     }
     async openBlock(b, c, fromList) {
-      const head = `<header>${fromList ? `<button type="button" class="hx-back" aria-label="${LZ.esc(t("back"))}">←</button>` : ""}<b>${LZ.esc(t("block", { h: LZ.num(b.height) }))}</b><button type="button" class="hx-x" aria-label="${LZ.esc(t("close"))}">×</button></header>`;
-      const meta = `<dl class="hx-meta"><div><dt>${LZ.esc(t("found"))}</dt><dd>${LZ.esc(LZ.when(b.ts))}<small>${LZ.esc(LZ.ago(b.ts))}</small></dd></div>` +
-        `<div><dt>${LZ.esc(t("rewardOne"))}</dt><dd>${LZ.amt(b.reward_btc)}</dd></div>` +
-        (this.via(b) ? `<div><dt>${LZ.esc(t("foundVia"))}</dt><dd>${LZ.esc(this.via(b))}</dd></div>` : "") + `</dl>`;
-      const foot = `<footer><a href="${LZ.EXPLORER}/block/${LZ.esc(b.hash)}" target="_blank" rel="noreferrer">${LZ.esc(t("explorer"))} ↗</a></footer>`;
+      const head = `<header>${fromList ? `<button type="button" class="hx-back" aria-label="${LZ.esc(this.t("back"))}">←</button>` : ""}<b>${LZ.esc(this.t("block", { h: LZ.num(b.height) }))}</b><button type="button" class="hx-x" aria-label="${LZ.esc(this.t("close"))}">×</button></header>`;
+      const meta = `<dl class="hx-meta"><div><dt>${LZ.esc(this.t("found"))}</dt><dd>${LZ.esc(LZ.when(b.ts))}<small>${LZ.esc(LZ.ago(b.ts))}</small></dd></div>` +
+        `<div><dt>${LZ.esc(this.t("rewardOne"))}</dt><dd>${LZ.amt(b.reward_btc)}${this.mode === "miner" && b.status ? `<small>${LZ.esc(b.status === "immature" ? this.t("immature") : this.t("spendable"))}</small>` : ""}</dd></div>` +
+        (this.via(b) ? `<div><dt>${LZ.esc(this.t("foundVia"))}</dt><dd>${LZ.esc(this.via(b))}</dd></div>` : "") + `</dl>`;
+      const foot = `<footer><a href="${LZ.EXPLORER}/block/${LZ.esc(b.hash)}" target="_blank" rel="noreferrer">${LZ.esc(this.t("explorer"))} ↗</a></footer>`;
       const bind = () => {
         this.pop.querySelector(".hx-x").addEventListener("click", () => this.closePop());
         const back = this.pop.querySelector(".hx-back");
         if (back) back.addEventListener("click", () => this.openList(c));
       };
-      this.pop.innerHTML = head + meta + `<p class="hx-loading">${LZ.esc(t("loadingSplit"))}</p>` + foot;
+      this.pop.innerHTML = head + meta + `<p class="hx-loading">${LZ.esc(this.t("loadingSplit"))}</p>` + foot;
       bind(); this.placePop(c);
       try {
         const r = await fetch("/api/found/" + b.hash);
@@ -561,15 +605,18 @@
         const d = await r.json();
         if (this.pinned !== c) return;
         const outs = (d.outputs || []).slice().sort((p, q) => q.btc - p.btc);
-        const top = outs.slice(0, 5).map((o) =>
-          `<li><a href="#${LZ.esc(o.address)}">${LZ.esc(LZ.short(o.address))}</a><span class="hx-bar"><i style="width:${Math.max(2, Math.round((o.share || 0) * 100))}%"></i></span><span>${LZ.amt(o.btc)}</span></li>`).join("");
-        const split = `<p class="hx-split-head">${LZ.esc(t("paidTo", { n: LZ.num(outs.length) }))}</p><ol class="hx-split">${top}</ol>` +
-          (outs.length > 5 ? `<p class="hx-more">${LZ.esc(t("moreOutputs", { n: LZ.num(outs.length - 5) }))}</p>` : "");
+        const shown = outs.slice(0, 5);
+        const mine = this.address ? outs.find((o) => o.address === this.address) : null;
+        if (mine && !shown.includes(mine)) shown[4] = mine;
+        const top = shown.map((o) =>
+          `<li${o === mine ? ' class="is-you"' : ""}><a href="${location.pathname.startsWith("/miner") || /^\/zh\/miner/.test(location.pathname) ? "/#" : "#"}${LZ.esc(o.address)}">${LZ.esc(LZ.short(o.address))}</a><span class="hx-bar"><i style="width:${Math.max(2, Math.round((o.share || 0) * 100))}%"></i></span><span>${LZ.amt(o.btc)}</span></li>`).join("");
+        const split = `<p class="hx-split-head">${LZ.esc(this.t("paidTo", { n: LZ.num(outs.length) }))}</p><ol class="hx-split">${top}</ol>` +
+          (outs.length > 5 ? `<p class="hx-more">${LZ.esc(this.t("moreOutputs", { n: LZ.num(outs.length - 5) }))}</p>` : "");
         this.pop.innerHTML = head + meta + split + foot;
         bind(); this.placePop(c);
       } catch (err) {
         const l = this.pop.querySelector(".hx-loading");
-        if (l) l.textContent = t("splitError");
+        if (l) l.textContent = this.t("splitError");
       }
     }
   }
@@ -579,5 +626,6 @@
     if (root && !root.__hx) root.__hx = new HashChart(root);
   }
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", boot); else boot();
+  HashChart.mount = (root, mode) => (root ? root.__hx || (root.__hx = new HashChart(root, mode)) : null);
   window.LZ_HashChart = HashChart;
 })();

@@ -140,19 +140,7 @@
       setTab(tab, false);
       const hasPool = !!(d.via || Number(d.window_work) > 0 || Number(d.shares_lifetime) > 0 || Number(d.round_share) > 0);
       $("chart-wrap").hidden = !(d.known && hasPool);
-      draw(
-        $("chart"),
-        d.history || [],
-        "hr_ghs",
-        (d.blocks_found || [])
-          .filter((b) => Number(b.ts) > 0)
-          .map((b) => ({
-            ts: Number(b.ts),
-            title: (b.height ? t("chart.blockN", { h: num(b.height) }) : t("chart.block")) + " · " + clock(b.ts),
-            sub: t("chart.toAddr", { amt: amt(b.miner_btc) }) + (payStatus(b) === "immature" ? t("chart.immature") : ""),
-          }))
-      );
-      chartLegend($("chart-legend"), $("chart"), t("chart.blockPaid", { n: 1 }), t("chart.blockPaid", { n: 2 }));
+      window.LZ_HashChart?.mount($("minerchart"), "miner")?.setData(d);
     } finally {
       busy = false;
     }

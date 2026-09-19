@@ -1393,20 +1393,9 @@
       return;
     }
     showChart(true);
-    // Same trend markers, but from this address's side: the blocks its work was paid in.
-    draw(
-      $("chart"),
-      m.history || [],
-      "hr_ghs",
-      (m.blocks_found || [])
-        .filter((b) => Number(b.ts) > 0)
-        .map((b) => ({
-          ts: Number(b.ts),
-          title: (b.height ? t("chart.blockN", { h: num(b.height) }) : t("chart.block")) + " · " + clock(b.ts),
-          sub: t("chart.toYou", { amt: amt(b.miner_btc) }) + (payStatus(b) === "immature" ? t("chart.immature") : ""),
-        }))
-    );
-    chartLegend($("chart-legend"), $("chart"), t("chart.blockPaidYou", {n:1}), t("chart.blockPaidYou", {n:2}));
+    // Same explorer as the pool's chart, from this address's side: its hashrate, and the blocks
+    // its work was paid in. chart.js loads after this file, hence the lookup at call time.
+    window.LZ_HashChart?.mount($("minerchart"), "miner")?.setData(m);
   }
   // Tab clicks inside the card switch panels and update the URL without a reload.
   $("miner").addEventListener("click", (e) => {
