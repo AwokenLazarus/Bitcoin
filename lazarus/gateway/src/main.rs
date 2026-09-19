@@ -254,6 +254,9 @@ struct Miner {
     tokens: f64,
     tokens_at: Instant,
     flood: u64,
+    /// Shares under their target in the current window; see `note_low`.
+    low_n: u32,
+    low_at: Instant,
     /// Solo only: this session's own jobs, newest last. Every identity gets a different
     /// coinbase, so a submitted job id has to be resolved against the session that was
     /// handed it rather than a gateway-wide history.
@@ -268,7 +271,7 @@ fn new_miner(host: String, vstart: u64) -> Miner {
         host, user: String::new(), ua: String::new(), vdiff: vstart, acc: 0, acc_n: 0, rej: 0, rej_n: 0, last: now,
         vdiff_prev: vstart, vdiff_prev_until: now, last_retarget: now, retarget_acc_n: 0,
         recent: VecDeque::new(), job_diffs: VecDeque::new(), seen: HashSet::new(), seen_order: VecDeque::new(),
-        tokens: SUBMIT_BURST, tokens_at: now, flood: 0, jobs: VecDeque::new(), ident: String::new(),
+        tokens: SUBMIT_BURST, tokens_at: now, flood: 0, low_n: 0, low_at: now, jobs: VecDeque::new(), ident: String::new(),
     }
 }
 /// Solo jobs remembered per session. Templates are republished every `JOB_REFRESH`, so
@@ -286,6 +289,18 @@ fn note_share(m: &mut Miner, hash: [u8; 32]) -> bool {
         }
     }
     true
+}
+/// Shares under their target a connection may send inside [`LOW_WINDOW`] before it is dropped.
+const LOW_BURST: u32 = 200;
+const LOW_WINDOW: Duration = Duration::from_secs(60);
+/// Count a share that missed its target; true when the connection has sent a flood of them.
+fn note_low(m: &mut Miner) -> bool {
+    if m.low_at.elapsed() > LOW_WINDOW {
+        m.low_at = Instant::now();
+        m.low_n = 0;
+    }
+    m.low_n += 1;
+    m.low_n > LOW_BURST
 }
 /// Take one submit token; false when the client is over its rate.
 fn take_token(m: &mut Miner) -> bool {
@@ -1500,15 +1515,6 @@ fn handle_miner(mut sock: TcpStream, st: Arc<Shared>, ip: IpAddr) {
                 let pot = accept_diff.max(1).ilog2() as u8;
                 let credit = accept_diff.max(1);
                 let hash = hdr.pow_hash();
-                // A repeated hash is the same work submitted twice: refuse it before it is
-                // counted, credited, forwarded to Prime or fed to the vardiff estimate.
-                let fresh = lk(&st.miners).get_mut(&id).map(|m| note_share(m, hash)).unwrap_or(false);
-                if !fresh {
-                    st.rej.fetch_add(1, Ordering::Relaxed);
-                    if let Some(m) = lk(&st.miners).get_mut(&id) { m.rej_n += 1; m.flood += 1; }
-                    send_line(&mut sock, &json!({"id": mid, "result": false, "error": json!([22, "Duplicate", null])}));
-                    continue;
-                }
                 *lk(&st.last_share_hdr) = Some(hdr.clone());
                 *lk(&st.last_share_job) = Some(j.id.clone());
                 // The rebuilt header is the one we would submit as a block, so a share that
@@ -1527,6 +1533,16 @@ fn handle_miner(mut sock: TcpStream, st: Arc<Shared>, ip: IpAddr) {
                         );
                     }
                 }
+                if !share_ok {
+                    // A header that misses its target costs the sender nothing to make and
+                    // costs us a full hash to find out. Real miners do send the odd one (about
+                    // 4 in 10 000 live), so it is not a strike; a stream of them is a flood.
+                    let over = lk(&st.miners).get_mut(&id).map(|m| note_low(m)).unwrap_or(true);
+                    if over {
+                        log::warn!("{host_label}: {LOW_BURST}+ shares under their target inside a minute; dropping connection");
+                        break;
+                    }
+                }
                 if !share_ok && st.verify == VerifyMode::Enforce {
                     st.rej.fetch_add(1, Ordering::Relaxed);
                     if let Some(m) = lk(&st.miners).get_mut(&id) {
@@ -1541,6 +1557,20 @@ fn handle_miner(mut sock: TcpStream, st: Arc<Shared>, ip: IpAddr) {
                     // is not credited, forwarded to Prime (which would refuse it) or allowed
                     // to steer vardiff. Otherwise arbitrary bytes count as accepted work.
                     send_line(&mut sock, &json!({"id": mid, "result": true, "error": null}));
+                    continue;
+                }
+                // A repeated hash is the same work submitted twice: refuse it before it is
+                // counted, credited, forwarded to Prime or fed to the vardiff estimate. Only
+                // work that met its target is remembered. Remembering every hash sent let
+                // 8 192 free, worthless submits push every real one out of the set, after
+                // which saved shares could be replayed: each forwarded to Prime again, each
+                // refused there as a duplicate, and enough refusals make Prime drop this
+                // gateway's session, which is every miner on it.
+                let fresh = lk(&st.miners).get_mut(&id).map(|m| note_share(m, hash)).unwrap_or(false);
+                if !fresh {
+                    st.rej.fetch_add(1, Ordering::Relaxed);
+                    if let Some(m) = lk(&st.miners).get_mut(&id) { m.rej_n += 1; m.flood += 1; }
+                    send_line(&mut sock, &json!({"id": mid, "result": false, "error": json!([22, "Duplicate", null])}));
                     continue;
                 }
                 st.acc.fetch_add(1, Ordering::Relaxed);
@@ -2215,7 +2245,7 @@ mod limits_tests {
         let now = Instant::now();
         Miner { host: String::new(), user: String::new(), ua: String::new(), vdiff: 1, acc: 0, acc_n: 0, rej: 0, rej_n: 0, last: now,
             vdiff_prev: 1, vdiff_prev_until: now, last_retarget: now, retarget_acc_n: 0, job_diffs: VecDeque::new(),
-            recent: VecDeque::new(), seen: HashSet::new(), seen_order: VecDeque::new(), tokens: SUBMIT_BURST, tokens_at: now, flood: 0,
+            recent: VecDeque::new(), seen: HashSet::new(), seen_order: VecDeque::new(), tokens: SUBMIT_BURST, tokens_at: now, flood: 0, low_n: 0, low_at: now,
             jobs: VecDeque::new(), ident: String::new() }
     }
 
@@ -2562,6 +2592,22 @@ mod limits_tests {
         }
         assert!(m.seen.len() <= SEEN_CAP);
         assert_eq!(m.seen.len(), m.seen_order.len());
+    }
+
+    /// A header that misses its target is free to send and costs a hash to refuse. Real miners
+    /// send the odd one; a connection sending hundreds a minute is dropped, and a quiet minute
+    /// starts the count again.
+    #[test]
+    fn a_stream_of_shares_under_target_is_a_flood_but_the_odd_one_is_not() {
+        let now = Instant::now();
+        let mut m = miner();
+        for _ in 0..LOW_BURST {
+            assert!(!note_low(&mut m));
+        }
+        assert!(note_low(&mut m), "one more inside the window");
+        m.low_at = now - LOW_WINDOW - Duration::from_secs(1);
+        assert!(!note_low(&mut m), "a new window");
+        assert_eq!(m.low_n, 1);
     }
 
     #[test]
