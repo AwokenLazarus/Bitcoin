@@ -48,6 +48,25 @@ the chain's backlog sits at ~0.2-0.3 sat/vB, and the stock 1 sat/vB floor kept i
 and out of our block templates.
 
 
+## Mempool explorer: source and license
+
+Lazarus Mempool is a **Lazarus-styled instance of [Retropex/mempool](https://github.com/Retropex/mempool)**
+(the BLAKE2b explorer also at [mempool.guide](https://mempool.guide)), itself
+[The Mempool Open Source Project](https://github.com/mempool/mempool).
+
+All three layers are **GNU AGPL-3.0-or-later**. The official LICENSE / COPYING and our NOTICE
+are served at `/lazarus/LICENSE`, `/lazarus/COPYING.md`, and `/lazarus/NOTICE`. Corresponding
+source: this repo (`node/umbrel/`), [Retropex/mempool](https://github.com/Retropex/mempool), and
+[mempool/mempool](https://github.com/mempool/mempool).
+
+AGPL does **not** include a trademark license. We do not use mempool.space® / Mempool Goggles®
+marks or mempool.guide marks as this site's brand; the Chi Rho and wordmark are Lazarus's.
+
+Retropex work this overlay follows includes BLAKE2b headers, SIGHASH_UNIFIED / the
+replay-protected Features badge, DATUM miner bands in the pool pie, and DATUM pool priority.
+The live frontend image is still official `mempool/frontend:v3.3.1`; Lazarus CSS/JS and the
+compiled backend patches sit on top.
+
 ## Mempool explorer: Lazarus theme
 
 The mempool frontend image is nginx serving a prebuilt Angular bundle, so the theme is applied without

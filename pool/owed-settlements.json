@@ -43,5 +43,40 @@
     "txid": "99bf59f8d038a572cbd6106fcf48dc6ea0995956d2973cf52d3d766c9744fc6e",
     "height": 969900,
     "note": "Spent 969796 coinbase vout 18 and paid the 60 dropped TIDES identities."
+  },
+  "00000000000000025bc64ae7411f5cc74e761cc212658047d09010fbeff2d7c4": {
+    "txid": "78348e336af487ce2db90f29060f2961cba499129ce5c0bd15f454148e1169f6",
+    "height": 970037,
+    "note": "Spent 969922 coinbase vout 0 (pool-only) and paid the 89 issued TIDES identities; broadcast 2026-09-09 once mature."
+  },
+  "carry-20260909": {
+    "txid": "9cd48058c2513d955462f82821b9b48e0c689c3c9e78248d3dce3c3cd40ff2da",
+    "height": 970039,
+    "note": "TIDES carry backlog (seeded 01:25Z from earnings the 100k min-payout floor withheld since 969932, plus organic carry) paid in one tx from jfaq change d04c4b50\u2026:1; 62 miners, 0.22086192 BTC. Balances zeroed in Prime at 01:45:20Z; see carry-paid-20260909T014520Z.json."
+  },
+  "0000000000000000c79c94c7e1a4d0ec4b57017433f09d06163e5719c205e83a": {
+    "txid": "a8e7486d4941051bbad94636af35522906010c01ed937e4aa115825cb66ee5e1",
+    "height": 970072,
+    "note": "Spent 969973 coinbase vout 0 (pool-only) and paid the 76 issued TIDES identities; broadcast 2026-09-09 once mature."
+  },
+  "00000000000000003de0541eefdcca51da3f28f69f28df1dca3e8c5c9bd20562": {
+    "txid": "e559f827f4203ea78edb44a11a3fe736443e20d97b100c2ea3b8daf0757511cd",
+    "height": 970316,
+    "note": "Spent 970216 coinbase vout 0 (pool-only) and paid the 128 issued TIDES identities; broadcast 2026-09-09 once mature."
+  },
+  "0000000000000000f085738826e3107f79d074a4985351dfee81c49474af1f84": {
+    "txid": "eab6b1619e34cc5c051389aabecdc6189e18396a5d7f23aa1be110b6f318ba3e",
+    "height": 970339,
+    "note": "Spent 970239 coinbase vout 0 (pool-only) and paid the 124 issued TIDES identities; broadcast 2026-09-09 once mature."
+  },
+  "0000000000000002ea1eb581b17c6116a707736476fb8ab6d89fa79b9051d0cb": {
+    "txid": "d9c54d67879cd651996e259ae2d9e5d505b51137a6ba0c19e555658141d4fd9c",
+    "height": 970441,
+    "note": "Spent 970338 coinbase vout 0 (pool-only) and paid the 137 issued TIDES identities; broadcast 2026-09-10 04:26Z at tip 970438."
+  },
+  "00000000000000009582ac4ad4f985e9333638aacf866527f11586727aede223": {
+    "txid": "422140a115258bce5db72e536d683f9f21ea0918f6e1ce9d194558cfcf4a8f49",
+    "height": 970676,
+    "note": "Spent 970506 coinbase vout 0 (pool-only) and paid the 133 issued TIDES identities; broadcast 2026-09-10 at tip 970670, confirmed in 970676."
   }
 }

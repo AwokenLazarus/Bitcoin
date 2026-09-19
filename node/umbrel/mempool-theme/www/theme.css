@@ -369,6 +369,35 @@ footer .lz-links .lz-sub-category { margin-top: 0.9rem; }
 footer .lz-footer-endpoint { display: flex; align-items: center; gap: 0.4rem; }
 footer .lz-footer-endpoint code { font-size: 0.78rem; color: var(--lz-ink); word-break: break-all; }
 footer .lz-footer-note { font-size: 0.74rem; color: var(--lz-faint) !important; }
+footer .lz-source-note a { color: var(--lz-brass) !important; }
+app-tx-features .lz-replay { margin-left: 0.25rem; font-weight: 500; }
+app-tx-features .lz-replay-none del { text-decoration: line-through; }
+.lz-fork-note, .lz-about-source {
+  margin: 0.75rem 0 1rem;
+  padding: 0.7rem 0.9rem;
+  border: 1px solid var(--lz-line-strong);
+  border-radius: 4px;
+  background: var(--lz-bg-raised);
+  color: var(--lz-muted);
+  font-size: 0.92rem;
+  line-height: 1.45;
+}
+.lz-fork-note a, .lz-about-source a { color: var(--lz-brass); }
+.lz-about-source p { margin: 0; }
+app-block tr.lz-header-v2 td:first-child { color: var(--lz-muted); }
+.lz-sighash {
+  display: inline-block;
+  margin-left: 0.15rem;
+  font-size: 0.62rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: var(--lz-brass);
+  vertical-align: middle;
+}
+.sig.sighash-33, .sig.sighash-1 { color: var(--green, #3fb950); }
+.sig.sighash-34, .sig.sighash-2 { color: gold; }
+.sig.sighash-35, .sig.sighash-3 { color: cornflowerblue; }
+#bitcoin-block-961640.blink-bg { box-shadow: 0 0 0 1px var(--lz-brass); }
 
 /* --- Lazarus dashboard card (theme.js dashboard()) -------------------------------------- */
 /* Full-width row in the dashboard grid (the stock cols are 50% on md+). */

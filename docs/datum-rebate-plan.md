@@ -1,27 +1,27 @@
-# DATUM rebate: 10% stratum, 5 points credited to DATUM miners
+# DATUM rebate: 15% stratum, 7.5 points credited to DATUM miners
 
-Status: **live since 2026-09-12**. `stratum-fee-bps = 1000`, `fee-bps = 0`,
-`datum-rebate-bps = 500`. Dedicated solo is a separate knob (`solo_fee_bps = 500`,
-5%) and `solo-rebate-bps = 0`. The dashboard reads the rebate numbers from primed
+Status: **live since 2026-09-15**. `stratum-fee-bps = 1500`, `fee-bps = 0`,
+`datum-rebate-bps = 750`. Dedicated solo is a separate knob (`solo_fee_bps = 750`,
+7.5%) and `solo-rebate-bps = 0`. The dashboard reads the rebate numbers from primed
 and the dedicated-solo fee from the solo gateway APIs.
 
-Public-stratum miners pay 10%. 5 points of that fee (5% of stratum work) is credited
-to DATUM miners; the pool wallet keeps the other 5%. Dedicated solo is the same
-5% fee and owes nothing to the window.
+Public-stratum miners pay 15%. 7.5 points of that fee (7.5% of stratum work) is credited
+to DATUM miners; the pool wallet keeps the other 7.5%. Dedicated solo is the same
+7.5% fee and owes nothing to the window.
 
 ## Goal
 
-Keep DATUM at 0%, charge public stratum 10%, and credit 5% of stratum work's value
-to the miners who run their own DATUM gateway. The pool nets 5% of stratum work.
-Dedicated solo is not part of this rebate: it keeps its own 5% fee and owes nothing
+Keep DATUM at 0%, charge public stratum 15%, and credit 7.5% of stratum work's value
+to the miners who run their own DATUM gateway. The pool nets 7.5% of stratum work.
+Dedicated solo is not part of this rebate: it keeps its own 7.5% fee and owes nothing
 to the window.
 
 ## How it works
 
 ### The point is credited, not paid in the coinbase
 
-The coinbase is the plain split at the live rate: stratum work is charged 10%, DATUM
-work 0%, and the pool output receives the whole fee. **When the block is found**, 5%
+The coinbase is the plain split at the live rate: stratum work is charged 15%, DATUM
+work 0%, and the pool output receives the whole fee. **When the block is found**, 7.5%
 of stratum work's value is credited to the DATUM miners in the window, pro rata by
 DATUM work, as **carry** — the same per-identity balance TIDES already uses for
 under-floor earnings. It is then paid out of the pool's remainder with each miner's
@@ -29,9 +29,9 @@ next output that clears `min-payout`.
 
 ```
 stratum_value  = value × Σstratum_work / total_work
-fee charged    = stratum_value × 10%             (in the pool output of this coinbase)
-credited       = stratum_value × 5%             (→ DATUM miners' carry, ∝ datum_work)
-pool nets      = stratum_value × 5%             (after the carry is paid out next block)
+fee charged    = stratum_value × 15%             (in the pool output of this coinbase)
+credited       = stratum_value × 7.5%           (→ DATUM miners' carry, ∝ datum_work)
+pool nets      = stratum_value × 7.5%           (after the carry is paid out next block)
 ```
 
 Why credit rather than pay: a DATUM miner too small to make a given coinbase (under the floor,
@@ -137,7 +137,7 @@ whole campaign on or off, and the page reads exactly as it did before when off):
 | hero lede + first action | "Build your own blocks with DATUM: pay 0% and collect a share of the public stratum's fee on every block"; primary button is now **Set up DATUM** |
 | `#live-ths` chip and the first ticker cell | headline 1 TH/s/day is the DATUM figure **including** the bonus (`ths_btc_day_datum_bonus`), against the stratum figure beside it — 0.0667 vs 0.0534 XBT/day today |
 | `#live-bonus-chip` | its own live chip: `DATUM bonus +21.2%` |
-| "Two ways in · one gets paid extra" | DATUM card carries a live `+N% DATUM bonus` line; the stratum card says five points of the 10% goes to DATUM miners |
+| "Two ways in · one gets paid extra" | DATUM card carries a live `+N% DATUM bonus` line; the stratum card says 7.5 points of the 15% goes to DATUM miners |
 | pillars, fee cards, connect tabs | the bonus pill on the DATUM rate; the stratum pane's Fee row links "run your own gateway" straight to the DATUM tab |
 | `#datum-bonus-explain` | the full mechanism in the DATUM pane, including why crediting beats paying (a gateway too small for a coinbase still earns every satoshi) and the live work split |
 | `#payout-rebate-note` under *Next payout* | "This block also credits 0.0298 XBT to the DATUM miners in the window" — and that it is not one of the outputs above |
@@ -219,11 +219,28 @@ Public stratum 10%, 5 points credited to DATUM miners, pool nets 5% of stratum w
 DATUM stays 0%. Dedicated solo stays 5% and is outside the rebate.
 Pool UI fallback `stratum_fee_percent: 10`. Dedicated solo `solo_fee_bps = 500` (5%).
 
+## Rate change 2026-09-15 (15% / 7.5 points)
+
+Config only; same primed binary. `scripts/restart-lazarus-prime.sh`.
+
+```toml
+fee-bps = 0
+stratum-fee-bps = 1500
+datum-rebate-bps = 750
+empty-solo-fee-bps = 750
+solo-rebate-bps = 0
+```
+
+Public stratum 15%, 7.5 points credited to DATUM miners, pool nets 7.5% of stratum work.
+DATUM stays 0%. Dedicated solo is 7.5% and is outside the rebate.
+Pool UI fallback `stratum_fee_percent: 15`. Dedicated solo `solo_fee_bps = 750` (7.5%).
+
 ## Rollback
 
 Set `stratum-fee-bps` / `datum-rebate-bps` and restart primed. Previous schedules:
 
-- **2026-09-12 (current):** 1000 / 500 (10% stratum, 5 point DATUM subsidy, pool nets 5%)
+- **2026-09-15 (current):** 1500 / 750 (15% stratum, 7.5 point DATUM subsidy, pool nets 7.5%)
+- **2026-09-12:** 1000 / 500 (10% stratum, 5 point DATUM subsidy, pool nets 5%)
 - **2026-09-12 earlier:** 750 / 500 (7.5% stratum, 5 point DATUM subsidy, pool nets 2.5%)
 - **2026-09-12 earlier:** 750 / 250 (7.5% stratum, 2.5 point DATUM subsidy, pool nets 5%)
 - **2026-09-11:** 500 / 150 (5% stratum, 1.5 point DATUM subsidy, pool nets 3.5%)

@@ -1,0 +1,47 @@
+Lazarus Mempool
+https://mempool.awokenlazarus.xyz
+
+This explorer is a Lazarus-styled instance of the BLAKE2b / BIP110 explorer
+published by Léo Haf (Retropex) as:
+
+    https://github.com/Retropex/mempool
+    live reference: https://mempool.guide
+
+Retropex/mempool is itself a modification of The Mempool Open Source Project®:
+
+    https://github.com/mempool/mempool
+
+License
+-------
+
+The Mempool Open Source Project, Retropex's modifications, and Lazarus's
+theme/patches are licensed under the GNU Affero General Public License
+version 3 or any later version approved by a proxy statement published on
+https://mempool.space/about. See LICENSE and COPYING.md in this directory
+(/lazarus/LICENSE, /lazarus/COPYING.md).
+
+Corresponding source
+--------------------
+
+* Lazarus theme, nginx overlay, backend patches, and pool-tag sync:
+  https://github.com/AwokenLazarus/Bitcoin  (node/umbrel/)
+* Retropex/mempool (BLAKE2b headers, SIGHASH_UNIFIED / replay-protected
+  badge, DATUM miner pie, DATUM pool priority):
+  https://github.com/Retropex/mempool
+* The Mempool Open Source Project:
+  https://github.com/mempool/mempool
+
+Trademarks
+----------
+
+AGPL-3.0 does not grant a trademark license. This instance does not use
+Mempool Holdings marks (mempool.space®, Mempool Accelerator®, Mempool
+Goggles®, official mempool logos) or mempool.guide marks as its own brand.
+The wordmark and Chi Rho here are Lazarus's.
+
+Lazarus-specific work in this overlay includes the brass/near-black theme,
+DATUM gateway bands on the mining-pool pie, BTCB2 price substitution, and
+the replay-protected badge ported from Retropex's tx-features component
+(frontend/src/app/components/tx-features/ and
+frontend/src/app/shared/transaction.utils.ts at commit
+e56a2c6a2e91b8eaa10e69512a27f5b0e4456e86).

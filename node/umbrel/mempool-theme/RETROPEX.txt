@@ -1,0 +1,11 @@
+Retropex/mempool pin this Lazarus overlay follows:
+
+  repo   https://github.com/Retropex/mempool
+  commit e56a2c6a2e91b8eaa10e69512a27f5b0e4456e86
+  date   2026-09-15
+  title  Show DATUM miners in the pie chart
+
+Parent project: https://github.com/mempool/mempool  (AGPL-3.0)
+Live reference: https://mempool.guide
+
+Do not copy mempool.guide or mempool.space trademarks into the Lazarus brand.

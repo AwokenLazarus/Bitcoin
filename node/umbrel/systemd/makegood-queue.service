@@ -1,0 +1,6 @@
+[Unit]
+Description=Broadcast queued Lazarus make-good txs on fork Knots when coinbases mature
+
+[Service]
+Type=oneshot
+ExecStart=/home/umbrel/blake2b/bin/makegood-queue.py
