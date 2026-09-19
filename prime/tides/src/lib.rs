@@ -105,6 +105,12 @@ pub struct Window {
     /// fees, and stratum rebate from blocks with no DATUM work). Paid down by each split out
     /// of the fee the pool keeps; see `split::compute`.
     rebate_owed: u64,
+    /// When each identity last had work credited, unix seconds. The window forgets an identity
+    /// once its rows age out; carry does not, and whether a balance is *stale* (its owner has
+    /// stopped mining) is a question about exactly the identities the window has forgotten.
+    last_seen: HashMap<u32, u32>,
+    /// Carry set aside for a payout made outside the coinbase; see [`Hold`]. By batch id.
+    holds: std::collections::BTreeMap<String, Hold>,
     pub lifetime_shares: u64,
     pub lifetime_work: u64,
 }
@@ -177,6 +183,7 @@ impl Window {
         self.lifetime_shares += 1;
         self.lifetime_work = self.lifetime_work.saturating_add(work);
         self.total_work = self.total_work.saturating_add(work);
+        self.note_seen(ident, ts);
         let t = self.totals.entry(ident).or_insert((0, 0, 0));
         t.0 = t.0.saturating_add(work);
         t.2 = ts;
@@ -203,6 +210,7 @@ impl Window {
         self.lifetime_shares += 1;
         self.lifetime_work = self.lifetime_work.saturating_add(work);
         self.total_work = self.total_work.saturating_add(work);
+        self.note_seen(ident, ts);
         let t = self.totals.entry(ident).or_insert((0, 0, 0));
         t.0 = t.0.saturating_add(work);
         t.1 += 1;
@@ -215,6 +223,7 @@ impl Window {
 
     /// Replay a stored row without coalescing or lifetime accounting.
     fn push_raw(&mut self, c: Credit) {
+        self.note_seen(c.ident, c.ts);
         self.total_work = self.total_work.saturating_add(c.work);
         let t = self.totals.entry(c.ident).or_insert((0, 0, 0));
         t.0 = t.0.saturating_add(c.work);
@@ -339,7 +348,7 @@ impl Window {
                     work: 0,
                     stratum_work: 0,
                     credits: 0,
-                    last_ts: 0,
+                    last_ts: self.last_seen.get(&i).copied().unwrap_or(0),
                     carry,
                 });
             }
@@ -351,10 +360,127 @@ impl Window {
     }
 
     /// Compute the coinbase split for a block worth `value` sats.
-    pub fn split(&self, value: u64, params: &SplitParams, script_for: impl FnMut(&str) -> Option<Vec<u8>>) -> Split {
-        split::compute(self.miners(), self.total_work, value, params, self.rebate_owed, script_for)
+    pub fn split(
+        &self,
+        value: u64,
+        params: &SplitParams,
+        now: u32,
+        script_for: impl FnMut(&str) -> Option<Vec<u8>>,
+    ) -> Split {
+        split::compute(self.miners(), self.total_work, value, params, self.rebate_owed, now, script_for)
+    }
+
+    fn note_seen(&mut self, ident: u32, ts: u32) {
+        let e = self.last_seen.entry(ident).or_insert(0);
+        *e = (*e).max(ts);
+    }
+
+    /// When this identity last had work credited (0: never, or not known).
+    pub fn last_seen_of(&self, identity: &str) -> u32 {
+        self.ident_index.get(identity).and_then(|i| self.last_seen.get(i)).copied().unwrap_or(0)
+    }
+
+    /// Record when an identity was last seen, if that is later than what is known. For
+    /// balances that predate `last_seen` (the operator backfills them from the block log).
+    pub fn set_last_seen(&mut self, identity: &str, ts: u32) {
+        let i = self.intern(identity);
+        self.note_seen(i, ts);
+    }
+
+    /// Balances whose owners have stopped mining: no work left in the window, last credited
+    /// at least `after` seconds before `now`, and holding at least `min` sats. Largest first.
+    /// An identity never seen (`last_seen` 0) is not stale: nothing says how long it has been.
+    pub fn stale_carries(&self, now: u32, after: u32, min: u64) -> Vec<StaleCarry> {
+        let mut v: Vec<StaleCarry> = self
+            .carry
+            .iter()
+            .filter(|(i, &sats)| sats >= min.max(1) && !self.totals.contains_key(i))
+            .filter_map(|(i, &sats)| {
+                let last_seen = self.last_seen.get(i).copied().unwrap_or(0);
+                (last_seen > 0 && now.saturating_sub(last_seen) >= after).then(|| StaleCarry {
+                    identity: self.idents[*i as usize].clone(),
+                    sats,
+                    last_seen,
+                })
+            })
+            .collect();
+        v.sort_by(|a, b| b.sats.cmp(&a.sats).then_with(|| a.identity.cmp(&b.identity)));
+        v
+    }
+
+    /// Take up to `sats` of one identity's money out of the holds, oldest batch first.
+    /// Returns what was taken. A hold left with nothing in it is dropped.
+    fn draw_from_holds(&mut self, identity: &str, sats: u64) -> u64 {
+        let mut left = sats;
+        let mut order: Vec<(u64, String)> = self.holds.iter().map(|(k, h)| (h.created_ts, k.clone())).collect();
+        order.sort();
+        for (_, batch) in order {
+            if left == 0 {
+                break;
+            }
+            let Some(hold) = self.holds.get_mut(&batch) else { continue };
+            for e in hold.entries.iter_mut().filter(|e| e.0 == identity) {
+                let take = e.1.min(left);
+                e.1 -= take;
+                left -= take;
+            }
+            hold.entries.retain(|e| e.1 > 0);
+            if hold.entries.is_empty() {
+                self.holds.remove(&batch);
+            }
+        }
+        sats - left
+    }
+
+    pub fn holds(&self) -> &std::collections::BTreeMap<String, Hold> {
+        &self.holds
+    }
+
+    /// Sats set aside in holds, all batches.
+    pub fn total_held(&self) -> u64 {
+        self.holds.values().flat_map(|h| h.entries.iter()).fold(0u64, |a, e| a.saturating_add(e.1))
     }
 }
+
+/// A balance whose owner has stopped mining; see [`Window::stale_carries`].
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct StaleCarry {
+    pub identity: String,
+    pub sats: u64,
+    pub last_seen: u32,
+}
+
+/// Carry set aside to be paid by an ordinary transaction from the pool's wallet, not by a
+/// coinbase. Money in a hold is off the books as far as any split is concerned, which is the
+/// point: between the operator deciding to pay a balance by hand and that payment confirming,
+/// no coinbase may pay it too. A hold ends one of two ways: the payment confirmed and the
+/// money is gone ([`Ledger::finish_hold`]), or it was abandoned and the balances go back to
+/// carry ([`Ledger::release_hold`]).
+///
+/// One thing can still reach into a hold: a coinbaser handed out *before* the hold was placed
+/// names the balance as it then stood, and a block mined on it pays that balance. Such a block
+/// takes the amount out of the hold (see [`Ledger::book_debits`]), so the hand-made payment
+/// must not be built until those coinbasers can no longer be mined on: `ready_height`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Hold {
+    pub created_ts: u64,
+    /// Tip height when the hold was placed.
+    pub height: u32,
+    /// From this tip height on, no coinbaser older than the hold can be mined on, and
+    /// `entries` are final.
+    pub ready_height: u32,
+    pub entries: Vec<(String, u64)>,
+}
+
+/// Why a requested entry was not put in a hold.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct HoldSkip {
+    pub identity: String,
+    pub requested: u64,
+    pub carry: u64,
+    pub reason: &'static str,
+}
+
 
 /// Persisted window state.
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -369,6 +495,13 @@ struct Meta {
     /// Outstanding DATUM rebate (see [`Window::rebate_owed`]). Pool money owed to miners.
     #[serde(default)]
     rebate_owed: u64,
+    /// When each identity that is owed money was last credited work ([`Window::last_seen_of`]).
+    /// Only identities with carry: for anyone else the window's own rows say it.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    last_seen: std::collections::BTreeMap<String, u32>,
+    /// Carry set aside for payouts made outside the coinbase. Money, like `carry`.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    holds: std::collections::BTreeMap<String, Hold>,
 }
 
 /// Durable [`Window`]: identities, credit rows, and a small meta file on disk.
@@ -396,6 +529,7 @@ impl Ledger {
         window.lifetime_shares = meta.lifetime_shares;
         window.lifetime_work = meta.lifetime_work;
         window.rebate_owed = meta.rebate_owed;
+        window.holds = meta.holds.clone();
 
         let idents_path = dir.join(Self::IDENTS);
         // A crash can leave half an identity at the end of the file. Appending to it would
@@ -424,6 +558,11 @@ impl Ledger {
                 new_idents.push(identity.clone());
             }
             window.set_carry(identity, *sats);
+        }
+        for (identity, ts) in &meta.last_seen {
+            if window.ident_index.contains_key(identity) {
+                window.set_last_seen(identity, *ts);
+            }
         }
 
         let credits_path = dir.join(Self::CREDITS);
@@ -514,8 +653,17 @@ impl Ledger {
         for (identity, d) in carry_delta.iter().filter(|d| d.1 < 0) {
             let before = self.window.carry_of(identity);
             let after = self.window.adjust_carry(identity, *d);
-            if before > after {
-                books.debited.push((identity.clone(), before - after));
+            let mut moved = before - after;
+            // A balance short of what this coinbase paid, with the rest sitting in a hold: the
+            // coinbaser was handed out before the hold was placed. The block has paid it, so
+            // it comes out of the hold, or the hand-made payment would pay it a second time.
+            // Booked as an ordinary debit: an orphan puts it back as carry.
+            let short = d.unsigned_abs().saturating_sub(moved);
+            if short > 0 {
+                moved += self.window.draw_from_holds(identity, short);
+            }
+            if moved > 0 {
+                books.debited.push((identity.clone(), moved));
             }
         }
         let before = self.window.rebate_owed();
@@ -575,6 +723,87 @@ impl Ledger {
         }
         self.dirty = true;
         short
+    }
+
+    /// Set stale balances aside for a payment made by hand. Each entry is taken only if the
+    /// identity is stale by the given rule *now* and holds exactly the sats named: the list
+    /// was drawn up from a snapshot, and a balance that has moved since (its owner came back,
+    /// or a block paid it) is not the balance the operator looked at. Returns what was held
+    /// and what was not; with nothing to hold, no hold is made.
+    #[allow(clippy::too_many_arguments)]
+    pub fn hold_carry(
+        &mut self,
+        batch: &str,
+        entries: &[(String, u64)],
+        now: u32,
+        after: u32,
+        min: u64,
+        tip_height: u32,
+        ready_height: u32,
+    ) -> Result<(Vec<(String, u64)>, Vec<HoldSkip>), &'static str> {
+        if self.window.holds.contains_key(batch) {
+            return Err("a hold with this id exists");
+        }
+        let stale: HashMap<String, u64> =
+            self.window.stale_carries(now, after, min).into_iter().map(|s| (s.identity, s.sats)).collect();
+        let mut held: Vec<(String, u64)> = Vec::new();
+        let mut skipped = Vec::new();
+        for (identity, sats) in entries {
+            let carry = self.window.carry_of(identity);
+            let reason = if held.iter().any(|h| &h.0 == identity) {
+                Some("listed twice")
+            } else if *sats == 0 {
+                Some("nothing requested")
+            } else {
+                match stale.get(identity) {
+                    None => Some("not stale"),
+                    Some(have) if have != sats => Some("balance changed"),
+                    Some(_) => None,
+                }
+            };
+            match reason {
+                Some(reason) => {
+                    skipped.push(HoldSkip { identity: identity.clone(), requested: *sats, carry, reason })
+                }
+                None => {
+                    self.window.adjust_carry(identity, -(*sats as i64));
+                    held.push((identity.clone(), *sats));
+                }
+            }
+        }
+        if !held.is_empty() {
+            self.window.holds.insert(
+                batch.to_owned(),
+                Hold { created_ts: u64::from(now), height: tip_height, ready_height, entries: held.clone() },
+            );
+            self.dirty = true;
+        }
+        Ok((held, skipped))
+    }
+
+    /// The payment was abandoned: the held balances are carry again. Returns them.
+    pub fn release_hold(&mut self, batch: &str) -> Option<Vec<(String, u64)>> {
+        let hold = self.window.holds.remove(batch)?;
+        for (identity, sats) in &hold.entries {
+            self.window.adjust_carry(identity, (*sats).min(i64::MAX as u64) as i64);
+        }
+        self.dirty = true;
+        Some(hold.entries)
+    }
+
+    /// The payment is in the chain: the held balances are paid and leave the books. Returns them.
+    pub fn finish_hold(&mut self, batch: &str) -> Option<Vec<(String, u64)>> {
+        let hold = self.window.holds.remove(batch)?;
+        self.dirty = true;
+        Some(hold.entries)
+    }
+
+    /// Date a balance that has no last-seen (see [`Window::set_last_seen`]) and schedule a flush.
+    pub fn set_last_seen(&mut self, identity: &str, ts: u32) {
+        if self.window.ident_index.contains_key(identity) {
+            self.window.set_last_seen(identity, ts);
+            self.dirty = true;
+        }
     }
 
     /// Set the owed DATUM rebate outright and schedule a flush.
@@ -638,6 +867,19 @@ impl Ledger {
             lifetime_work: self.window.lifetime_work,
             carry: self.window.carries().into_iter().collect(),
             rebate_owed: self.window.rebate_owed,
+            // for everyone owed money, on the books or in a hold (a released hold is carry again)
+            last_seen: self
+                .window
+                .carry
+                .keys()
+                .map(|i| self.window.idents[*i as usize].as_str())
+                .chain(self.window.holds.values().flat_map(|h| h.entries.iter().map(|e| e.0.as_str())))
+                .filter_map(|identity| {
+                    let ts = self.window.last_seen_of(identity);
+                    (ts > 0).then(|| (identity.to_owned(), ts))
+                })
+                .collect(),
+            holds: self.window.holds.clone(),
         };
         write_atomic(&self.dir.join(Self::META), &serde_json::to_vec_pretty(&meta)?)?;
         self.dirty = false;
@@ -1113,7 +1355,7 @@ mod tests {
         // of the pool's fee (with a 0% fee and nothing unplaced there is no remainder to
         // pay it from, and it would simply wait for a block that has one)
         let p = SplitParams { fee_bps: 100, stratum_fee_bps: 100, min_payout: 500, ..SplitParams::default() };
-        let s = l.window.split(1_000_000, &p, |i| Some(i.as_bytes().to_vec()));
+        let s = l.window.split(1_000_000, &p, 0, |i| Some(i.as_bytes().to_vec()));
         let small = s.payees.iter().find(|x| x.identity == "bc1qsmall").expect("paid from carry alone");
         assert_eq!((small.sats, small.carry), (1_000, 1_000));
         assert!(s.unpaid.iter().any(|u| u.identity == "bc1qnew" && u.sats == 42));
@@ -1151,7 +1393,7 @@ mod tests {
             min_payout: 1,
             ..SplitParams::default()
         };
-        let s = l.window.split(1_000_000, &p, |i| Some(i.as_bytes().to_vec()));
+        let s = l.window.split(1_000_000, &p, 0, |i| Some(i.as_bytes().to_vec()));
         // stratum 900k → fee 27k in the pool output; 9k of it plus the whole owed balance is
         // credited to the one DATUM miner when the block is found
         assert_eq!((s.fee_sats, s.pool_sats, s.rebate_sats), (27_000, 27_000, 9_000 + 3_125_500));
@@ -1460,4 +1702,120 @@ mod tests {
         assert!(!serde_json::to_string(&old).unwrap().contains("books"));
         let _ = fs::remove_dir_all(&dir);
     }
+    /// Last-seen survives the window forgetting an identity, and a restart.
+    #[test]
+    fn last_seen_outlives_the_window_and_is_persisted_for_balances() {
+        let dir = std::env::temp_dir().join(format!("tides-test-{}-{}", std::process::id(), line!()));
+        let _ = fs::remove_dir_all(&dir);
+        {
+            let mut l = Ledger::open(&dir).unwrap();
+            l.set_target(100);
+            l.credit("left", 50, 1, 1_000, SOURCE_DATUM).unwrap();
+            l.set_carry("left", 40_000);
+            for i in 0..10 {
+                l.credit("stays", 50, 2, 2_000 + i, SOURCE_DATUM).unwrap();
+            }
+            assert_eq!(l.window.work_of("left"), 0, "aged out");
+            assert_eq!(l.window.last_seen_of("left"), 1_000);
+            let m = l.window.miners().into_iter().find(|m| m.identity == "left").unwrap();
+            assert_eq!((m.work, m.last_ts, m.carry), (0, 1_000, 40_000));
+            l.persist_window().unwrap();
+        }
+        let l = Ledger::open(&dir).unwrap();
+        assert_eq!(l.window.last_seen_of("left"), 1_000);
+        let week = 7 * 86_400;
+        assert!(l.window.stale_carries(1_000 + week - 1, week, 10_000).is_empty());
+        let stale = l.window.stale_carries(1_000 + week, week, 10_000);
+        assert_eq!(stale, vec![StaleCarry { identity: "left".into(), sats: 40_000, last_seen: 1_000 }]);
+        assert!(l.window.stale_carries(1_000 + week, week, 40_001).is_empty(), "under the minimum");
+        // a window.json written before last_seen existed still loads
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_hold_takes_stale_balances_off_the_books_until_paid_or_released() {
+        let dir = std::env::temp_dir().join(format!("tides-test-{}-{}", std::process::id(), line!()));
+        let _ = fs::remove_dir_all(&dir);
+        let week = 7 * 86_400u32;
+        let now = 10 + week;
+        let mut l = Ledger::open(&dir).unwrap();
+        l.set_target(100);
+        for (id, carry) in [("s1", 300_000u64), ("s2", 20_000), ("small", 5_000)] {
+            l.credit(id, 1, 1, 10, SOURCE_DATUM).unwrap();
+            l.set_carry(id, carry);
+        }
+        for i in 0..200 {
+            l.credit("active", 1, 2, now - 5 + (i % 5), SOURCE_DATUM).unwrap();
+        }
+        l.set_carry("active", 50_000);
+        let ask: Vec<(String, u64)> = [("s1", 300_000), ("s2", 19_999), ("small", 5_000), ("active", 50_000), ("s1", 300_000)]
+            .iter()
+            .map(|(i, s)| (i.to_string(), *s as u64))
+            .collect();
+        let (held, skipped) = l.hold_carry("b1", &ask, now, week, 10_000, 500, 504).unwrap();
+        assert_eq!(held, vec![("s1".to_string(), 300_000)]);
+        let why: Vec<(&str, &str)> = skipped.iter().map(|s| (s.identity.as_str(), s.reason)).collect();
+        assert_eq!(
+            why,
+            [("s2", "balance changed"), ("small", "not stale"), ("active", "not stale"), ("s1", "listed twice")]
+        );
+        assert_eq!((l.window.carry_of("s1"), l.window.total_held()), (0, 300_000));
+        assert!(l.hold_carry("b1", &ask, now, week, 10_000, 500, 504).is_err(), "ids are used once");
+        // held money is in no split
+        let p = SplitParams { min_payout: 500_000, stale_after: week, stale_min_payout: 10_000, ..SplitParams::default() };
+        let s = l.window.split(100_000_000, &p, now, |i| Some(i.as_bytes().to_vec()));
+        assert!(s.payees.iter().all(|x| x.identity != "s1"));
+        // and it survives a restart
+        l.persist_window().unwrap();
+        drop(l);
+        let mut l = Ledger::open(&dir).unwrap();
+        assert_eq!(l.window.holds()["b1"].entries, vec![("s1".to_string(), 300_000)]);
+        assert_eq!(l.window.holds()["b1"].ready_height, 504);
+        // released: carry again
+        assert_eq!(l.release_hold("b1").unwrap(), vec![("s1".to_string(), 300_000)]);
+        assert_eq!((l.window.carry_of("s1"), l.window.total_held()), (300_000, 0));
+        assert!(l.release_hold("b1").is_none());
+        // held again and paid: gone
+        l.hold_carry("b2", &[("s1".to_string(), 300_000)], now, week, 10_000, 500, 504).unwrap();
+        assert_eq!(l.finish_hold("b2").unwrap(), vec![("s1".to_string(), 300_000)]);
+        assert_eq!((l.window.carry_of("s1"), l.window.total_held()), (0, 0));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A coinbaser handed out before the hold names the balance as it stood. A block mined on
+    /// it has paid that balance, so it comes out of the hold; an orphan puts it back as carry.
+    #[test]
+    fn a_block_mined_on_an_older_coinbaser_draws_from_the_hold() {
+        let dir = std::env::temp_dir().join(format!("tides-test-{}-{}", std::process::id(), line!()));
+        let _ = fs::remove_dir_all(&dir);
+        let week = 7 * 86_400u32;
+        let now = 10 + week;
+        let mut l = Ledger::open(&dir).unwrap();
+        l.set_target(100);
+        for id in ["s1", "s2"] {
+            l.credit(id, 1, 1, 10, SOURCE_DATUM).unwrap();
+            l.set_carry(id, 100_000);
+        }
+        for _ in 0..200 {
+            l.credit("active", 1, 2, now, SOURCE_DATUM).unwrap();
+        }
+        let ask = vec![("s1".to_string(), 100_000), ("s2".to_string(), 100_000)];
+        l.hold_carry("b", &ask, now, week, 10_000, 500, 504).unwrap();
+        let delta = vec![("s1".to_string(), -100_000i64)];
+        let mut books = Books::new(0, 0);
+        l.book_debits(&delta, &mut books);
+        assert_eq!(books.debited, vec![("s1".to_string(), 100_000)]);
+        assert_eq!(l.window.holds()["b"].entries, vec![("s2".to_string(), 100_000)], "s1 is paid; only s2 is still held");
+        assert_eq!(l.window.carry_of("s1"), 0);
+        // orphaned: the block paid nobody after all, and s1 is owed again (as carry)
+        l.unbook(&mut books);
+        assert_eq!(l.window.carry_of("s1"), 100_000);
+        assert_eq!(l.window.total_held(), 100_000);
+        // a block that pays the last entry leaves no empty hold behind
+        let mut books = Books::new(0, 0);
+        l.book_debits(&[("s2".to_string(), -100_000i64)], &mut books);
+        assert!(l.window.holds().is_empty());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
 }

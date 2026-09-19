@@ -26,6 +26,35 @@ const HASHES_PER_WORK: f64 = 4_294_967_296.0;
 const HASHRATE_WINDOW_S: u64 = 600;
 const LEDGER_EXPORT_S: u64 = 3600;
 
+/// Stale balances and holds. `payable` is false for an identity that is not an address: it is
+/// listed so the total is honest, but no payment can be made to it.
+fn stale_doc(shared: &Shared, w: &tides::Window, ts: u64) -> Value {
+    let after = shared.cfg.stale_after_secs();
+    let list = if after > 0 { w.stale_carries(ts as u32, after, shared.cfg.stale_min_payout) } else { Vec::new() };
+    let balances: Vec<Value> = list
+        .iter()
+        .map(|s| {
+            json!({
+                "identity": s.identity,
+                "sats": s.sats,
+                "last_seen": s.last_seen,
+                "idle_days": (ts.saturating_sub(u64::from(s.last_seen))) / 86_400,
+                "payable": address::to_script(&s.identity, shared.network).is_some(),
+            })
+        })
+        .collect();
+    json!({
+        "after_days": shared.cfg.stale_after_days,
+        "min_payout": shared.cfg.stale_min_payout,
+        "coinbase": shared.cfg.stale_coinbase,
+        "count": list.len(),
+        "sats": list.iter().map(|s| s.sats).sum::<u64>(),
+        "balances": balances,
+        "held_sats": w.total_held(),
+        "holds": w.holds(),
+    })
+}
+
 pub fn build(shared: &Shared) -> Value {
     let ts = now();
     let tip = shared.tip_snapshot();
@@ -54,7 +83,7 @@ pub fn build(shared: &Shared) -> Value {
 
     // the split a block would pay right now: how the UI shows each miner's expected payout
     let sample_value = 312_500_000u64;
-    let split = w.split(sample_value, &shared.split_params, |i| address::to_script(i, shared.network));
+    let split = w.split(sample_value, &shared.split_params, ts as u32, |i| address::to_script(i, shared.network));
     let payouts: std::collections::HashMap<&str, u64> =
         split.payees.iter().map(|p| (p.identity.as_str(), p.sats)).collect();
     let rebates: std::collections::HashMap<&str, u64> =
@@ -216,6 +245,9 @@ pub fn build(shared: &Shared) -> Value {
             // everything the pool is holding for miners under the floor, and for whom
             "carry_total_sats": w.total_carry(),
             "carry_holders": w.carries().len(),
+            // balances whose owners have stopped mining (`stale-after-days`), and carry set
+            // aside for payments made by hand (`payouts/`): what the payout tool reads
+            "stale": stale_doc(shared, w, ts),
         },
         "hashrate": { "pool_ghs": ghs(recent_total), "window_s": HASHRATE_WINDOW_S },
         "totals": {

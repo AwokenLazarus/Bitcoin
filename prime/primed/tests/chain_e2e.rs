@@ -302,3 +302,145 @@ fn a_found_block_is_booked_when_seen_and_settled_when_the_node_has_it() {
     assert_eq!(b["books"]["credits_live"], true, "{b}");
     assert_eq!(st["window"]["carry_total_sats"], 0, "{st}");
 }
+
+
+/// Wait for the Prime to answer a payout request; returns the answer once `done` accepts it.
+fn payout_answer(p: &Primed, id: &str, done: impl Fn(&serde_json::Value) -> bool) -> serde_json::Value {
+    let path = p.dir.join("payouts").join(format!("{id}.json"));
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    loop {
+        if let Some(v) = std::fs::read(&path).ok().and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok()) {
+            if done(&v) {
+                return v;
+            }
+        }
+        assert!(std::time::Instant::now() < deadline, "no answer for payout {id}");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+fn payout_request(p: &Primed, id: &str, body: serde_json::Value) {
+    let dir = p.dir.join("payouts");
+    std::fs::create_dir_all(&dir).unwrap();
+    let _ = std::fs::remove_file(dir.join(format!("{id}.json")));
+    // written whole, then named: the Prime must never read half a request
+    let tmp = dir.join(format!("{id}.tmp"));
+    std::fs::write(&tmp, body.to_string()).unwrap();
+    std::fs::rename(tmp, dir.join(format!("{id}.request.json"))).unwrap();
+}
+
+/// A miner who left with less than the floor on the books: listed once it has been gone long
+/// enough, paid by the next coinbase, or set aside and paid by hand, and never both.
+#[test]
+fn a_stale_balance_is_paid_by_the_coinbase_or_by_hand_and_never_twice() {
+    const BITS: u32 = 0x207f_ffff;
+    let left = "bc1qrp33g0q5c5txsp9arysrx4k6zdkfs4nce4xj0gdcccefvpysxf3qccfmv3";
+    let left_script = "00201863143c14c5166804bd19203356da136c985678cd4d27a1b8c6329604903262";
+    let recent = "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4";
+    let tip = [0x42; 32];
+    let now = unix_now();
+    let pool = Identity::generate();
+    let node = MockNode::start(Chain {
+        height: HEIGHT - 1,
+        tip: node_hex(&tip),
+        parent: node_hex(&[0x41; 32]),
+        bits: BITS,
+        next_bits: Some(BITS),
+    });
+    let cfg = format!(
+        "{}\nhouse-loopback = false\nmin-payout = 500000\nstale-after-days = 7\nstale-min-payout = 10000",
+        node.config(0.2)
+    );
+    let (primed, port) = start_primed_seeded(&pool, &cfg, |dir| {
+        let meta = serde_json::json!({
+            "target_work": 8, "lifetime_shares": 0, "lifetime_work": 0, "rebate_owed": 0,
+            "carry": {left: 499_226, recent: 400_000, "not-an-address": 50_000},
+            "last_seen": {left: now - 8 * 86_400, recent: now - 86_400, "not-an-address": now - 30 * 86_400},
+        });
+        std::fs::write(dir.join("window.json"), meta.to_string()).unwrap();
+        std::fs::write(dir.join("identities.txt"), format!("{left}\n{recent}\nnot-an-address\n")).unwrap();
+    });
+    wait_for_tip(&primed);
+
+    // listed: the one gone eight days, not the one gone a day; the unpayable name is shown as such
+    let st = settled_stats(&primed);
+    let stale = &st["window"]["stale"];
+    assert_eq!(stale["after_days"], 7, "{stale}");
+    let ids: Vec<&str> = stale["balances"].as_array().unwrap().iter().map(|b| b["identity"].as_str().unwrap()).collect();
+    assert_eq!(ids, [left, "not-an-address"], "{stale}");
+    assert_eq!(stale["balances"][0]["payable"], true);
+    assert_eq!(stale["balances"][1]["payable"], false);
+
+    // the coinbase path: the next coinbaser pays it, whole, under the 500 000 floor
+    let mut gw = Gateway::connect(port, &pool, &Identity::generate());
+    let (_, outputs) = gw.request_coinbaser_outputs(VALUE, &tip);
+    let paid_left = |outs: &[datum_wire::coinbaser::Output]| {
+        outs.iter().filter(|o| hex::encode(&o.script) == left_script).map(|o| o.sats).sum::<u64>()
+    };
+    assert_eq!(paid_left(&outputs), 499_226, "{outputs:?}");
+    assert_eq!(outputs.iter().map(|o| o.sats).sum::<u64>(), VALUE);
+
+    // by hand instead: a hold takes it off the books. A wrong amount, a miner who is not
+    // stale and a name that is no address are refused one by one.
+    payout_request(
+        &primed,
+        "batch-1",
+        serde_json::json!({"action": "hold", "entries": [[left, 499_226], [recent, 400_000], ["not-an-address", 50_000]]}),
+    );
+    let held = payout_answer(&primed, "batch-1", |v| v["status"] == "held");
+    assert_eq!(held["entries"], serde_json::json!([[left, 499_226]]), "{held}");
+    assert_eq!(held["ready_height"], HEIGHT - 1 + 4, "{held}");
+    let why: Vec<&str> = held["skipped"].as_array().unwrap().iter().map(|s| s["reason"].as_str().unwrap()).collect();
+    assert_eq!(why, ["not stale", "not an address"], "{held}");
+    assert!(!primed.dir.join("payouts/batch-1.request.json").exists(), "a request is handled once");
+    let st = settled_stats(&primed);
+    assert_eq!(st["window"]["stale"]["held_sats"], 499_226);
+    assert_eq!(st["window"]["carry_total_sats"], 450_000);
+    // and no coinbaser issued from now on pays it
+    let (_, outputs) = gw.request_coinbaser_outputs(VALUE + 1, &tip);
+    assert_eq!(paid_left(&outputs), 0, "{outputs:?}");
+
+    // "paid" is checked against the node. Unknown to it: keep waiting. Confirmed but a sat
+    // short: refused, and the hold stays.
+    let txid = "ab".repeat(32);
+    payout_request(&primed, "batch-1", serde_json::json!({"action": "paid", "txid": txid}));
+    let waiting = payout_answer(&primed, "batch-1", |v| v["status"] == "waiting");
+    assert_eq!(waiting["retry"], true, "{waiting}");
+    assert!(primed.dir.join("payouts/batch-1.request.json").exists(), "it is looked at again");
+    std::fs::remove_file(primed.dir.join("payouts/batch-1.request.json")).unwrap();
+
+    let short = "cd".repeat(32);
+    let tx = |sats: f64| serde_json::json!({"confirmations": 3, "vout": [{"value": sats, "scriptPubKey": {"hex": left_script}}]});
+    node.txs.lock().unwrap().insert(short.clone(), tx(0.00499225));
+    payout_request(&primed, "batch-1", serde_json::json!({"action": "paid", "txid": short}));
+    let refused = payout_answer(&primed, "batch-1", |v| v["ok"] == false && v["retry"].is_null());
+    assert!(refused["error"].as_str().unwrap().contains("paid 499225"), "{refused}");
+    // an id that names no hold finishes nothing
+    payout_request(&primed, "batch-9", serde_json::json!({"action": "paid", "txid": short}));
+    assert_eq!(payout_answer(&primed, "batch-9", |v| v["ok"] == false)["error"], "no such hold");
+    assert_eq!(settled_stats(&primed)["window"]["stale"]["held_sats"], 499_226, "still held");
+
+    // abandoned: released, and it is carry (and stale, and in the next coinbaser) again
+    payout_request(&primed, "batch-1", serde_json::json!({"action": "release"}));
+    let released = payout_answer(&primed, "batch-1", |v| v["status"] == "released");
+    assert_eq!(released["released_sats"], 499_226);
+    let st = settled_stats(&primed);
+    assert_eq!((st["window"]["stale"]["held_sats"].as_u64(), st["window"]["carry_total_sats"].as_u64()), (Some(0), Some(949_226)));
+
+    // held again and really paid: off the books for good
+    payout_request(&primed, "batch-2", serde_json::json!({"action": "hold", "entries": [[left, 499_226]]}));
+    payout_answer(&primed, "batch-2", |v| v["status"] == "held");
+    let good = "ef".repeat(32);
+    node.txs.lock().unwrap().insert(good.clone(), tx(0.00499226));
+    payout_request(&primed, "batch-2", serde_json::json!({"action": "paid", "txid": good}));
+    let paid = payout_answer(&primed, "batch-2", |v| v["status"] == "paid");
+    assert_eq!(paid["paid_sats"], 499_226, "{paid}");
+    let st = settled_stats(&primed);
+    assert_eq!((st["window"]["stale"]["held_sats"].as_u64(), st["window"]["carry_total_sats"].as_u64()), (Some(0), Some(450_000)));
+    let log = std::fs::read_to_string(primed.dir.join("payouts/payouts.jsonl")).unwrap();
+    assert!(log.lines().count() >= 4, "every change is on the record:\n{log}");
+    // and it survives a restart: window.json has no carry for it and no hold
+    let meta: serde_json::Value = serde_json::from_slice(&std::fs::read(primed.dir.join("window.json")).unwrap()).unwrap();
+    assert!(meta["carry"].get(left).is_none(), "{meta}");
+    assert!(meta.get("holds").is_none(), "{meta}");
+}

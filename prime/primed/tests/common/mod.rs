@@ -203,6 +203,23 @@ impl Gateway {
         }
     }
 
+    /// [`Gateway::request_coinbaser`], returning the outputs the Prime issued as well.
+    pub fn request_coinbaser_outputs(&mut self, value: u64, prev_hash: &Hash) -> (u8, Vec<datum_wire::coinbaser::Output>) {
+        let mut m = vec![mining::SUB_COINBASER_REQUEST];
+        m.extend_from_slice(&value.to_le_bytes());
+        m.extend_from_slice(prev_hash);
+        m.push(mining::END);
+        self.send_mining(&m);
+        loop {
+            let m = self.next_mining();
+            if m[0] == mining::SUB_COINBASER_REPLY {
+                // sub-command, value, length, then the v2 list (whose first byte is the id)
+                let len = u32::from_le_bytes(m[9..13].try_into().unwrap()) as usize;
+                return datum_wire::coinbaser::decode_v2(&m[13..13 + len]).unwrap();
+            }
+        }
+    }
+
     /// Submit and return `(status, reject_code)`.
     pub fn submit(&mut self, s: &PowSubmit) -> (u8, u16) {
         self.send_mining(&s.encode());
@@ -353,6 +370,8 @@ pub struct MockNode {
     /// What `getblockheader` says of a block that is not the tip: its `confirmations`
     /// (negative: not in the main chain). A hash not listed is one the node has never seen.
     pub confirmations: Arc<std::sync::Mutex<std::collections::HashMap<String, i64>>>,
+    /// What `getrawtransaction <txid> true` answers. A txid not listed is one the node lacks.
+    pub txs: Arc<std::sync::Mutex<std::collections::HashMap<String, serde_json::Value>>>,
 }
 
 impl MockNode {
@@ -362,11 +381,14 @@ impl MockNode {
         let chain = Arc::new(std::sync::Mutex::new(chain));
         let calls = Arc::new(AtomicU64::new(0));
         let confirmations: Arc<std::sync::Mutex<std::collections::HashMap<String, i64>>> = Default::default();
+        let txs: Arc<std::sync::Mutex<std::collections::HashMap<String, serde_json::Value>>> = Default::default();
         let (c, n, confs) = (chain.clone(), calls.clone(), confirmations.clone());
+        let txs_in = txs.clone();
         std::thread::spawn(move || {
             for conn in listener.incoming() {
                 let Ok(mut conn) = conn else { continue };
                 let (c, n, confs) = (c.clone(), n.clone(), confs.clone());
+                let txs = txs_in.clone();
                 std::thread::spawn(move || {
                     let _ = conn.set_read_timeout(Some(Duration::from_secs(5)));
                     let mut buf = Vec::new();
@@ -409,6 +431,10 @@ impl MockNode {
                                 }
                             }
                         }
+                        "getrawtransaction" => {
+                            let asked = req["params"][0].as_str().unwrap_or("").to_string();
+                            txs.lock().unwrap().get(&asked).cloned().unwrap_or(serde_json::json!({"__error": -5}))
+                        }
                         "getmininginfo" => match ch.next_bits {
                             Some(b) => serde_json::json!({"blocks": ch.height, "next": {"bits": format!("{b:08x}")}}),
                             None => serde_json::json!({"blocks": ch.height}),
@@ -427,7 +453,7 @@ impl MockNode {
                 });
             }
         });
-        MockNode { port, chain, calls, confirmations }
+        MockNode { port, chain, calls, confirmations, txs }
     }
 
     /// The `rpc` part of a Prime config pointing at this node.

@@ -482,7 +482,12 @@ impl Shared {
         base
     }
 
-    /// Target work for the TIDES window from the current network difficulty.
+    /// Forget the shared coinbaser snapshot: balances were moved by hand, and the next
+    /// coinbaser must not be priced off what they were.
+    pub fn drop_coinbaser_base(&self) {
+        *self.coinbaser_base.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    }
+
     pub fn gateway_scripts_path(&self) -> std::path::PathBuf {
         self.cfg.data_dir.join("gateway-scripts.json")
     }
@@ -606,9 +611,9 @@ mod tests {
 
         // the subsidy alone, and a value carrying fees, as a real template would
         for value in [312_500_000u64, 312_644_067] {
-            let live = w.split(value, &params, |i| address::to_script(i, net));
+            let live = w.split(value, &params, 0, |i| address::to_script(i, net));
             let snap =
-                tides::split::compute(w.miners(), w.total_work(), value, &params, 0, |i| scripts.get(i).cloned());
+                tides::split::compute(w.miners(), w.total_work(), value, &params, 0, 0, |i| scripts.get(i).cloned());
             assert_eq!(snap.fee_sats, live.fee_sats, "fee at value={value}");
             assert_eq!(snap.pool_sats, live.pool_sats, "pool remainder at value={value}");
             assert_eq!(snap.payees.len(), live.payees.len(), "payee count at value={value}");

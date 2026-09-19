@@ -7,6 +7,7 @@
 mod address;
 mod config;
 mod node;
+mod payouts;
 mod rpc;
 mod session;
 mod solo;
@@ -242,6 +243,7 @@ fn run(cfg: Config) -> i32 {
     warn_if_window_cliff(&cfg.data_dir, &ledger);
     let block_log = BlockLog::open(&cfg.data_dir);
     let blocks = block_log.read_all().unwrap_or_default();
+    backfill_last_seen(&mut ledger, &blocks);
 
     let (tip_tx, tip) = watch::channel(None);
     let (notify, _) = broadcast::channel(64);
@@ -255,6 +257,9 @@ fn run(cfg: Config) -> i32 {
             // output appended after the payees. The byte budget leaves room for it too.
             max_outputs: 511,
             output_budget_bytes: 14_000 - 9 - 64,
+            stale_after: if cfg.stale_coinbase { cfg.stale_after_secs() } else { 0 },
+            stale_min_payout: cfg.stale_min_payout,
+            stale_max_outputs: cfg.stale_per_block,
         },
         pool_script,
         pool,
@@ -372,6 +377,43 @@ impl Drop for ConnectionSlot {
             c.release(self.ip);
         }
     }
+}
+
+/// Balances from before Prime kept `last_seen` have no date to be stale since. The block log
+/// has one: a block names everyone it paid or deferred earnings for, so the last block that
+/// names an identity is no earlier than its last share by more than the gap between blocks,
+/// and a later date only delays a payment. With nothing in the log either, the clock starts
+/// now.
+fn backfill_last_seen(ledger: &mut tides::Ledger, blocks: &[tides::BlockRecord]) {
+    let unknown: std::collections::HashSet<String> = ledger
+        .window
+        .carries()
+        .into_iter()
+        .map(|c| c.0)
+        .filter(|id| ledger.window.last_seen_of(id) == 0 && ledger.window.work_of(id) == 0)
+        .collect();
+    if unknown.is_empty() {
+        return;
+    }
+    let mut found: std::collections::HashMap<&str, u64> = std::collections::HashMap::new();
+    for b in blocks.iter().filter(|b| !b.kind.starts_with("orphan")) {
+        let named = b.split.iter().map(|s| s.0.as_str()).chain(b.carry_delta.iter().filter(|d| d.1 > 0).map(|d| d.0.as_str()));
+        for id in named.filter(|id| unknown.contains(*id)) {
+            let e = found.entry(id).or_insert(0);
+            *e = (*e).max(b.ts);
+        }
+    }
+    let now = now();
+    let from_log = found.len();
+    for id in &unknown {
+        let ts = found.get(id.as_str()).copied().unwrap_or(now).min(now);
+        ledger.set_last_seen(id, ts as u32);
+    }
+    log::info!(
+        "stale balances: dated {} balances with no last-seen ({from_log} from the block log, {} from now)",
+        unknown.len(),
+        unknown.len() - from_log
+    );
 }
 
 /// If the last `stats.json` (written by the previous process) disagrees with the

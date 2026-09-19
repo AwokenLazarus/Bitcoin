@@ -41,6 +41,21 @@ pub struct Config {
     /// Dust floor for split outputs, sats.
     #[serde(default = "d_min_payout")]
     pub min_payout: u64,
+    /// Days without a credited share after which a balance under `min-payout` is *stale*: its
+    /// owner has stopped mining and nothing more will be added to it. Stale balances are
+    /// listed in `stats.json` and can be set aside for a payment made by hand (`payouts/`);
+    /// with `stale-coinbase` they are also paid by the next block with room. 0 disables both.
+    #[serde(default = "d_stale_after_days")]
+    pub stale_after_days: u32,
+    /// Smallest stale balance worth an output, sats. Not below the dust limit.
+    #[serde(default = "d_stale_min_payout")]
+    pub stale_min_payout: u64,
+    /// Pay stale balances in the coinbase, after every miner in the window has been placed.
+    #[serde(default = "d_true")]
+    pub stale_coinbase: bool,
+    /// Most stale balances one coinbase pays; a backlog drains over blocks.
+    #[serde(default = "d_stale_per_block")]
+    pub stale_per_block: usize,
     #[serde(default)]
     pub fee_bps: u32,
     /// Fee on an upgraded empty-solo coinbase (gateway + pool), basis points. Default 750
@@ -168,6 +183,15 @@ fn d_window() -> u32 {
 fn d_min_payout() -> u64 {
     546
 }
+fn d_stale_per_block() -> usize {
+    25
+}
+fn d_stale_after_days() -> u32 {
+    7
+}
+fn d_stale_min_payout() -> u64 {
+    10_000
+}
 fn d_min_diff() -> u64 {
     1
 }
@@ -212,6 +236,11 @@ fn d_solo_tag() -> String {
 }
 
 impl Config {
+    /// `stale-after-days` in seconds; 0 when the rule is off.
+    pub fn stale_after_secs(&self) -> u32 {
+        self.stale_after_days.saturating_mul(86_400)
+    }
+
     pub fn load(path: &Path) -> Result<Self, String> {
         let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
         let mut c: Config = toml::from_str(&text).map_err(|e| format!("{}: {e}", path.display()))?;
@@ -226,6 +255,12 @@ impl Config {
         }
         if c.fee_bps > 10_000 {
             return Err("fee-bps cannot exceed 10000".into());
+        }
+        if c.stale_min_payout < 546 {
+            return Err("stale-min-payout cannot be below the dust limit (546)".into());
+        }
+        if c.stale_after_days > 3650 {
+            return Err("stale-after-days is in days (3650 at most; 0 disables)".into());
         }
         if c.stratum_fee_bps == 0 {
             c.stratum_fee_bps = c.fee_bps;

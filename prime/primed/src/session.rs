@@ -79,7 +79,7 @@ const MAX_IDLE_FRAME: usize = 192 * 1024;
 /// How long after a block candidate a session may still send a full-size frame.
 const BLOCK_REPLY_WINDOW: Duration = Duration::from_secs(1800);
 /// Blocks past the one it was issued for that a coinbaser is still honoured; see `issued_for`.
-const COINBASER_GRACE_BLOCKS: u32 = 2;
+pub const COINBASER_GRACE_BLOCKS: u32 = 2;
 /// Identities one session's gateway-script vote keeps count of; see `note_identity`.
 const MAX_SESSION_IDENTITIES: usize = 1024;
 /// What one over-rate coinbaser request with nothing to repeat counts as, in rejects.
@@ -879,6 +879,7 @@ impl Session {
             value,
             &self.shared.split_params,
             base.rebate_owed,
+            now() as u32,
             |ident| base.script_for(ident),
         );
         let (target, total_work) = (base.target_work, base.total_work);
@@ -1482,7 +1483,9 @@ impl Session {
         let live = if issued.is_none() && matches!(v.coinbase_kind, CoinbaseKind::PoolOnly) {
             let ledger = self.shared.ledger.lock().unwrap();
             let net = self.shared.network;
-            Some(ledger.window.split(v.coinbase_value, &self.shared.split_params, |i| address::to_script(i, net)))
+            Some(ledger.window.split(v.coinbase_value, &self.shared.split_params, now() as u32, |i| {
+                address::to_script(i, net)
+            }))
         } else {
             None
         };

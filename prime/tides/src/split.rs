@@ -12,6 +12,13 @@
 //! time earned + carry clears the floor and fits. An identity whose work has aged out of
 //! the window entirely is still a payee while its carry alone clears the floor.
 //!
+//! **Stale balances.** A miner who leaves with less than `min_payout` on the books would wait
+//! for ever: nothing will be added to it. Once an identity has had no work credited for
+//! `stale_after` seconds its floor drops to `stale_min_payout`, and it is paid, whole, by the
+//! next block with room. It cannot take a slot from anyone mining: every active payee is at
+//! or over `min_payout`, every stale balance is under it, and outputs are placed largest
+//! first.
+//!
 //! **DATUM rebate.** `datum_rebate_bps` of the house-stratum fee is not kept by the pool but
 //! *credited* to the window's DATUM miners, pro rata by DATUM work, as carry — the same
 //! balance under-floor earnings use. The coinbase itself is unchanged in shape: stratum work
@@ -44,6 +51,30 @@ pub struct SplitParams {
     /// hold 16 KiB total; leave room for the scriptSig, the pool output and the witness
     /// commitment.
     pub output_budget_bytes: usize,
+    /// Seconds without credited work after which a balance is stale. 0: never.
+    pub stale_after: u32,
+    /// The floor for a stale balance, in place of `min_payout`.
+    pub stale_min_payout: u64,
+    /// Most stale balances one coinbase pays. A backlog is paid down over blocks rather than
+    /// by one coinbase several times the size of any the gateways have been handed before.
+    pub stale_max_outputs: usize,
+}
+
+impl SplitParams {
+    /// The payout floor for this miner at time `now`.
+    fn floor_for(&self, m: &MinerStat, now: u32) -> u64 {
+        if self.is_stale(m, now) {
+            self.stale_min_payout.min(self.min_payout)
+        } else {
+            self.min_payout
+        }
+    }
+
+    /// No work in the window, and none credited for `stale_after` seconds. `last_ts` 0 is
+    /// "not known", which is not the same as "long ago".
+    pub fn is_stale(&self, m: &MinerStat, now: u32) -> bool {
+        self.stale_after > 0 && m.work == 0 && m.last_ts > 0 && now.saturating_sub(m.last_ts) >= self.stale_after
+    }
 }
 
 impl Default for SplitParams {
@@ -55,6 +86,9 @@ impl Default for SplitParams {
             min_payout: 546,
             max_outputs: 512,
             output_budget_bytes: 14_000,
+            stale_after: 0,
+            stale_min_payout: 546,
+            stale_max_outputs: 25,
         }
     }
 }
@@ -238,6 +272,7 @@ pub fn compute(
     value: u64,
     p: &SplitParams,
     rebate_owed: u64,
+    now: u32,
     mut script_for: impl FnMut(&str) -> Option<Vec<u8>>,
 ) -> Split {
     let stratum_bps = if p.stratum_fee_bps == 0 { p.fee_bps } else { p.stratum_fee_bps };
@@ -323,6 +358,7 @@ pub fn compute(
     // leaves its earned share with the pool. Deciding both in one walk made a payee's carry
     // depend on whether the miners left out happened to come before it or after.
     let mut placed = Vec::new();
+    let mut stale_placed = 0usize;
     for ((m, script), earned) in queue {
         let total = earned.saturating_add(m.carry);
         if total == 0 {
@@ -337,9 +373,12 @@ pub fn compute(
             continue;
         };
         let need = 8 + 1 + script.len();
-        let reason = if total < p.min_payout {
+        let reason = if total < p.floor_for(&m, now) {
             Some(UnpaidReason::BelowMinimum)
-        } else if placed.len() >= p.max_outputs || bytes + need > p.output_budget_bytes {
+        } else if placed.len() >= p.max_outputs
+            || bytes + need > p.output_budget_bytes
+            || (p.is_stale(&m, now) && stale_placed >= p.stale_max_outputs)
+        {
             Some(UnpaidReason::OverBudget)
         } else {
             None
@@ -350,12 +389,15 @@ pub fn compute(
             continue;
         }
         bytes += need;
+        stale_placed += usize::from(p.is_stale(&m, now));
         placed.push((m, script, earned));
     }
     for (m, script, earned) in placed {
         let carry = m.carry.min(carry_room);
         let sats = earned + carry;
-        if sats < p.min_payout {
+        // A stale balance is paid whole or not at all: what a part payment left behind would
+        // be under even the stale floor, with nothing ever to be added to it.
+        if sats < p.floor_for(&m, now) || (p.is_stale(&m, now) && carry < m.carry) {
             // it cleared the floor only with carry there is no room to pay this block
             carry_room = carry_room.saturating_add(earned);
             let total = earned.saturating_add(m.carry);
@@ -427,8 +469,9 @@ mod tests {
             min_payout: 400_000,
             max_outputs: 512,
             output_budget_bytes: 14_000,
+            ..SplitParams::default()
         };
-        let s = compute(miners, 1001, 312_538_966, &p, 0, script);
+        let s = compute(miners, 1001, 312_538_966, &p, 0, 0, script);
         assert_eq!(s.fee_sats, 1_562_694);
         let dist = 312_538_966 - 1_562_694;
         assert_eq!(s.payees.len(), 3);
@@ -456,9 +499,10 @@ mod tests {
             min_payout: 4_000,
             max_outputs: 512,
             output_budget_bytes: 14_000,
+            ..SplitParams::default()
         };
         // block 1: `small` earns 3 960 (< floor) and is deferred
-        let s1 = compute(vec![miner("big", 9_600), miner("small", 400)], 10_000, 100_000, &p, 0, script);
+        let s1 = compute(vec![miner("big", 9_600), miner("small", 400)], 10_000, 100_000, &p, 0, 0, script);
         assert_eq!(s1.payees.len(), 1);
         assert_eq!(s1.unpaid[0].identity, "small");
         assert_eq!(s1.unpaid[0].sats, 3_960);
@@ -468,7 +512,7 @@ mod tests {
         // block 2: same work, now carrying 3 960 → 7 920 total clears the floor. The pool's
         // remainder this block is only its 1 000 fee, so that is how much carry it can pay
         // down now; the rest stays owed.
-        let s2 = compute(vec![miner("big", 9_600), miner_carry("small", 400, 3_960)], 10_000, 100_000, &p, 0, script);
+        let s2 = compute(vec![miner("big", 9_600), miner_carry("small", 400, 3_960)], 10_000, 100_000, &p, 0, 0, script);
         assert_eq!(s2.payees.len(), 2);
         let small = s2.payees.iter().find(|x| x.identity == "small").unwrap();
         assert_eq!((small.sats, small.carry), (4_960, 1_000));
@@ -484,6 +528,7 @@ mod tests {
             10_000,
             100_000,
             &p,
+            0,
             0,
             script,
         );
@@ -503,13 +548,14 @@ mod tests {
             min_payout: 5_000,
             max_outputs: 512,
             output_budget_bytes: 14_000,
+            ..SplitParams::default()
         };
-        let s = compute(vec![miner("a", 100), miner_carry("gone", 0, 4_999)], 100, 1_000_000, &p, 0, script);
+        let s = compute(vec![miner("a", 100), miner_carry("gone", 0, 4_999)], 100, 1_000_000, &p, 0, 0, script);
         assert_eq!(s.payees.len(), 1, "4 999 is still under the floor");
         assert_eq!(s.unpaid[0].identity, "gone");
         assert_eq!((s.unpaid[0].sats, s.unpaid[0].earned), (4_999, 0));
         assert!(s.carry_delta(|_| true).is_empty(), "nothing earned, nothing to add");
-        let s = compute(vec![miner("a", 100), miner_carry("gone", 0, 5_000)], 100, 1_000_000, &p, 0, script);
+        let s = compute(vec![miner("a", 100), miner_carry("gone", 0, 5_000)], 100, 1_000_000, &p, 0, 0, script);
         assert_eq!(s.payees.len(), 2);
         let gone = s.payees.iter().find(|x| x.identity == "gone").unwrap();
         assert_eq!((gone.sats, gone.carry, gone.work), (5_000, 5_000, 0));
@@ -528,8 +574,9 @@ mod tests {
             min_payout: 1,
             max_outputs: 512,
             output_budget_bytes: 14_000,
+            ..SplitParams::default()
         };
-        let s = compute(vec![miner("a", 50), miner_carry("b", 50, 1_000_000)], 100, 1_000, &p, 0, script);
+        let s = compute(vec![miner("a", 50), miner_carry("b", 50, 1_000_000)], 100, 1_000, &p, 0, 0, script);
         assert_eq!(s.pool_sats + s.paid_sats(), 1_000);
         assert_eq!(s.pool_sats, 0);
         let b = s.payees.iter().find(|x| x.identity == "b").unwrap();
@@ -537,13 +584,13 @@ mod tests {
         assert_eq!(b.carry, 0);
         assert!(s.carry_delta(|_| true).is_empty(), "carry untouched, still owed in full");
         // unpayable work does not accrue: there is no address to ever pay it to
-        let s = compute(vec![miner("a", 50), miner("bad", 50)], 100, 1_000, &p, 0, script);
+        let s = compute(vec![miner("a", 50), miner("bad", 50)], 100, 1_000, &p, 0, 0, script);
         assert_eq!(s.unpaid[0].reason, UnpaidReason::NoScript);
         assert!(!s.unpaid[0].defers());
         // nor when it is also under the payout floor, which is where a made-up username with
         // a share or two lands: small is deferred, unpayable is not, and unpayable comes first
         let floor = SplitParams { min_payout: 546, ..p };
-        let s = compute(vec![miner("a", 999_900), miner("bad", 100)], 1_000_000, 1_000_000, &floor, 0, script);
+        let s = compute(vec![miner("a", 999_900), miner("bad", 100)], 1_000_000, 1_000_000, &floor, 0, 0, script);
         let bad = s.unpaid.iter().find(|u| u.identity == "bad").unwrap();
         assert_eq!((bad.reason, bad.earned), (UnpaidReason::NoScript, 100));
         assert!(!bad.defers());
@@ -556,7 +603,7 @@ mod tests {
     #[test]
     fn carry_on_an_early_payee_cannot_eat_a_later_payees_share() {
         let p = SplitParams { fee_bps: 100, stratum_fee_bps: 100, min_payout: 1, ..SplitParams::default() };
-        let s = compute(vec![miner_carry("a", 60, 1_000_000), miner("b", 40)], 100, 100_000, &p, 0, script);
+        let s = compute(vec![miner_carry("a", 60, 1_000_000), miner("b", 40)], 100, 100_000, &p, 0, 0, script);
         let a = s.payees.iter().find(|x| x.identity == "a").unwrap();
         let b = s.payees.iter().find(|x| x.identity == "b").unwrap();
         assert_eq!(b.sats, 39_600, "b gets its full earned share");
@@ -576,8 +623,9 @@ mod tests {
             min_payout: 1,
             max_outputs: 5,
             output_budget_bytes: 14_000,
+            ..SplitParams::default()
         };
-        let s = compute(miners, 2000, 1_000_000, &p, 0, script);
+        let s = compute(miners, 2000, 1_000_000, &p, 0, 0, script);
         assert_eq!(s.payees.len(), 5);
         assert!(s.unpaid.iter().any(|u| u.reason == UnpaidReason::NoScript));
         assert_eq!(s.unpaid.iter().filter(|u| u.reason == UnpaidReason::OverBudget).count(), 14);
@@ -590,15 +638,16 @@ mod tests {
             min_payout: 1,
             max_outputs: 512,
             output_budget_bytes: 12 * 2,
+            ..SplitParams::default()
         };
-        let s = compute(vec![miner("a", 1), miner("b", 1), miner("c", 1)], 3, 300, &p, 0, script);
+        let s = compute(vec![miner("a", 1), miner("b", 1), miner("c", 1)], 3, 300, &p, 0, 0, script);
         assert_eq!(s.payees.len(), 2);
         assert_eq!(s.pool_sats, 100);
     }
 
     #[test]
     fn empty_window_pays_the_pool() {
-        let s = compute(vec![], 0, 100, &SplitParams::default(), 0, script);
+        let s = compute(vec![], 0, 100, &SplitParams::default(), 0, 0, script);
         assert!(s.payees.is_empty());
         assert_eq!(s.pool_sats, 100);
     }
@@ -613,8 +662,9 @@ mod tests {
             min_payout: 1,
             max_outputs: 512,
             output_budget_bytes: 14_000,
+            ..SplitParams::default()
         };
-        let s = compute(miners, 1000, 10_000_000, &p, 0, script);
+        let s = compute(miners, 1000, 10_000_000, &p, 0, 0, script);
         assert_eq!(s.payees[0].identity, "datum");
         assert_eq!(s.payees[0].sats, 5_970_000);
         assert_eq!(s.payees[1].identity, "house");
@@ -645,7 +695,7 @@ mod tests {
         // 60% of the window is stratum, 40% DATUM (two miners, 3:1)
         let miners = vec![miner_stratum("house", 600), miner("d1", 300), miner("d2", 100)];
         let value = 100_000_000u64;
-        let s = compute(miners, 1000, value, &rebate_params(), 0, script);
+        let s = compute(miners, 1000, value, &rebate_params(), 0, 0, script);
         // the coinbase is the plain 3% split: stratum charged 1.8M, DATUM paid its share
         assert_eq!(s.fee_sats, 1_800_000);
         let by = |id: &str| s.payees.iter().find(|p| p.identity == id).unwrap();
@@ -667,6 +717,7 @@ mod tests {
             value,
             &rebate_params(),
             0,
+            0,
             script,
         );
         let by = |id: &str| next.payees.iter().find(|p| p.identity == id).unwrap();
@@ -681,7 +732,7 @@ mod tests {
         // 60% of the window is public stratum, 40% DATUM.
         let miners = vec![miner_stratum("house", 600), miner("d1", 300), miner("d2", 100)];
         let value = 100_000_000u64;
-        let s = compute(miners, 1000, value, &production_params(), 0, script);
+        let s = compute(miners, 1000, value, &production_params(), 0, 0, script);
         // 15% of the stratum slice (60M) is taken this coinbase; DATUM work is free.
         assert_eq!(s.fee_sats, 9_000_000);
         let by = |id: &str| s.payees.iter().find(|p| p.identity == id).unwrap();
@@ -701,6 +752,7 @@ mod tests {
             value,
             &production_params(),
             0,
+            0,
             script,
         );
         let by = |id: &str| next.payees.iter().find(|p| p.identity == id).unwrap();
@@ -709,11 +761,11 @@ mod tests {
         assert_eq!(next.pool_sats, 4_500_000, "15% charged, 7.5 points paid back: the pool nets 7.5%");
         assert_eq!(next.pool_sats + next.paid_sats(), value);
 
-        let all_datum = compute(vec![miner("d", 1000)], 1000, value, &production_params(), 0, script);
+        let all_datum = compute(vec![miner("d", 1000)], 1000, value, &production_params(), 0, 0, script);
         assert_eq!((all_datum.fee_sats, all_datum.rebate_sats, all_datum.pool_sats), (0, 0, 0));
         assert_eq!(all_datum.payees[0].sats, value);
 
-        let all_stratum = compute(vec![miner_stratum("house", 1000)], 1000, value, &production_params(), 0, script);
+        let all_stratum = compute(vec![miner_stratum("house", 1000)], 1000, value, &production_params(), 0, 0, script);
         assert_eq!(all_stratum.fee_sats, 15_000_000);
         assert_eq!(all_stratum.pool_sats, 15_000_000);
         assert_eq!(all_stratum.rebate_sats, 0);
@@ -727,7 +779,7 @@ mod tests {
         let p = SplitParams { min_payout: 50_000, ..rebate_params() };
         let value = 100_000_000u64;
         // tiny earns 10k (< 50k floor) — but 1% of 99.99% of the value is 999,900 of rebate
-        let s = compute(vec![miner_stratum("house", 9_999), miner("tiny", 1)], 10_000, value, &p, 0, script);
+        let s = compute(vec![miner_stratum("house", 9_999), miner("tiny", 1)], 10_000, value, &p, 0, 0, script);
         assert_eq!(s.payees.len(), 1);
         assert_eq!(s.unpaid[0].identity, "tiny");
         assert_eq!(s.unpaid[0].earned, 10_000);
@@ -742,6 +794,7 @@ mod tests {
             value,
             &p,
             0,
+            0,
             script,
         );
         let tiny = s.payees.iter().find(|x| x.identity == "tiny").unwrap();
@@ -752,11 +805,11 @@ mod tests {
     #[test]
     fn rebate_is_clamped_to_the_stratum_fee_and_off_when_zero() {
         let p = SplitParams { datum_rebate_bps: 900, ..rebate_params() };
-        let s = compute(vec![miner_stratum("house", 500), miner("d", 500)], 1000, 1_000_000, &p, 0, script);
+        let s = compute(vec![miner_stratum("house", 500), miner("d", 500)], 1000, 1_000_000, &p, 0, 0, script);
         // 3% of 500k charged; the credit is capped at that same 3%
         assert_eq!((s.fee_sats, s.rebate_sats, s.pool_sats), (15_000, 15_000, 15_000));
         let p = SplitParams { datum_rebate_bps: 0, ..rebate_params() };
-        let s = compute(vec![miner_stratum("house", 500), miner("d", 500)], 1000, 1_000_000, &p, 0, script);
+        let s = compute(vec![miner_stratum("house", 500), miner("d", 500)], 1000, 1_000_000, &p, 0, 0, script);
         assert!(s.rebate_credits.is_empty());
         assert_eq!((s.fee_sats, s.rebate_sats, s.rebate_deferred), (15_000, 0, 0));
     }
@@ -764,17 +817,17 @@ mod tests {
     #[test]
     fn rebate_with_no_datum_work_is_deferred_and_handed_out_later() {
         let p = rebate_params();
-        let s = compute(vec![miner_stratum("a", 700), miner_stratum("b", 300)], 1000, 1_000_000, &p, 0, script);
+        let s = compute(vec![miner_stratum("a", 700), miner_stratum("b", 300)], 1000, 1_000_000, &p, 0, 0, script);
         assert_eq!(s.fee_sats, 30_000);
         assert!(s.rebate_credits.is_empty());
         assert_eq!(s.rebate_deferred, 10_000, "1% of an all-stratum block waits for a DATUM miner");
         assert_eq!(s.rebate_delta(), 10_000);
         assert!(s.carry_delta(|_| true).is_empty());
         // DATUM work under an unpayable address is not somewhere to send it either
-        let s = compute(vec![miner_stratum("a", 900), miner("bad", 100)], 1000, 1_000_000, &p, 0, script);
+        let s = compute(vec![miner_stratum("a", 900), miner("bad", 100)], 1000, 1_000_000, &p, 0, 0, script);
         assert_eq!((s.rebate_sats, s.rebate_deferred), (0, 9_000));
         // the next block with a DATUM miner hands the balance out on top of its own point
-        let s = compute(vec![miner_stratum("a", 900), miner("d", 100)], 1000, 1_000_000, &p, 19_000, script);
+        let s = compute(vec![miner_stratum("a", 900), miner("d", 100)], 1000, 1_000_000, &p, 19_000, 0, script);
         assert_eq!(s.rebate_credits, vec![("d".to_string(), 9_000 + 19_000)]);
         assert_eq!((s.rebate_owed_credited, s.rebate_deferred, s.rebate_delta()), (19_000, 0, -19_000));
     }
@@ -819,10 +872,11 @@ mod tests {
                 min_payout: 1 + rnd(20_000),
                 max_outputs: 1 + rnd(40) as usize,
                 output_budget_bytes: 14_000,
+                ..SplitParams::default()
             };
             let owed = rnd(50_000_000);
             let dbg = format!("{miners:?} total={total} value={value} p={p:?} owed={owed}");
-            let s = compute(miners.clone(), total, value, &p, owed, script);
+            let s = compute(miners.clone(), total, value, &p, owed, 0, script);
             assert_eq!(s.pool_sats + s.paid_sats(), value, "{dbg}\n{s:?}");
             // the summed per-miner fee floors can trail the closed-form fee by a sat each
             assert!(s.rebate_sats <= s.fee_sats + owed + n as u64, "{dbg}\n{s:?}");
@@ -852,6 +906,7 @@ mod tests {
             min_payout: 1,
             max_outputs: 3,
             output_budget_bytes: 14_000,
+            ..SplitParams::default()
         };
         // three large addresses and one small miner, block after block
         let window = |small_carry: u64| {
@@ -860,7 +915,7 @@ mod tests {
         let mut carry = 0u64;
         let mut waited = 0;
         loop {
-            let s = compute(window(carry), 1_000, 1_000_000, &p, 0, script);
+            let s = compute(window(carry), 1_000, 1_000_000, &p, 0, 0, script);
             assert_eq!(s.pool_sats + s.paid_sats(), 1_000_000);
             if let Some(out) = s.payees.iter().find(|x| x.identity == "small") {
                 assert_eq!(out.sats, 100_000 + carry, "paid this block's share and everything it was kept waiting for");
@@ -874,7 +929,107 @@ mod tests {
         }
         assert_eq!(waited, 3, "it outranks a 300 000 output once it is owed more than that");
         // with nobody carrying anything the order is the window's, as before
-        let s = compute(window(0), 1_000, 1_000_000, &p, 0, script);
+        let s = compute(window(0), 1_000, 1_000_000, &p, 0, 0, script);
         assert_eq!(s.payees.iter().map(|x| x.identity.as_str()).collect::<Vec<_>>(), ["x1", "x2", "x3"]);
     }
+    fn stale_params() -> SplitParams {
+        SplitParams {
+            fee_bps: 100,
+            stratum_fee_bps: 100,
+            min_payout: 500_000,
+            stale_after: 7 * 86_400,
+            stale_min_payout: 10_000,
+            ..SplitParams::default()
+        }
+    }
+
+    fn gone(id: &str, carry: u64, last_ts: u32) -> MinerStat {
+        MinerStat { identity: id.into(), work: 0, stratum_work: 0, credits: 0, last_ts, carry }
+    }
+
+    /// A miner who left with less than the floor is paid once it has been gone long enough.
+    #[test]
+    fn a_stale_balance_is_paid_under_the_floor_after_the_delay() {
+        let p = stale_params();
+        let now = 100 * 86_400;
+        let value = 100_000_000;
+        let window = |last| vec![miner("a", 100), gone("left", 499_226, last)];
+        // six days gone: still waiting
+        let s = compute(window(now - 6 * 86_400), 100, value, &p, 0, now, script);
+        assert_eq!(s.payees.len(), 1);
+        assert_eq!(s.unpaid[0].reason, UnpaidReason::BelowMinimum);
+        // seven: paid, whole, out of the pool's remainder
+        let s = compute(window(now - 7 * 86_400), 100, value, &p, 0, now, script);
+        let left = s.payees.iter().find(|x| x.identity == "left").unwrap();
+        assert_eq!((left.sats, left.carry, left.work), (499_226, 499_226, 0));
+        assert_eq!(s.pool_sats, 1_000_000 - 499_226);
+        assert_eq!(s.pool_sats + s.paid_sats(), value);
+        assert_eq!(s.carry_delta(|_| true), vec![("left".to_string(), -499_226)]);
+        // never seen is not the same as long gone
+        let s = compute(window(0), 100, value, &p, 0, now, script);
+        assert_eq!(s.payees.len(), 1);
+        // and the rule is off unless configured
+        let off = SplitParams { stale_after: 0, ..stale_params() };
+        assert_eq!(compute(window(1), 100, value, &off, 0, now, script).payees.len(), 1);
+    }
+
+    /// Under the stale floor it stays on the books; a miner still in the window is never
+    /// stale, however old its last share; an unpayable name is never paid.
+    #[test]
+    fn what_the_stale_rule_does_not_touch() {
+        let p = stale_params();
+        let now = 100 * 86_400;
+        let old = now - 30 * 86_400;
+        let miners = vec![
+            miner("a", 99),
+            MinerStat { identity: "slow".into(), work: 1, stratum_work: 0, credits: 1, last_ts: old, carry: 20_000 },
+            gone("crumb", 9_999, old),
+            gone("bad-name", 50_000, old),
+        ];
+        let s = compute(miners, 100, 1_000_000, &p, 0, now, script);
+        assert_eq!(s.payees.iter().map(|x| x.identity.as_str()).collect::<Vec<_>>(), ["a"]);
+        let why = |id: &str| s.unpaid.iter().find(|u| u.identity == id).unwrap().reason;
+        assert_eq!(why("slow"), UnpaidReason::BelowMinimum);
+        assert_eq!(why("crumb"), UnpaidReason::BelowMinimum);
+        assert_eq!(why("bad-name"), UnpaidReason::NoScript);
+    }
+
+    /// Stale balances are paid from what is left after everyone mining has been paid, whole or
+    /// not at all, and never take an output from a miner in the window.
+    #[test]
+    fn stale_balances_wait_for_room_and_are_never_part_paid() {
+        let now = 100 * 86_400;
+        let old = now - 8 * 86_400;
+        let p = stale_params();
+        // the pool's remainder is its 1% fee: 10 000 sats. Two stale balances want 8 000 + 6 000.
+        let p_small = SplitParams { min_payout: 100_000, stale_min_payout: 5_000, ..p.clone() };
+        let s = compute(
+            vec![miner("a", 100), gone("s1", 8_000, old), gone("s2", 6_000, old)],
+            100,
+            1_000_000,
+            &p_small,
+            0,
+            now,
+            script,
+        );
+        let ids: Vec<&str> = s.payees.iter().map(|x| x.identity.as_str()).collect();
+        assert_eq!(ids, ["a", "s1"], "the larger goes first; 2 000 left is not 6 000");
+        let s2 = s.unpaid.iter().find(|u| u.identity == "s2").unwrap();
+        assert_eq!((s2.sats, s2.earned, s2.reason), (6_000, 0, UnpaidReason::OverBudget));
+        assert!(!s2.defers(), "nothing earned, so nothing is added to it: it just waits");
+        assert_eq!(s.pool_sats + s.paid_sats(), 1_000_000);
+        assert_eq!(s.pool_sats, 2_000);
+        // a backlog goes out a few to a block, largest first
+        let few = SplitParams { stale_max_outputs: 2, ..stale_params() };
+        let mut window = vec![miner("a", 100)];
+        window.extend((0..5).map(|i| gone(&format!("g{i}"), 20_000 + i, old)));
+        let s = compute(window, 100, 100_000_000, &few, 0, now, script);
+        assert_eq!(s.payees.iter().map(|x| x.identity.as_str()).collect::<Vec<_>>(), ["a", "g4", "g3"]);
+        assert_eq!(s.unpaid.iter().filter(|u| u.reason == UnpaidReason::OverBudget).count(), 3);
+        // one output slot: the miner in the window has it
+        let one = SplitParams { max_outputs: 1, ..p };
+        let s = compute(vec![miner("a", 100), gone("s1", 400_000, old)], 100, 100_000_000, &one, 0, now, script);
+        assert_eq!(s.payees.iter().map(|x| x.identity.as_str()).collect::<Vec<_>>(), ["a"]);
+    }
+
 }

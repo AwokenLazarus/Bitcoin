@@ -40,6 +40,16 @@ window-min-work = 0
 # Floor for split outputs, sats. An identity under it is not paid this block; what it
 # earned is carried forward and paid on top of its first output that clears the floor.
 min-payout = 546
+# A miner who stops with less than min-payout on the books would wait for ever. After this many
+# days without a share its balance is *stale*: listed in stats.json (window.stale), payable by
+# hand (scripts/stale_payout.py), and, with stale-coinbase, paid whole by the next block that
+# has room once everyone mining has been placed. 0 turns all of it off.
+stale-after-days = 7
+# Smallest stale balance worth an output, sats (not below 546).
+stale-min-payout = 10000
+stale-coinbase = true
+# Most stale balances one coinbase pays; a backlog drains over blocks.
+stale-per-block = 25
 # DATUM / Prime-gateway fee in basis points (0 = free).
 fee-bps = 0
 # Public house-stratum fee (1000 = 10%). 0 inherits fee-bps.

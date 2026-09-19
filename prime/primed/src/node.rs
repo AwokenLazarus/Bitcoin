@@ -55,6 +55,8 @@ pub async fn run(shared: Arc<Shared>) {
                 }
             }
         }
+        // balances the operator is paying by hand; works without the node, except `paid`
+        crate::payouts::poll(&shared).await;
         tokio::time::sleep(period).await;
     }
 }

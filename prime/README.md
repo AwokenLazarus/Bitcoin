@@ -219,6 +219,26 @@ each other's settlement still add up), reversed if the block is orphaned, and re
 it comes back. Each `BlockRecord` carries `carry_paid` and `carry_delta`; `stats.json`
 reports `carry_sats` per miner and `carry_total_sats` / `carry_holders` for the window.
 
+**Stale balances.** A miner who leaves with less than `min-payout` on the books has nothing
+more coming to push it over the floor. Prime keeps each identity's last credited share
+(`last_seen`, persisted in `window.json` for everyone owed money; balances older than the
+field are dated from the block log at startup). After `stale-after-days` without one, a
+balance of at least `stale-min-payout` is *stale*, listed under `window.stale` in `stats.json`,
+and paid one of two ways, never both:
+
+* *In the coinbase* (`stale-coinbase = true`): its floor drops to `stale-min-payout`. Outputs
+  are placed largest first and every stale balance is smaller than any active payee, so it
+  takes a slot and a share of the pool's remainder only after everyone mining has theirs. It
+  is paid whole or not at all.
+* *By hand* (`scripts/stale_payout.py`, on the node next to `fee_wallet.py`): `hold` asks
+  Prime, through a request file in `<data-dir>/payouts/`, to set balances aside in a *hold*;
+  held money is in no split. A coinbaser handed out before the hold can be mined on for a few
+  more blocks, and a block found on one draws what it paid out of the hold, so the amounts
+  are final only at the answer's `ready_height`. `pay` then spends mature fee UTXOs from the
+  pool's wallet, and leaves a `paid` request; Prime reads the transaction from its own node
+  and closes the hold only when it has 3 confirmations and pays every held script in full.
+  `release` turns a hold back into carry. Every change is appended to `payouts/payouts.jsonl`.
+
 Stock gateways build several coinbase sizes and hand small miners those with room for only
 the first few outputs, or none at all while a coinbaser reply is in flight. The Prime
 classifies every share's coinbase as **Split** (every issued miner output paid), **Partial**
