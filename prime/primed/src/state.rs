@@ -212,6 +212,8 @@ pub struct Totals {
     /// below `coinbasers` is the point: it means replies are being served from one snapshot
     /// instead of each taking the ledger lock and recomputing the same split.
     pub coinbaser_base_builds: AtomicU64,
+    /// Accepted shares under `min-diff`, credited by hash alone at the floor.
+    pub below_floor_shares: AtomicU64,
     /// Accepted shares whose difficulty was not part of what they hashed, credited by hash
     /// alone (`Policy::uncommitted_pot`).
     pub uncommitted_shares: AtomicU64,

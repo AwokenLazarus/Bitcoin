@@ -236,6 +236,7 @@ pub fn build(shared: &Shared) -> Value {
             // Stock DATUM's per-height subsidy-only job lands in `pool_only_shares` and is
             // expected; `pool_only_full_jobs` is the one that should be zero.
             "uncommitted_shares": t.uncommitted_shares.load(Ordering::Relaxed),
+            "below_floor_shares": t.below_floor_shares.load(Ordering::Relaxed),
             "pool_only_shares": t.pool_only_shares.load(Ordering::Relaxed),
             "pool_only_full_jobs": t.pool_only_full_jobs.load(Ordering::Relaxed),
             "solo_empty_shares": t.solo_empty_shares.load(Ordering::Relaxed),

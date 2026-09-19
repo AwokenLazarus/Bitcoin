@@ -200,7 +200,8 @@ pub struct Policy<'a> {
     pub tolerance: u64,
     /// Unix seconds now; 0 disables the time check.
     pub now: u32,
-    /// Smallest power-of-two difficulty the pool accepts.
+    /// The pool's floor: the smallest power-of-two difficulty a share is credited at. A share
+    /// under it is accepted and credited by its hash alone, at the floor.
     pub min_pot: u8,
     /// Script this gateway is allowed to take on an empty-solo or late-solo coinbase.
     /// Prime handed it over in configure; a coinbase paying only this is not Foreign.
@@ -410,9 +411,8 @@ pub fn classify_coinbase(
 ///
 /// `slot` must already have absorbed the share. On `Err` the code is a DATUM reject reason.
 pub fn verify(slot: &mut JobSlot, s: &PowSubmit, p: &Policy) -> Result<VerifiedShare, u16> {
-    if s.target_pot < p.min_pot {
-        return Err(mining::REJECT_BAD_TARGET);
-    }
+    // A share under the pool's floor is not refused (see `VerifiedShare::work`): the floor is
+    // announced to gateways, but not every gateway applies it to its miners.
     let share_target = pow::share_target_le(s.target_pot).ok_or(mining::REJECT_BAD_TARGET)?;
     verify_with_target(slot, s, p, &share_target)
 }
@@ -544,7 +544,13 @@ pub fn verify_with_target(
 
     let verified = VerifiedShare {
         hash,
-        work: if target_committed {
+        // Under the floor, as for a difficulty that was not hashed: credited by the hash alone,
+        // at the floor. A gateway that does not apply the announced floor to its miners
+        // (lazarus-gateway sets its own) would otherwise have every small miner's share
+        // refused. This way they earn, on average, exactly what they did, in fewer and larger
+        // credits; and what the floor is for still holds, because only a hash that meets it
+        // ever reaches the ledger, the duplicate set or the identity table.
+        work: if target_committed && s.target_pot >= p.min_pot {
             s.claimed_work()
         } else {
             let pot = p.uncommitted_pot.max(p.min_pot);
@@ -1286,6 +1292,25 @@ mod tests {
         assert_ne!(a, b);
     }
 
+    /// A share under the pool's floor is taken, and earns what its hash does at the floor.
+    #[test]
+    fn a_share_under_the_floor_is_credited_at_the_floor_by_its_hash() {
+        let pool = pool_script();
+        let iss = split();
+        let outs = gateway_outputs(&iss, &pool, VALUE);
+        let mut slot = JobSlot::default();
+        let mut s = share(0, 4, 1, &outs, &txids(2), 3, [0; 8], [0; 8]);
+        grind(&mut slot, &mut s);
+        let floor = Policy { min_pot: 10, ..policy(&iss, &pool) };
+        let v = verify_with_target(&mut slot, &s, &floor, &easy_target()).expect("not refused");
+        assert!(v.target_committed);
+        let earned = pow::meets_target(&v.hash, &pow::share_target_le(10).unwrap());
+        assert_eq!(v.work, if earned { 1 << 10 } else { 0 }, "never the 2^3 it claims");
+        // at or above the floor a committed difficulty is the credit, as ever
+        let at = Policy { min_pot: 3, ..policy(&iss, &pool) };
+        assert_eq!(verify_with_target(&mut slot, &s, &at, &easy_target()).unwrap().work, 1 << 3);
+    }
+
     /// Why a share whose difficulty is outside its hash is credited by the hash alone. A model
     /// of the two rules over the same 2^17 hashes, difficulty counted in leading zero bits.
     #[test]
@@ -1381,9 +1406,11 @@ mod tests {
         p.now = NOW - MAX_TIME_AHEAD - 10;
         assert_eq!(check(&mut slot, &s, &p), Err(mining::REJECT_BAD_NTIME));
 
+        // under the pool's floor is not a reason to refuse (it is credited at the floor, by
+        // its hash: `a_share_under_the_floor_is_credited_at_the_floor_by_its_hash`)
         let mut p = policy(&iss, &pool);
         p.min_pot = 5;
-        assert_eq!(verify(&mut slot, &s, &p), Err(mining::REJECT_BAD_TARGET));
+        assert!(verify_with_target(&mut slot, &s, &p, &easy_target()).is_ok());
 
         // a height mismatch between coinbase and job section
         let mut wrong_h = s.clone();

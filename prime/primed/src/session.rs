@@ -46,6 +46,8 @@ const HANDSHAKE_LIMIT: Duration = Duration::from_secs(15);
 const COINBASERS_KEPT: usize = 16;
 const PENDING_BLOCK_TTL: Duration = Duration::from_secs(120);
 const MAX_IDENTITIES: usize = 1 << 16;
+/// The identity table's hard ceiling, addresses included (about 100 MB of names).
+const MAX_IDENTITIES_HARD: usize = 1 << 20;
 /// Job slots whose coinbase sections stay resident per session; see `Session::touch_slot`.
 const MAX_LIVE_SLOTS: usize = 16;
 /// Coinbaser requests a session may make at once, and how often one is added back. A
@@ -1163,8 +1165,15 @@ impl Session {
             Err(code) => return self.reject(&s, code).await,
         };
         // One credit per hash, pool-wide and for as long as the height is live: the set is
-        // shared, keyed by height, and never cleared by anything a gateway can send.
-        let seen = self.shared.seen.lock().unwrap().insert(v.height, v.hash);
+        // shared, keyed by height, and never cleared by anything a gateway can send. A share
+        // that earned nothing (credited by hash alone, and its hash fell short) has no credit
+        // to take twice and is kept out of the set, which is what makes the set, the ledger
+        // and the identity table cost a hash at the floor to touch rather than any hash.
+        let seen = if v.work == 0 && !v.is_block_candidate {
+            Seen::Fresh
+        } else {
+            self.shared.seen.lock().unwrap().insert(v.height, v.hash)
+        };
         match seen {
             Seen::Fresh => {}
             Seen::Duplicate => return self.reject(&s, mining::REJECT_DUPLICATE_WORK).await,
@@ -1179,16 +1188,24 @@ impl Session {
         }
 
         // credit — empty-solo and gateway-solo are accepted work but not window work.
-        self.note_identity(&identity, v.work);
+        if v.work > 0 {
+            self.note_identity(&identity, v.work);
+        }
         let ts = now();
         let solo = matches!(v.coinbase_kind, CoinbaseKind::EmptySolo | CoinbaseKind::GatewaySolo);
         let credited = if solo {
             true
         } else {
             let mut ledger = self.shared.ledger.lock().unwrap();
-            let table_full =
-                ledger.window.identities().len() >= MAX_IDENTITIES && ledger.window.work_of(&identity) == 0;
-            if table_full && address::to_script(&identity, self.shared.network).is_none() {
+            let known = ledger.window.identities().len();
+            let new = known >= MAX_IDENTITIES && ledger.window.work_of(&identity) == 0;
+            // Past the first limit only an address gets a new row; past the second nothing
+            // does. Rows are never reclaimed, and at the floor each costs real work, so the
+            // second limit is an attack in progress rather than a busy day.
+            let refused = new
+                && v.work > 0
+                && (known >= MAX_IDENTITIES_HARD || address::to_script(&identity, self.shared.network).is_none());
+            if refused {
                 false
             } else {
                 let source = if self.is_house_stratum() { SOURCE_STRATUM } else { SOURCE_DATUM };
@@ -1275,6 +1292,8 @@ impl Session {
 
         if !v.target_committed {
             self.note_uncommitted_share();
+        } else if v.target_pot < self.shared.cfg.min_pot() {
+            self.shared.totals.add(&self.shared.totals.below_floor_shares, 1);
         }
         if v.is_block_candidate {
             if held_to_chain {

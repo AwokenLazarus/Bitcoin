@@ -72,7 +72,11 @@ solo-rebate-bps = 0
 # uncommitted-pot = 20
 # house-loopback = true
 # Smallest share difficulty accepted; power of two. Also the vardiff floor sent to gateways.
-min-diff = 1
+# A share under it is not refused: it is credited by its hash alone, at this difficulty, so a
+# small miner behind a gateway that ignores the floor earns the same on average. What the floor
+# buys is that only a hash meeting it touches the ledger, the duplicate set and the identity
+# table; at 1 a flood of those costs an ASIC nothing.
+min-diff = 1024
 # Sats of slack per issued output when checking a coinbase against the split.
 split-tolerance = 2
 # Shares one height behind the tip are accepted for this many seconds after the tip moved.
