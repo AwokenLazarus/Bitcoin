@@ -536,16 +536,16 @@
       if (bs.length === 1) {
         const b = bs[0];
         return `<b>◆ ${LZ.esc(this.t("block", { h: LZ.num(b.height) }))}</b><span>${LZ.esc(this.fmtTime(b.ts, true))} · ${LZ.esc(LZ.ago(b.ts))}</span>` +
-          `<span>${this.mode === "miner" ? LZ.esc(this.t("toYou", { amt: "" })) : ""}${LZ.amt(b.reward_btc)}${b.kind ? " · " + LZ.esc(this.via(b)) : ""}${this.mode === "miner" && b.status === "immature" ? " · " + LZ.esc(this.t("immature")) : ""}</span><span class="hx-tip-cta">${LZ.esc(this.t("clickSplit"))}</span>`;
+          `<span>${this.mode === "miner" ? LZ.esc(this.t("toYou", { amt: "" })) : ""}${LZ.amt(b.reward_btc)}${this.via(b) ? " · " + LZ.esc(this.via(b)) : ""}${this.mode === "miner" && b.status === "immature" ? " · " + LZ.esc(this.t("immature")) : ""}</span><span class="hx-tip-cta">${LZ.esc(this.t("clickSplit"))}</span>`;
       }
       const sum = bs.reduce((a, b) => a + (b.reward_btc || 0), 0);
       return `<b>◆ ${LZ.esc(this.t("nBlocks", { n: bs.length }))}</b><span>${LZ.num(bs[0].height)} – ${LZ.num(bs[bs.length - 1].height)}</span>` +
         `<span>${LZ.amt(sum)}</span><span class="hx-tip-cta">${LZ.esc(this.t("clickList"))}</span>`;
     }
+    // `kind` is the coinbase's shape (split, pool-only, partial), not who found the block, so the
+    // only thing said about the finder is the gateway, when Prime recorded one.
     via(b) {
-      if (b.kind === "datum" || b.gateway) return b.gateway ? this.t("viaGw", { gw: b.gateway }) : this.t("viaDatum");
-      if (b.kind) return this.t("viaStratum");
-      return "";
+      return b.gateway ? this.t("viaGw", { gw: b.gateway }) : "";
     }
     showTip(px, py, html) {
       const tip = this.tip;
