@@ -674,13 +674,15 @@
       </div>
       <div class="learn-split">
         <div class="card learn-path">
-          <h3 data-i18n="app.learn.pathTitle">From zero to mining</h3>
+          <h3 data-i18n="app.learn.pathTitle">From zero to mining, the DATUM way</h3>
           <ol>
-            <li data-i18n-html="app.learn.p1"><b>Get an address.</b> Any wallet that gives you a bc1… address on this chain. That address is your username; there is nothing else to register.</li>
-            <li data-i18n-html="app.learn.p2"><b>Point a miner.</b> Any Siacoin BLAKE2b ASIC. Use the public stratum to start in two minutes, or run a DATUM gateway for 0% and the bonus.</li>
-            <li data-i18n-html="app.learn.p3"><b>Watch it work.</b> Look your address up here: live hashrate, your share of the window, and every coinbase that paid you.</li>
+            <li data-i18n-html="app.learn.p1"><b>Get a payout address.</b> Any wallet that gives you a bc1… address on this chain. That address is your username; there is nothing to register.</li>
+            <li data-i18n-html="app.learn.p2"><b>Run your own node.</b> Bitcoin Knots for this chain, with <code>server=1</code> and a cookie or RPC user your gateway can read. Your node is what chooses the transactions in your blocks.</li>
+            <li data-i18n-html="app.learn.p3"><b>Start a DATUM gateway.</b> Build one (iohzrd is the recommended build), paste in the Lazarus host, port and pubkey from the Connect page, and set <code>mining.pool_address</code> to your address.</li>
+            <li data-i18n-html="app.learn.p4"><b>Point your miner at your gateway.</b> Any Siacoin BLAKE2b ASIC, aimed at your own gateway’s stratum port, with the username <code>address.worker</code>.</li>
+            <li data-i18n-html="app.learn.p5"><b>Watch it work.</b> Your gateway shows up under Gateways and your address under Miners. You pay 0%, you build your own blocks, and every block the pool finds pays you the DATUM bonus on top.</li>
           </ol>
-          <p class="learn-actions"><a class="btn" href="#connect" data-i18n="app.learn.pathCta">Connect a miner</a> <a class="btn ghost" href="#calc" data-i18n="app.learn.pathCalc">What would I earn?</a></p>
+          <p class="learn-actions"><a class="btn" href="#connect" data-tab="tab-datum" data-i18n="app.learn.pathCta">Set up DATUM</a> <a class="btn ghost" href="#calc" data-i18n="app.learn.pathCalc">What would I earn?</a></p>
         </div>
         <div class="card learn-gloss">
           <h3 data-i18n="app.learn.glossTitle">Words you will meet</h3>

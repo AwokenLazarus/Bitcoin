@@ -26,6 +26,23 @@
   const root = document.documentElement;
   let current = null;
 
+  // Each crawlable URL (/tides, /hardware, ...) is this same page with that topic's article put
+  // at the top of <main> by the server. The article belongs to the view its topic lives in, and
+  // that view is what the URL opens.
+  const PATH_VIEW = {
+    "/how": "learn", "/bip110": "learn", "/tides": "learn", "/non-custodial": "learn", "/self-cap": "learn", "/pools": "learn",
+    "/datum-subsidy": "learn", "/api": "learn",
+    "/connect": "mine", "/mine-xbt": "mine", "/hardware": "mine", "/profitability": "mine", "/calculator": "mine",
+    "/blocks": "payouts",
+  };
+  const pagePath = location.pathname.replace(/^\/zh(?=\/|$)/, "").replace(/\/$/, "") || "/";
+  const article = document.querySelector("main > section.seo-intro");
+  const articleView = article && pagePath !== "/" ? PATH_VIEW[pagePath] || "learn" : null;
+  if (article) {
+    if (!article.id) article.id = "article";
+    SECTION_VIEW[article.id] = articleView || "home";
+  }
+
   function viewFor(target) {
     if (target in ALIAS) target = ALIAS[target];
     if (SECTION_VIEW[target]) return SECTION_VIEW[target];
@@ -63,7 +80,8 @@
     const hash = decodeURIComponent(location.hash.slice(1));
     const scroll = root.getAttribute("data-scroll") || "";
     const target = hash || scroll;
-    show(viewFor(target), { keepScroll });
+    // No hash on an article URL: open the article's own view, at the article.
+    show(!target && articleView ? articleView : viewFor(target), { keepScroll });
     const tops = new Set(Object.values(VIEWS).map((ids) => ids[0]));
     if (hash && !tops.has(ALIAS[hash] || hash)) {
       const node = $(ALIAS[hash] || hash);
@@ -362,6 +380,8 @@
 
   // ------------------------------------------------------------ boot
   root.classList.add("app");
+  // Thumbs get the bottom tab bar; a mouse keeps the header tabs however narrow the window is.
+  if (navigator.maxTouchPoints > 0 && matchMedia("(pointer: coarse)").matches) root.classList.add("is-touch");
   route(true);
   const ready = () => {
     route(true);

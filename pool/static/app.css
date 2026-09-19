@@ -109,12 +109,13 @@ html.app { scroll-padding-top: calc(var(--mast-full, 7.5rem) + 14px); }
 
 /* ------------------------------------------------------------------ mobile tab bar */
 .tabbar { display: none; }
+/* The bottom bar is for thumbs. A narrow desktop window keeps the header tabs (they scroll). */
 @media (max-width: 900px) {
-  .nav.views > a[data-view-link] { display: none; }
+  .is-touch .nav.views > a[data-view-link] { display: none; }
   .pal-label, .pal-btn kbd { display: none; }
   .pal-btn { padding: 0 0.7rem; }
-  .app body { padding-bottom: calc(4.1rem + env(safe-area-inset-bottom)); }
-  .tabbar {
+  .app.is-touch body { padding-bottom: calc(4.1rem + env(safe-area-inset-bottom)); }
+  .is-touch .tabbar {
     position: fixed;
     inset: auto 0 0 0;
     z-index: 40;
@@ -375,3 +376,7 @@ html.app { scroll-padding-top: calc(var(--mast-full, 7.5rem) + 14px); }
 @media (max-width: 1060px) { .app .topbar-side > a.btn.small { display: none; } .app .pal-btn kbd { display: none; } }
 @media (max-width: 980px) { .app .wordmark { font-size: 1.25rem; } .app .nav.views { font-size: 0.78rem; } }
 @media (max-width: 860px) { .app .scroller-views { grid-area: nav; } }
+
+.learn-path code { font: 0.86em var(--mono); color: var(--ink); background: var(--bg-inset); padding: 0.05em 0.35em; border-radius: 5px; }
+.app main > section.seo-intro { padding-block: clamp(1.6rem, 3.5vw, 2.6rem) 0.4rem; }
+.subnav .scroller > .wrap { padding-inline: max(var(--space), 0.9rem); }

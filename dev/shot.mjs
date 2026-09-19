@@ -31,6 +31,7 @@ try {
   await send("Runtime.enable"); await send("Network.enable"); await send("Page.enable");
   await send("Emulation.setDeviceMetricsOverride", { width: job.w || 1400, height: job.h || 900, deviceScaleFactor: job.dpr || 1, mobile: !!job.mobile });
   if (job.mobile) await send("Emulation.setTouchEmulationEnabled", { enabled: true });
+  if (job.media) await send("Emulation.setEmulatedMedia", { features: Object.entries(job.media).map(([name, value]) => ({ name, value })) });
   await send("Page.navigate", { url: job.url });
   await sleep(job.settle || 2500);
   const ev = async (expression) => (await send("Runtime.evaluate", { expression, returnByValue: true, awaitPromise: true })).result.value;
