@@ -206,6 +206,11 @@ db_conn.executescript(
     CREATE TABLE IF NOT EXISTS pool_samples (
       ts INTEGER PRIMARY KEY, hr_ghs REAL, miners INTEGER, shares_acc INTEGER, shares_rej INTEGER
     );
+    -- Hour averages of pool_samples, kept for good. pool_samples is pruned at seven days, so
+    -- this is what the 30-day and all-time hashrate charts are drawn from.
+    CREATE TABLE IF NOT EXISTS pool_hourly (
+      ts INTEGER PRIMARY KEY, hr_ghs REAL, miners REAL, n INTEGER
+    );
     CREATE TABLE IF NOT EXISTS found_blocks (
       height INTEGER PRIMARY KEY, hash TEXT, ts INTEGER, reward_btc REAL,
       finder TEXT, pool_fee_btc REAL, miner_btc REAL, coinbase TEXT
@@ -2249,6 +2254,7 @@ def scrape():
     last_prune = int(state.get("last_prune_ts") or 0)
     if ts - last_prune >= 1800:
         db("DELETE FROM samples WHERE ts < ?", (ts - 3 * 86400,), write=True)
+        rollup_pool_hourly(ts)
         db("DELETE FROM pool_samples WHERE ts < ?", (ts - 7 * 86400,), write=True)
         state["last_prune_ts"] = ts
         _checkpoint_wal()
@@ -4261,6 +4267,93 @@ def _public_prime_blocks(blocks):
     return slim
 
 
+def rollup_pool_hourly(now):
+    """Fold pool_samples into pool_hourly. Every hour that still has samples is rewritten, so the
+    first run backfills the whole retained week and later runs only really change the last hour.
+    The hour in progress is left out until it is complete."""
+    this_hour = (int(now) // 3600) * 3600
+    last = db("SELECT MAX(ts) AS t FROM pool_hourly", one=True)
+    since = int(last["t"] or 0) if last else 0
+    db(
+        "INSERT OR REPLACE INTO pool_hourly(ts,hr_ghs,miners,n) "
+        "SELECT (ts / 3600) * 3600, AVG(hr_ghs), AVG(miners), COUNT(*) FROM pool_samples "
+        "WHERE ts >= ? AND ts < ? GROUP BY (ts / 3600)",
+        (since, this_hour),
+        write=True,
+    )
+
+
+# Chart ranges: how far back, and the bucket each point averages over. Buckets are sized so every
+# range comes back as a few hundred points whatever its span.
+_HISTORY_RANGES = {
+    "1h": (3600, 30),
+    "6h": (6 * 3600, 120),
+    "24h": (86400, 300),
+    "3d": (3 * 86400, 900),
+    "7d": (7 * 86400, 1800),
+    "30d": (30 * 86400, 4 * 3600),
+    "all": (0, 12 * 3600),
+}
+
+
+def history_payload(rng):
+    """Pool hashrate over a range, with every block the pool found inside it.
+
+    Ranges up to a week read the ten-second samples; longer ones read the hourly rollup and
+    finish with the samples newer than its last hour, so the right-hand edge is always live.
+    """
+    span, step = _HISTORY_RANGES[rng]
+    now = int(time.time())
+    since = (now - span) if span else 0
+    if span and span <= 7 * 86400:
+        rows = db(
+            "SELECT (ts / ?) * ? AS t, AVG(hr_ghs) AS hr, AVG(miners) AS m FROM pool_samples "
+            "WHERE ts > ? GROUP BY (ts / ?) ORDER BY 1",
+            (step, step, since, step),
+        )
+    else:
+        rows = db(
+            "SELECT (ts / ?) * ? AS t, AVG(hr) AS hr, AVG(m) AS m FROM ("
+            "  SELECT ts, hr_ghs AS hr, miners AS m FROM pool_hourly WHERE ts > ?"
+            "  UNION ALL"
+            "  SELECT ts, hr_ghs, miners FROM pool_samples"
+            "  WHERE ts > ? AND ts >= COALESCE((SELECT MAX(ts) + 3600 FROM pool_hourly), 0)"
+            ") GROUP BY (ts / ?) ORDER BY 1",
+            (step, step, since, since, step),
+        )
+    points = [[int(r["t"]), round(float(r["hr"] or 0), 3), int(round(float(r["m"] or 0)))] for r in (rows or [])]
+    first_ts = points[0][0] if points else since
+    # Blocks are never pruned, but a marker left of the first hashrate point has nothing to sit on.
+    fbs = db(
+        "SELECT height, hash, ts, reward_btc FROM found_blocks WHERE ts >= ? ORDER BY height",
+        (max(since, first_ts),),
+    )
+    prime_blocks = {b.get("hash"): b for b in (prime_summary().get("blocks") or []) if b.get("hash")}
+    blocks = []
+    for fb in fbs or []:
+        pb = prime_blocks.get(fb["hash"]) or {}
+        blocks.append(
+            {
+                "height": int(fb["height"]),
+                "hash": fb["hash"],
+                "ts": int(fb["ts"] or 0),
+                "reward_btc": round(float(fb["reward_btc"] or 0), 8),
+                "kind": pb.get("kind") or "",
+                "gateway": pb.get("gateway") or "",
+                "status": pb.get("status") or "",
+            }
+        )
+    return {
+        "range": rng,
+        "since": since,
+        "until": now,
+        "step_s": step,
+        "points": points,
+        "blocks": blocks,
+        "ranges": list(_HISTORY_RANGES),
+    }
+
+
 # Public origin for canonical / sitemap / OG. Override in config.json if the UI is mirrored.
 _PUBLIC_SITE = str(CONF.get("public_url") or "https://pool.awokenlazarus.xyz").rstrip("/")
 _SEO_PAGES = {
@@ -5430,6 +5523,15 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json({"error": "not found"}, 404)
                 return
             self.send_json(cached(("miner", addr), 5.0, lambda: public_view(miner_payload(addr))), cache_s=5)
+            return
+        if path == "/api/history":
+            rng = (parse_qs(u.query).get("range") or ["24h"])[0]
+            if rng not in _HISTORY_RANGES:
+                self.send_json({"error": "unknown range", "ranges": list(_HISTORY_RANGES)}, 400)
+                return
+            # A longer range moves slower, so it can sit in the cache longer.
+            ttl = 10.0 if rng == "1h" else 30.0 if rng in ("6h", "24h") else 120.0
+            self.send_json(cached(("history", rng), ttl, lambda: history_payload(rng)), cache_s=int(ttl))
             return
         if path == "/api/blocks":
             self.send_json(cached("blocks", 15.0, lambda: {"blocks": mempool_blocks()}), cache_s=15)
