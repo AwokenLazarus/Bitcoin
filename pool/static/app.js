@@ -89,9 +89,15 @@
       subnav.className = "subnav";
       subnav.innerHTML = '<div class="wrap"></div>';
       mast.appendChild(subnav);
-      const setH = () => root.style.setProperty("--mast-h", (mast.querySelector(".site-header")?.offsetHeight || 58) + "px");
+      // The mast is sticky and its height changes (banner dismissed, sub-bar shown, phone width), so
+      // anchor jumps take their offset from what it measures now.
+      const setH = () => {
+        root.style.setProperty("--mast-h", (mast.querySelector(".site-header")?.offsetHeight || 58) + "px");
+        root.style.setProperty("--mast-full", mast.offsetHeight + "px");
+      };
       setH();
       window.addEventListener("resize", setH);
+      if ("ResizeObserver" in window) new ResizeObserver(setH).observe(mast);
     }
     const items = (SUB[current] || []).filter(([id]) => { const n = $(id); return n && !n.hidden && !n.closest("[hidden]"); });
     subnav.hidden = items.length < 2;

@@ -10,7 +10,7 @@
 .app main > section.section { padding-block: clamp(2.2rem, 4.5vw, 3.6rem); border-top: 0; }
 .app main > section.section + section.section:not(.view-off) { border-top: 1px solid var(--line); }
 .app[data-view="home"] #status { padding-top: clamp(1.4rem, 3vw, 2.4rem); }
-html.app { scroll-padding-top: 7.5rem; }
+html.app { scroll-padding-top: calc(var(--mast-full, 7.5rem) + 14px); }
 
 /* ------------------------------------------------------------------ header tabs */
 .nav.views { gap: 0.15rem; }
