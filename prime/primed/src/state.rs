@@ -32,10 +32,92 @@ pub struct Tip {
     pub height: u32,
     pub hash: String,
     pub difficulty: f64,
+    /// `hash` and the tip's parent in the byte order a job section carries them, and the
+    /// compact targets the node holds the tip and the block after it to. A job is only as
+    /// good as the block it builds on, and that is the node's to say, not the gateway's;
+    /// see [`Tip::check_job`]. `None` is something the node did not tell us, and matches
+    /// nothing.
+    pub hash_le: Option<Hash>,
+    pub parent_le: Option<Hash>,
+    pub bits: Option<u32>,
+    pub next_bits: Option<u32>,
     /// When this Prime first saw the tip; shares for the previous height are accepted for
     /// a grace period after it.
     pub seen_at: Instant,
     pub seen_ts: u64,
+}
+
+/// What the node's tip says about the block a job claims to build.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum JobCheck {
+    /// Builds on the tip, or on the tip's parent inside the grace period.
+    Current,
+    /// For a height the chain has left behind.
+    Stale,
+    /// For a height past the one after our tip: our node has not caught up, or it is made up.
+    Ahead,
+    /// The right height on a block that is not the one our node has there.
+    WrongParent,
+    /// The right parent under a target the node does not set for that block.
+    WrongBits,
+}
+
+/// A block hash as the node prints it, in the byte order it has on the wire.
+pub fn hash_le(hex_be: &str) -> Option<Hash> {
+    let mut h: Hash = hex::decode(hex_be).ok()?.try_into().ok()?;
+    h.reverse();
+    Some(h)
+}
+
+impl Tip {
+    /// Hold a job section's `prev_hash`, `height` and `nbits` to the node's chain.
+    ///
+    /// All three are the gateway's word. Height alone is not a check: work on a parent the
+    /// node does not have at the tip can never become a block the pool is paid for, and an
+    /// easy `nbits` turns every share into a block candidate.
+    pub fn check_job(&self, prev_hash: &Hash, height: u32, nbits: u32, grace: Duration) -> JobCheck {
+        let expected = self.height + 1;
+        let (parent, bits) = if height == expected {
+            (self.hash_le, self.next_bits)
+        } else if height > expected {
+            return JobCheck::Ahead;
+        } else if height + 1 == expected && self.seen_at.elapsed() < grace {
+            (self.parent_le, self.bits)
+        } else {
+            return JobCheck::Stale;
+        };
+        if parent.as_ref() != Some(prev_hash) {
+            return JobCheck::WrongParent;
+        }
+        let wrong = match bits {
+            Some(b) => b != nbits,
+            // The node did not say (`node::refresh`). Consensus still bounds a retarget: the
+            // next target is at most four times the tip's. Anything easier is made up.
+            None => self.bits.is_some_and(|tip_bits| easier_than_4x(nbits, tip_bits)),
+        };
+        if wrong {
+            return JobCheck::WrongBits;
+        }
+        JobCheck::Current
+    }
+}
+
+/// Whether compact target `nbits` is easier than four times `tip_bits`, the most a retarget
+/// allows. An `nbits` that does not decode is not a target at all.
+fn easier_than_4x(nbits: u32, tip_bits: u32) -> bool {
+    let Some(t) = datum_wire::pow::nbits_to_target_le(nbits) else { return true };
+    let Some(mut cap) = datum_wire::pow::nbits_to_target_le(tip_bits) else { return false };
+    if cap[31] >> 6 != 0 {
+        return false; // 4x overflows 256 bits: no bound to apply
+    }
+    let mut carry = 0u8;
+    for b in cap.iter_mut() {
+        let next = *b >> 6;
+        *b = (*b << 2) | carry;
+        carry = next;
+    }
+    // little-endian: compare from the most significant byte
+    t.iter().rev().cmp(cap.iter().rev()) == std::cmp::Ordering::Greater
 }
 
 #[derive(Clone, Debug, Default, serde::Serialize)]
@@ -227,12 +309,35 @@ pub struct Connections {
 }
 
 impl Connections {
+    /// What "one remote address" means for the per-address limit. An IPv6 host is handed a
+    /// whole /64 (at least), so counted by exact address one machine is 2^64 addresses and the
+    /// per-address limit is no limit at all; and the same IPv4 host can arrive plain or
+    /// v4-mapped depending on how the listener is bound.
+    fn key(ip: IpAddr) -> IpAddr {
+        match ip {
+            IpAddr::V4(_) => ip,
+            IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
+                Some(v4) => IpAddr::V4(v4),
+                None => {
+                    let mut s = v6.segments();
+                    s[4..].fill(0);
+                    IpAddr::V6(s.into())
+                }
+            },
+        }
+    }
+
     /// Reserve a slot for `ip`, or say which limit it would break.
+    ///
+    /// The last few slots are kept for loopback, which is where the pool's own gateway
+    /// connects from: strangers holding every slot open (a handshake is all a slot costs)
+    /// must not be able to lock the house stratum out with everyone else.
     pub fn admit(&mut self, ip: IpAddr, max_total: u32, max_per_ip: u32) -> Result<(), &'static str> {
-        if self.total >= max_total {
+        let reserved = if ip.is_loopback() { 0 } else { (max_total / 8).min(8) };
+        if self.total >= max_total.saturating_sub(reserved) {
             return Err("connection limit reached");
         }
-        let n = self.per_ip.entry(ip).or_insert(0);
+        let n = self.per_ip.entry(Self::key(ip)).or_insert(0);
         if *n >= max_per_ip {
             return Err("per-address connection limit reached");
         }
@@ -242,6 +347,7 @@ impl Connections {
     }
 
     pub fn release(&mut self, ip: IpAddr) {
+        let ip = Self::key(ip);
         if let Some(n) = self.per_ip.get_mut(&ip) {
             *n = n.saturating_sub(1);
             if *n == 0 {
@@ -274,6 +380,10 @@ pub struct Shared {
     /// block-notify so gateways refresh their templates.
     pub notify: broadcast::Sender<u32>,
     pub rpc: Rpc,
+    /// One tip refresh at a time, so the poller and a session asking early agree on who saw
+    /// the new tip first; see `node::refresh`.
+    /// Holds when the last one finished.
+    pub refresh: tokio::sync::Mutex<Option<Instant>>,
     pub totals: Totals,
     pub started: Instant,
     pub started_ts: u64,
@@ -291,6 +401,9 @@ pub struct GatewayPayout {
     pub identity: String,
     pub script_hex: String,
 }
+
+/// Gateway keys whose payout script is remembered across restarts; see `Shared::remember_gateway`.
+const MAX_REMEMBERED_GATEWAYS: usize = 4096;
 
 impl Shared {
     pub fn client_update(&self, id: u64, f: impl FnOnce(&mut ClientInfo)) {
@@ -354,12 +467,22 @@ impl Shared {
         if map.get(key_hex).is_some_and(|p| p.identity == identity && p.script_hex == hex_script) {
             return;
         }
+        // A gateway key costs nothing to make and one accepted share gets it remembered, the
+        // whole file rewritten each time. A pool has tens of gateways; past the cap a new key
+        // is simply not remembered (it learns its script again from its first share).
+        if map.len() >= MAX_REMEMBERED_GATEWAYS && !map.contains_key(key_hex) {
+            return;
+        }
         map.insert(key_hex.to_string(), GatewayPayout { identity: identity.to_string(), script_hex: hex_script });
         let text = serde_json::to_string_pretty(&*map).unwrap_or_else(|_| "{}".into());
-        drop(map);
-        if let Err(e) = std::fs::write(self.gateway_scripts_path(), text) {
+        // written under the lock, through a rename: two sessions writing at once must not
+        // interleave, and a crash must not leave half a file
+        let path = self.gateway_scripts_path();
+        let tmp = path.with_extension("tmp");
+        if let Err(e) = std::fs::write(&tmp, text).and_then(|_| std::fs::rename(&tmp, &path)) {
             log::warn!("gateway-scripts.json write failed: {e}");
         }
+        drop(map);
     }
 
     pub fn load_gateway_payouts(dir: &std::path::Path) -> HashMap<String, GatewayPayout> {
@@ -465,6 +588,60 @@ mod tests {
         }
     }
 
+    /// A job is held to the node's chain, not to the gateway's account of it.
+    #[test]
+    fn a_job_must_build_on_what_the_node_has() {
+        let (tip_hash, parent) = (h(125), h(124));
+        let mut tip = Tip {
+            height: 125,
+            hash: String::new(),
+            difficulty: 1.0,
+            hash_le: Some(tip_hash),
+            parent_le: Some(parent),
+            bits: Some(0x1d00_ffff),
+            next_bits: Some(0x1c7f_ffff),
+            seen_at: Instant::now(),
+            seen_ts: 0,
+        };
+        let grace = Duration::from_secs(5);
+        assert_eq!(tip.check_job(&tip_hash, 126, 0x1c7f_ffff, grace), JobCheck::Current);
+        // the right height is not enough: any other parent, and the easy target that would
+        // make every share a block candidate
+        assert_eq!(tip.check_job(&h(999), 126, 0x1c7f_ffff, grace), JobCheck::WrongParent);
+        assert_eq!(tip.check_job(&parent, 126, 0x1c7f_ffff, grace), JobCheck::WrongParent);
+        assert_eq!(tip.check_job(&tip_hash, 126, 0x207f_ffff, grace), JobCheck::WrongBits);
+        // a height our node has not reached is never taken on the gateway's word
+        assert_eq!(tip.check_job(&h(126), 127, 0x1c7f_ffff, grace), JobCheck::Ahead);
+        assert_eq!(tip.check_job(&tip_hash, 128, 0x1c7f_ffff, grace), JobCheck::Ahead);
+        // the previous height, inside the grace period, on the tip's own parent and target
+        assert_eq!(tip.check_job(&parent, 125, 0x1d00_ffff, grace), JobCheck::Current);
+        assert_eq!(tip.check_job(&h(7), 125, 0x1d00_ffff, grace), JobCheck::WrongParent);
+        assert_eq!(tip.check_job(&parent, 125, 0x1c7f_ffff, grace), JobCheck::WrongBits);
+        assert_eq!(tip.check_job(&parent, 125, 0x1d00_ffff, Duration::ZERO), JobCheck::Stale);
+        assert_eq!(tip.check_job(&h(123), 124, 0x1d00_ffff, grace), JobCheck::Stale);
+        // what the node did not say matches nothing, except a target it never reports
+        tip.parent_le = None;
+        assert_eq!(tip.check_job(&parent, 125, 0x1d00_ffff, grace), JobCheck::WrongParent);
+        tip.next_bits = None;
+        // a next target the node never reported is still bounded by the retarget rule: the
+        // tip's 0x1d00ffff allows up to 0x1d03fffc, and no more
+        assert_eq!(tip.check_job(&tip_hash, 126, 0x207f_ffff, grace), JobCheck::WrongBits);
+        assert_eq!(tip.check_job(&tip_hash, 126, 0x1d03_fffd, grace), JobCheck::WrongBits);
+        assert_eq!(tip.check_job(&tip_hash, 126, 0x1d03_fffc, grace), JobCheck::Current);
+        assert_eq!(tip.check_job(&tip_hash, 126, 0x1c7f_ffff, grace), JobCheck::Current);
+        assert_eq!(tip.check_job(&tip_hash, 126, 0x0080_0001, grace), JobCheck::WrongBits);
+        tip.hash_le = None;
+        assert_eq!(tip.check_job(&tip_hash, 126, 0x1c7f_ffff, grace), JobCheck::WrongParent);
+    }
+
+    #[test]
+    fn a_node_hash_is_reversed_onto_the_wire() {
+        let le = hash_le("00000000fb375e2285a6cb77ea45bf309fe054d46082fbc828486c709b1b1ec5").unwrap();
+        assert_eq!((le[0], le[31]), (0xc5, 0x00));
+        assert_eq!(hash_le(""), None);
+        assert_eq!(hash_le("00"), None);
+    }
+
     #[test]
     fn pruning_forgets_only_old_heights() {
         let mut s = SeenShares::default();
@@ -516,5 +693,44 @@ mod tests {
         assert_eq!(c.total(), 0);
         c.release(b); // over-release is harmless
         assert_eq!(c.total(), 0);
+    }
+
+    #[test]
+    fn one_ipv6_network_is_one_remote_address() {
+        let mut c = Connections::default();
+        let a: IpAddr = "2001:db8:1:2::1".parse().unwrap();
+        let b: IpAddr = "2001:db8:1:2:ffff:ffff:ffff:ffff".parse().unwrap();
+        let elsewhere: IpAddr = "2001:db8:1:3::1".parse().unwrap();
+        assert!(c.admit(a, 100, 2).is_ok());
+        assert!(c.admit(b, 100, 2).is_ok());
+        assert_eq!(c.admit(a, 100, 2), Err("per-address connection limit reached"), "same /64");
+        assert!(c.admit(elsewhere, 100, 2).is_ok());
+        // a v4 host is itself, however the socket reports it
+        let plain: IpAddr = "203.0.113.9".parse().unwrap();
+        let mapped: IpAddr = "::ffff:203.0.113.9".parse().unwrap();
+        assert!(c.admit(plain, 100, 1).is_ok());
+        assert_eq!(c.admit(mapped, 100, 1), Err("per-address connection limit reached"));
+        c.release(mapped);
+        assert!(c.admit(plain, 100, 1).is_ok(), "released under either spelling");
+        c.release(a);
+        c.release(b);
+        assert!(c.admit(b, 100, 2).is_ok());
+    }
+
+    #[test]
+    fn strangers_cannot_take_the_slots_kept_for_the_house_gateway() {
+        let mut c = Connections::default();
+        let mut taken = 0;
+        for i in 0..64u32 {
+            let ip = IpAddr::V4(std::net::Ipv4Addr::from(0xcb00_7100 + i));
+            if c.admit(ip, 16, 8).is_ok() {
+                taken += 1;
+            }
+        }
+        assert_eq!(taken, 14, "two of sixteen held back");
+        let house: IpAddr = "127.0.0.1".parse().unwrap();
+        assert!(c.admit(house, 16, 8).is_ok());
+        assert!(c.admit(house, 16, 8).is_ok());
+        assert_eq!(c.admit(house, 16, 8), Err("connection limit reached"));
     }
 }

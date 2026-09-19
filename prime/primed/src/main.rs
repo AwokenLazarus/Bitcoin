@@ -269,6 +269,7 @@ fn run(cfg: Config) -> i32 {
         tip,
         notify,
         rpc,
+        refresh: Default::default(),
         totals: Totals::default(),
         started: Instant::now(),
         started_ts: now(),

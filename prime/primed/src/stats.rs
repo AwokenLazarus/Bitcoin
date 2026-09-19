@@ -3,7 +3,7 @@
 
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -13,9 +13,12 @@ use crate::address;
 use crate::config::Config;
 use crate::state::{now, Shared};
 
+/// Display only: `gateway` is the 16 digits of the key that stats show, so a configured key is
+/// compared over those. What a session is trusted with is decided on its whole key
+/// (`session::house_stratum`).
 fn house_gateway(cfg: &Config, gateway: &str) -> bool {
     let g = gateway.to_ascii_lowercase();
-    cfg.house_gateways.iter().any(|h| !h.is_empty() && g.starts_with(&h.to_ascii_lowercase()))
+    cfg.house_gateways.iter().any(|h| h.len() >= 16 && g.len() >= 16 && h[..16] == g[..16])
 }
 
 /// One unit of window work is one difficulty-1 share: 2^32 hashes.
@@ -282,10 +285,20 @@ pub async fn serve(shared: Arc<Shared>) {
         }
     };
     log::info!("stats on http://{}/stats.json", shared.cfg.stats_listen);
+    // Both documents are built under the ledger mutex, which is the one share crediting and
+    // the coinbaser snapshot wait on, and walk the whole window. Built per request, a few
+    // dozen GETs in parallel park the workers behind it until gateways give up on their
+    // coinbaser (five seconds, then a coinbase paying only the pool). So: one build per
+    // `STATS_TTL` however many ask, and a ceiling on how many may be asking.
+    let cache: Arc<tokio::sync::Mutex<[Built; 2]>> = Default::default();
+    let slots = Arc::new(tokio::sync::Semaphore::new(STATS_MAX_CONNECTIONS));
     loop {
         let Ok((mut sock, _)) = listener.accept().await else { continue };
+        let Ok(slot) = slots.clone().try_acquire_owned() else { continue };
         let shared = shared.clone();
+        let cache = cache.clone();
         tokio::spawn(async move {
+            let _slot = slot;
             let mut buf = [0u8; 2048];
             let n = match tokio::time::timeout(Duration::from_secs(5), sock.read(&mut buf)).await {
                 Ok(Ok(n)) => n,
@@ -293,21 +306,44 @@ pub async fn serve(shared: Arc<Shared>) {
             };
             let req = String::from_utf8_lossy(&buf[..n]);
             let path = req.split_whitespace().nth(1).unwrap_or("/");
+            let document = |which: usize| {
+                let (cache, shared) = (cache.clone(), shared.clone());
+                async move {
+                    let mut held = cache.lock().await;
+                    if let Some((at, body)) = &held[which] {
+                        if at.elapsed() < STATS_TTL {
+                            return body.clone();
+                        }
+                    }
+                    let body = Arc::new(if which == 0 { build(&shared) } else { legacy_ledger(&shared) }.to_string());
+                    held[which] = Some((Instant::now(), body.clone()));
+                    body
+                }
+            };
+            let plain = |text: &str| Arc::new(text.to_string());
             let (status, ctype, body) = match path.split('?').next().unwrap_or("/") {
-                "/" | "/stats.json" | "/stats" => ("200 OK", "application/json", build(&shared).to_string()),
-                "/ledger.json" => ("200 OK", "application/json", legacy_ledger(&shared).to_string()),
-                "/healthz" => ("200 OK", "text/plain", "ok\n".to_string()),
-                _ => ("404 Not Found", "text/plain", "not found\n".to_string()),
+                "/" | "/stats.json" | "/stats" => ("200 OK", "application/json", document(0).await),
+                "/ledger.json" => ("200 OK", "application/json", document(1).await),
+                "/healthz" => ("200 OK", "text/plain", plain("ok\n")),
+                _ => ("404 Not Found", "text/plain", plain("not found\n")),
             };
             let resp = format!(
                 "HTTP/1.1 {status}\r\nContent-Type: {ctype}\r\nContent-Length: {}\r\nAccess-Control-Allow-Origin: *\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n{body}",
                 body.len()
             );
-            let _ = sock.write_all(resp.as_bytes()).await;
+            let _ = tokio::time::timeout(Duration::from_secs(30), sock.write_all(resp.as_bytes())).await;
             let _ = sock.shutdown().await;
         });
     }
 }
+
+/// A stats document and when it was built.
+type Built = Option<(Instant, Arc<String>)>;
+
+/// How long a built stats document is served for before it is built again.
+const STATS_TTL: Duration = Duration::from_millis(500);
+/// Stats connections open at once; past this a new one is closed unanswered.
+const STATS_MAX_CONNECTIONS: usize = 64;
 
 /// Mirror stats and the legacy ledger to files, and flush the ledger, on a timer.
 pub async fn housekeeping(shared: Arc<Shared>) {

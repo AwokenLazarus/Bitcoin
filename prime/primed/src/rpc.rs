@@ -79,8 +79,13 @@ impl Rpc {
         let fut = async {
             let mut s = TcpStream::connect((self.host.as_str(), self.port)).await?;
             s.write_all(req.as_bytes()).await?;
+            // Bounded: the largest honest answer is a verbose block, well under this, and an
+            // endpoint that streams without end would otherwise be read until memory runs out.
             let mut buf = Vec::with_capacity(4096);
-            s.read_to_end(&mut buf).await?;
+            (&mut s).take(MAX_RESPONSE).read_to_end(&mut buf).await?;
+            if buf.len() as u64 >= MAX_RESPONSE {
+                return Err(RpcError::Malformed("response too large".into()));
+            }
             parse_response(&buf)
         };
         match tokio::time::timeout(self.timeout, fut).await {
@@ -91,6 +96,10 @@ impl Rpc {
 
     pub async fn getblockchaininfo(&self) -> Result<Value, RpcError> {
         self.call("getblockchaininfo", json!([])).await
+    }
+
+    pub async fn getmininginfo(&self) -> Result<Value, RpcError> {
+        self.call("getmininginfo", json!([])).await
     }
 
     pub async fn submitblock(&self, hex: &str) -> Result<Value, RpcError> {
@@ -137,6 +146,9 @@ fn parse_response(buf: &[u8]) -> Result<Value, RpcError> {
     Ok(v.get("result").cloned().unwrap_or(Value::Null))
 }
 
+/// Most bytes read from the node for one call.
+const MAX_RESPONSE: u64 = 64 << 20;
+
 fn dechunk(mut b: &[u8]) -> Result<Vec<u8>, RpcError> {
     let mut out = Vec::with_capacity(b.len());
     loop {
@@ -148,7 +160,9 @@ fn dechunk(mut b: &[u8]) -> Result<Vec<u8>, RpcError> {
         if size == 0 {
             return Ok(out);
         }
-        if b.len() < size + 2 {
+        // `size` is the peer's number; overflow checks are on in release, and a panic here
+        // would end the node poller for good
+        if size.checked_add(2).is_none_or(|need| b.len() < need) {
             return Err(RpcError::Malformed("short chunk".into()));
         }
         out.extend_from_slice(&b[..size]);
@@ -202,5 +216,14 @@ mod tests {
         assert!(matches!(parse_response(r), Err(RpcError::Http(401))));
         let url = Rpc::new("http://127.0.0.1:9332", None, Some("u"), Some("p")).unwrap();
         assert_eq!((url.host.as_str(), url.port, url.path.as_str()), ("127.0.0.1", 9332, "/"));
+    }
+
+    /// A chunk size is the peer's number. Overflow checks are on in release, and a panic in
+    /// here ends the node poller for the life of the process.
+    #[test]
+    fn a_chunk_size_cannot_overflow() {
+        assert!(dechunk(b"ffffffffffffffff\r\nabc\r\n0\r\n\r\n").is_err());
+        assert!(dechunk(b"fffffffffffffffe\r\nabc").is_err());
+        assert_eq!(dechunk(b"3\r\nabc\r\n0\r\n\r\n").unwrap(), b"abc");
     }
 }

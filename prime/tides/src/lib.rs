@@ -392,13 +392,22 @@ impl Ledger {
         fs::create_dir_all(&dir)?;
         let mut window = Window::new();
 
-        let meta: Meta =
-            fs::read(dir.join(Self::META)).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+        let meta = load_meta(&dir.join(Self::META))?;
         window.lifetime_shares = meta.lifetime_shares;
         window.lifetime_work = meta.lifetime_work;
         window.rebate_owed = meta.rebate_owed;
 
         let idents_path = dir.join(Self::IDENTS);
+        // A crash can leave half an identity at the end of the file. Appending to it would
+        // glue the next identity onto that line and shift every index after it by one, so
+        // that credits load against the wrong addresses; cut back to the last whole line.
+        if let Ok(bytes) = fs::read(&idents_path) {
+            let whole = bytes.iter().rposition(|&b| b == b'\n').map_or(0, |i| i + 1);
+            if whole != bytes.len() {
+                log::warn!("{}: dropping a torn last line ({} bytes)", idents_path.display(), bytes.len() - whole);
+                OpenOptions::new().write(true).open(&idents_path)?.set_len(whole as u64)?;
+            }
+        }
         if let Ok(f) = File::open(&idents_path) {
             for line in BufReader::new(f).lines() {
                 let line = line?;
@@ -419,9 +428,16 @@ impl Ledger {
 
         let credits_path = dir.join(Self::CREDITS);
         let mut rows_on_disk = 0u64;
+        let mut rows_skipped = 0u64;
         if let Ok(f) = File::open(&credits_path) {
             let len = f.metadata()?.len();
             let usable = len - len % Credit::SIZE as u64;
+            if usable != len {
+                // the file is appended to: a partial row left in place would put every later
+                // row out of step with the row size
+                log::warn!("{}: dropping a torn last row ({} bytes)", credits_path.display(), len - usable);
+                OpenOptions::new().write(true).open(&credits_path)?.set_len(usable)?;
+            }
             let mut buf = Vec::with_capacity(usable as usize);
             f.take(usable).read_to_end(&mut buf)?;
             for chunk in buf.as_chunks::<{ Credit::SIZE }>().0 {
@@ -429,6 +445,8 @@ impl Ledger {
                 if (c.ident as usize) < window.idents.len() {
                     window.push_raw(c);
                     rows_on_disk += 1;
+                } else {
+                    rows_skipped += 1;
                 }
             }
         }
@@ -442,7 +460,15 @@ impl Ledger {
             l.idents_out.write_all(b"\n")?;
             l.dirty = true;
         }
-        if l.rows_on_disk > l.window.len() as u64 + 8192 {
+        // A row whose identity never reached disk stays out of the window, and must leave the
+        // file too: the next new identity takes that index, and the row would load as its work.
+        if rows_skipped > 0 {
+            log::warn!(
+                "{}: {rows_skipped} rows name an identity that was never written; removing them",
+                credits_path.display()
+            );
+        }
+        if rows_skipped > 0 || l.rows_on_disk > l.window.len() as u64 + 8192 {
             l.compact()?;
         }
         Ok(l)
@@ -460,7 +486,7 @@ impl Ledger {
             let new = self.window.adjust_carry(identity, *d);
             if !known {
                 // adjust_carry interned it; keep the identity file in step
-                let _ = self.idents_out.write_all(identity.as_bytes()).and_then(|_| self.idents_out.write_all(b"\n"));
+                let _ = self.idents_out.write_all(format!("{identity}\n").as_bytes());
             }
             out.push((identity.clone(), new));
             self.dirty = true;
@@ -508,8 +534,8 @@ impl Ledger {
         let known = self.window.ident_index.contains_key(identity);
         let row = self.window.credit_row(identity, work, height, ts, source);
         if !known {
-            self.idents_out.write_all(identity.as_bytes())?;
-            self.idents_out.write_all(b"\n")?;
+            // one write, so the line and its newline are not split across a buffer spill
+            self.idents_out.write_all(format!("{identity}\n").as_bytes())?;
         }
         let mut b = Vec::with_capacity(Credit::SIZE);
         row.write(&mut b);
@@ -619,10 +645,61 @@ impl Ledger {
     }
 }
 
+/// Replace `path` with `data` so that a crash at any point leaves a whole file: the new one,
+/// the old one, or the old one under `.bak`. The data is on disk before the rename makes it
+/// the file, or a power cut can leave the name pointing at nothing.
 fn write_atomic(path: &Path, data: &[u8]) -> io::Result<()> {
     let tmp = path.with_extension("tmp");
-    fs::write(&tmp, data)?;
-    fs::rename(tmp, path)
+    {
+        let mut f = File::create(&tmp)?;
+        f.write_all(data)?;
+        f.sync_all()?;
+    }
+    let bak = path.with_extension("json.bak");
+    let _ = fs::remove_file(&bak);
+    let _ = fs::hard_link(path, &bak);
+    fs::rename(&tmp, path)?;
+    if let Some(dir) = path.parent() {
+        File::open(dir)?.sync_all()?;
+    }
+    Ok(())
+}
+
+/// Read `window.json`, which holds what the pool owes: every miner's carry and the rebate
+/// balance. A file that is not there is a new ledger. One that is there and does not parse is
+/// not: loading it as empty zeroes every balance, and the next flush writes the zeros over the
+/// evidence. The previous flush's copy is used if it is whole; failing that, refuse to start.
+fn load_meta(path: &Path) -> io::Result<Meta> {
+    fn read(p: &Path) -> io::Result<Option<Meta>> {
+        match fs::read(p) {
+            Ok(b) => serde_json::from_slice(&b)
+                .map(Some)
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("{}: {e}", p.display()))),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(io::Error::new(e.kind(), format!("{}: {e}", p.display()))),
+        }
+    }
+    let bak = path.with_extension("json.bak");
+    match read(path) {
+        Ok(Some(meta)) => Ok(meta),
+        Ok(None) => match read(&bak)? {
+            Some(meta) => {
+                log::warn!("{} is missing; using {}", path.display(), bak.display());
+                Ok(meta)
+            }
+            None => Ok(Meta::default()),
+        },
+        Err(e) => match read(&bak) {
+            Ok(Some(meta)) => {
+                log::error!("{e}; using the previous flush, {}", bak.display());
+                Ok(meta)
+            }
+            _ => Err(io::Error::new(
+                e.kind(),
+                format!("{e}. This file holds the carry owed to miners, so it is not replaced with an empty one: restore it from a backup, or move it aside to start with no balances"),
+            )),
+        },
+    }
 }
 
 /// A block the pool's coinbase paid (found by a gateway on this pool), for the record.
@@ -1123,5 +1200,73 @@ mod tests {
         assert_eq!(m["gw-b"].found, 1);
         assert!(!m.contains_key(""));
         assert_eq!(m.values().map(|f| f.found).sum::<u64>(), 3);
+    }
+
+    /// `window.json` is what the pool owes. Unreadable is not the same as empty.
+    #[test]
+    fn a_damaged_window_file_is_never_read_as_no_balances() {
+        let dir = std::env::temp_dir().join(format!("tides-test-{}-{}", std::process::id(), line!()));
+        let _ = fs::remove_dir_all(&dir);
+        {
+            let mut l = Ledger::open(&dir).unwrap();
+            l.credit("alice", 40, 1, 1000, SOURCE_DATUM).unwrap();
+            l.settle_carry(&[("alice".into(), 5_000)]);
+            l.flush().unwrap();
+            l.settle_carry(&[("alice".into(), 2_000)]);
+            l.sync().unwrap();
+        }
+        let meta = dir.join("window.json");
+        let carry = |l: &Ledger| l.window.carries().into_iter().find(|c| c.0 == "alice").map(|c| c.1);
+        assert_eq!(carry(&Ledger::open(&dir).unwrap()), Some(7_000));
+        // what a power cut leaves: an empty file. The previous flush is still beside it.
+        fs::write(&meta, b"").unwrap();
+        assert_eq!(carry(&Ledger::open(&dir).unwrap()), Some(5_000), "the previous flush, not zero");
+        // gone altogether (a crash between the two renames)
+        fs::remove_file(&meta).unwrap();
+        assert_eq!(carry(&Ledger::open(&dir).unwrap()), Some(5_000));
+        // no whole copy anywhere: refuse, and leave the evidence alone
+        fs::write(&meta, b"{\"carry\": {\"alice\": 70").unwrap();
+        fs::write(dir.join("window.json.bak"), b"").unwrap();
+        let err = Ledger::open(&dir).err().expect("must not open with balances zeroed").to_string();
+        assert!(err.contains("window.json") && err.contains("carry"), "{err}");
+        assert_eq!(fs::read(&meta).unwrap(), b"{\"carry\": {\"alice\": 70");
+        // a ledger that never had the file is simply new
+        let fresh = dir.join("fresh");
+        assert_eq!(Ledger::open(&fresh).unwrap().window.carries().len(), 0);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Both data files are appended to, so a torn tail has to be cut off before the next
+    /// write or everything after it is read out of step.
+    #[test]
+    fn torn_file_tails_are_cut_back_before_appending() {
+        let dir = std::env::temp_dir().join(format!("tides-test-{}-{}", std::process::id(), line!()));
+        let _ = fs::remove_dir_all(&dir);
+        {
+            let mut l = Ledger::open(&dir).unwrap();
+            l.set_target(1_000_000);
+            l.credit("alice", 40, 1, 1000, SOURCE_DATUM).unwrap();
+            l.credit("bob", 60, 1, 1001, SOURCE_DATUM).unwrap();
+            l.sync().unwrap();
+        }
+        // a crash mid-write: half a row, and half an identity with no newline
+        let mut f = OpenOptions::new().append(true).open(dir.join("credits.bin")).unwrap();
+        f.write_all(&[0xab; Credit::SIZE / 2]).unwrap();
+        let mut f = OpenOptions::new().append(true).open(dir.join("identities.txt")).unwrap();
+        f.write_all(b"car").unwrap();
+        {
+            let mut l = Ledger::open(&dir).unwrap();
+            assert_eq!(l.window.total_work(), 100);
+            l.credit("dave", 25, 1, 1002, SOURCE_DATUM).unwrap();
+            l.sync().unwrap();
+        }
+        let l = Ledger::open(&dir).unwrap();
+        let work: Vec<(String, u64)> = l.window.miners().into_iter().map(|m| (m.identity, m.work)).collect();
+        for who in [("alice", 40), ("bob", 60), ("dave", 25)] {
+            assert!(work.contains(&(who.0.to_string(), who.1)), "{who:?} in {work:?}");
+        }
+        assert_eq!(work.len(), 3, "{work:?}");
+        assert_eq!(fs::metadata(dir.join("credits.bin")).unwrap().len() as usize % Credit::SIZE, 0);
+        let _ = fs::remove_dir_all(&dir);
     }
 }

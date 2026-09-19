@@ -317,17 +317,19 @@ pub fn compute(
         }
         // an identity this block does not place leaves its earned share with the pool, which
         // is then room to pay someone else's carry from
-        if total < p.min_payout {
-            if script.is_some() {
-                carry_room = carry_room.saturating_add(earned);
-            }
-            unpaid.push(Unpaid { identity: m.identity, sats: total, earned, reason: UnpaidReason::BelowMinimum });
-            continue;
-        }
+        // Whether it can be paid at all comes before how much: an identity with no script that
+        // is also under the floor must not be filed as merely small. `BelowMinimum` defers,
+        // and carry deferred for a username that is not an address is never paid and never
+        // leaves, one entry per made-up name, in every split and every flush from then on.
         let Some(script) = script else {
             unpaid.push(Unpaid { identity: m.identity, sats: total, earned, reason: UnpaidReason::NoScript });
             continue;
         };
+        if total < p.min_payout {
+            carry_room = carry_room.saturating_add(earned);
+            unpaid.push(Unpaid { identity: m.identity, sats: total, earned, reason: UnpaidReason::BelowMinimum });
+            continue;
+        }
         let need = 8 + 1 + script.len();
         if payees.len() >= p.max_outputs || bytes + need > p.output_budget_bytes {
             carry_room = carry_room.saturating_add(earned);
@@ -520,6 +522,15 @@ mod tests {
         let s = compute(vec![miner("a", 50), miner("bad", 50)], 100, 1_000, &p, 0, script);
         assert_eq!(s.unpaid[0].reason, UnpaidReason::NoScript);
         assert!(!s.unpaid[0].defers());
+        // nor when it is also under the payout floor, which is where a made-up username with
+        // a share or two lands: small is deferred, unpayable is not, and unpayable comes first
+        let floor = SplitParams { min_payout: 546, ..p };
+        let s = compute(vec![miner("a", 999_900), miner("bad", 100)], 1_000_000, 1_000_000, &floor, 0, script);
+        let bad = s.unpaid.iter().find(|u| u.identity == "bad").unwrap();
+        assert_eq!((bad.reason, bad.earned), (UnpaidReason::NoScript, 100));
+        assert!(!bad.defers());
+        assert!(s.carry_delta(|_| true).iter().all(|d| d.0 != "bad"), "no carry for a name that cannot be paid");
+        assert_eq!(s.pool_sats + s.paid_sats(), 1_000_000);
     }
 
     /// Carry is budgeted against every payee's earned share, not just the ones placed so

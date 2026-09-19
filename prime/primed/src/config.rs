@@ -73,7 +73,10 @@ pub struct Config {
     /// Coinbase tag the dedicated solo gateways stamp, for spotting their blocks on chain.
     #[serde(default = "d_solo_tag")]
     pub solo_coinbase_tag: String,
-    /// Gateway key prefixes (hex) that are the pool's own public stratum.
+    /// Gateway keys (hex) that are the pool's own public stratum: the full 64-digit identity
+    /// key, or a prefix of it no shorter than 16 digits. These sessions are trusted with
+    /// things no stranger is (`Policy::trusted_target`), and a short prefix is one a stranger
+    /// can grind a key to match, so give the full key.
     #[serde(default)]
     pub house_gateways: Vec<String>,
     /// Treat loopback Prime connections as house stratum. Default on.
@@ -99,6 +102,12 @@ pub struct Config {
     /// Node poll interval, seconds.
     #[serde(default = "d_poll")]
     pub poll: f64,
+    /// Credit shares before the node has ever told this Prime its tip. Off by default: with
+    /// no tip there is nothing to hold a job's parent, height or target to, so a made-up job
+    /// is credited and an easy `nbits` makes every share a "block" that moves carry balances.
+    /// Only for tests that run without a node.
+    #[serde(default)]
+    pub accept_without_node: bool,
     /// Shares for a height this many blocks behind the tip are stale. 0 means only the
     /// current height. The default tolerates a template refresh in flight.
     #[serde(default = "d_stale_grace")]
@@ -231,6 +240,9 @@ impl Config {
         }
         for g in &mut c.house_gateways {
             *g = g.to_ascii_lowercase();
+            if !(16..=64).contains(&g.len()) || !g.bytes().all(|b| b.is_ascii_hexdigit()) {
+                return Err(format!("house-gateways entry {g:?} must be 16 to 64 hex digits of the gateway's key"));
+            }
         }
         if c.coinbase_tag.len() > 32 {
             return Err("coinbase-tag is too long (32 bytes max)".into());
@@ -361,5 +373,28 @@ require-split-gateway = true
         let r = Config::load(&p);
         std::fs::remove_dir_all(&dir).unwrap();
         assert!(r.unwrap_err().contains("fee_percent"));
+    }
+
+    /// A house gateway is trusted with its shares' difficulty, so the key that names one has
+    /// to be long enough that nobody can grind a match.
+    #[test]
+    fn a_house_gateway_is_named_by_a_key_nobody_can_grind() {
+        let dir = std::env::temp_dir().join(format!("primed-cfg-h-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("prime.toml");
+        let base = LEGACY.replace("/home/umbrel/blake2b/lazarus-prime", dir.to_str().unwrap());
+        let load = |entry: &str| {
+            std::fs::write(&p, format!("{base}house-gateways = [\"{entry}\"]\n")).unwrap();
+            Config::load(&p)
+        };
+        let full = "9D992E5CFEC05102".repeat(4);
+        assert_eq!(load(&full).unwrap().house_gateways, vec![full.to_ascii_lowercase()]);
+        assert!(load("9d992e5cfec05102").is_ok());
+        for bad in ["", "9d99", "9d992e5cfec0510", "9d992e5cfec0510g", &format!("{full}00")] {
+            assert!(load(bad).is_err(), "{bad:?}");
+        }
+        // off unless asked for: shares are not taken on a gateway's word alone
+        assert!(!load(&full).unwrap().accept_without_node);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

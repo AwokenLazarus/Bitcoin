@@ -34,8 +34,8 @@ pub const MAX_COINBASE_SECTION_BYTES: usize = 20_000;
 /// one; anything past that is a session filling memory, not a job.
 pub const MAX_COINBASES_PER_SLOT: usize = 8;
 /// Bounds on the per-slot caches. Both are keyed partly by share-chosen fields (`target_pot`,
-/// `version`) and the coinbase cache fills *before* the work is checked, so an unbounded
-/// map is attacker-sized. They are caches: on overflow they are simply emptied.
+/// `version`), so an unbounded map is attacker-sized, and both fill only from shares whose
+/// work checked out. They are caches: on overflow they are simply emptied.
 const MAX_CB_CACHE: usize = 32;
 const MAX_H2_CACHE: usize = 64;
 
@@ -59,7 +59,7 @@ pub struct JobSlot {
     pub coinbases: HashMap<u8, CoinbaseSection>,
     /// H2 per (coinbase id, target byte, txcount convention), so repeat shares on a job cost
     /// one BLAKE2b instead of a full coinbase hash + merkle fold + two tagged SHA256s.
-    h2_cache: HashMap<(u8, u8, u32, u32), Hash>,
+    h2_cache: HashMap<(u8, u8, u32, u32, u32, u8), Hash>,
     /// The parsed coinbase per (coinbase id, target byte).
     cb_cache: HashMap<(u8, u8), (Vec<u8>, Coinbase)>,
     /// Whether this gateway's `txn_count` already includes the coinbase, learned from the
@@ -204,6 +204,10 @@ pub struct Policy<'a> {
     /// Fee on an upgraded empty-solo coinbase (gateway + pool), in basis points. 0 means
     /// a stock 0%-fee coinbase (gateway only) is the only EmptySolo shape accepted.
     pub empty_solo_fee_bps: u32,
+    /// Take the share's difficulty on the gateway's word when the coinbase does not carry it.
+    /// Only for the pool's own gateway, whose whole-coinbase shares have no target byte; from
+    /// anyone else such a share is refused (see [`coinbase::commits_target`]).
+    pub trusted_target: bool,
 }
 
 fn fee_sats(value: u64, bps: u32) -> u64 {
@@ -232,9 +236,15 @@ pub fn classify_coinbase(
     let tolerance = p.tolerance;
     let mut pool_paid = false;
     let mut gateway_paid = false;
+    let mut gateway_sats = 0u64;
     let mut foreign = 0u64;
     for o in &cb.outputs {
         if o.is_op_return() {
+            // Value in an OP_RETURN is reward burned: the pool's fee and remainder, which is
+            // all a coinbase that pays every miner has left to put there.
+            if o.value > 0 {
+                return CoinbaseKind::Foreign;
+            }
             continue;
         }
         if o.script == pool_script {
@@ -243,6 +253,7 @@ pub fn classify_coinbase(
         }
         if is_gateway(&o.script, p.gateway_script) {
             gateway_paid = true;
+            gateway_sats = gateway_sats.saturating_add(o.value);
             continue;
         }
         let sanctioned = issued.is_some_and(|iss| iss.iter().any(|i| i.script == o.script));
@@ -288,6 +299,37 @@ pub fn classify_coinbase(
             }
         };
         let slack = tolerance.saturating_add(iss.len() as u64);
+        // The gateway's own script is a share username, which is to say anything the gateway
+        // likes, and it is where a stock gateway configured with it sends what its template is
+        // worth beyond the issued list. That is all it may take on a coinbase that claims the
+        // split: the list already sums to the value it was asked for (the pool's fee and
+        // remainder are its last entry), so the excess is a template that gained a few fees
+        // since. Without a ceiling, "one small payee in full, everything else to me" is a
+        // Partial: credited in the window like anyone's work, and a block found on it books a
+        // debt to the window for a reward the pool never saw. The excess is held to a
+        // sixteenth of the list as well, or a list asked for at a value of one sat makes the
+        // whole reward "excess". Past the ceiling the share is the gateway's own solo work (see
+        // below). A gateway script the list itself pays is a miner output like any other, held
+        // to its issued amount further down.
+        let gateway_listed = p.gateway_script.is_some_and(|g| iss.iter().any(|i| i.script == g));
+        if gateway_paid && !gateway_listed {
+            let excess = actual_value.saturating_sub(issued_value).min(issued_value / 16);
+            if gateway_sats > excess.saturating_add(slack) {
+                // Not refused: a stock gateway still configured with its own script that
+                // builds a small coinbase class does this by accident, sending the outputs it
+                // dropped to itself. It is the gateway's block more than the window's, so it
+                // is treated as one: accepted, not credited in the window, and a find owes
+                // nobody. That takes away the reason to do it on purpose (window credit for
+                // work whose reward the pool never sees) without rejecting anyone's shares.
+                return if subsidy_only && !empty_job(job_txn_count, merkle_empty) {
+                    CoinbaseKind::Foreign
+                } else if subsidy_only {
+                    CoinbaseKind::EmptySolo
+                } else {
+                    CoinbaseKind::GatewaySolo
+                };
+            }
+        }
         let mut issued_to: HashMap<&[u8], u64> = HashMap::new();
         for i in &miners {
             let e = issued_to.entry(i.script.as_slice()).or_insert(0);
@@ -322,8 +364,7 @@ pub fn classify_coinbase(
         return CoinbaseKind::PoolOnly;
     }
     let gw = p.gateway_script.unwrap_or(&[]);
-    let only_gateway =
-        gateway_paid && !gw.is_empty() && cb.outputs.iter().all(|o| o.is_op_return() || o.script == gw);
+    let only_gateway = gateway_paid && !gw.is_empty() && cb.outputs.iter().all(|o| o.is_op_return() || o.script == gw);
     if only_gateway {
         if subsidy_only && empty_job(job_txn_count, merkle_empty) {
             return CoinbaseKind::EmptySolo;
@@ -375,21 +416,35 @@ pub fn verify_with_target(
 
     let cb_id = JobSlot::coinbase_id_for(s);
     let cb_key = (cb_id, s.target_pot);
-    if !slot.cb_cache.contains_key(&cb_key) {
-        let sect = slot.coinbases.get(&cb_id).ok_or(mining::REJECT_COINBASE_MISSING)?;
+    // Parsed here but only kept once the work below checks out: `target_pot` is the share's
+    // to choose, so caching first would let a session that never finds a hash park 32 copies
+    // of every coinbase section it holds.
+    let sect = slot.coinbases.get(&cb_id).ok_or(mining::REJECT_COINBASE_MISSING)?;
+    let tbi = usize::from(job.target_byte_index);
+    let on_trust = p.trusted_target && coinbase::is_whole(&sect.coinb2, tbi);
+    let fresh = if slot.cb_cache.contains_key(&cb_key) {
+        None
+    } else {
         let legacy = coinbase::assemble(&sect.coinb1, &sect.coinb2, usize::from(job.target_byte_index), s.target_pot);
         let parsed = coinbase::parse(&legacy).map_err(|_| mining::REJECT_BAD_COINBASE)?;
-        if let Some(h) = parsed.height {
-            if h != job.height {
-                return Err(mining::REJECT_BAD_JOB_ID);
-            }
+        // No height is no block: BIP34 is consensus, and a scriptSig that opens with anything
+        // else would otherwise skip the one check tying the coinbase to the job's height.
+        if parsed.height != Some(job.height) {
+            return Err(mining::REJECT_BAD_JOB_ID);
         }
-        if slot.cb_cache.len() >= MAX_CB_CACHE {
-            slot.cb_cache.clear();
+        Some((legacy, parsed))
+    };
+    let (legacy, parsed) = match &fresh {
+        Some((legacy, parsed)) => (legacy, parsed),
+        None => {
+            let (legacy, parsed) = &slot.cb_cache[&cb_key];
+            (legacy, parsed)
         }
-        slot.cb_cache.insert(cb_key, (legacy, parsed));
+    };
+    // The claimed difficulty has to be in the hash, or it was chosen after the work was done.
+    if !on_trust && !coinbase::commits_target(legacy, tbi) {
+        return Err(mining::REJECT_TARGET_MISMATCH);
     }
-    let (legacy, parsed) = slot.cb_cache.get(&cb_key).unwrap();
     let merkle_empty = job.merkle_branches.is_empty();
     let coinbase_kind = classify_coinbase(parsed, p, s.subsidy_only(), job.txn_count, merkle_empty);
     if coinbase_kind == CoinbaseKind::Foreign {
@@ -412,10 +467,17 @@ pub fn verify_with_target(
         Some(false) => &[false],
         None => &[false, true],
     };
+    // The serialized header carries the count in 16 bits (`pow::header_bytes`); H1 commits
+    // all 32. Past that the work is for a header no block can have.
+    if job.txn_count >= u32::from(u16::MAX) {
+        return Err(mining::REJECT_BAD_JOB_ID);
+    }
     let mut chosen: Option<(Commitment, Hash, bool)> = None;
     for &includes in conventions {
         let txcount = if includes { job.txn_count } else { job.txn_count.wrapping_add(1) };
-        let key = (cb_id, s.target_pot, txcount, s.version);
+        // every share-chosen field H2 commits to: a cached H2 stands in for the header, so a
+        // field left out of the key is a field the share may lie about
+        let key = (cb_id, s.target_pot, txcount, s.version, time_on_wire, flags);
         let commitment_of = |h2_hint: Option<Hash>| -> (Commitment, Hash) {
             let c = Commitment {
                 version: s.version,
@@ -463,7 +525,7 @@ pub fn verify_with_target(
     let is_block_candidate =
         pow::nbits_to_target_le(commitment.nbits).map(|t| pow::meets_target(&hash, &t)).unwrap_or(false);
 
-    Ok(VerifiedShare {
+    let verified = VerifiedShare {
         hash,
         work: s.claimed_work(),
         target_pot: s.target_pot,
@@ -476,7 +538,14 @@ pub fn verify_with_target(
         commitment,
         coinbase_legacy: legacy.clone(),
         coinbase: parsed.clone(),
-    })
+    };
+    if let Some(entry) = fresh {
+        if slot.cb_cache.len() >= MAX_CB_CACHE {
+            slot.cb_cache.clear();
+        }
+        slot.cb_cache.insert(cb_key, entry);
+    }
+    Ok(verified)
 }
 
 /// Serialize a full block from a verified block candidate and the job's transactions
@@ -582,8 +651,7 @@ pub mod fixtures {
         nonce: [u8; 8],
         ntime: [u8; 8],
     ) -> PowSubmit {
-        let (cb, tidx) = coinbase::build(HEIGHT, b"Lazarus", outs, 0);
-        let split_at = tidx + 1;
+        let (cb, tidx, split_at) = coinbase::build(HEIGHT, b"Lazarus", outs, 0);
         let coinb1 = cb[..split_at].to_vec();
         let coinb2 = cb[split_at + coinbase::EXTRANONCE_SLOT..].to_vec();
         PowSubmit {
@@ -661,6 +729,7 @@ mod tests {
             min_pot: 0,
             gateway_script: None,
             empty_solo_fee_bps: 250,
+            trusted_target: false,
         }
     }
 
@@ -821,8 +890,7 @@ mod tests {
         iss.push(Output { sats: VALUE - miners_paid, script: pool.clone() });
 
         // every miner exact, pool output missing, first miner takes the remainder
-        let mut outs: Vec<TxOut> =
-            iss[..3].iter().map(|o| TxOut { value: o.sats, script: o.script.clone() }).collect();
+        let mut outs: Vec<TxOut> = iss[..3].iter().map(|o| TxOut { value: o.sats, script: o.script.clone() }).collect();
         outs[0].value += VALUE - miners_paid;
         let mut slot = JobSlot::default();
         let mut s = share(0, 4, 1, &outs, &txids(3), 1, [0; 8], [0; 8]);
@@ -830,8 +898,7 @@ mod tests {
         assert_eq!(check(&mut slot, &s, &policy(&iss, &pool)), Err(mining::REJECT_BAD_COINBASE_OUTPUTS));
 
         // same with a token pool output present, so "pool_paid" alone cannot be the tell
-        let mut outs: Vec<TxOut> =
-            iss[..3].iter().map(|o| TxOut { value: o.sats, script: o.script.clone() }).collect();
+        let mut outs: Vec<TxOut> = iss[..3].iter().map(|o| TxOut { value: o.sats, script: o.script.clone() }).collect();
         outs[1].value += VALUE - miners_paid - 1_000;
         outs.push(TxOut { value: 1_000, script: pool.clone() });
         let mut slot = JobSlot::default();
@@ -985,15 +1052,23 @@ mod tests {
         let mut slot = JobSlot::default();
         let s = share(0, 4, 1, &outs, &txids(3), 1, [0; 8], [0; 8]);
         slot.absorb(&s).unwrap();
-        // every target byte parses a fresh coinbase before any work is checked
+        // every target byte parses a fresh coinbase, but a share with no work behind it
+        // leaves nothing in the slot
+        let none = [0u8; 32];
         for pot in 0..=255u8 {
             let mut t = s.clone();
             t.target_pot = pot;
-            let _ = check(&mut slot, &t, &policy(&iss, &pool));
+            assert_eq!(verify_with_target(&mut slot, &t, &policy(&iss, &pool), &none), Err(mining::REJECT_HIGH_HASH));
         }
-        assert!(slot.cb_cache.len() <= 32, "cb_cache={}", slot.cb_cache.len());
-        // a permissive target lets every version through; the H2 cache is keyed by it
+        assert!(slot.cb_cache.is_empty() && slot.h2_cache.is_empty());
+        // a permissive target lets every target byte and version through
         let all = [0xff; 32];
+        for pot in 0..=255u8 {
+            let mut t = s.clone();
+            t.target_pot = pot;
+            verify_with_target(&mut slot, &t, &policy(&iss, &pool), &all).unwrap();
+        }
+        assert!(!slot.cb_cache.is_empty() && slot.cb_cache.len() <= 32, "cb_cache={}", slot.cb_cache.len());
         for v in 0..200u32 {
             let mut t = s.clone();
             t.version = 0xa000_0000 | v;
@@ -1102,6 +1177,83 @@ mod tests {
         assert_eq!(check(&mut slot, &s, &policy(&iss, &pool)), Err(mining::REJECT_BAD_COINBASE_OUTPUTS));
     }
 
+    /// A share is worth `2^target_pot` only because that byte was in the coinbase the miner
+    /// hashed. Leave it out and one stream of easy hashes can be claimed, each at the highest
+    /// difficulty it happens to meet, for about `log2(n) / 2` times the work done.
+    #[test]
+    fn a_difficulty_that_was_not_hashed_is_not_credited() {
+        let pool = pool_script();
+        let iss = split();
+        let outs = gateway_outputs(&iss, &pool, VALUE);
+        let all = [0xff; 32];
+
+        // an index past the end of the coinbase: the byte is never written, and every claim
+        // rebuilds the same header
+        let mut slot = JobSlot::default();
+        let mut s = share(0, 4, 1, &outs, &txids(3), 1, [0; 8], [0; 8]);
+        s.job.as_mut().unwrap().target_byte_index = 0xffff;
+        slot.absorb(&s).unwrap();
+        for pot in [0u8, 1, 20, 40] {
+            s.target_pot = pot;
+            let r = verify_with_target(&mut slot, &s, &policy(&iss, &pool), &all);
+            assert_eq!(r, Err(mining::REJECT_TARGET_MISMATCH), "pot {pot}");
+        }
+        // not even from the pool's own gateway: no gateway builds this
+        let house = Policy { trusted_target: true, ..policy(&iss, &pool) };
+        assert_eq!(verify_with_target(&mut slot, &s, &house, &all), Err(mining::REJECT_TARGET_MISMATCH));
+
+        // the whole coinbase in `coinb1`: no target byte at all, so the difficulty is the
+        // gateway's word, which is only good when the gateway is the pool's own
+        let mut slot = JobSlot::default();
+        let mut s = share(0, 4, 1, &outs, &txids(3), 1, [0; 8], [0; 8]);
+        let c = s.coinbase.as_mut().unwrap();
+        c.coinb1.extend_from_slice(&[0u8; coinbase::EXTRANONCE_SLOT]);
+        c.coinb1.append(&mut c.coinb2);
+        s.job.as_mut().unwrap().target_byte_index = 0;
+        slot.absorb(&s).unwrap();
+        assert_eq!(verify_with_target(&mut slot, &s, &policy(&iss, &pool), &all), Err(mining::REJECT_TARGET_MISMATCH));
+        verify_with_target(&mut slot, &s, &house, &all).expect("the pool's own gateway is taken at its word");
+
+        // a byte that already holds the pot being claimed: writing it changes nothing, so a
+        // coinbase seeded with several pots is one header under each of those claims
+        let mut slot = JobSlot::default();
+        let mut s = share(0, 4, 1, &outs, &txids(3), 1, [0; 8], [0; 8]);
+        let real = usize::from(s.job.as_ref().unwrap().target_byte_index);
+        let seeded = real - 3; // the last letter of the tag
+        s.coinbase.as_mut().unwrap().coinb1[seeded] = 5;
+        let honest = verify_with_target(
+            &mut slot.clone(),
+            &{
+                let mut h = s.clone();
+                h.target_pot = 9;
+                h
+            },
+            &policy(&iss, &pool),
+            &all,
+        );
+        s.job.as_mut().unwrap().target_byte_index = seeded as u16;
+        s.target_pot = 5;
+        slot.absorb(&s).unwrap();
+        assert_eq!(verify_with_target(&mut slot, &s, &policy(&iss, &pool), &all), Err(mining::REJECT_TARGET_MISMATCH));
+        assert_eq!(verify_with_target(&mut slot, &s, &house, &all), Err(mining::REJECT_TARGET_MISMATCH));
+        // the same coinbase with the index where the script puts it is ordinary work
+        assert!(honest.is_err(), "not absorbed yet");
+        let mut slot = JobSlot::default();
+        s.job.as_mut().unwrap().target_byte_index = real as u16;
+        s.target_pot = 9;
+        slot.absorb(&s).unwrap();
+        verify_with_target(&mut slot, &s, &policy(&iss, &pool), &all).expect("the script's own target byte");
+
+        // the ordinary form commits: a different claim is a different header
+        let mut slot = JobSlot::default();
+        let mut s = share(0, 4, 1, &outs, &txids(3), 1, [0; 8], [0; 8]);
+        slot.absorb(&s).unwrap();
+        let a = verify_with_target(&mut slot, &s, &policy(&iss, &pool), &all).unwrap().hash;
+        s.target_pot = 2;
+        let b = verify_with_target(&mut slot, &s, &policy(&iss, &pool), &all).unwrap().hash;
+        assert_ne!(a, b);
+    }
+
     #[test]
     fn pool_only_coinbase_is_credited_but_flagged() {
         let pool = pool_script();
@@ -1117,6 +1269,7 @@ mod tests {
             min_pot: 0,
             gateway_script: None,
             empty_solo_fee_bps: 250,
+            trusted_target: false,
         };
         let v = check(&mut slot, &s, &p).expect("pool-only is valid work");
         assert_eq!(v.coinbase_kind, CoinbaseKind::PoolOnly);
@@ -1243,6 +1396,7 @@ mod tests {
             min_pot: 0,
             gateway_script: Some(gw),
             empty_solo_fee_bps: 250,
+            trusted_target: false,
         }
     }
 
@@ -1268,11 +1422,14 @@ mod tests {
         let outs = vec![
             crate::coinbase::TxOut { value: VALUE - fee, script: gw.clone() },
             crate::coinbase::TxOut { value: fee, script: pool.clone() },
-            crate::coinbase::TxOut { value: 0, script: {
-                let mut wc = vec![0x6a, 0x24, 0xaa, 0x21, 0xa9, 0xed];
-                wc.extend_from_slice(&[0x76; 32]);
-                wc
-            } },
+            crate::coinbase::TxOut {
+                value: 0,
+                script: {
+                    let mut wc = vec![0x6a, 0x24, 0xaa, 0x21, 0xa9, 0xed];
+                    wc.extend_from_slice(&[0x76; 32]);
+                    wc
+                },
+            },
         ];
         let mut slot = JobSlot::default();
         let mut s = empty_solo_share(&outs);
@@ -1290,11 +1447,14 @@ mod tests {
         let outs = vec![
             crate::coinbase::TxOut { value: VALUE - fee, script: gw.clone() },
             crate::coinbase::TxOut { value: fee, script: pool.clone() },
-            crate::coinbase::TxOut { value: 0, script: {
-                let mut wc = vec![0x6a, 0x24, 0xaa, 0x21, 0xa9, 0xed];
-                wc.extend_from_slice(&[0x76; 32]);
-                wc
-            } },
+            crate::coinbase::TxOut {
+                value: 0,
+                script: {
+                    let mut wc = vec![0x6a, 0x24, 0xaa, 0x21, 0xa9, 0xed];
+                    wc.extend_from_slice(&[0x76; 32]);
+                    wc
+                },
+            },
         ];
         let mut slot = JobSlot::default();
         let mut s = empty_solo_share(&outs);
@@ -1373,5 +1533,135 @@ mod tests {
         let v = check(&mut slot, &s, &p).expect("remainder to gateway");
         assert_eq!(v.coinbase_kind, CoinbaseKind::Split);
         assert_eq!(v.paid_to_pool, 0);
+    }
+
+    fn wc() -> TxOut {
+        let mut script = vec![0x6a, 0x24, 0xaa, 0x21, 0xa9, 0xed];
+        script.extend_from_slice(&[0x76; 32]);
+        TxOut { value: 0, script }
+    }
+
+    fn kind_of(outs: &[TxOut], p: &Policy) -> Result<CoinbaseKind, u16> {
+        let mut slot = JobSlot::default();
+        let s = share(0, 4, 1, outs, &txids(2), 1, [0; 8], [0; 8]);
+        slot.absorb(&s).unwrap();
+        verify_with_target(&mut slot, &s, p, &[0xff; 32]).map(|v| v.coinbase_kind)
+    }
+
+    /// The gateway's script is a username: anything the gateway likes. On a coinbase that
+    /// claims the split it may take the template's excess over the issued list and no more.
+    #[test]
+    fn the_gateway_script_cannot_take_what_the_split_did_not_place() {
+        let pool = pool_script();
+        let gw = gw_script();
+        let mut iss = split();
+        let fee = VALUE - iss.iter().map(|o| o.sats).sum::<u64>();
+        iss.push(Output { sats: fee, script: pool.clone() });
+        let mut p = policy(&iss, &pool);
+        p.gateway_script = Some(&gw);
+        let pay = |o: &Output| TxOut { value: o.sats, script: o.script.clone() };
+        let to_gw = |value: u64| TxOut { value, script: gw.clone() };
+        let foreign = Err(mining::REJECT_BAD_COINBASE_OUTPUTS);
+        // accepted, so a gateway doing this by accident loses no shares, but it is the
+        // gateway's own solo work: no credit in the window, and a block on it owes nobody
+        let solo = Ok(CoinbaseKind::GatewaySolo);
+
+        // one small payee in full and the rest of the reward to the gateway: was Partial(1),
+        // credited, and a block on it owed the window a reward the pool never received
+        let smallest = pay(&iss[2]);
+        assert_eq!(kind_of(&[smallest.clone(), to_gw(VALUE - smallest.value), wc()], &p), solo);
+        // every miner in full, and the pool's fee to the gateway: was Split
+        let miners: Vec<TxOut> = iss[..3].iter().map(pay).collect();
+        assert_eq!(kind_of(&[miners.clone(), vec![to_gw(fee), wc()]].concat(), &p), solo);
+        // the accident this must not punish: a small coinbase class that keeps a prefix of the
+        // list, with what it dropped going to the pool, is still Partial and still credited
+        let prefix = vec![pay(&iss[0]), TxOut { value: VALUE - iss[0].sats, script: pool.clone() }, wc()];
+        assert_eq!(kind_of(&prefix, &p), Ok(CoinbaseKind::Partial(1)));
+        let pool_only = vec![TxOut { value: VALUE, script: pool.clone() }, wc()];
+        assert_eq!(kind_of(&pool_only, &p), Ok(CoinbaseKind::PoolOnly));
+        // the honest shapes: the whole list, and the whole list with a template that gained
+        // fees since the split was asked for, the excess going where a stock gateway sends it
+        let list: Vec<TxOut> = iss.iter().map(pay).collect();
+        assert_eq!(kind_of(&[list.clone(), vec![wc()]].concat(), &p), Ok(CoinbaseKind::Split));
+        assert_eq!(kind_of(&[list.clone(), vec![to_gw(40_000), wc()]].concat(), &p), Ok(CoinbaseKind::Split));
+        // a list asked for at a value of one sat does not make the whole reward "excess"
+        let one = [Output { sats: 1, script: pool.clone() }];
+        let mut p1 = policy(&one, &pool);
+        p1.gateway_script = Some(&gw);
+        assert_eq!(kind_of(&[TxOut { value: 1, script: pool.clone() }, to_gw(VALUE - 1), wc()], &p1), solo);
+        // a gateway the list itself pays is a miner like any other: its amount, not the rest
+        let mut listed = iss.clone();
+        listed[2].script = gw.clone();
+        let mut pl = policy(&listed, &pool);
+        pl.gateway_script = Some(&gw);
+        let all: Vec<TxOut> = listed.iter().map(pay).collect();
+        assert_eq!(kind_of(&[all, vec![wc()]].concat(), &pl), Ok(CoinbaseKind::Split));
+        assert_eq!(kind_of(&[pay(&listed[0]), to_gw(VALUE - listed[0].sats), wc()], &pl), foreign);
+    }
+
+    #[test]
+    fn reward_burned_in_an_op_return_is_not_a_split() {
+        let pool = pool_script();
+        let iss = split();
+        let mut outs: Vec<TxOut> = iss.iter().map(|o| TxOut { value: o.sats, script: o.script.clone() }).collect();
+        let mut burn = wc();
+        burn.value = VALUE - outs.iter().map(|o| o.value).sum::<u64>();
+        outs.push(burn);
+        assert_eq!(kind_of(&outs, &policy(&iss, &pool)), Err(mining::REJECT_BAD_COINBASE_OUTPUTS));
+    }
+
+    /// BIP34 is consensus, and the height in the scriptSig is what ties a coinbase to its job.
+    #[test]
+    fn a_coinbase_without_its_height_is_refused() {
+        let pool = pool_script();
+        let iss = split();
+        let outs = gateway_outputs(&iss, &pool, VALUE);
+        let mut slot = JobSlot::default();
+        let mut s = share(0, 4, 1, &outs, &txids(2), 1, [0; 8], [0; 8]);
+        // the height push becomes one that is no height: a 5-byte push does not decode
+        let c = s.coinbase.as_mut().unwrap();
+        assert_eq!(c.coinb1[42], 3, "BIP34 push of a 3-byte height");
+        c.coinb1[42] = 5;
+        slot.absorb(&s).unwrap();
+        assert_eq!(
+            verify_with_target(&mut slot, &s, &policy(&iss, &pool), &[0xff; 32]),
+            Err(mining::REJECT_BAD_JOB_ID)
+        );
+    }
+
+    /// A cached H2 stands in for the header, so nothing the header commits to may be left out
+    /// of its key: the second share here claims a time it was never hashed with.
+    #[test]
+    fn a_share_cannot_borrow_another_header_time() {
+        let pool = pool_script();
+        let iss = split();
+        let outs = gateway_outputs(&iss, &pool, VALUE);
+        let mut slot = JobSlot::default();
+        let mut s = share(0, 4, 1, &outs, &txids(2), 1, [0; 8], [0; 8]);
+        grind(&mut slot, &mut s);
+        let p = policy(&iss, &pool);
+        let first = check(&mut slot, &s, &p).expect("ground at this time");
+        let mut lie = s.clone();
+        lie.time_on_wire = Some(s.time_on_wire.unwrap() + 600);
+        match check(&mut slot, &lie, &p) {
+            // a different header: it has to find its own work
+            Err(code) => assert_eq!(code, mining::REJECT_HIGH_HASH),
+            Ok(v) => assert_ne!(v.hash, first.hash, "credited for the first share's work under a time it never had"),
+        }
+    }
+
+    #[test]
+    fn a_transaction_count_the_header_cannot_carry_is_refused() {
+        let pool = pool_script();
+        let iss = split();
+        let outs = gateway_outputs(&iss, &pool, VALUE);
+        let mut slot = JobSlot::default();
+        let mut s = share(0, 4, 1, &outs, &txids(2), 1, [0; 8], [0; 8]);
+        s.job.as_mut().unwrap().txn_count = 70_000;
+        slot.absorb(&s).unwrap();
+        assert_eq!(
+            verify_with_target(&mut slot, &s, &policy(&iss, &pool), &[0xff; 32]),
+            Err(mining::REJECT_BAD_JOB_ID)
+        );
     }
 }

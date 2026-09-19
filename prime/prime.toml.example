@@ -57,10 +57,13 @@ datum-rebate-bps = 500
 # and owes nothing to the window.
 solo-rebate-bps = 0
 # solo-coinbase-tag = "Lazarus/solo"
-# Signing-key prefixes (hex) of the pool's own public-stratum gateway.
-# Remote DATUM users who run lazarus-gateway are not matched by UA — only
-# loopback (default) and these prefixes pay the higher fee.
-# house-gateways = ["9d992e5cfec05102"]
+# Signing keys (hex) of the pool's own public-stratum gateway: the full 64-digit key, or a
+# prefix of at least 16 digits. Remote DATUM users who run lazarus-gateway are not matched
+# by UA — only loopback (default) and these keys pay the higher fee. A house gateway is also
+# trusted with its shares' difficulty (its whole-coinbase form carries no target byte), so
+# give the full key, and turn house-loopback off if anything on this host forwards outside
+# connections to the DATUM port: through a local proxy every gateway arrives from 127.0.0.1.
+# house-gateways = ["9d992e5cfec05102..."]
 # house-loopback = true
 # Smallest share difficulty accepted; power of two. Also the vardiff floor sent to gateways.
 min-diff = 1

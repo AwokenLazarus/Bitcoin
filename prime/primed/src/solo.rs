@@ -170,7 +170,11 @@ pub async fn scan(shared: &Shared, tip_height: u32) {
             };
             let facts = coinbase_facts(&tx, &shared.cfg.solo_coinbase_tag, &pool_hex);
             if facts.tagged && facts.pool_sats > 0 {
-                let rebate = rebate_for(facts.value_sats, bps);
+                // Never more than the block paid the pool. The tag is a string and the pool's
+                // script is public, so anyone's block can carry both; priced off the whole
+                // coinbase, a stranger's one-sat output would book a full rebate that the pool
+                // then pays DATUM miners out of its own remainder.
+                let rebate = rebate_for(facts.value_sats, bps).min(facts.pool_sats);
                 let net = shared.network;
                 let (credits, after) = {
                     let mut ledger = shared.ledger.lock().unwrap();

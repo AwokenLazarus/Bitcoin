@@ -64,7 +64,7 @@ impl Coinbase {
 /// `target_byte_index` 0 — a shape a stock gateway can never produce (its slot always has
 /// outputs after it, and byte 0 is the version). That form is taken as is.
 pub fn assemble(coinb1: &[u8], coinb2: &[u8], target_byte_index: usize, target_pot: u8) -> Vec<u8> {
-    if coinb2.is_empty() && target_byte_index == 0 {
+    if is_whole(coinb2, target_byte_index) {
         return coinb1.to_vec();
     }
     let mut v = Vec::with_capacity(coinb1.len() + EXTRANONCE_SLOT + coinb2.len());
@@ -75,6 +75,55 @@ pub fn assemble(coinb1: &[u8], coinb2: &[u8], target_byte_index: usize, target_p
         v[target_byte_index] = target_pot;
     }
     v
+}
+
+/// Whether the target byte a share names is the one its coinbase commits to: `assembled` is
+/// what [`assemble`] made of the share's pieces, and the byte it wrote has to sit where a
+/// gateway's coinbase carries it ([`target_byte_at`]).
+///
+/// A share is worth `2^target_pot` only because that byte was part of what the miner hashed,
+/// and only if nothing but the hashed bytes says where it is. `target_byte_index` travels in
+/// the job section, outside the hash. Taken at its word it may point past the end (nothing is
+/// written, every claim rebuilds the same header) or at any byte that already holds the pot
+/// being claimed: a coinbase seeded with 0, 1, 2, … in its tag, offered as one job per seeded
+/// byte, is a single header under every one of those claims. Either way one stream of easy
+/// hashes is claimed after the fact, each hash at the highest difficulty it happens to meet.
+pub fn commits_target(assembled: &[u8], target_byte_index: usize) -> bool {
+    target_byte_at(assembled) == Some(target_byte_index)
+}
+
+/// Offset of the target byte in a legacy coinbase: the first data byte of the scriptSig's
+/// third push. Every DATUM gateway lineage builds its scriptSig as the BIP34 height, the tag
+/// push, then a "unique id" push that opens with the target byte (`generate_coinbase_input`
+/// in `datum_coinbaser.c`; the push is 3, 7 or 11 bytes depending on lineage and whether a
+/// Prime id is set), which is where a pool is meant to look for it. Found by walking the
+/// script, so it depends on nothing but bytes the miner hashed.
+pub fn target_byte_at(legacy: &[u8]) -> Option<usize> {
+    const SIG_AT: usize = 4 + 1 + 36 + 1;
+    let len = usize::from(*legacy.get(SIG_AT - 1)?);
+    if len >= 0xfd {
+        return None;
+    }
+    let sig = legacy.get(SIG_AT..SIG_AT + len)?;
+    let mut i = 0;
+    for _ in 0..2 {
+        i = match *sig.get(i)? {
+            n @ 0x01..=0x4b => i + 1 + usize::from(n),
+            0x4c => i + 2 + usize::from(*sig.get(i + 1)?),
+            // a height or tag with no data of its own: OP_0, OP_1NEGATE, OP_1..OP_16
+            0x00 | 0x4f | 0x51..=0x60 => i + 1,
+            _ => return None,
+        };
+    }
+    match *sig.get(i)? {
+        n @ 0x01..=0x4b if i + 1 + usize::from(n) <= sig.len() => Some(SIG_AT + i + 1),
+        _ => None,
+    }
+}
+
+/// The whole-coinbase form [`assemble`] takes as is.
+pub fn is_whole(coinb2: &[u8], target_byte_index: usize) -> bool {
+    coinb2.is_empty() && target_byte_index == 0
 }
 
 pub fn read_varint(c: &mut Cursor) -> Result<u64> {
@@ -222,22 +271,30 @@ pub fn with_witness(legacy: &[u8], parsed: &Coinbase) -> Vec<u8> {
     v
 }
 
-/// Build a legacy coinbase for tests and tools: BIP34 height, tag, a 12-byte zero
-/// extranonce slot, then the outputs. Returns `(bytes, target_byte_index)` where the target
-/// byte is the last byte of the tag push (a gateway puts it inside its scriptSig too).
-pub fn build(height: u32, tag: &[u8], outputs: &[TxOut], lock_time: u32) -> (Vec<u8>, usize) {
+/// Build a legacy coinbase for tests and tools, laid out as a stock gateway does: BIP34
+/// height, the tag push, the unique-id push that opens with the target byte, then a push
+/// holding the extranonce prefix and the 12-byte zero extranonce slot; then the outputs.
+/// Returns `(bytes, target_byte_index, slot)`: `coinb1` is `bytes[..slot]` and `coinb2` is
+/// `bytes[slot + EXTRANONCE_SLOT..]`.
+pub fn build(height: u32, tag: &[u8], outputs: &[TxOut], lock_time: u32) -> (Vec<u8>, usize, usize) {
     let mut sig = Vec::new();
     let hb = height.to_le_bytes();
     let n = 4 - hb.iter().rev().take_while(|&&b| b == 0).count();
     let n = n.max(1);
     sig.push(n as u8);
     sig.extend_from_slice(&hb[..n]);
-    // tag push: tag || 1 target byte || 12 extranonce bytes
-    let push_len = tag.len() + 1 + EXTRANONCE_SLOT;
-    sig.push(push_len as u8);
+    // tag push: primary tag, terminated
+    sig.push(tag.len() as u8 + 1);
     sig.extend_from_slice(tag);
+    sig.push(0x00);
+    // unique-id push: target byte, coinbase unique id, prime id
+    sig.push(0x07);
     let target_in_sig = sig.len();
-    sig.push(0xff);
+    sig.extend_from_slice(&[0xff, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00]);
+    // extranonce push: a 2-byte prefix, then the slot
+    sig.push(0x0e);
+    sig.extend_from_slice(&[0x00, 0x00]);
+    let slot_in_sig = sig.len();
     sig.extend_from_slice(&[0u8; EXTRANONCE_SLOT]);
 
     let mut v = Vec::new();
@@ -256,7 +313,7 @@ pub fn build(height: u32, tag: &[u8], outputs: &[TxOut], lock_time: u32) -> (Vec
         v.extend_from_slice(&o.script);
     }
     v.extend_from_slice(&lock_time.to_le_bytes());
-    (v, sig_at + target_in_sig)
+    (v, sig_at + target_in_sig, sig_at + slot_in_sig)
 }
 
 #[cfg(test)]
@@ -266,15 +323,15 @@ mod tests {
     #[test]
     fn assemble_handles_both_gateway_shapes() {
         let outs = vec![TxOut { value: 5, script: vec![0x00, 0x14, 0x11] }];
-        let (full, tidx) = build(7, b"t", &outs, 0);
-        // stock: coinb1 ends with the target byte, the 12-byte slot follows, coinb2 is the rest
-        let c1 = &full[..tidx + 1];
-        let c2 = &full[tidx + 1 + EXTRANONCE_SLOT..];
+        let (full, tidx, slot) = build(7, b"t", &outs, 0);
+        // stock: coinb1 runs up to the 12-byte slot, coinb2 is the rest
+        let c1 = &full[..slot];
+        let c2 = &full[slot + EXTRANONCE_SLOT..];
         let a = assemble(c1, c2, tidx, 9);
         assert_eq!(a.len(), full.len());
         assert_eq!(a[tidx], 9);
-        assert_eq!(&a[tidx + 1..tidx + 1 + EXTRANONCE_SLOT], &[0u8; EXTRANONCE_SLOT]);
-        assert_eq!(&a[tidx + 1 + EXTRANONCE_SLOT..], c2);
+        assert_eq!(&a[slot..slot + EXTRANONCE_SLOT], &[0u8; EXTRANONCE_SLOT]);
+        assert_eq!(&a[slot + EXTRANONCE_SLOT..], c2);
         // lazarus-gateway: the whole coinbase in coinb1, nothing else
         assert_eq!(assemble(&full, &[], 0, 9), full);
         assert_eq!(full[0], 1, "version byte untouched");
@@ -286,7 +343,7 @@ mod tests {
             TxOut { value: 100, script: vec![0x00, 0x14, 1, 2, 3] },
             TxOut { value: 0, script: vec![0x6a, 0x24, 0xaa, 0x21, 0xa9, 0xed] },
         ];
-        let (cb, tidx) = build(966_267, b"Lazarus", &outs, 0);
+        let (cb, tidx, slot) = build(966_267, b"Lazarus", &outs, 0);
         assert_eq!(cb[tidx], 0xff);
         let p = parse(&cb).unwrap();
         assert_eq!(p.height, Some(966_267));
@@ -295,7 +352,6 @@ mod tests {
         assert_eq!(p.paid_to(&[0x00, 0x14, 1, 2, 3]), 100);
 
         // split at the extranonce slot as a gateway would and reassemble with a target byte
-        let slot = tidx + 1;
         let coinb1 = &cb[..slot];
         let coinb2 = &cb[slot + EXTRANONCE_SLOT..];
         let again = assemble(coinb1, coinb2, tidx, 9);
@@ -312,10 +368,10 @@ mod tests {
 
     #[test]
     fn rejects_non_coinbase_shapes() {
-        let (mut cb, _) = build(1, b"x", &[TxOut { value: 1, script: vec![0x51] }], 0);
+        let (mut cb, _, _) = build(1, b"x", &[TxOut { value: 1, script: vec![0x51] }], 0);
         cb[5] = 1; // prevout hash non-zero
         assert!(parse(&cb).is_err());
-        let (cb, _) = build(1, b"x", &[TxOut { value: 1, script: vec![0x51] }], 0);
+        let (cb, _, _) = build(1, b"x", &[TxOut { value: 1, script: vec![0x51] }], 0);
         assert!(parse(&cb[..cb.len() - 1]).is_err());
         let mut more = cb.clone();
         more.push(0);
@@ -339,5 +395,55 @@ mod tests {
         assert_eq!(bip34_height(&[0x51]), Some(1));
         assert_eq!(bip34_height(&[0x03, 0x7b, 0xbe, 0x0e]), Some(966_267));
         assert_eq!(bip34_height(&[]), None);
+    }
+
+    /// The target byte is where the script says it is, whatever the job section says.
+    #[test]
+    fn the_target_byte_is_found_from_the_script_alone() {
+        let outs = vec![TxOut { value: 5, script: vec![0x00, 0x14, 0x11] }];
+        for height in [0u32, 1, 16, 17, 300, 966_267] {
+            let (cb, tidx, _) = build(height, b"Lazarus", &outs, 0);
+            assert_eq!(target_byte_at(&cb), Some(tidx), "height {height}");
+            assert!(commits_target(&cb, tidx));
+            // what the byte holds does not move it
+            let mut other = cb.clone();
+            other[tidx] = 0x4c;
+            assert_eq!(target_byte_at(&other), Some(tidx));
+            for wrong in [0, tidx - 1, tidx + 1, cb.len(), 0xffff] {
+                assert!(!commits_target(&cb, wrong), "height {height} index {wrong}");
+            }
+        }
+        // the three unique-id pushes the lineages use: no Prime id, stock, Convoy
+        for uid in [3usize, 7, 11] {
+            let mut sig = vec![3, 0x7b, 0xbe, 0x0e, 8];
+            sig.extend_from_slice(b"Lazarus\0");
+            sig.push(uid as u8);
+            let at = sig.len();
+            sig.extend(std::iter::repeat_n(0xee, uid));
+            let mut cb = vec![1, 0, 0, 0, 1];
+            cb.extend_from_slice(&[0u8; 32]);
+            cb.extend_from_slice(&[0xff; 4]);
+            cb.push(sig.len() as u8);
+            cb.extend_from_slice(&sig);
+            assert_eq!(target_byte_at(&cb), Some(42 + at), "uid push {uid}");
+        }
+        // a 76..94-byte tag push takes OP_PUSHDATA1
+        let mut sig = vec![3, 0x7b, 0xbe, 0x0e, 0x4c, 80];
+        sig.extend(std::iter::repeat_n(b'x', 80));
+        sig.extend_from_slice(&[3, 0xff, 0, 0]);
+        let mut cb = vec![1, 0, 0, 0, 1];
+        cb.extend_from_slice(&[0u8; 32]);
+        cb.extend_from_slice(&[0xff; 4]);
+        cb.push(sig.len() as u8);
+        cb.extend_from_slice(&sig);
+        assert_eq!(target_byte_at(&cb), Some(42 + 4 + 2 + 80 + 1));
+        // no third push, a third push that runs off the script, and junk
+        assert_eq!(target_byte_at(&cb[..42 + 4 + 2 + 80]), None);
+        let mut short = cb.clone();
+        short[41] -= 1;
+        short.truncate(short.len() - 1);
+        assert_eq!(target_byte_at(&short), None);
+        assert_eq!(target_byte_at(&[]), None);
+        assert_eq!(target_byte_at(&[0u8; 42]), None);
     }
 }

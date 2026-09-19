@@ -4,31 +4,22 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crate::state::{now, Shared, Tip};
+use crate::rpc::RpcError;
+use crate::state::{hash_le, now, Shared, Tip};
 
 pub async fn run(shared: Arc<Shared>) {
     let period = Duration::from_secs_f64(shared.cfg.poll.max(0.2));
     let mut confirm_at = Instant::now();
     let mut warned = false;
+    // The tip this loop last ran the per-block work for. A session can publish a new tip before
+    // the poller sees it (`refresh_ahead`), so "the tip moved" is judged here, not in `refresh`.
+    let mut scanned: Option<String> = None;
     loop {
-        match shared.rpc.getblockchaininfo().await {
-            Ok(info) => {
+        match refresh(&shared).await {
+            Ok((height, difficulty)) => {
                 if warned {
                     log::info!("node is back");
                     warned = false;
-                }
-                let height = info.get("blocks").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
-                let hash = info.get("bestblockhash").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                let difficulty = info.get("difficulty").and_then(|v| v.as_f64()).unwrap_or(0.0);
-                let current = shared.tip_snapshot();
-                let changed = current.as_ref().is_none_or(|t| t.hash != hash);
-                if changed {
-                    let tip = Tip { height, hash: hash.clone(), difficulty, seen_at: Instant::now(), seen_ts: now() };
-                    log::info!("tip height={height} hash={} difficulty={difficulty:.3}", &hash[..hash.len().min(16)]);
-                    shared.tip_tx.send_replace(Some(tip));
-                    if current.is_some() {
-                        let _ = shared.notify.send(0);
-                    }
                 }
                 if difficulty > 0.0 {
                     let target = shared.window_target(difficulty);
@@ -45,20 +36,131 @@ pub async fn run(shared: Arc<Shared>) {
                     confirm_at = Instant::now() + Duration::from_secs(30);
                     confirm_blocks(&shared, height).await;
                 }
-                if changed {
+                let hash = shared.tip_snapshot().map(|t| t.hash);
+                if hash.is_some() && hash != scanned {
+                    scanned = hash;
                     // book the DATUM rebate share of any solo block the chain just buried
                     crate::solo::scan(&shared, height).await;
                 }
             }
             Err(e) => {
                 if !warned {
-                    log::warn!("node rpc failed: {e} (shares are still accepted without a staleness check)");
+                    log::warn!(
+                        "node rpc failed: {e} (jobs are held to the last tip it gave; with none yet, shares are refused)"
+                    );
                     warned = true;
                 }
             }
         }
         tokio::time::sleep(period).await;
     }
+}
+
+/// Read the node's tip and publish it if it moved; returns its height and difficulty.
+///
+/// Along with the tip come the things a job is held to (`Tip::check_job`): the tip's parent
+/// and compact target from its header, and the target the node sets for the block after it.
+/// Either lookup can fail on its own; the tip is published without it, shares that need it
+/// are refused, and the next call asks again.
+///
+/// The poller calls this every period. Sessions go through [`refresh_ahead`].
+pub async fn refresh(shared: &Shared) -> Result<(u32, f64), RpcError> {
+    let mut last = shared.refresh.lock().await;
+    let r = refresh_locked(shared).await;
+    *last = Some(Instant::now());
+    r
+}
+
+/// The least time between two refreshes that sessions cause, across all of them. Whether a
+/// share is "ahead" is decided before any of its work is checked, so it costs a gateway nothing
+/// to say so; without a floor that every session shares, a few hundred connections turn into a
+/// few hundred node RPCs a second, queued in front of the poller.
+const AHEAD_REFRESH_FLOOR: Duration = Duration::from_millis(250);
+/// How long a session waits on the node for an early tip before carrying on without one.
+const AHEAD_REFRESH_PATIENCE: Duration = Duration::from_secs(2);
+
+/// A session's refresh, for when a gateway submits work past our tip, so good work is not
+/// refused for the rest of a poll period. Does nothing if anyone refreshed while this call
+/// waited its turn, or within [`AHEAD_REFRESH_FLOOR`]: that answer is as new as ours would be.
+pub async fn refresh_ahead(shared: &Shared) {
+    let asked = Instant::now();
+    let mut last = shared.refresh.lock().await;
+    if last.is_some_and(|t| t >= asked || t.elapsed() < AHEAD_REFRESH_FLOOR) {
+        return;
+    }
+    // Bounded well under the RPC timeout: this runs on the session's own task, between a share
+    // and its receipt, and a node that has stopped answering is the poller's to wait for.
+    let _ = tokio::time::timeout(AHEAD_REFRESH_PATIENCE, refresh_locked(shared)).await;
+    *last = Some(Instant::now());
+}
+
+async fn refresh_locked(shared: &Shared) -> Result<(u32, f64), RpcError> {
+    let info = shared.rpc.getblockchaininfo().await?;
+    let height = info.get("blocks").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+    let hash = info.get("bestblockhash").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let difficulty = info.get("difficulty").and_then(|v| v.as_f64()).unwrap_or(0.0);
+    let current = shared.tip_snapshot().filter(|t| t.hash == hash);
+    let changed = current.is_none();
+    let (mut parent_le, mut bits, mut next_bits) =
+        current.as_ref().map_or((None, None, None), |t| (t.parent_le, t.bits, t.next_bits));
+    if parent_le.is_none() || bits.is_none() {
+        match shared.rpc.getblockheader(&hash).await {
+            Ok(h) => {
+                parent_le = h.get("previousblockhash").and_then(|v| v.as_str()).and_then(hash_le);
+                bits = h.get("bits").and_then(compact);
+            }
+            Err(e) => log::warn!("getblockheader {hash}: {e}; work on the previous height is refused until it answers"),
+        }
+    }
+    if next_bits.is_none() {
+        match shared.rpc.getmininginfo().await {
+            // `next` describes the block after the tip the node had when it answered
+            Ok(m) if m.get("blocks").and_then(|v| v.as_u64()) == Some(u64::from(height)) => {
+                next_bits = m.get("next").and_then(|n| n.get("bits")).and_then(compact);
+            }
+            Ok(_) => {}
+            Err(e) => log::warn!("getmininginfo: {e}"),
+        }
+    }
+    if next_bits.is_none() {
+        // Nodes before v29 do not report `next`. Off a retarget boundary the next block's
+        // target is the tip's, which the header gave us. On one (or on a network with
+        // min-difficulty blocks) it stays unknown and `Tip::check_job` falls back to the
+        // consensus bound: no easier than four times the tip's target.
+        next_bits = bits.filter(|_| next_bits_follow_tip(&shared.cfg.network, height));
+        if changed && next_bits.is_none() {
+            log::warn!("next block's bits unknown at height {height}; a job's nbits is only bounded, not matched");
+        }
+    }
+    let (seen_at, seen_ts) = current.as_ref().map_or_else(|| (Instant::now(), now()), |t| (t.seen_at, t.seen_ts));
+    let tip = Tip { height, hash_le: hash_le(&hash), hash, difficulty, parent_le, bits, next_bits, seen_at, seen_ts };
+    if changed {
+        log::info!("tip height={height} hash={} difficulty={difficulty:.3}", &tip.hash[..tip.hash.len().min(16)]);
+    }
+    if current.as_ref() != Some(&tip) {
+        let first = shared.tip_snapshot().is_none();
+        shared.tip_tx.send_replace(Some(tip));
+        if changed && !first {
+            let _ = shared.notify.send(0);
+        }
+    }
+    Ok((height, difficulty))
+}
+
+/// Whether the block after `height` must carry the same compact target as the block at it.
+fn next_bits_follow_tip(network: &str, height: u32) -> bool {
+    match network {
+        // fPowNoRetargeting
+        "regtest" => true,
+        "mainnet" | "signet" => !(height + 1).is_multiple_of(2016),
+        // testnet allows min-difficulty blocks whenever the tip is 20 minutes old
+        _ => false,
+    }
+}
+
+/// A compact target as the node prints it (`"1d00ffff"`).
+fn compact(v: &serde_json::Value) -> Option<u32> {
+    u32::from_str_radix(v.as_str()?, 16).ok()
 }
 
 /// How many blocks past a candidate we keep re-checking one we have called an orphan. A block
@@ -118,7 +220,7 @@ async fn confirm_blocks(shared: &Shared, tip_height: u32) {
                     mark_orphan(shared, &hash, height, "is not in the main chain");
                 }
             }
-            Err(crate::rpc::RpcError::Node { code: -5, .. }) => {
+            Err(RpcError::Node { code: -5, .. }) => {
                 // unknown to the node yet; if the chain has moved well past it, it lost
                 if tip_height > height + 6 {
                     mark_orphan(shared, &hash, height, "never reached the node");

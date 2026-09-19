@@ -452,7 +452,11 @@ Doing this by hand first surfaced three bugs, all fixed:
 * Block notify is fanned out with a broadcast channel; a tip change from the node poller or a
   block candidate from any session reaches every other gateway immediately.
 * Idle gateways get a zero-length INFO frame every 20 s (the client's global timeout is 60 s);
-  a gateway silent for 300 s is dropped. Handshake must complete in 15 s.
+  a gateway silent for 300 s is dropped. Handshake must complete in 15 s. Silent means no
+  whole frame: bytes of a frame that never completes do not count, and a frame may be at most
+  192 KiB unless a found block's transactions have been asked for. The per-address limit counts
+  an IPv6 /64 as one address, and the last eighth of the slots (at most 8) are kept for
+  loopback so the house gateway cannot be crowded out.
 * Duplicate shares are caught by hash in one set shared by every session and keyed by block
   height. The hash commits to the job (prev, merkle, nBits, txcount, version) and the miner's
   nonces, so it is unique per height and needs no per-job scoping; nothing a gateway sends —
@@ -462,6 +466,40 @@ Doing this by hand first surfaced three bugs, all fixed:
   whenever the job section changed, which let one share be credited without limit.) Shares one
   height behind are accepted for `stale-grace-secs` after the tip moved, matching template
   refresh latency.
+* A job is held to the pool node's chain, not to the gateway's account of it: the job's
+  `prev_hash` must be the node's tip (or the tip's parent inside `stale-grace-secs`), its height
+  the next one, and its `nbits` the target the node sets for that block (`getmininginfo`
+  `next.bits`; on a node that does not report it, the tip's own bits off a retarget boundary,
+  and no easier than four times the tip's target on one). Without this an easy `nbits` makes
+  every share a "block", and a block candidate moves carry balances at once. Until the node has
+  given a tip there is nothing to hold a job to, so shares are refused (`accept-without-node`
+  is for tests). Work ahead of our tip makes the session ask the node early, at most once per
+  250 ms across all sessions, so the ask cannot be turned into an RPC flood.
+* A share's difficulty has to be part of what was hashed, and only hashed bytes may say where
+  it is. The target byte is the first data byte of the scriptSig's third push (height, tags,
+  then the unique-id push, as `generate_coinbase_input` builds it in every gateway lineage);
+  the job section's `target_byte_index` must name exactly that byte. An index past the end, or
+  one aimed at a tag byte that already holds the pot being claimed, would let one stream of
+  easy hashes be claimed each at the best difficulty it happens to meet. The whole-coinbase
+  form (`lazarus-gateway`) has no target byte, so its difficulty is the gateway's word, and
+  that word is only taken from the pool's own gateway: loopback while `house-loopback` is on,
+  or a key in `house-gateways` (give the full 64-digit key). Turn `house-loopback` off if
+  anything on the host forwards outside connections to the DATUM port.
+* A coinbaser is good for the block it was asked for and the one after. The job names the
+  coinbaser id and a session keeps its last sixteen, so with no limit a gateway could ask once
+  while its share of the window was at its best and mine on that reading for ever. The block of
+  grace is for a gateway racing a new tip on the split it already had: that is late, not lying.
+  Past it the job is held to no coinbaser, which for a pool-only coinbase changes nothing.
+* The gateway's own script (learned from its dominant share username, so: anything it likes)
+  may take only what a template is worth beyond the issued list, and at most a sixteenth of
+  the list. That is where a stock gateway configured with that script sends the excess. A
+  coinbase that sends it more (a small coinbase class whose dropped outputs went to the gateway
+  instead of the pool, by accident or not) is not refused: it is that gateway's own solo work,
+  accepted but not credited in the window, and a block found on it owes nobody. Rejecting
+  would punish a gateway with a coinbase bug; crediting would pay window credit for work whose
+  reward the pool never sees. A pool-only coinbase, or a partial one whose remainder goes to
+  the pool, is credited as before. Reward placed in an OP_RETURN is refused outright, as is a
+  coinbase whose scriptSig does not open with its BIP34 height.
 * The coinbase check bounds miner outputs from both sides. An issued output may not be paid
   *less* than its share (scaled down when the template is worth less than the split assumed)
   and may not be paid *more* than Prime issued against its script (scaled up by the same ratio
