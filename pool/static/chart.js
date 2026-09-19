@@ -120,6 +120,8 @@
       for (const b of this.pills.children) {
         b.textContent = t("range." + b.dataset.range);
         b.setAttribute("aria-pressed", String(b.dataset.range === this.range));
+        b.disabled = !!this.legacy && b.dataset.range !== "24h";
+        b.title = b.disabled ? t("rangeSoon") : "";
       }
       this.minersBtn.textContent = t("miners");
       this.minersBtn.setAttribute("aria-pressed", String(this.showMiners));
@@ -165,11 +167,24 @@
       this.loading = true;
       this.root.classList.add("is-loading");
       try {
-        const r = await fetch("/api/history?range=" + k);
-        if (!r.ok) throw new Error("HTTP " + r.status);
-        const data = await r.json();
-        this.cache[k] = { at: Date.now(), data };
-        if (k !== this.range) return;
+        let data;
+        if (this.legacy) data = await this.legacyData();
+        else {
+          const r = await fetch("/api/history?range=" + k);
+          if (r.status === 404) {
+            // A node that predates /api/history: draw the day it does publish, from the endpoints
+            // it has, and leave the other ranges off until it is updated.
+            this.legacy = true;
+            this.range = "24h";
+            this.labels();
+            data = await this.legacyData();
+          } else {
+            if (!r.ok) throw new Error("HTTP " + r.status);
+            data = await r.json();
+          }
+        }
+        this.cache[this.range] = { at: Date.now(), data };
+        if (!this.legacy && k !== this.range) return;
         const first = !this.data;
         this.data = data;
         this.prepare();
@@ -181,6 +196,28 @@
         this.loading = false;
         this.root.classList.remove("is-loading");
       }
+    }
+
+    async legacyData() {
+      const [pool, pays] = await Promise.all([
+        fetch("/api/pool").then((r) => r.json()),
+        fetch("/api/payouts").then((r) => r.json()).catch(() => ({})),
+      ]);
+      const step = 300, buckets = new Map();
+      for (const h of pool.history || []) {
+        const k = Math.floor(h.ts / step) * step, b = buckets.get(k) || [0, 0, 0];
+        b[0] += h.hr_ghs; b[1] += h.miners || 0; b[2]++;
+        buckets.set(k, b);
+      }
+      const points = [...buckets.entries()].sort((a, b) => a[0] - b[0]).map(([ts, b]) => [ts, b[0] / b[2], Math.round(b[1] / b[2])]);
+      const since = points.length ? points[0][0] : 0, seen = new Set(), blocks = [];
+      for (const row of pays.payouts || []) {
+        if (!row.hash || seen.has(row.hash) || !(row.ts >= since)) continue;
+        seen.add(row.hash);
+        blocks.push({ height: row.height, hash: row.hash, ts: row.ts, reward_btc: row.reward_btc || 0, kind: row.kind || "", gateway: row.gateway || "", status: row.block_status || "" });
+      }
+      blocks.sort((a, b) => a.height - b.height);
+      return { range: "24h", since, until: Math.floor(Date.now() / 1000), step_s: step, points, blocks };
     }
 
     prepare() {
@@ -240,7 +277,8 @@
     size() {
       const w = Math.max(280, this.stage.clientWidth);
       const h = w < 560 ? 250 : 330;
-      return { w, h, pw: w - PAD.l - PAD.r, ph: h - PAD.t - PAD.b - LANE_H, top: PAD.t, left: PAD.l };
+      const padR = w < 560 ? 60 : PAD.r;
+      return { w, h, pw: w - PAD.l - padR, ph: h - PAD.t - PAD.b - LANE_H, top: PAD.t, left: PAD.l };
     }
     x(ts, g) { return g.left + ((ts - this.t0) / (this.t1 - this.t0)) * g.pw; }
     y(v, g) { return g.top + g.ph - (v / this.yMax) * g.ph; }
@@ -291,10 +329,10 @@
         ctx.strokeStyle = line; ctx.globalAlpha = i === 0 ? 1 : 0.55; ctx.lineWidth = 1;
         ctx.beginPath(); ctx.moveTo(g.left, yy); ctx.lineTo(g.left + g.pw, yy); ctx.stroke();
         ctx.globalAlpha = 1; ctx.fillStyle = faint;
-        if (i > 0) ctx.fillText(LZ.fmtHr(v), g.left + g.pw + 8, yy);
+        if (i > 0) ctx.fillText(LZ.fmtHr(v).replace(/\.0+(?=\s)/, ""), g.left + g.pw + 8, yy);
       }
       // x labels
-      const nTicks = g.w < 560 ? 3 : 6;
+      const nTicks = g.w < 560 ? 2 : 6;
       ctx.textBaseline = "top";
       for (let i = 0; i <= nTicks; i++) {
         const ts = this.t0 + ((this.t1 - this.t0) * i) / nTicks;

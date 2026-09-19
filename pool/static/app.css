@@ -314,3 +314,12 @@ html.app { scroll-padding-top: 7.5rem; }
 .app .site-header .nav-out { display: none; }
 .app .nav.views > a:not([data-view-link]) { color: var(--faint); font-size: 0.82rem; }
 .app .hero-grid > .hx-card { grid-column: 1 / -1; margin-top: 0.4rem; }
+.hx-range:disabled { opacity: 0.35; cursor: not-allowed; }
+
+/* On a phone the sticky mast must stay small: the bonus banner keeps its headline and its button. */
+@media (max-width: 900px) {
+  .app .promo #promo-text { display: none; }
+  .app .promo-row { gap: 0.5rem 0.7rem; padding-block: 0.55rem; }
+  .app .promo-copy { font-size: 0.84rem; line-height: 1.35; }
+  .app .promo-tag { display: none; }
+}

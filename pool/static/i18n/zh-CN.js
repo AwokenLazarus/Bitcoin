@@ -1149,3 +1149,4 @@ window.LZ_I18N_DICTS["zh-CN"].app = {
 window.LZ_I18N_DICTS["zh-CN"].app.sub = {"aria": "本页内容", "intro": "概览", "chart": "算力与区块", "calc": "计算器", "basics": "基础知识"};
 window.LZ_I18N_DICTS["zh-CN"].app.sub.intro = "欢迎";
 window.LZ_I18N_DICTS["zh-CN"].app.sub.live = "实时数据";
+window.LZ_I18N_DICTS["zh-CN"].app.chart.rangeSoon = "更长的时间范围将随下一次节点更新提供";

@@ -16,6 +16,7 @@ ap = argparse.ArgumentParser()
 ap.add_argument("--tables", required=True)
 ap.add_argument("--port", type=int, default=8899)
 ap.add_argument("--node", default="http://27.69.0.25:8888")
+ap.add_argument("--no-history", action="store_true", help="forward /api/history too, to see the site against a node that lacks it")
 a = ap.parse_args()
 
 pool = Path(__file__).resolve().parent.parent / "pool"
@@ -49,7 +50,7 @@ server.prime_summary = lambda: {"blocks": []}
 class Dev(server.Handler):
     def do_GET(self):
         path = self.path.split("?", 1)[0]
-        if path.startswith("/api/") and path != "/api/history":
+        if path.startswith("/api/") and (path != "/api/history" or a.no_history):
             try:
                 with urllib.request.urlopen(a.node + self.path, timeout=30) as r:
                     body, code, ctype = r.read(), r.status, r.headers.get("Content-Type", "application/json")
