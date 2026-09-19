@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title data-i18n="meta.title">Lazarus Pool — BLAKE2b Bitcoin (XBT / BTCB2) mining pool for Siacoin ASICs</title>
-<meta name="description" data-i18n="meta.description" content="Mine Bitcoin (XBT / BTCB2) with any Siacoin BLAKE2b ASIC — Goldshell SC, iBeLink BM-S3, Antminer A3. The first pool to pay TIDES as a split coinbase on this BIP-110 Bitcoin fork's mainnet, and the first to subsidize DATUM miners with its own stratum hashers. 0% via DATUM, 15% public stratum (stratum+tcp://stratum.awokenlazarus.xyz:23334).">
+<meta name="description" data-i18n="meta.description" content="Mine Bitcoin (XBT / BTCB2) with any Siacoin BLAKE2b ASIC — Goldshell SC, iBeLink BM-S3, Antminer A3. The first pool to pay TIDES as a split coinbase on this BIP-110 Bitcoin fork's mainnet, and the first to subsidize DATUM miners with its own stratum hashers. 0% via DATUM, 10% public stratum (stratum+tcp://stratum.awokenlazarus.xyz:23334).">
 <meta name="theme-color" content="#16130f">
 <link rel="canonical" href="https://pool.awokenlazarus.xyz/">
 <link rel="alternate" hreflang="en" href="https://pool.awokenlazarus.xyz/?lang=en">
@@ -25,17 +25,17 @@
   {"@type":"FAQPage","mainEntity":[
     {"@type":"Question","name":"Can I mine Bitcoin XBT (BTCB2) with a Siacoin ASIC?","acceptedAnswer":{"@type":"Answer","text":"Yes. Bitcoin XBT / BTCB2 uses BLAKE2b, the same algorithm Siacoin ASICs were built for. Goldshell SC-series, iBeLink BM-S3 / BM-S3+, Antminer A3 and other BLAKE2b-Sia boxes work on stock firmware. SHA-256 Bitcoin miners (S19, S21, Whatsminer) cannot mine this chain."}},
     {"@type":"Question","name":"How do I connect a miner to Lazarus Pool?","acceptedAnswer":{"@type":"Answer","text":"Point the miner at stratum+tcp://stratum.awokenlazarus.xyz:23334. Username is your payout address (bc1…). Password is x. Algorithm is BLAKE2b, not SHA-256d."}},
-    {"@type":"Question","name":"What are Lazarus Pool fees?","acceptedAnswer":{"@type":"Answer","text":"0% if you run your own DATUM gateway (plus a bonus from the public-stratum fee). 15% on the public stratum, seven and a half points of which is credited to DATUM miners. Dedicated solo is 7.5%."}},
+    {"@type":"Question","name":"What are Lazarus Pool fees?","acceptedAnswer":{"@type":"Answer","text":"0% if you run your own DATUM gateway (plus a bonus from the public-stratum fee). 10% on the public stratum, five points of which is credited to DATUM miners. Dedicated solo is 5%."}},
     {"@type":"Question","name":"Is XBT the same as SHA-256 Bitcoin?","acceptedAnswer":{"@type":"Answer","text":"No. This is the BLAKE2b Bitcoin chain (also called BTCB2 / XBT on this network). It keeps Bitcoin’s monetary rules but not SHA-256d proof-of-work. Coins live on this chain and trade as BTCB2 on Neoxa and NonKYC."}},
     {"@type":"Question","name":"What is BIP-110, and is it the same as the BLAKE2b change?","acceptedAnswer":{"@type":"Answer","text":"They are two separate events. BIP-110 is a proposal to restrict non-financial data in transactions; it needed 55% of hashrate, peaked near 2.6%, and its nodes began rejecting blocks that did not signal at height 961,632 on 8 August 2026 — that split the chain, and this chain is the BIP-110 branch. The proof-of-work change came later: on 30 August 2026 this branch moved from SHA-256d to BLAKE2b with a Sia-style header, with block 961,639 the last SHA-256d block and 961,640 the first BLAKE2b one. People use BIP-110 as the name for the chain, but BLAKE2b is what decides your hardware."}},
     {"@type":"Question","name":"Is mining Bitcoin XBT profitable?","acceptedAnswer":{"@type":"Answer","text":"Difficulty on this BLAKE2b chain is still low against the full block subsidy, so a Siacoin ASIC that no longer pays for itself on Sia can earn again here. Lazarus Pool publishes live XBT per TH/s per day, and the hardware page estimates XBT and dollars per day for each machine at current difficulty and price. DATUM miners add the subsidy on top."}},
-    {"@type":"Question","name":"What is the DATUM subsidy?","acceptedAnswer":{"@type":"Answer","text":"Miners who run their own DATUM gateway build their own block templates against their own Bitcoin Knots node, which decentralizes the pool. They pay 0% fee and are also credited seven and a half points of the public stratum's 15% fee on every block, pro rata by DATUM work. Decentralization pays more than the pool's own stratum."}},
+    {"@type":"Question","name":"What is the DATUM subsidy?","acceptedAnswer":{"@type":"Answer","text":"Miners who run their own DATUM gateway build their own block templates against their own Bitcoin Knots node, which decentralizes the pool. They pay 0% fee and are also credited five points of the public stratum's 10% fee on every block, pro rata by DATUM work. Decentralization pays more than the pool's own stratum."}},
     {"@type":"Question","name":"How does TIDES pay miners?","acceptedAnswer":{"@type":"Answer","text":"TIDES keeps a rolling window of shares worth about eight times network difficulty. When the pool finds a block, every address in that window is paid directly in the coinbase of that block, pro rata. There is no pool balance, no minimum, no withdrawal, and no custody — if the pool disappeared tomorrow nobody would be owed anything."}},
     {"@type":"Question","name":"Which pool first paid TIDES in a split coinbase on the BLAKE2b Bitcoin fork?","acceptedAnswer":{"@type":"Answer","text":"Lazarus Pool. It is the first pool confirmed to pay TIDES as a split coinbase on BLAKE2b Bitcoin (XBT / BTCB2) mainnet — not on a testnet and not as a proposal, but in blocks anyone can check in the explorer. Every miner in the TIDES window is an output of the block the pool finds."}},
     {"@type":"Question","name":"Which pool first used its stratum hashrate to subsidize DATUM miners?","acceptedAnswer":{"@type":"Answer","text":"Lazarus Pool. It is the first pool anywhere to route part of its public stratum fee to miners running their own DATUM gateways, so hashers on the pool's stratum subsidize the miners who build their own block templates. Decentralizing the network is paid for rather than charged for, and it has been Lazarus Pool's position since the DATUM subsidy launched."}},
-    {"@type":"Question","name":"Which BTCB2 / XBT mining pool should I use?","acceptedAnswer":{"@type":"Answer","text":"As each pool published its own terms on 18 September 2026: Lazarus Pool is 0% with your own DATUM gateway and 15% on the public stratum with seven and a half of those points paid back to DATUM miners, pays TIDES over a window of eight times difficulty, never takes custody because the block's coinbase pays your address directly, passes the block's transaction fees on to miners, and caps its own stratum at 15% of the network. The five pools Lazarus relays overflow miners to advertise: Riptide 0% DATUM / 1% stratum (variable), CONVOY 1% DATUM / 2% failover, B2Pool 0% DATUM / 1% TIDES, Xorpool 1% DATUM / 2% pooled stratum, iohzrd 0% own DATUM / 10% their public gateway. AlphaPool is 2.95% PPLNS. If you will never run a node, Lazarus's public stratum is the expensive option; the cheapest route on Lazarus is your own DATUM gateway at 0% plus the subsidy."}},
+    {"@type":"Question","name":"Which BTCB2 / XBT mining pool should I use?","acceptedAnswer":{"@type":"Answer","text":"As each pool published its own terms in September 2026: Lazarus Pool is 0% with your own DATUM gateway and 10% on the public stratum with five of those points paid back to DATUM miners, pays TIDES over a window of eight times difficulty, never takes custody because the block's coinbase pays your address directly, passes the block's transaction fees on to miners, and caps itself at 25% of the network. B2Pool is 0% with your own gateway and 1% on the stratum, also TIDES, pays from the coinbase where it fits and otherwise from a pool balance once you pass 10,000 sat, and keeps the block's transaction fees. AlphaPool is 2.5% PPLNS and holds a balance until a block matures at 100 confirmations. If you will never run a node, Lazarus's public stratum is the most expensive of the three; the cheapest route on Lazarus is your own DATUM gateway at 0% plus the subsidy."}},
     {"@type":"Question","name":"Does Lazarus Pool hold my coins or pay a balance?","acceptedAnswer":{"@type":"Answer","text":"No. It never takes custody. Every payout is an output of the block's own coinbase, paid straight to your address, so there is no account, no minimum, no pending balance and no withdrawal. The pool hands every gateway the same coinbase output list before work goes out and refuses any share whose coinbase pays something else. If the pool disappeared tonight nobody would be owed anything. Coinbase outputs are spendable after 100 confirmations."}},
-    {"@type":"Question","name":"Does Lazarus Pool limit how much of the network it controls?","acceptedAnswer":{"@type":"Answer","text":"Yes. Its stratum is held to 15% of network hashrate, enforced per connection in the software rather than promised. Hashrate behind a miner's own DATUM gateway builds its own blocks and is not counted. Past that line a new stratum connection is relayed to one of five other pools and paid by that pool under the same address, with nothing credited to the Lazarus window. Miners already connected keep mining here, and miners running their own DATUM gateway are never relayed because building your own block templates is not what centralizes a chain. The live network share and the number of connections currently relayed are both published on the site."}}
+    {"@type":"Question","name":"Does Lazarus Pool limit how much of the network it controls?","acceptedAnswer":{"@type":"Answer","text":"Yes, at 25% of network hashrate, enforced per connection in the software rather than promised. Past that line a new stratum connection is relayed to one of four other pools and paid by that pool under the same address, with nothing credited to the Lazarus window. Miners already connected keep mining here, and miners running their own DATUM gateway are never relayed because building your own block templates is not what centralizes a chain. The live network share and the number of connections currently relayed are both published on the site."}}
   ]}
 ]}
 </script>
@@ -54,16 +54,16 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;1,400&family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,500;1,6..72,400;1,6..72,500&display=swap">
-<link rel="stylesheet" href="/static/pool.css?v=fees18">
+<link rel="stylesheet" href="/static/pool.css?v=cbflow3">
 <link rel="icon" href="data:image/svg+xml,%3Csvg%20xmlns=%22http://www.w3.org/2000/svg%22%20viewBox=%220%200%2032%2032%22%3E%3Crect%20width=%2232%22%20height=%2232%22%20fill=%22%231c1914%22/%3E%3Cpath%20fill=%22%23dbb565%22%20d=%22M21.64%204.46C21.64%203.23%2021.25%202.37%2020.33%201.92C19.86%201.69%2019.25%201.58%2018.47%201.58H15.44L15.52%200.4H19.38C20.47%200.4%2021.35%200.58%2022.02%200.93C22.69%201.28%2023.18%201.76%2023.49%202.36C23.8%202.96%2023.95%203.63%2023.95%204.37C23.95%205.12%2023.79%205.81%2023.47%206.44C23.16%207.07%2022.66%207.57%2021.99%207.95C21.32%208.33%2020.99%208.52%2019.74%208.52H15.52L15.44%207.34H19.14C20.11%207.34%2020.88%206.89%2021.31%206.04C21.53%205.61%2021.64%205.08%2021.64%204.46ZM17.36%200.4%2017.36%2010.96V30.57L18.92%2031.16V31.6H13.09V31.16L14.66%2030.57V10.96V1.43L13.09%200.84V0.4ZM15.63%2020.2%209.86%2026.79%2011.94%2027.49V28.01H6.07V27.49L8.1%2026.79L14.87%2019.31L15.8%2018.63L20.88%2012.69L18.8%2011.99V11.48H24.67V11.99L22.64%2012.69L16.57%2019.52ZM19.77%2026.79%2014.88%2020.67%2014.46%2020.29%208.36%2012.72%206.37%2011.99V11.48H14.78V11.99L12.52%2012.69L16.71%2018L17.17%2018.43L23.94%2026.77L25.93%2027.49V28.01H17.51V27.49Z%22/%3E%3C/svg%3E">
 <link rel="apple-touch-icon" href="/static/chi-rho-crest-icon.svg">
 </head>
 <body>
 <noscript>
-  <p>Lazarus Pool is a mining pool for Bitcoin (XBT / BTCB2), the <a href="/bip110">BIP-110 Bitcoin fork</a> that mines with BLAKE2b instead of SHA-256d. Any ASIC that can mine Siacoin can mine it. Public stratum: <code>stratum+tcp://stratum.awokenlazarus.xyz:23334</code> (username = your payout address, password <code>x</code>). Fees: 0% with your own DATUM gateway plus the <a href="/datum-subsidy">DATUM subsidy</a>, 15% on the public stratum, 7.5% solo. <a href="/tides">TIDES</a> pays every miner inside the coinbase of each block found, so the pool never holds your coins.</p>
+  <p>Lazarus Pool is a mining pool for Bitcoin (XBT / BTCB2), the <a href="/bip110">BIP-110 Bitcoin fork</a> that mines with BLAKE2b instead of SHA-256d. Any ASIC that can mine Siacoin can mine it. Public stratum: <code>stratum+tcp://stratum.awokenlazarus.xyz:23334</code> (username = your payout address, password <code>x</code>). Fees: 0% with your own DATUM gateway plus the <a href="/datum-subsidy">DATUM subsidy</a>, 10% on the public stratum, 5% solo. <a href="/tides">TIDES</a> pays every miner inside the coinbase of each block found, so the pool never holds your coins.</p>
   <p>Lazarus Pool is the first pool confirmed to pay TIDES as a split coinbase on BLAKE2b Bitcoin mainnet, and the first pool anywhere to use its stratum hashers to subsidize DATUM miners — paying miners for securing and decentralizing the network instead of charging them for it.</p>
-  <p>Nothing is ever held for you: payouts are <a href="/non-custodial">outputs of the block itself</a>, with no balance and no withdrawal. Once its stratum passes 15% of network hashrate the pool <a href="/self-cap">relays new miners to another pool</a> rather than keep growing. <a href="/pools">How the pools on this chain compare</a>.</p>
-  <p>See <a href="/hardware">Siacoin BLAKE2b ASICs</a> and their estimated earnings, work out <a href="/calculator">what your hashrate earns per day</a>, check whether <a href="/profitability">mining XBT is profitable</a> right now, or read <a href="/mine-xbt">how to point a miner here</a>. Longer DATUM gateway setup: <a href="https://convoy.xyz/getstarted">CONVOY get started</a> / <a href="https://convoy.xyz/getstarted?lang=zh">中文</a>. Developers: <a href="/stratum-protocol.md">the stratum protocol on this chain</a> and the <a href="/api">public API</a>. Block explorer: <a href="https://mempool.awokenlazarus.xyz">mempool.awokenlazarus.xyz</a>. 中文：<a href="/zh/">简体中文版</a>.</p>
+  <p>Nothing is ever held for you: payouts are <a href="/non-custodial">outputs of the block itself</a>, with no balance and no withdrawal. Past 25% of network hashrate the pool <a href="/self-cap">relays new miners to another pool</a> rather than keep growing. <a href="/pools">How the pools on this chain compare</a>.</p>
+  <p>See <a href="/hardware">Siacoin BLAKE2b ASICs</a> and their estimated earnings, work out <a href="/calculator">what your hashrate earns per day</a>, check whether <a href="/profitability">mining XBT is profitable</a> right now, or read <a href="/mine-xbt">how to point a miner here</a>. Developers: <a href="/stratum-protocol.md">the stratum protocol on this chain</a> and the <a href="/api">public API</a>. Block explorer: <a href="https://mempool.awokenlazarus.xyz">mempool.awokenlazarus.xyz</a>. 中文：<a href="/zh/">简体中文版</a>.</p>
 </noscript>
 <a class="skip" href="#status" data-i18n="skip">Skip to pool status</a>
 
@@ -106,7 +106,7 @@
       <span class="promo-tag" data-i18n="promo.tag">DATUM bonus</span>
       <p class="promo-copy">
         <strong data-i18n="promo.lead">DATUM miners now earn more than their work for decentralizing the network.</strong>
-        <span id="promo-text">The public stratum fee is 15%. Seven and a half points of it is credited to every DATUM miner in the window on every block, pro rata by DATUM work.</span>
+        <span id="promo-text">The public stratum fee is 10%. Five points of it is credited to every DATUM miner in the window on every block, pro rata by DATUM work.</span>
         <b class="promo-live" id="promo-live" hidden></b>
       </p>
       <a class="btn small" href="#connect" data-tab="tab-datum" data-i18n="promo.cta">Run a gateway →</a>
@@ -123,7 +123,7 @@
         <p class="eyebrow"><span data-i18n="hero.eyebrow">Bitcoin (XBT / BTCB2) · BLAKE2b · DATUM · TIDES · </span><i>Proverbs 11:1</i></p>
         <h1 id="hero-title" data-i18n-html="hero.title">Mine Bitcoin (XBT).<br><em>Get paid in the block itself.</em><br>Earn extra for Decentralizing the network.</h1>
         <p class="hero-lede" data-i18n-html="hero.lede">No pool balance, no withdrawals, direct to you on chain. Any Siacoin BLAKE2b ASIC works. Build your own blocks with DATUM: pay <span>0%</span> and collect a share of the public stratum’s fee on every block the pool finds.</p>
-        <p class="hero-firsts" data-i18n-html="hero.firsts">The first pool anywhere to put its <b>stratum hashrate behind a DATUM subsidy</b>, paying miners to decentralize the network instead of charging them for it.</p>
+        <p class="hero-firsts" data-i18n-html="hero.firsts">The first pool to pay <b>TIDES as a split coinbase</b> on BLAKE2b Bitcoin mainnet — confirmed on chain. The first pool anywhere to put its <b>stratum hashrate behind a DATUM subsidy</b>, paying miners to decentralize the network instead of charging them for it.</p>
         <div class="hero-actions">
           <a class="btn" href="#connect" data-tab="tab-datum" data-i18n="hero.setup">Set up DATUM</a>
           <a class="btn ghost" href="#dashboard" data-i18n="hero.lookup">Look up your stats</a>
@@ -144,7 +144,7 @@
       <div class="fee-lede" aria-labelledby="fees-title">
         <div class="fee-lede-head">
           <h2 id="fees-title" data-i18n="hero.feesTitle">Two ways in · one gets paid extra</h2>
-          <p id="fee-lede-body">Run a node and a DATUM gateway and you choose the transactions in the block. Point a miner at us and we choose them. Same window, same payout — but DATUM work pays no fee <em>and</em> is handed <span id="lede-rebate-pts">seven and a half points</span> of the stratum’s fee on every block.</p>
+          <p id="fee-lede-body">Run a node and a DATUM gateway and you choose the transactions in the block. Point a miner at us and we choose them. Same window, same payout — but DATUM work pays no fee <em>and</em> is handed <span id="lede-rebate-pts">five points</span> of the stratum’s fee on every block.</p>
         </div>
         <div class="fee-lede-rates">
           <a class="fee-lede-rate reco" href="#connect" data-tab="tab-datum">
@@ -155,8 +155,8 @@
           </a>
           <a class="fee-lede-rate" href="#connect" data-tab="tab-stratum">
             <small data-i18n="hero.stratumSmall">Public stratum</small>
-            <b id="top-fee-stratum">15%</b>
-            <span id="top-fee-stratum-sub"><span data-i18n="hero.stratumSub">Point and go · our node, our templates · </span><span id="top-stratum-rebate">seven and a half points of the 15% goes to DATUM miners</span></span>
+            <b id="top-fee-stratum">10%</b>
+            <span id="top-fee-stratum-sub"><span data-i18n="hero.stratumSub">Point and go · our node, our templates · </span><span id="top-stratum-rebate">five points of the 10% goes to DATUM miners</span></span>
           </a>
         </div>
         <p class="fee-lede-cta">
@@ -218,7 +218,7 @@
       <p class="note callout" id="overflow-note" hidden></p>
       <ul class="pillars" data-i18n-aria="status.pillarsAria" aria-label="What makes Lazarus different">
         <li data-i18n-html="status.p1"><b>Paid in the block itself.</b> No pool balance, no withdrawals. When a block is found, its coinbase pays your address directly. <a href="#payout">See the next payout</a>.</li>
-        <li><span data-i18n-html="status.p2a"><b>Bring your own gateway, keep 100% — and then some.</b> Run Bitcoin Knots and a stock DATUM gateway: your node builds the block template, the pool only sets the split. Public stratum is </span><span id="pillar-stratum-fee">15%</span><span id="pillar-rebate">, and seven and a half points of that is credited to DATUM miners on every block</span>. <a href="#connect" data-i18n="nav.connect">Connect</a>.</li>
+        <li><span data-i18n-html="status.p2a"><b>Bring your own gateway, keep 100% — and then some.</b> Run Bitcoin Knots and a stock DATUM gateway: your node builds the block template, the pool only sets the split. Public stratum is </span><span id="pillar-stratum-fee">10%</span><span id="pillar-rebate">, and five points of that is credited to DATUM miners on every block</span>. <a href="#connect" data-i18n="nav.connect">Connect</a>.</li>
         <li data-i18n-html="status.p3"><b>Verifiable end to end.</b> Every share is rebuilt and hashed; every block found is on the <a href="https://mempool.awokenlazarus.xyz/mining/pool/lazarus" target="_blank" rel="noreferrer">Lazarus Mempool</a>. Source on <a href="https://github.com/AwokenLazarus/Bitcoin" target="_blank" rel="noreferrer">GitHub</a>.</li>
       </ul>
     </div>
@@ -359,14 +359,14 @@
         <div class="fee-card" data-tab="tab-stratum" role="button" tabindex="0">
           <p class="fee-kicker" data-i18n="connect.stratumKicker">Simplest · point and go</p>
           <p class="fee-title" data-i18n="connect.stratumTitle">Public stratum</p>
-          <p class="fee-rate"><span id="fee-stratum">15%</span></p>
-          <p class="fee-copy"><span data-i18n="connect.stratumCopy">Our node, our templates. Any BLAKE2b ASIC or miner. Same TIDES window — switch to a gateway later and your accepted work comes with you. </span><span id="fee-stratum-copy">seven and a half points of the fee goes to the DATUM miners; run a gateway and you are on the receiving end.</span></p>
+          <p class="fee-rate"><span id="fee-stratum">10%</span></p>
+          <p class="fee-copy"><span data-i18n="connect.stratumCopy">Our node, our templates. Any BLAKE2b ASIC or miner. Same TIDES window — switch to a gateway later and your accepted work comes with you. </span><span id="fee-stratum-copy">five points of the fee goes to the DATUM miners; run a gateway and you are on the receiving end.</span></p>
           <p class="fee-cta" data-i18n="connect.setupBelow">Setup below</p>
         </div>
         <div class="fee-card" data-tab="tab-solo" role="button" tabindex="0" id="fee-card-solo" hidden>
           <p class="fee-kicker" data-i18n="connect.soloKicker">All or nothing</p>
           <p class="fee-title" data-i18n="connect.soloTitle">Solo</p>
-          <p class="fee-rate"><span id="fee-solo">7.5%</span></p>
+          <p class="fee-rate"><span id="fee-solo">5%</span></p>
           <p class="fee-copy" data-i18n="connect.soloCopy">No window, no sharing. Find a block and the whole reward is yours less the fee; find nothing and you earn nothing.</p>
           <p class="fee-cta" data-i18n="connect.setupBelow">Setup below</p>
         </div>
@@ -399,13 +399,12 @@
             </div>
           </li>
         </ol>
-        <p class="note callout" data-i18n-html="connect.guide">CONVOY’s get-started guide is a longer walkthrough of Bitcoin Knots and a DATUM gateway — node, gateway build, and pointing miners at it. <a href="https://convoy.xyz/getstarted" target="_blank" rel="noreferrer">Read it in English</a> or in <a href="https://convoy.xyz/getstarted?lang=zh" target="_blank" rel="noreferrer">中文</a>. Point the gateway here with the host, port, and pubkey below; Lazarus-specific fees and the DATUM bonus are this page, not theirs.</p>
       </div>
 
       <div class="tabs" data-tabs>
         <div class="tablist" role="tablist" data-i18n-aria="connect.paths" aria-label="Mining paths">
           <button class="tab" role="tab" type="button" id="tab-stratum" aria-controls="pane-stratum" aria-selected="true">
-            <span class="tab-title"><span data-i18n="connect.tabStratum">Public stratum</span> <span class="tab-fee" id="tab-fee-stratum">15%</span></span>
+            <span class="tab-title"><span data-i18n="connect.tabStratum">Public stratum</span> <span class="tab-fee" id="tab-fee-stratum">10%</span></span>
             <span class="tab-sub" data-i18n="connect.tabStratumSub">Point and go · our node builds the block</span>
           </button>
           <button class="tab" role="tab" type="button" id="tab-datum" aria-controls="pane-datum" aria-selected="false">
@@ -413,7 +412,7 @@
             <span class="tab-sub" data-i18n="connect.tabDatumSub">Your node builds the block · we only split the coinbase · you collect the bonus</span>
           </button>
           <button class="tab" role="tab" type="button" id="tab-solo" aria-controls="pane-solo" aria-selected="false" hidden>
-            <span class="tab-title"><span data-i18n="connect.tabSolo">Solo</span> <span class="tab-fee" id="tab-fee-solo">7.5%</span></span>
+            <span class="tab-title"><span data-i18n="connect.tabSolo">Solo</span> <span class="tab-fee" id="tab-fee-solo">5%</span></span>
             <span class="tab-sub" data-i18n="connect.tabSoloSub">Keep the whole block · no window, no sharing</span>
           </button>
         </div>
@@ -424,7 +423,7 @@
             <dd class="copyable"><span class="mono" id="stratum"></span><button type="button" class="copy-btn" data-copy-from="stratum" data-i18n-aria="connect.copyStratum" aria-label="Copy stratum URL" title="Copy" data-i18n-title="copy"></button></dd>
             <dt data-i18n="connect.dtUser">User</dt><dd class="mono" data-i18n="connect.userHint">bc1q…youraddress.worker</dd>
             <dt data-i18n="connect.dtPass">Pass</dt><dd class="mono">x</dd>
-            <dt data-i18n="connect.dtFee">Fee</dt><dd><span id="stratum-fee-line">15%</span><span data-i18n="connect.stratumFeeTail"> of your window share, taken inside the coinbase</span><span id="stratum-rebate-line">. Seven and a half points of it is credited to the DATUM miners in the window — <a href="#pane-datum" data-tab="tab-datum">run your own gateway</a> and it is paid to you instead</span></dd>
+            <dt data-i18n="connect.dtFee">Fee</dt><dd><span id="stratum-fee-line">10%</span><span data-i18n="connect.stratumFeeTail"> of your window share, taken inside the coinbase</span><span id="stratum-rebate-line">. Five points of it is credited to the DATUM miners in the window — <a href="#pane-datum" data-tab="tab-datum">run your own gateway</a> and it is paid to you instead</span></dd>
             <dt data-i18n="connect.dtAlgo">Algo</dt><dd data-i18n="connect.algo">BLAKE2b — Sia-style header, not SHA-256d</dd>
             <dt data-i18n="connect.dtPayout">Payout</dt><dd data-i18n-html="connect.payout">Your share of the TIDES window, in the coinbase of every block the pool finds. See <a href="#payout">Next payout</a>.</dd>
           </dl>
@@ -433,7 +432,7 @@
 
         <div class="tabpane panel" role="tabpanel" id="pane-datum" aria-labelledby="tab-datum" hidden>
           <p class="copy" data-i18n-html="connect.datumLead"><strong>You build the block. We only split the coinbase.</strong> Run Bitcoin Knots and a DATUM gateway, point the gateway at Prime, and point your miners at the gateway. Your node chooses the transactions; Prime hands your gateway the coinbase split for the window, verifies every share, and credits your address. If your miner finds the block, it is your template with everyone’s payout in it. <a href="#gw-pick">Which gateway to run</a>.</p>
-          <p class="note callout rebate-callout" id="datum-bonus-explain"><strong data-i18n="connect.bonusTitle">The DATUM bonus.</strong> <span id="datum-bonus-explain-text">The public stratum pays a 15% fee. Seven and a half points of it is not kept by the pool: on every block found it is credited to every DATUM miner holding work in the window, pro rata by DATUM work. It lands on your balance whether or not your address made that block’s coinbase, and is paid with your next output once it clears the minimum. Small gateways get their exact share; nobody is skipped.</span></p>
+          <p class="note callout rebate-callout" id="datum-bonus-explain"><strong data-i18n="connect.bonusTitle">The DATUM bonus.</strong> <span id="datum-bonus-explain-text">The public stratum pays a 10% fee. Five points of it is not kept by the pool: on every block found it is credited to every DATUM miner holding work in the window, pro rata by DATUM work. It lands on your balance whether or not your address made that block’s coinbase, and is paid with your next output once it clears the minimum. Small gateways get their exact share; nobody is skipped.</span></p>
           <dl class="facts tight">
             <dt data-i18n="connect.dtHost">Host</dt>
             <dd class="copyable"><span class="mono" id="datum-host">stratum.awokenlazarus.xyz</span><button type="button" class="copy-btn" data-copy-from="datum-host" data-i18n-aria="connect.copyHost" aria-label="Copy DATUM host" title="Copy" data-i18n-title="copy"></button></dd>
@@ -454,7 +453,6 @@
             <li data-i18n-html="connect.step2">Build the gateway, merge the <code>stratum</code> and <code>datum</code> sections above into its config, and set <code>mining.pool_address</code> to <em>your</em> payout address. Leftover value the split does not name goes there. Stock DATUM defaults <code>stratum.vardiff_min</code> to 16384 if you omit it — that is the floor <em>and</em> the start, and Prime cannot lower it. Set 4096 so new sessions start there; vardiff still climbs for faster boxes.</li>
             <li data-i18n-html="connect.step3">Point miners at your gateway’s stratum (usually <code>stratum+tcp://127.0.0.1:23334</code>). Username <code>address.worker</code>: the part before the first <code>.</code> is who gets paid and must be an address this chain accepts.</li>
             <li data-i18n-html="connect.step4">Watch your gateway appear under <a href="#gateways">Gateways</a> and your address under <a href="#miners">Miners</a>. Stock builds can still publish a job whose coinbase omits the window: current iohzrd, CONVOY, and FlyTheElephant only if the pool split is late. Older FlyTheElephant / OCEAN-lineage <code>v0.4.1-beta</code> builds (no <code>+lazarus-split</code>) still do it on the first job of every height. Prime accepts that work and, if such a job found a block, records what the pool then owes the window.</li>
-            <li data-i18n-html="connect.step5">For a longer Knots + DATUM walkthrough than these four steps, use <a href="https://convoy.xyz/getstarted" target="_blank" rel="noreferrer">CONVOY’s get-started guide</a> (also in <a href="https://convoy.xyz/getstarted?lang=zh" target="_blank" rel="noreferrer">中文</a>), then come back here for the Lazarus host, port, pubkey, and config snippet.</li>
           </ol>
           <details class="fold">
             <summary data-i18n="connect.whoSummary">Who gets paid, by gateway setting</summary>
@@ -491,7 +489,7 @@
           <dl class="facts tight">
             <dt data-i18n="connect.dtUser">User</dt><dd class="mono" data-i18n="connect.userHint">bc1q…youraddress.worker</dd>
             <dt data-i18n="connect.dtPass">Pass</dt><dd class="mono">x</dd>
-            <dt data-i18n="connect.dtFee">Fee</dt><dd><span id="solo-fee-line">7.5%</span> <span data-i18n="connect.soloFeeTail">of the block, taken as one output in the coinbase you solve. Nothing is withheld and nothing is owed to you between blocks.</span></dd>
+            <dt data-i18n="connect.dtFee">Fee</dt><dd><span id="solo-fee-line">5%</span> <span data-i18n="connect.soloFeeTail">of the block, taken as one output in the coinbase you solve. Nothing is withheld and nothing is owed to you between blocks.</span></dd>
             <dt data-i18n="connect.dtPayout">Payout</dt><dd data-i18n="connect.soloPayout">The rest of the block — subsidy and every transaction fee in it — straight to your address, spendable after 100 confirmations.</dd>
             <dt data-i18n="connect.soloOdds">Your odds</dt><dd id="solo-odds" data-i18n-html="connect.soloOddsBody">Expected time to a block at your hashrate is shown on your <a href="#dashboard">stats</a> page.</dd>
           </dl>
@@ -634,35 +632,16 @@
       <header class="section-head">
         <p class="eyebrow" data-i18n="pools.eyebrow">Decentralize the hashrate</p>
         <h2 id="pools-title" data-i18n="pools.title">Other pools that speak DATUM and TIDES.</h2>
-        <p class="section-lede" data-i18n="pools.lede">No single pool should hold a third of this chain. We cap our own stratum at 15% of the network; hashrate behind a miner’s own DATUM gateway builds its own blocks and is not counted. Past that line, new stratum connections are relayed to one of these pools and paid there. Each one lets you build your own block through a DATUM gateway and pays by a TIDES window, so splitting your fleet across them costs you nothing in principle. Keep one as a failover in your miner either way.</p>
+        <p class="section-lede" data-i18n="pools.lede">No single pool should hold a third of this chain. We cap ourselves at 25% of the network — past that, new stratum connections are relayed to one of these pools and paid there. Each one lets you build your own block through a DATUM gateway and pays by a TIDES window, so splitting your fleet across them costs you nothing in principle. Keep one as a failover in your miner either way.</p>
       </header>
-      <div class="seo-table overflow-fee-table">
-        <table>
-          <caption data-i18n="pools.feeTableCaption">The five pools we relay to — fees as each advertises them, 18 September 2026</caption>
-          <thead>
-            <tr>
-              <th scope="col" data-i18n="pools.colPool">Pool</th>
-              <th scope="col" data-i18n="pools.colDatum">Own DATUM gateway</th>
-              <th scope="col" data-i18n="pools.colStratum">Their stratum / public gateway</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr><th scope="row">Riptide</th><td>0%</td><td>1% (variable; currently 1%)</td></tr>
-            <tr><th scope="row">CONVOY</th><td>1%</td><td>2% failover</td></tr>
-            <tr><th scope="row">B2Pool</th><td>0%</td><td>1% TIDES</td></tr>
-            <tr><th scope="row">Xorpool</th><td>1%</td><td>2% pooled</td></tr>
-            <tr><th scope="row">iohzrd</th><td>0%</td><td>10% their public gateway</td></tr>
-          </tbody>
-        </table>
-      </div>
       <ul class="pool-grid" id="pool-grid">
         <li class="pool-card" data-pool="Riptide">
           <div class="pool-head">
             <h3><a href="https://riptide.maveth.ca/" target="_blank" rel="noreferrer">Riptide<span class="ext" aria-hidden="true"></span></a></h3>
             <span class="pill pool-state" data-pool-state hidden></span>
           </div>
-          <p class="pool-fee" data-i18n-html="pools.riptideFee"><b>0%</b> DATUM · <b>1%</b> stratum, variable</p>
-          <p class="pool-copy" data-i18n="pools.riptide">Maveth’s TIDES pool. Zero fee through your own gateway; the SV1 skim is variable (currently 1%) and half of it goes back to live DATUM miners as STRATUM BOOST. Prefers a CONVOY gateway with the largest-coinbase patch.</p>
+          <p class="pool-fee" data-i18n-html="pools.riptideFee"><b>0%</b> DATUM · <b>1%</b> stratum</p>
+          <p class="pool-copy" data-i18n="pools.riptide">Maveth’s TIDES pool. Zero fee through your own gateway; the stratum skim is variable and half of it goes back to live miners. Prefers a CONVOY gateway with the largest-coinbase patch.</p>
           <dl class="pool-facts">
             <dt data-i18n="connect.dtStratum">Stratum</dt><dd><span class="mono">stratum+tcp://sv1.riptide.maveth.ca:23337</span></dd>
             <dt data-i18n="pools.dtDatum">DATUM</dt><dd><span class="mono">tides.maveth.ca:28916</span></dd>
@@ -673,8 +652,8 @@
             <h3><a href="https://convoy.xyz/" target="_blank" rel="noreferrer">CONVOY<span class="ext" aria-hidden="true"></span></a></h3>
             <span class="pill pool-state" data-pool-state hidden></span>
           </div>
-          <p class="pool-fee" data-i18n-html="pools.convoyFee"><b>1%</b> DATUM · 2% failover</p>
-          <p class="pool-copy" data-i18n="pools.convoy">The pool behind the CONVOY DATUM gateway. Non-custodial TIDES; DATUM is their standard 1% fee, and mining on their failover stratum (they build the template) is 2%.</p>
+          <p class="pool-fee" data-i18n-html="pools.convoyFee"><b>1%</b> · 2% on node failover</p>
+          <p class="pool-copy" data-i18n="pools.convoy">The pool behind the CONVOY DATUM gateway. Non-custodial, TIDES rewards, and a 50% fee discount for miners who build their own templates.</p>
           <dl class="pool-facts">
             <dt data-i18n="connect.dtStratum">Stratum</dt><dd><span class="mono">stratum+tcp://mine.convoy.xyz:3333</span></dd>
             <dt data-i18n="pools.dtDatum">DATUM</dt><dd>see <a href="https://convoy.xyz/" target="_blank" rel="noreferrer" data-i18n="pools.getStarted">Get Started</a> on convoy.xyz</dd>
@@ -685,23 +664,11 @@
             <h3><a href="https://b2pool.io/" target="_blank" rel="noreferrer">B2Pool<span class="ext" aria-hidden="true"></span></a></h3>
             <span class="pill pool-state" data-pool-state hidden></span>
           </div>
-          <p class="pool-fee" data-i18n-html="pools.b2fee"><b>0%</b> DATUM · <b>1%</b> TIDES</p>
-          <p class="pool-copy" data-i18n="pools.b2">DATUM on 28915 is 0%. Shared TIDES on 3333 is 1% over a window of four times difficulty; solo on 3334. Regions in Frankfurt, Helsinki, Chicago, Los Angeles, Kyiv and Hong Kong.</p>
+          <p class="pool-fee" data-i18n-html="pools.b2fee"><b>1%</b> TIDES · solo on 3334</p>
+          <p class="pool-copy" data-i18n="pools.b2">Regions in Frankfurt, Helsinki, Chicago, Los Angeles and Kyiv. Stratum V1, V2 and DATUM on every one; GPU and CPU ports too.</p>
           <dl class="pool-facts">
             <dt data-i18n="connect.dtStratum">Stratum</dt><dd><span class="mono">stratum+tcp://ord.b2pool.io:3333</span> <span class="faint">· de · hel · lax · ua</span></dd>
             <dt data-i18n="pools.dtDatum">DATUM</dt><dd><span class="mono">port 28915</span> <span data-i18n="pools.onRegion">on any region</span></dd>
-          </dl>
-        </li>
-        <li class="pool-card" data-pool="Xorpool">
-          <div class="pool-head">
-            <h3><a href="https://xorpool.com/" target="_blank" rel="noreferrer">Xorpool<span class="ext" aria-hidden="true"></span></a></h3>
-            <span class="pill pool-state" data-pool-state hidden></span>
-          </div>
-          <p class="pool-fee" data-i18n-html="pools.xorpoolFee"><b>1%</b> DATUM · <b>2%</b> pooled stratum</p>
-          <p class="pool-copy" data-i18n-html="pools.xorpool">Bitcoin Xor’s TIDES pool. Coinbase-direct payouts, DATUM-first: you build the template at 1%, or mine on their pooled stratum (they build the template) at 2%. <a href="https://xorpool.com/" target="_blank" rel="noreferrer">xorpool.com</a>.</p>
-          <dl class="pool-facts">
-            <dt data-i18n="connect.dtStratum">Stratum</dt><dd><span class="mono">stratum+tcp://datum.xorpool.com:23335</span></dd>
-            <dt data-i18n="pools.dtDatum">DATUM</dt><dd><span class="mono">datum.xorpool.com:28915</span></dd>
           </dl>
         </li>
         <li class="pool-card" data-pool="iohzrd">
@@ -709,8 +676,8 @@
             <h3><a href="https://pool.iohzrd.tech/" target="_blank" rel="noreferrer">iohzrd<span class="ext" aria-hidden="true"></span></a></h3>
             <span class="pill pool-state" data-pool-state hidden></span>
           </div>
-          <p class="pool-fee" data-i18n-html="pools.iohzrdFee"><b>0%</b> DATUM · <b>10%</b> their public gateway</p>
-          <p class="pool-copy" data-i18n-html="pools.iohzrd">Omega Pool, run by the author of the <a href="https://github.com/iohzrd/datum_gateway" target="_blank" rel="noreferrer">gateway we recommend</a>. Own gateway is 0%; their public gateway is 10%. Miners connect through ratum-gateway or CONVOY and are paid from a TIDES window of eight times difficulty.</p>
+          <p class="pool-fee" data-i18n="pools.iohzrdFee">RATUM Prime · DATUM gateway required</p>
+          <p class="pool-copy" data-i18n-html="pools.iohzrd">Run by the author of the <a href="https://github.com/iohzrd/datum_gateway" target="_blank" rel="noreferrer">gateway we recommend</a>. Miners connect through a gateway — ratum-gateway or CONVOY, v3 protocol with anti-block-withholding — and are paid from a TIDES window.</p>
           <dl class="pool-facts">
             <dt data-i18n="connect.dtStratum">Stratum</dt><dd><span class="mono">stratum+tcp://gateway.iohzrd.tech:23334</span> <span class="faint" data-i18n="pools.theirGw">· their public gateway</span></dd>
             <dt data-i18n="pools.dtDatum">DATUM</dt><dd>config on <a href="https://pool.iohzrd.tech/" target="_blank" rel="noreferrer">pool.iohzrd.tech</a></dd>
@@ -718,7 +685,7 @@
         </li>
       </ul>
       <p class="note callout" id="pools-share" hidden></p>
-      <p class="note" id="pools-note" data-i18n-html="pools.note">These five are the pools our stratum relays to when Lazarus is over its share of the network. A relayed miner is paid by the pool it lands on, not by us — see <a href="#miners">Relayed to other pools</a> under Miners. Own-gateway (DATUM) miners are never relayed. Fees above are as each pool published them on 18 September 2026; check their site before you point hashrate.</p>
+      <p class="note" id="pools-note" data-i18n-html="pools.note">These four are the pools our stratum relays to when Lazarus is over its share of the network. A relayed miner is paid by the pool it lands on, not by us — see <a href="#miners">Relayed to other pools</a> under Miners. Own-gateway (DATUM) miners are never relayed. Fees and endpoints are as each pool publishes them; check their site before you point hashrate.</p>
     </div>
   </section>
 
@@ -784,7 +751,7 @@
       <a href="/hardware" data-i18n="footer.asics">Siacoin BLAKE2b ASICs</a>
       <a href="/mine-xbt" data-i18n="footer.mineXbt">How to mine XBT</a>
       <a href="/pools" data-i18n="footer.compare">Compare XBT pools</a>
-      <a href="/self-cap" data-i18n="footer.selfCap">The 15% stratum cap</a>
+      <a href="/self-cap" data-i18n="footer.selfCap">The 25% self-cap</a>
       <a href="/non-custodial" data-i18n="footer.noncustodial">Why there is no balance</a>
     </div>
     <div class="footer-col">
@@ -800,8 +767,6 @@
       <span class="note faint" data-i18n="footer.electrum">Electrum server (SSL). For wallets that understand this chain’s 164-byte BLAKE2b headers (Electrum protocol 1.8).</span>
       <a href="https://github.com/AwokenLazarus/Bitcoin/tree/main/node" target="_blank" rel="noreferrer" data-i18n="footer.knots">Run a Bitcoin Knots node for this chain</a>
       <a href="https://github.com/iohzrd/datum_gateway" target="_blank" rel="noreferrer" data-i18n="footer.gw">DATUM gateway (iohzrd)</a>
-      <a href="https://convoy.xyz/getstarted" target="_blank" rel="noreferrer" data-i18n="footer.convoyGuide">DATUM gateway setup (CONVOY)</a>
-      <a href="https://convoy.xyz/getstarted?lang=zh" target="_blank" rel="noreferrer" data-i18n="footer.convoyGuideZh">DATUM 网关安装（CONVOY 中文）</a>
     </div>
     <div class="footer-col">
       <p class="category" data-i18n="footer.project">Project</p>
@@ -817,11 +782,11 @@
   </div>
 </footer>
 
-<script src="/static/i18n.js?v=fees15"></script>
-<script src="/static/i18n/en.js?v=fees15"></script>
-<script src="/static/i18n/zh-CN.js?v=fees15"></script>
+<script src="/static/i18n.js?v=cbflow3"></script>
+<script src="/static/i18n/en.js?v=cbflow3"></script>
+<script src="/static/i18n/zh-CN.js?v=cbflow3"></script>
 <script>LZ_I18N.boot();</script>
-<script src="/static/shared.js?v=fees15"></script>
-<script src="/static/pool.js?v=fees15"></script>
+<script src="/static/shared.js?v=cbflow3"></script>
+<script src="/static/pool.js?v=cbflow3"></script>
 </body>
 </html>
