@@ -10,7 +10,7 @@
   const REFRESH_S = { "1h": 15, "6h": 30, "24h": 30, "3d": 120, "7d": 120, "30d": 300, all: 300 };
   const LANE_H = 30; // block lane under the plot
   const PAD = { l: 8, r: 78, t: 14, b: 22 };
-  const CLUSTER_PX = 15;
+  const CLUSTER_SPAN = 30; // px of timeline one marker may stand for
 
   const css = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
   // Canvas wants plain colours with alpha; the palette is oklch custom properties. Paint one pixel
@@ -333,7 +333,9 @@
         const bx = this.x(b.ts, g);
         if (bx < g.left - 1 || bx > g.left + g.pw + 1) continue;
         const last = out[out.length - 1];
-        if (last && bx - last.x1 <= CLUSTER_PX) { last.blocks.push(b); last.x1 = bx; last.x = (last.x0 + last.x1) / 2; }
+        // Measured from the cluster's first block, so a busy week becomes a row of evenly sized
+        // groups instead of one chain that swallows everything between two quiet spells.
+        if (last && bx - last.x0 <= CLUSTER_SPAN) { last.blocks.push(b); last.x1 = bx; last.x = (last.x0 + last.x1) / 2; }
         else out.push({ x: bx, x0: bx, x1: bx, blocks: [b] });
       }
       return out;
