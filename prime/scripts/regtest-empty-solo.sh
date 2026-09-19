@@ -15,7 +15,7 @@ set -euo pipefail
 LINEAGE="${1:-convoy}"
 case "$LINEAGE" in
   convoy) GW_REPO=https://github.com/CONVOYMining/datum_gateway; GW_REF=master ;;
-  fte)    GW_REPO=https://github.com/FlyTheElephant1/datum_gateway; GW_REF=test/console-collapse-pr14-pr17 ;;
+  fte)    GW_REPO=https://github.com/FlyTheElephant1/datum_gateway; GW_REF=master ;;
   iohzrd) GW_REPO=https://github.com/iohzrd/datum_gateway; GW_REF=master ;;
   *) echo "usage: $0 convoy|fte|iohzrd" >&2; exit 2 ;;
 esac

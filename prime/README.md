@@ -120,10 +120,10 @@ the versions this Prime is checked against.
 
 | Name | Upstream | Ref tracked | Generation |
 |---|---|---|---|
-| `convoy` | `CONVOYMining/datum_gateway` | `master` | Convoy, configure v3 |
-| `fte` | `FlyTheElephant1/datum_gateway` | `test/console-collapse-pr14-pr17` (now also `master`) | OCEAN, configure v1 |
-| `iohzrd` | `iohzrd/datum_gateway` | `master` (has the `blake2b` branch and two commits more) | OCEAN, configure v1 |
-| `startos` | packaged by `Retropex/datum-gateway-startos` | the `datum_gateway` submodule of the newest `pow_*` release | OCEAN, configure v1 |
+| `convoy` | `CONVOYMining/datum_gateway` | `master` (`b9ea7dc`, 2026-09-03) | Convoy, configure v3 |
+| `fte` | `FlyTheElephant1/datum_gateway` | `master` (identical to CONVOY `b9ea7dc`; the old OCEAN empty-first branch is gone) | Convoy, configure v3 |
+| `iohzrd` | `iohzrd/datum_gateway` | `master` (`7491a50`, two commits ahead of CONVOY: YUGE-for-every-BLAKE2b-miner + header weight) | Convoy, configure v3 |
+| `startos` | packaged by `Retropex/datum-gateway-startos` | newest `pow_*` (`pow_0.4.1_23` pins iohzrd `7491a50`) | Convoy, configure v3 |
 
 The StartOS package ships the gateway as a submodule, so a release pins one gateway commit
 rather than naming a branch. `scripts/regtest-e2e.sh startos` resolves that commit from the
@@ -284,9 +284,9 @@ How bad it is depends on the build, and there are two severities:
 
 | build | when it publishes a pool-only full job | fix |
 |---|---|---|
-| `FlyTheElephant1` `master` | every BLAKE2b miner, first notify of every height — 100% of shares live | [#5](https://github.com/FlyTheElephant1/datum_gateway/pull/5) |
+| `FlyTheElephant1` `master` (`b9ea7dc`, now CONVOY code) | only when the coinbaser is late (same as CONVOY). Older OCEAN-lineage FTE still empty-firsts every height | CONVOY [#13](https://github.com/CONVOYMining/datum_gateway/pull/13); old [#5](https://github.com/FlyTheElephant1/datum_gateway/pull/5) is gone with the OCEAN tree |
 | `CONVOYMining` `b9ea7dc` | only when the coinbaser is late — 1 share in 167 live | [#13](https://github.com/CONVOYMining/datum_gateway/pull/13) |
-| `iohzrd` `40cf813` | same late-coinbaser case | [#1](https://github.com/iohzrd/datum_gateway/pull/1) |
+| `iohzrd` `7491a50` | same late-coinbaser case; every BLAKE2b miner then gets class YUGE | [#1](https://github.com/iohzrd/datum_gateway/pull/1) |
 | `OCEAN-xyz` `dbc3b14` | same late-coinbaser case, SHA256d (no BLAKE2b code at all) | not filed |
 
 Convoy and iohzrd already return `DATUM_COINBASE_ID_EMPTY` on a new block and pair it with

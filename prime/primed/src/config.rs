@@ -43,8 +43,8 @@ pub struct Config {
     pub min_payout: u64,
     #[serde(default)]
     pub fee_bps: u32,
-    /// Fee on an upgraded empty-solo coinbase (gateway + pool), basis points. Default 500
-    /// (5%), matching the dedicated solo ports. Stock gateways without a fee output
+    /// Fee on an upgraded empty-solo coinbase (gateway + pool), basis points. Default 750
+    /// (7.5%), matching the dedicated solo ports. Stock gateways without a fee output
     /// still classify as EmptySolo at 0% via the script-flip path.
     #[serde(default = "d_empty_solo_fee")]
     pub empty_solo_fee_bps: u32,
@@ -62,7 +62,7 @@ pub struct Config {
     #[serde(default)]
     pub stratum_fee_bps: u32,
     /// Share of the house-stratum fee handed to DATUM work instead of kept, basis points of
-    /// stratum work's value (500 = 5 points of a 10% stratum fee). 0 (default) disables it.
+    /// stratum work's value (750 = 7.5 points of a 15% stratum fee). 0 (default) disables it.
     #[serde(default)]
     pub datum_rebate_bps: u32,
     /// Share of a solo block's reward owed to DATUM work when a `solo-coinbase-tag` block
@@ -189,7 +189,7 @@ fn d_session_coinbase_budget() -> usize {
     4 << 20
 }
 fn d_empty_solo_fee() -> u32 {
-    500
+    750
 }
 fn d_owe() -> String {
     "owe".into()

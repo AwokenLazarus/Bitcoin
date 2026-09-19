@@ -600,12 +600,12 @@ mod tests {
         SplitParams { fee_bps: 0, stratum_fee_bps: 300, datum_rebate_bps: 100, min_payout: 1, ..SplitParams::default() }
     }
 
-    /// Lazarus production: DATUM 0%, public stratum 10%, five of those points to DATUM as carry.
+    /// Lazarus production: DATUM 0%, public stratum 15%, 7.5 of those points to DATUM as carry.
     fn production_params() -> SplitParams {
         SplitParams {
             fee_bps: 0,
-            stratum_fee_bps: 1000,
-            datum_rebate_bps: 500,
+            stratum_fee_bps: 1500,
+            datum_rebate_bps: 750,
             min_payout: 1,
             ..SplitParams::default()
         }
@@ -648,26 +648,26 @@ mod tests {
     }
 
     #[test]
-    fn production_ten_percent_stratum_five_points_to_datum_five_to_pool() {
+    fn production_fifteen_percent_stratum_seven_half_points_to_datum() {
         // 60% of the window is public stratum, 40% DATUM.
         let miners = vec![miner_stratum("house", 600), miner("d1", 300), miner("d2", 100)];
         let value = 100_000_000u64;
         let s = compute(miners, 1000, value, &production_params(), 0, script);
-        // 10% of the stratum slice (60M) is taken this coinbase; DATUM work is free.
-        assert_eq!(s.fee_sats, 6_000_000);
+        // 15% of the stratum slice (60M) is taken this coinbase; DATUM work is free.
+        assert_eq!(s.fee_sats, 9_000_000);
         let by = |id: &str| s.payees.iter().find(|p| p.identity == id).unwrap();
-        assert_eq!(by("house").sats, 54_000_000);
+        assert_eq!(by("house").sats, 51_000_000);
         assert_eq!(by("d1").sats, 30_000_000);
         assert_eq!(by("d2").sats, 10_000_000);
-        assert_eq!(s.pool_sats, 6_000_000, "same-block pool output is the full 10%");
+        assert_eq!(s.pool_sats, 9_000_000, "same-block pool output is the full 15%");
         assert_eq!(s.pool_sats + s.paid_sats(), value);
-        // five points of stratum work's value (3M) is credited 3:1 to the DATUM miners
-        assert_eq!(s.rebate_sats, 3_000_000);
-        assert_eq!(s.rebate_credits, vec![("d1".to_string(), 2_250_000), ("d2".to_string(), 750_000)]);
-        assert_eq!(s.carry_delta(|_| true), vec![("d1".to_string(), 2_250_000), ("d2".to_string(), 750_000)]);
-        // next block pays that carry out of the pool remainder: pool nets 5% of stratum work
+        // 7.5 points of stratum work's value (4.5M) is credited 3:1 to the DATUM miners
+        assert_eq!(s.rebate_sats, 4_500_000);
+        assert_eq!(s.rebate_credits, vec![("d1".to_string(), 3_375_000), ("d2".to_string(), 1_125_000)]);
+        assert_eq!(s.carry_delta(|_| true), vec![("d1".to_string(), 3_375_000), ("d2".to_string(), 1_125_000)]);
+        // next block pays that carry out of the pool remainder: pool nets 7.5% of stratum work
         let next = compute(
-            vec![miner_stratum("house", 600), miner_carry("d1", 300, 2_250_000), miner_carry("d2", 100, 750_000)],
+            vec![miner_stratum("house", 600), miner_carry("d1", 300, 3_375_000), miner_carry("d2", 100, 1_125_000)],
             1000,
             value,
             &production_params(),
@@ -675,9 +675,9 @@ mod tests {
             script,
         );
         let by = |id: &str| next.payees.iter().find(|p| p.identity == id).unwrap();
-        assert_eq!((by("d1").sats, by("d1").carry), (32_250_000, 2_250_000));
-        assert_eq!((by("d2").sats, by("d2").carry), (10_750_000, 750_000));
-        assert_eq!(next.pool_sats, 3_000_000, "10% charged, 5 points paid back: the pool nets 5%");
+        assert_eq!((by("d1").sats, by("d1").carry), (33_375_000, 3_375_000));
+        assert_eq!((by("d2").sats, by("d2").carry), (11_125_000, 1_125_000));
+        assert_eq!(next.pool_sats, 4_500_000, "15% charged, 7.5 points paid back: the pool nets 7.5%");
         assert_eq!(next.pool_sats + next.paid_sats(), value);
 
         let all_datum = compute(vec![miner("d", 1000)], 1000, value, &production_params(), 0, script);
@@ -685,10 +685,10 @@ mod tests {
         assert_eq!(all_datum.payees[0].sats, value);
 
         let all_stratum = compute(vec![miner_stratum("house", 1000)], 1000, value, &production_params(), 0, script);
-        assert_eq!(all_stratum.fee_sats, 10_000_000);
-        assert_eq!(all_stratum.pool_sats, 10_000_000);
+        assert_eq!(all_stratum.fee_sats, 15_000_000);
+        assert_eq!(all_stratum.pool_sats, 15_000_000);
         assert_eq!(all_stratum.rebate_sats, 0);
-        assert_eq!(all_stratum.rebate_deferred, 5_000_000, "no DATUM work: the 5-point subsidy waits");
+        assert_eq!(all_stratum.rebate_deferred, 7_500_000, "no DATUM work: the 7.5-point subsidy waits");
     }
 
     /// The point of crediting rather than paying: a DATUM miner too small for this coinbase
