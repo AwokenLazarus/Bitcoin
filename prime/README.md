@@ -454,9 +454,9 @@ Doing this by hand first surfaced three bugs, all fixed:
 * Idle gateways get a zero-length INFO frame every 20 s (the client's global timeout is 60 s);
   a gateway silent for 300 s is dropped. Handshake must complete in 15 s. Silent means no
   whole frame: bytes of a frame that never completes do not count, and a frame may be at most
-  192 KiB unless a found block's transactions have been asked for. The per-address limit counts
-  an IPv6 /64 as one address, and the last eighth of the slots (at most 8) are kept for
-  loopback so the house gateway cannot be crowded out.
+  192 KiB unless the session has had a block candidate in the last half hour. The per-address
+  limit counts an IPv6 /64 as one address, and the last two slots are kept for loopback so the
+  house gateway cannot be crowded out.
 * Duplicate shares are caught by hash in one set shared by every session and keyed by block
   height. The hash commits to the job (prev, merkle, nBits, txcount, version) and the miner's
   nonces, so it is unique per height and needs no per-job scoping; nothing a gateway sends —
@@ -466,29 +466,40 @@ Doing this by hand first surfaced three bugs, all fixed:
   whenever the job section changed, which let one share be credited without limit.) Shares one
   height behind are accepted for `stale-grace-secs` after the tip moved, matching template
   refresh latency.
-* A job is held to the pool node's chain, not to the gateway's account of it: the job's
-  `prev_hash` must be the node's tip (or the tip's parent inside `stale-grace-secs`), its height
-  the next one, and its `nbits` the target the node sets for that block (`getmininginfo`
-  `next.bits`; on a node that does not report it, the tip's own bits off a retarget boundary,
-  and no easier than four times the tip's target on one). Without this an easy `nbits` makes
-  every share a "block", and a block candidate moves carry balances at once. Until the node has
-  given a tip there is nothing to hold a job to, so shares are refused (`accept-without-node`
-  is for tests). Work ahead of our tip makes the session ask the node early, at most once per
-  250 ms across all sessions, so the ask cannot be turned into an RPC flood.
+* A job's target is held to the pool node's chain, not to the gateway's account of it. Under
+  an easy `nbits` every share "is a block", and a block candidate moves carry balances the
+  moment it is recorded, so `nbits` must be what the node sets for that block (`getmininginfo`
+  `next.bits`; on a node that does not report it, the tip's own bits off a retarget boundary).
+  Where the node cannot say (no `next`, or a retarget block on a branch or height our node is
+  not at) it must be no easier than four times the tip's target, which is all consensus
+  allows. Where a job *builds* is reported, not enforced: a gateway whose node is on a
+  competing tip, or one block ahead of ours, is doing honest work that may be on the winning
+  side, and its shares are taken (two or more ahead is refused as stale, as it always was).
+  Work ahead of our tip makes the session ask the node early, at most once per 250 ms across
+  all sessions, so the ask cannot be turned into an RPC flood. Until the node has given any
+  tip, work is still taken and credited (a slow node is not the gateways' fault), but nothing
+  is recorded as a block on a gateway's word.
 * A share's difficulty has to be part of what was hashed, and only hashed bytes may say where
   it is. The target byte is the first data byte of the scriptSig's third push (height, tags,
-  then the unique-id push, as `generate_coinbase_input` builds it in every gateway lineage);
-  the job section's `target_byte_index` must name exactly that byte. An index past the end, or
-  one aimed at a tag byte that already holds the pot being claimed, would let one stream of
-  easy hashes be claimed each at the best difficulty it happens to meet. The whole-coinbase
-  form (`lazarus-gateway`) has no target byte, so its difficulty is the gateway's word, and
-  that word is only taken from the pool's own gateway: loopback while `house-loopback` is on,
-  or a key in `house-gateways` (give the full 64-digit key). Turn `house-loopback` off if
-  anything on the host forwards outside connections to the DATUM port.
-* A coinbaser is good for the block it was asked for and the one after. The job names the
+  then the unique-id push, as `generate_coinbase_input` builds it in every C lineage and
+  `ratum-gateway` does too); the job section's `target_byte_index` must name exactly that
+  byte. An index past the end, or one aimed at a tag byte that already holds the pot being
+  claimed, would let one stream of easy hashes be claimed each at the best difficulty it
+  happens to meet. The whole-coinbase form (`lazarus-gateway`) has no target byte at all.
+  None of these is refused. A share whose difficulty is not provably hashed is credited by
+  its hash alone: `2^uncommitted-pot` (default 2^20) if the hash meets that, nothing
+  otherwise, whatever it claims. Credit that depends only on the hash leaves nothing to
+  choose after the fact, and it is fair: work at any difficulty up to the threshold earns,
+  on average, exactly what was done (lumpier, not smaller); only work above it is
+  under-credited. `totals.uncommitted_shares` counts them and the log names the gateway. The
+  one gateway taken at its word is the pool's own: loopback while `house-loopback` is on, or
+  a key in `house-gateways` (give the full 64-digit key; a short prefix still works but is
+  warned about at startup, since it is one a stranger could grind). Turn `house-loopback` off
+  if anything on the host forwards outside connections to the DATUM port.
+* A coinbaser is good for the block it was asked for and the two after. The job names the
   coinbaser id and a session keeps its last sixteen, so with no limit a gateway could ask once
-  while its share of the window was at its best and mine on that reading for ever. The block of
-  grace is for a gateway racing a new tip on the split it already had: that is late, not lying.
+  while its share of the window was at its best and mine on that reading for ever. The blocks of
+  grace are for a gateway racing a new tip on the split it already had: that is late, not lying.
   Past it the job is held to no coinbaser, which for a pool-only coinbase changes nothing.
 * The gateway's own script (learned from its dominant share username, so: anything it likes)
   may take only what a template is worth beyond the issued list, and at most a sixteenth of

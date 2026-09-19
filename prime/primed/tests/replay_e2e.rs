@@ -23,8 +23,8 @@ use datum_wire::mining;
 fn one_share_is_credited_once_no_matter_how_it_is_resubmitted() {
     let pool = Identity::generate();
     let gw_identity = Identity::generate();
-    // nothing listens here, and this test is not about the chain: take shares without a node
-    let (primed, port) = start_primed(&pool, "rpc = \"http://127.0.0.1:9\"\npoll = 5.0\naccept-without-node = true");
+    // nothing listens here: shares are taken without a chain to hold them to
+    let (primed, port) = start_primed(&pool, "rpc = \"http://127.0.0.1:9\"\npoll = 5.0");
     let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as u32;
 
     let mut share = pool_only_share(3, HEIGHT, [0x77; 32], 0x193c_2d40, 0, now);

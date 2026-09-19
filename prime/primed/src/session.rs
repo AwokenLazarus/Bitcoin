@@ -36,7 +36,7 @@ fn house_stratum(cfg: &Config, remote: SocketAddr, gateway_key: &str) -> bool {
         return true;
     }
     let g = gateway_key.to_ascii_lowercase();
-    cfg.house_gateways.iter().any(|h| h.len() >= 16 && g.starts_with(h.as_str()))
+    cfg.house_gateways.iter().any(|h| !h.is_empty() && g.starts_with(h.as_str()))
 }
 
 const MAX_HELLO: usize = 4096;
@@ -74,6 +74,10 @@ const MAX_MONEY: u64 = 2_100_000_000_000_000;
 /// transactions of a found block need the protocol's full `MAX_CMD_LEN`, and those are asked
 /// for. Every open session can make Prime buffer one frame, so this is what 256 of them cost.
 const MAX_IDLE_FRAME: usize = 192 * 1024;
+/// How long after a block candidate a session may still send a full-size frame.
+const BLOCK_REPLY_WINDOW: Duration = Duration::from_secs(1800);
+/// Blocks past the one it was issued for that a coinbaser is still honoured; see `issued_for`.
+const COINBASER_GRACE_BLOCKS: u32 = 2;
 /// Identities one session's gateway-script vote keeps count of; see `note_identity`.
 const MAX_SESSION_IDENTITIES: usize = 1024;
 /// What one over-rate coinbaser request with nothing to repeat counts as, in rejects.
@@ -270,6 +274,10 @@ struct Session {
     /// subsidy-only job and should not be happening.
     pool_only_full_jobs: u64,
     pool_only_warned: Option<Instant>,
+    /// When this session last said its shares are credited by hash alone.
+    uncommitted_warned: Option<Instant>,
+    /// When this session last had a block candidate; see `MAX_IDLE_FRAME`.
+    candidate_at: Option<Instant>,
     /// Work seen per share username on this session; the dominant identity is the
     /// gateway's payout for the script-flip.
     identity_work: HashMap<String, u64>,
@@ -420,6 +428,8 @@ pub async fn run(shared: Arc<Shared>, mut stream: TcpStream, remote: SocketAddr)
         pool_only_shares: 0,
         pool_only_full_jobs: 0,
         pool_only_warned: None,
+        uncommitted_warned: None,
+        candidate_at: None,
         identity_work: HashMap::new(),
         gateway_script: known_script,
         gateway_identity: None,
@@ -495,7 +505,11 @@ impl Session {
                             None => {
                                 let Some(hb) = inbuf.take(Header::SIZE) else { break };
                                 let h = Header::decode(hb.try_into().unwrap(), &mut self.recv_keys)?;
-                                let cap = if self.pending_blocks.is_empty() { MAX_IDLE_FRAME } else { MAX_CMD_LEN };
+                                // full size while a found block's transactions are owed, and
+                                // for a while after: a slow reply must not cost the connection
+                                let block_about = !self.pending_blocks.is_empty()
+                                    || self.candidate_at.is_some_and(|t| t.elapsed() < BLOCK_REPLY_WINDOW);
+                                let cap = if block_about { MAX_CMD_LEN } else { MAX_IDLE_FRAME };
                                 if h.len as usize > cap {
                                     return Err(SessionError::Bad("frame too large"));
                                 }
@@ -932,11 +946,12 @@ impl Session {
     /// the job builds on, or no more than a block before it. The id is the gateway's to choose
     /// and the last `COINBASERS_KEPT` replies stay in hand, so with no limit a gateway could
     /// ask once while its share of the window was at its best and mine every later block
-    /// against that reading. One block of grace, because a gateway racing a new tip can
+    /// against that reading. A couple of blocks of grace, because a gateway racing a new tip can
     /// publish its first job there on the split it already had, and that is a lag, not a lie:
     /// refusing it would throw away honest miners' shares over nothing.
     fn issued_for(&self, id: u8, prev_hash: &[u8; 32], height: u32) -> Option<&IssuedCoinbaser> {
-        self.issued(id).filter(|c| &c.prev_hash == prev_hash || (c.height > 0 && height <= c.height + 1))
+        self.issued(id)
+            .filter(|c| &c.prev_hash == prev_hash || (c.height > 0 && height <= c.height + COINBASER_GRACE_BLOCKS))
     }
 
     /// Undo a coinbase section this share brought in (it pushed the session over budget).
@@ -1010,22 +1025,19 @@ impl Session {
         };
         // The job section is the gateway's account of the chain; the node's is the one that
         // counts. Height, parent and target are all held to it before any work is credited.
+        // Until the node has answered once there is no chain to hold a job to. That is this
+        // pool's node being slow to start, not anything a gateway did, so their work is still
+        // taken and credited (it is real work: the hash is checked either way). What is not
+        // taken on a gateway's word is a *block*: see `held_to_chain` below.
         let tip = self.shared.tip_snapshot();
-        if tip.is_none() && !self.shared.cfg.accept_without_node {
-            // The node has never answered, so there is no chain to hold this job to. Work
-            // taken now is taken on the gateway's word alone, and that word can be anything.
-            if self.chain_warned.is_none_or(|t| t.elapsed() > Duration::from_secs(60)) {
-                self.chain_warned = Some(Instant::now());
-                log::warn!("[{}] refusing shares: the node has not told us its tip yet (check rpc)", self.id);
-            }
-            return self.reject(&s, mining::REJECT_STALE_BLOCK).await;
-        }
+        let held_to_chain = tip.is_some();
         if let Some(mut tip) = tip {
             let grace = Duration::from_secs(u64::from(self.shared.cfg.stale_grace_secs));
             let mut check = tip.check_job(&prev_hash, height, nbits, grace);
-            if check == JobCheck::Ahead && self.tip_asked.is_none_or(|t| t.elapsed() > AHEAD_REFRESH_EVERY) {
+            let ahead = matches!(check, JobCheck::Ahead | JobCheck::AheadByOne);
+            if ahead && self.tip_asked.is_none_or(|t| t.elapsed() > AHEAD_REFRESH_EVERY) {
                 // A gateway's node can have the next block before our poller does. Ask now
-                // instead of refusing good work for the rest of a poll period.
+                // rather than go on working from a tip that may be a block old.
                 self.tip_asked = Some(Instant::now());
                 node::refresh_ahead(&self.shared).await;
                 if let Some(t) = self.shared.tip_snapshot() {
@@ -1033,15 +1045,36 @@ impl Session {
                     tip = t;
                 }
             }
+            let warn = self.chain_warned.is_none_or(|t| t.elapsed() > Duration::from_secs(60));
             let code = match check {
-                JobCheck::Current => None,
+                JobCheck::Current | JobCheck::AheadByOne => None,
+                JobCheck::OtherBranch => {
+                    // Taken: its node is on a tip ours does not have, which is what a fork
+                    // looks like from here. Worth a line, because it is also what a gateway
+                    // inventing parents looks like, and what our own node looks like when it
+                    // is the one on the losing side.
+                    if warn {
+                        self.chain_warned = Some(Instant::now());
+                        let mut prev = prev_hash;
+                        prev.reverse();
+                        log::warn!(
+                            "[{}] {} is working at height {height} on {}, where our node has {} at {}: a competing tip, or a node out of step. Its work is taken.",
+                            self.id,
+                            self.gateway_hex,
+                            hex::encode(prev),
+                            tip.hash,
+                            tip.height,
+                        );
+                    }
+                    None
+                }
                 JobCheck::Stale => Some(mining::REJECT_STALE_BLOCK),
                 JobCheck::Ahead => {
-                    // Still past our tip after asking the node. That is our node lagging
+                    // Two or more past our tip, after asking the node. That is our node lagging
                     // (peers, sync, or an isolated node) or a gateway making heights up; say
                     // so, once a minute, because if it is the node then every share from
                     // every healthy gateway is being refused meanwhile.
-                    if self.chain_warned.is_none_or(|t| t.elapsed() > Duration::from_secs(60)) {
+                    if warn {
                         self.chain_warned = Some(Instant::now());
                         log::warn!(
                             "[{}] {} submits work for height {height} but our node's tip is {}: the pool node is behind the gateway's node; check its peers and sync. Rejecting as stale until it catches up.",
@@ -1050,28 +1083,22 @@ impl Session {
                     }
                     Some(mining::REJECT_STALE_BLOCK)
                 }
-                JobCheck::WrongParent | JobCheck::WrongBits => {
-                    if self.chain_warned.is_none_or(|t| t.elapsed() > Duration::from_secs(60)) {
+                JobCheck::WrongBits => {
+                    if warn {
                         self.chain_warned = Some(Instant::now());
-                        let mut prev = prev_hash;
-                        prev.reverse();
                         log::warn!(
-                            "[{}] {} submits work for height {height} on {} with nbits {nbits:08x}, which is not what our node has (tip {} at {}, next bits {}): its node is on another branch, or the job is made up. Rejecting.",
+                            "[{}] {} submits work for height {height} with nbits {nbits:08x}, a target the chain cannot have set there (tip {} bits {}, next bits {}). Rejecting: under it every share would be a block.",
                             self.id,
                             self.gateway_hex,
-                            hex::encode(prev),
-                            tip.hash,
                             tip.height,
+                            tip.bits.map_or("unknown".into(), |b| format!("{b:08x}")),
                             tip.next_bits.map_or("unknown".into(), |b| format!("{b:08x}")),
                         );
                     }
-                    Some(if check == JobCheck::WrongBits {
-                        mining::REJECT_TARGET_MISMATCH
-                    } else {
-                        mining::REJECT_STALE_BLOCK
-                    })
+                    Some(mining::REJECT_TARGET_MISMATCH)
                 }
             };
+            debug_assert_eq!(code.is_none(), check.taken());
             if let Some(code) = code {
                 return self.reject(&s, code).await;
             }
@@ -1089,6 +1116,7 @@ impl Session {
             gateway_script: gateway_script.as_deref(),
             empty_solo_fee_bps: self.shared.cfg.empty_solo_fee_bps,
             trusted_target: self.is_house_stratum(),
+            uncommitted_pot: self.shared.cfg.uncommitted_pot,
         };
         let v = match verify::verify(&mut self.slots[job_id], &s, &policy) {
             Ok(v) => v,
@@ -1124,8 +1152,12 @@ impl Session {
                 false
             } else {
                 let source = if self.is_house_stratum() { SOURCE_STRATUM } else { SOURCE_DATUM };
-                if let Err(e) = ledger.credit(&identity, v.work, v.height, ts as u32, source) {
-                    log::error!("ledger write failed: {e}");
+                // nothing to write for a share credited by its hash alone that earned nothing
+                // this time (`Policy::uncommitted_pot`); it is accepted like any other
+                if v.work > 0 {
+                    if let Err(e) = ledger.credit(&identity, v.work, v.height, ts as u32, source) {
+                        log::error!("ledger write failed: {e}");
+                    }
                 }
                 true
             }
@@ -1201,10 +1233,41 @@ impl Session {
         }
         self.send_mining(&mining::share_receipt(status, 0, s.nonce32, s.target_pot, s.job_id), false).await?;
 
+        if !v.target_committed {
+            self.note_uncommitted_share();
+        }
         if v.is_block_candidate {
-            self.on_block_candidate(s, v, identity).await?;
+            if held_to_chain {
+                self.on_block_candidate(s, v, identity).await?;
+            } else {
+                // Its `nbits` is whatever the job said, so "meets nbits" proves nothing: at
+                // regtest's target every share does. A candidate moves carry balances the
+                // moment it is recorded, and that is not done on a gateway's word. The gateway
+                // submits its own blocks to its own node regardless.
+                log::warn!(
+                    "[{}] {} share at height {} meets its job's nbits, but our node has given no tip to hold that job to: not recorded as a block (check rpc)",
+                    self.id, self.gateway_hex, v.height
+                );
+            }
         }
         Ok(())
+    }
+
+    /// Say, now and then, that this gateway's shares are being credited by their hash alone.
+    fn note_uncommitted_share(&mut self) {
+        self.shared.totals.add(&self.shared.totals.uncommitted_shares, 1);
+        if self.uncommitted_warned.is_some_and(|t| t.elapsed() < POOL_ONLY_WARN_EVERY) {
+            return;
+        }
+        self.uncommitted_warned = Some(Instant::now());
+        log::warn!(
+            "[{}] {} {} ua={:?}: the difficulty of its shares is not part of what they hash (no target byte where the scriptSig's unique-id push puts one), so they are credited by hash alone at difficulty 2^{}: fair on average up to that difficulty, lumpier than a gateway that commits it. lazarus-gateway away from the pool host does this; if it is the pool's own, give its full key in house-gateways.",
+            self.id,
+            self.remote,
+            self.gateway_hex,
+            self.hello.user_agent,
+            self.shared.cfg.uncommitted_pot.max(self.shared.cfg.min_pot()),
+        );
     }
 
     async fn reject(&mut self, s: &PowSubmit, code: u16) -> Result<(), SessionError> {
@@ -1303,6 +1366,7 @@ impl Session {
             v.coinbase_value,
             self.gateway_hex
         );
+        self.candidate_at = Some(Instant::now());
         self.shared.totals.add(&self.shared.totals.block_candidates, 1);
         self.shared.client_update(self.id, |c| c.block_candidates += 1);
 
@@ -1715,9 +1779,8 @@ mod tests {
         assert!(!house_stratum(&cfg, remote, &lookalike));
         cfg.house_gateways = vec!["9d992e5cfec05102".into()];
         assert!(house_stratum(&cfg, remote, &lookalike), "a prefix matches whatever starts with it");
-        cfg.house_gateways = vec!["9d99".into()];
-        assert!(!house_stratum(&cfg, remote, &house), "too short to mean anything");
         // loopback is house only while house-loopback says so
+        cfg.house_gateways.clear();
         assert!(!house_stratum(&cfg, "127.0.0.1:5000".parse().unwrap(), &lookalike));
         cfg.house_loopback = true;
         assert!(house_stratum(&cfg, "127.0.0.1:5000".parse().unwrap(), &lookalike));

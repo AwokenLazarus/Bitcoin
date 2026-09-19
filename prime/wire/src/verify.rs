@@ -170,8 +170,12 @@ pub enum CoinbaseKind {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VerifiedShare {
     pub hash: Hash,
-    /// Work in difficulty-1 units (`2^target_pot`).
+    /// Work to credit, in difficulty-1 units: `2^target_pot`, or what
+    /// [`Policy::uncommitted_pot`] gives a share whose difficulty was not in its hash (which
+    /// can be nothing: the share is accepted all the same).
     pub work: u64,
+    /// Whether `target_pot` was part of what was hashed, or taken from a trusted gateway.
+    pub target_committed: bool,
     pub target_pot: u8,
     pub height: u32,
     pub ntime: u32,
@@ -206,8 +210,21 @@ pub struct Policy<'a> {
     pub empty_solo_fee_bps: u32,
     /// Take the share's difficulty on the gateway's word when the coinbase does not carry it.
     /// Only for the pool's own gateway, whose whole-coinbase shares have no target byte; from
-    /// anyone else such a share is refused (see [`coinbase::commits_target`]).
+    /// anyone else such a share is credited by [`Policy::uncommitted_pot`] instead.
     pub trusted_target: bool,
+    /// How a share is credited when its difficulty is not provably part of what was hashed
+    /// (see [`coinbase::commits_target`]) and the gateway is not trusted with it: `2^pot` if
+    /// its hash meets that difficulty, nothing otherwise, whatever the share claims.
+    ///
+    /// Such a share is not refused. It may be an older `lazarus-gateway` run by a third party,
+    /// or a gateway that lays its scriptSig out in a way this Prime has not met, and neither is
+    /// cheating. What cannot stand is crediting the claim, because a claim outside the hash is
+    /// chosen after the hash is known: one stream of easy hashes, each claimed at the best
+    /// difficulty it happens to meet. Credit that depends on the hash alone leaves nothing to
+    /// choose. It is also fair: a miner working at any difficulty up to this one is credited,
+    /// on average, exactly the work done (at `2^13` and a pot of 20, one share in 128 is
+    /// credited 128 shares' worth). Only work above it is under-credited, so it is set high.
+    pub uncommitted_pot: u8,
 }
 
 fn fee_sats(value: u64, bps: u32) -> u64 {
@@ -442,9 +459,9 @@ pub fn verify_with_target(
         }
     };
     // The claimed difficulty has to be in the hash, or it was chosen after the work was done.
-    if !on_trust && !coinbase::commits_target(legacy, tbi) {
-        return Err(mining::REJECT_TARGET_MISMATCH);
-    }
+    // Where it is not, the share is still work and still taken; it is credited by its hash
+    // alone (`Policy::uncommitted_pot`), below.
+    let target_committed = on_trust || coinbase::commits_target(legacy, tbi);
     let merkle_empty = job.merkle_branches.is_empty();
     let coinbase_kind = classify_coinbase(parsed, p, s.subsidy_only(), job.txn_count, merkle_empty);
     if coinbase_kind == CoinbaseKind::Foreign {
@@ -527,7 +544,18 @@ pub fn verify_with_target(
 
     let verified = VerifiedShare {
         hash,
-        work: s.claimed_work(),
+        work: if target_committed {
+            s.claimed_work()
+        } else {
+            let pot = p.uncommitted_pot.max(p.min_pot);
+            let met = pow::share_target_le(pot).is_some_and(|t| pow::meets_target(&hash, &t));
+            if met && pot < 64 {
+                1u64 << pot
+            } else {
+                0
+            }
+        },
+        target_committed,
         target_pot: s.target_pot,
         height: job.height,
         ntime,
@@ -730,6 +758,7 @@ mod tests {
             gateway_script: None,
             empty_solo_fee_bps: 250,
             trusted_target: false,
+            uncommitted_pot: 20,
         }
     }
 
@@ -1186,6 +1215,15 @@ mod tests {
         let iss = split();
         let outs = gateway_outputs(&iss, &pool, VALUE);
         let all = [0xff; 32];
+        // Whatever such a share claims, it is accepted, and its credit is what its hash earns
+        // at the pool's own threshold: 2^20 or nothing. Never the claim.
+        let by_hash_alone = |slot: &mut JobSlot, s: &PowSubmit, p: &Policy| {
+            let v = verify_with_target(slot, s, p, &all).expect("not refused: it is still work");
+            assert!(!v.target_committed);
+            let earned = pow::meets_target(&v.hash, &pow::share_target_le(20).unwrap());
+            assert_eq!(v.work, if earned { 1 << 20 } else { 0 }, "claimed pot {}", s.target_pot);
+            v.hash
+        };
 
         // an index past the end of the coinbase: the byte is never written, and every claim
         // rebuilds the same header
@@ -1193,26 +1231,29 @@ mod tests {
         let mut s = share(0, 4, 1, &outs, &txids(3), 1, [0; 8], [0; 8]);
         s.job.as_mut().unwrap().target_byte_index = 0xffff;
         slot.absorb(&s).unwrap();
+        let mut hashes = Vec::new();
         for pot in [0u8, 1, 20, 40] {
             s.target_pot = pot;
-            let r = verify_with_target(&mut slot, &s, &policy(&iss, &pool), &all);
-            assert_eq!(r, Err(mining::REJECT_TARGET_MISMATCH), "pot {pot}");
+            hashes.push(by_hash_alone(&mut slot, &s, &policy(&iss, &pool)));
         }
+        assert!(hashes.windows(2).all(|w| w[0] == w[1]), "one header under every claim");
         // not even from the pool's own gateway: no gateway builds this
         let house = Policy { trusted_target: true, ..policy(&iss, &pool) };
-        assert_eq!(verify_with_target(&mut slot, &s, &house, &all), Err(mining::REJECT_TARGET_MISMATCH));
+        by_hash_alone(&mut slot, &s, &house);
 
         // the whole coinbase in `coinb1`: no target byte at all, so the difficulty is the
         // gateway's word, which is only good when the gateway is the pool's own
         let mut slot = JobSlot::default();
-        let mut s = share(0, 4, 1, &outs, &txids(3), 1, [0; 8], [0; 8]);
+        let mut s = share(0, 4, 1, &outs, &txids(3), 5, [0; 8], [0; 8]);
         let c = s.coinbase.as_mut().unwrap();
         c.coinb1.extend_from_slice(&[0u8; coinbase::EXTRANONCE_SLOT]);
         c.coinb1.append(&mut c.coinb2);
         s.job.as_mut().unwrap().target_byte_index = 0;
         slot.absorb(&s).unwrap();
-        assert_eq!(verify_with_target(&mut slot, &s, &policy(&iss, &pool), &all), Err(mining::REJECT_TARGET_MISMATCH));
-        verify_with_target(&mut slot, &s, &house, &all).expect("the pool's own gateway is taken at its word");
+        by_hash_alone(&mut slot, &s, &policy(&iss, &pool));
+        let v = verify_with_target(&mut slot, &s, &house, &all).expect("the pool's own gateway");
+        assert!(v.target_committed);
+        assert_eq!(v.work, 1 << 5, "taken at its word");
 
         // a byte that already holds the pot being claimed: writing it changes nothing, so a
         // coinbase seeded with several pots is one header under each of those claims
@@ -1221,28 +1262,19 @@ mod tests {
         let real = usize::from(s.job.as_ref().unwrap().target_byte_index);
         let seeded = real - 3; // the last letter of the tag
         s.coinbase.as_mut().unwrap().coinb1[seeded] = 5;
-        let honest = verify_with_target(
-            &mut slot.clone(),
-            &{
-                let mut h = s.clone();
-                h.target_pot = 9;
-                h
-            },
-            &policy(&iss, &pool),
-            &all,
-        );
         s.job.as_mut().unwrap().target_byte_index = seeded as u16;
         s.target_pot = 5;
         slot.absorb(&s).unwrap();
-        assert_eq!(verify_with_target(&mut slot, &s, &policy(&iss, &pool), &all), Err(mining::REJECT_TARGET_MISMATCH));
-        assert_eq!(verify_with_target(&mut slot, &s, &house, &all), Err(mining::REJECT_TARGET_MISMATCH));
+        by_hash_alone(&mut slot, &s, &policy(&iss, &pool));
+        by_hash_alone(&mut slot, &s, &house);
         // the same coinbase with the index where the script puts it is ordinary work
-        assert!(honest.is_err(), "not absorbed yet");
         let mut slot = JobSlot::default();
         s.job.as_mut().unwrap().target_byte_index = real as u16;
         s.target_pot = 9;
         slot.absorb(&s).unwrap();
-        verify_with_target(&mut slot, &s, &policy(&iss, &pool), &all).expect("the script's own target byte");
+        let v = verify_with_target(&mut slot, &s, &policy(&iss, &pool), &all).expect("the script's own target byte");
+        assert!(v.target_committed);
+        assert_eq!(v.work, 1 << 9);
 
         // the ordinary form commits: a different claim is a different header
         let mut slot = JobSlot::default();
@@ -1252,6 +1284,36 @@ mod tests {
         s.target_pot = 2;
         let b = verify_with_target(&mut slot, &s, &policy(&iss, &pool), &all).unwrap().hash;
         assert_ne!(a, b);
+    }
+
+    /// Why a share whose difficulty is outside its hash is credited by the hash alone. A model
+    /// of the two rules over the same 2^17 hashes, difficulty counted in leading zero bits.
+    #[test]
+    fn credit_by_hash_alone_is_fair_and_cannot_be_chosen() {
+        let n = 1u64 << 17;
+        let zeros = |i: u64| {
+            let h = pow::sha256d(&i.to_le_bytes());
+            h.iter()
+                .rev()
+                .map(|b| b.leading_zeros())
+                .scan(true, |go, z| {
+                    go.then(|| {
+                        *go = z == 8;
+                        z
+                    })
+                })
+                .sum::<u32>()
+        };
+        let by_hash = |pot: u32| (0..n).filter(|&i| zeros(i) >= pot).count() as u64 * (1 << pot);
+        // an honest miner at difficulty 2^3 submits what meets it and is credited 2^3 apiece
+        let honest = (0..n).filter(|&i| zeros(i) >= 3).count() as u64 * (1 << 3);
+        // crediting the claim pays whoever claims each hash at the best difficulty it meets
+        let cheat: u64 = (0..n).map(|i| 1u64 << zeros(i)).sum();
+        assert!(cheat > 4 * honest, "claims chosen after the fact: {cheat} against {honest}");
+        // credit by the hash alone, at 2^6: nothing to choose, so the same for everyone, and
+        // within sampling noise of the work the honest miner actually did
+        let paid = by_hash(6);
+        assert!(paid.abs_diff(honest) * 10 < honest, "{paid} against {honest}");
     }
 
     #[test]
@@ -1270,6 +1332,7 @@ mod tests {
             gateway_script: None,
             empty_solo_fee_bps: 250,
             trusted_target: false,
+            uncommitted_pot: 20,
         };
         let v = check(&mut slot, &s, &p).expect("pool-only is valid work");
         assert_eq!(v.coinbase_kind, CoinbaseKind::PoolOnly);
@@ -1397,6 +1460,7 @@ mod tests {
             gateway_script: Some(gw),
             empty_solo_fee_bps: 250,
             trusted_target: false,
+            uncommitted_pot: 20,
         }
     }
 

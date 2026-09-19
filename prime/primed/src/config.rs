@@ -102,12 +102,13 @@ pub struct Config {
     /// Node poll interval, seconds.
     #[serde(default = "d_poll")]
     pub poll: f64,
-    /// Credit shares before the node has ever told this Prime its tip. Off by default: with
-    /// no tip there is nothing to hold a job's parent, height or target to, so a made-up job
-    /// is credited and an easy `nbits` makes every share a "block" that moves carry balances.
-    /// Only for tests that run without a node.
-    #[serde(default)]
-    pub accept_without_node: bool,
+    /// How a share is credited when its difficulty is not part of what was hashed and its
+    /// gateway is not the pool's own: `2^this` if the hash meets it, nothing otherwise, whatever
+    /// the share claims (see `Policy::uncommitted_pot`). Fair on average for work at any
+    /// difficulty up to it; only work above it is under-credited, so keep it at or above the
+    /// largest vardiff a gateway's miners run at. A power-of-two exponent: 20 is 1 048 576.
+    #[serde(default = "d_uncommitted_pot")]
+    pub uncommitted_pot: u8,
     /// Shares for a height this many blocks behind the tip are stale. 0 means only the
     /// current height. The default tolerates a template refresh in flight.
     #[serde(default = "d_stale_grace")]
@@ -176,6 +177,9 @@ fn d_tolerance() -> u64 {
 fn d_network() -> String {
     "mainnet".into()
 }
+fn d_uncommitted_pot() -> u8 {
+    20
+}
 fn d_poll() -> f64 {
     0.5
 }
@@ -240,9 +244,9 @@ impl Config {
         }
         for g in &mut c.house_gateways {
             *g = g.to_ascii_lowercase();
-            if !(16..=64).contains(&g.len()) || !g.bytes().all(|b| b.is_ascii_hexdigit()) {
-                return Err(format!("house-gateways entry {g:?} must be 16 to 64 hex digits of the gateway's key"));
-            }
+        }
+        if c.uncommitted_pot > 63 {
+            return Err("uncommitted-pot is a power-of-two exponent, 63 at most".into());
         }
         if c.coinbase_tag.len() > 32 {
             return Err("coinbase-tag is too long (32 bytes max)".into());
@@ -272,6 +276,17 @@ impl Config {
     /// One line per legacy key present in the file, explaining why it no longer applies.
     pub fn legacy_notes(&self) -> Vec<String> {
         let mut v = Vec::new();
+        // Said, not enforced: a Prime that will not start takes every gateway down with it.
+        for g in &self.house_gateways {
+            if !g.bytes().all(|b| b.is_ascii_hexdigit()) || g.len() > 64 {
+                v.push(format!("house-gateways entry {g:?} is not hex digits of a gateway key and matches nothing"));
+            } else if g.len() < 64 {
+                v.push(format!(
+                    "house-gateways entry {g:?} is a {}-digit prefix: a house gateway is trusted with its shares' difficulty, and a short prefix is one a stranger can grind a key to match. Give the full 64-digit key",
+                    g.len()
+                ));
+            }
+        }
         if self.activation_height.is_some() {
             v.push("activation-height is ignored: every share is verified as BLAKE2b header v2; SHA256d shares are rejected as bad-version".into());
         }
@@ -375,26 +390,27 @@ require-split-gateway = true
         assert!(r.unwrap_err().contains("fee_percent"));
     }
 
-    /// A house gateway is trusted with its shares' difficulty, so the key that names one has
-    /// to be long enough that nobody can grind a match.
+    /// A house gateway is trusted with its shares' difficulty, so a key prefix short enough to
+    /// grind is worth a warning. It is never worth refusing to start: that takes the pool down.
     #[test]
-    fn a_house_gateway_is_named_by_a_key_nobody_can_grind() {
+    fn a_weak_house_gateway_entry_is_warned_about_not_fatal() {
         let dir = std::env::temp_dir().join(format!("primed-cfg-h-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let p = dir.join("prime.toml");
         let base = LEGACY.replace("/home/umbrel/blake2b/lazarus-prime", dir.to_str().unwrap());
         let load = |entry: &str| {
             std::fs::write(&p, format!("{base}house-gateways = [\"{entry}\"]\n")).unwrap();
-            Config::load(&p)
+            Config::load(&p).expect("loads whatever the entry")
         };
+        let notes = |c: &Config| c.legacy_notes().into_iter().filter(|n| n.contains("house-gateways")).count();
         let full = "9D992E5CFEC05102".repeat(4);
-        assert_eq!(load(&full).unwrap().house_gateways, vec![full.to_ascii_lowercase()]);
-        assert!(load("9d992e5cfec05102").is_ok());
-        for bad in ["", "9d99", "9d992e5cfec0510", "9d992e5cfec0510g", &format!("{full}00")] {
-            assert!(load(bad).is_err(), "{bad:?}");
+        let c = load(&full);
+        assert_eq!(c.house_gateways, vec![full.to_ascii_lowercase()]);
+        assert_eq!(notes(&c), 0);
+        for weak in ["9d99", "9d992e5cfec05102", "9d992e5cfec0510g", &format!("{full}00")] {
+            assert_eq!(notes(&load(weak)), 1, "{weak:?}");
         }
-        // off unless asked for: shares are not taken on a gateway's word alone
-        assert!(!load(&full).unwrap().accept_without_node);
+        assert_eq!(load(&full).uncommitted_pot, 20);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

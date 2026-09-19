@@ -50,16 +50,28 @@ pub struct Tip {
 /// What the node's tip says about the block a job claims to build.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum JobCheck {
-    /// Builds on the tip, or on the tip's parent inside the grace period.
+    /// Builds on the tip, or on the tip's parent inside the grace period, under the node's
+    /// target for that block.
     Current,
+    /// The right height and a possible target, on a block our node does not have there: the
+    /// gateway's node is on a competing tip. Taken; see [`Tip::check_job`].
+    OtherBranch,
+    /// One block past what our node would build, under a possible target: the gateway's node
+    /// has a block ours has not seen yet. Taken.
+    AheadByOne,
     /// For a height the chain has left behind.
     Stale,
-    /// For a height past the one after our tip: our node has not caught up, or it is made up.
+    /// Two or more blocks past our tip: our node is well behind, or the height is made up.
     Ahead,
-    /// The right height on a block that is not the one our node has there.
-    WrongParent,
-    /// The right parent under a target the node does not set for that block.
+    /// A target the chain cannot have set for that block.
     WrongBits,
+}
+
+impl JobCheck {
+    /// Whether work on this job is taken.
+    pub fn taken(self) -> bool {
+        matches!(self, JobCheck::Current | JobCheck::OtherBranch | JobCheck::AheadByOne)
+    }
 }
 
 /// A block hash as the node prints it, in the byte order it has on the wire.
@@ -72,13 +84,25 @@ pub fn hash_le(hex_be: &str) -> Option<Hash> {
 impl Tip {
     /// Hold a job section's `prev_hash`, `height` and `nbits` to the node's chain.
     ///
-    /// All three are the gateway's word. Height alone is not a check: work on a parent the
-    /// node does not have at the tip can never become a block the pool is paid for, and an
-    /// easy `nbits` turns every share into a block candidate.
+    /// All three are the gateway's word, and the one that must not be is `nbits`: under an
+    /// easy target every share "is a block", and a block candidate moves carry balances the
+    /// moment it is recorded. So the target is held to exactly what the node sets wherever
+    /// the node can say, and to what consensus allows (no easier than four times the tip's)
+    /// where it cannot: a node that does not report the next target, or a retarget block on
+    /// a branch or height our node is not at.
+    ///
+    /// The parent is reported, not enforced. A gateway whose node is on a competing tip, or
+    /// a block ahead of ours, is doing honest work that may well be on the winning side, and
+    /// before this check existed it was credited; refusing it would punish a gateway for
+    /// which of two blocks reached it first. Work on a parent that was simply made up earns
+    /// what withholding a block earns, which any miner can do anyway, and with the target
+    /// held it cannot fake a block.
     pub fn check_job(&self, prev_hash: &Hash, height: u32, nbits: u32, grace: Duration) -> JobCheck {
         let expected = self.height + 1;
-        let (parent, bits) = if height == expected {
+        let (parent, reference) = if height == expected {
             (self.hash_le, self.next_bits)
+        } else if height == expected + 1 {
+            (None, self.next_bits)
         } else if height > expected {
             return JobCheck::Ahead;
         } else if height + 1 == expected && self.seen_at.elapsed() < grace {
@@ -86,19 +110,22 @@ impl Tip {
         } else {
             return JobCheck::Stale;
         };
-        if parent.as_ref() != Some(prev_hash) {
-            return JobCheck::WrongParent;
-        }
-        let wrong = match bits {
-            Some(b) => b != nbits,
-            // The node did not say (`node::refresh`). Consensus still bounds a retarget: the
-            // next target is at most four times the tip's. Anything easier is made up.
-            None => self.bits.is_some_and(|tip_bits| easier_than_4x(nbits, tip_bits)),
-        };
-        if wrong {
+        let ours = parent.as_ref() == Some(prev_hash);
+        let exact = reference == Some(nbits);
+        let possible = self.bits.is_none_or(|tip_bits| !easier_than_4x(nbits, tip_bits));
+        // where the node's figure is not the last word: it gave none, or this is a retarget
+        // block being built somewhere our node is not
+        let open = reference.is_none() || (!ours && height.is_multiple_of(2016));
+        if !(exact || (open && possible)) {
             return JobCheck::WrongBits;
         }
-        JobCheck::Current
+        if ours {
+            JobCheck::Current
+        } else if height == expected + 1 {
+            JobCheck::AheadByOne
+        } else {
+            JobCheck::OtherBranch
+        }
     }
 }
 
@@ -185,6 +212,9 @@ pub struct Totals {
     /// below `coinbasers` is the point: it means replies are being served from one snapshot
     /// instead of each taking the ledger lock and recomputing the same split.
     pub coinbaser_base_builds: AtomicU64,
+    /// Accepted shares whose difficulty was not part of what they hashed, credited by hash
+    /// alone (`Policy::uncommitted_pot`).
+    pub uncommitted_shares: AtomicU64,
     /// Accepted shares whose coinbase paid only the pool script.
     pub pool_only_shares: AtomicU64,
     /// Of those, the ones on a job that carried transactions — the kind that should be zero.
@@ -329,11 +359,11 @@ impl Connections {
 
     /// Reserve a slot for `ip`, or say which limit it would break.
     ///
-    /// The last few slots are kept for loopback, which is where the pool's own gateway
+    /// The last two slots are kept for loopback, which is where the pool's own gateway
     /// connects from: strangers holding every slot open (a handshake is all a slot costs)
     /// must not be able to lock the house stratum out with everyone else.
     pub fn admit(&mut self, ip: IpAddr, max_total: u32, max_per_ip: u32) -> Result<(), &'static str> {
-        let reserved = if ip.is_loopback() { 0 } else { (max_total / 8).min(8) };
+        let reserved = if ip.is_loopback() { 0 } else { (max_total / 8).min(2) };
         if self.total >= max_total.saturating_sub(reserved) {
             return Err("connection limit reached");
         }
@@ -588,9 +618,9 @@ mod tests {
         }
     }
 
-    /// A job is held to the node's chain, not to the gateway's account of it.
+    /// A job's target is held to the node's chain; where it builds is reported, not enforced.
     #[test]
-    fn a_job_must_build_on_what_the_node_has() {
+    fn a_job_is_held_to_the_target_the_chain_sets() {
         let (tip_hash, parent) = (h(125), h(124));
         let mut tip = Tip {
             height: 125,
@@ -605,33 +635,42 @@ mod tests {
         };
         let grace = Duration::from_secs(5);
         assert_eq!(tip.check_job(&tip_hash, 126, 0x1c7f_ffff, grace), JobCheck::Current);
-        // the right height is not enough: any other parent, and the easy target that would
-        // make every share a block candidate
-        assert_eq!(tip.check_job(&h(999), 126, 0x1c7f_ffff, grace), JobCheck::WrongParent);
-        assert_eq!(tip.check_job(&parent, 126, 0x1c7f_ffff, grace), JobCheck::WrongParent);
-        assert_eq!(tip.check_job(&tip_hash, 126, 0x207f_ffff, grace), JobCheck::WrongBits);
-        // a height our node has not reached is never taken on the gateway's word
-        assert_eq!(tip.check_job(&h(126), 127, 0x1c7f_ffff, grace), JobCheck::Ahead);
+        // the easy target that would make every share a block candidate, wherever it builds
+        for prev in [tip_hash, h(999)] {
+            assert_eq!(tip.check_job(&prev, 126, 0x207f_ffff, grace), JobCheck::WrongBits);
+            assert_eq!(tip.check_job(&prev, 126, 0x1d00_ffff, grace), JobCheck::WrongBits);
+            assert_eq!(tip.check_job(&prev, 127, 0x207f_ffff, grace), JobCheck::WrongBits);
+        }
+        // a gateway whose node is on a competing tip, or one block ahead of ours, is taken
+        assert_eq!(tip.check_job(&h(999), 126, 0x1c7f_ffff, grace), JobCheck::OtherBranch);
+        assert_eq!(tip.check_job(&h(126), 127, 0x1c7f_ffff, grace), JobCheck::AheadByOne);
+        assert!(JobCheck::OtherBranch.taken() && JobCheck::AheadByOne.taken() && JobCheck::Current.taken());
+        // two ahead is our node well behind, or made up
         assert_eq!(tip.check_job(&tip_hash, 128, 0x1c7f_ffff, grace), JobCheck::Ahead);
-        // the previous height, inside the grace period, on the tip's own parent and target
+        assert!(!JobCheck::Ahead.taken() && !JobCheck::Stale.taken() && !JobCheck::WrongBits.taken());
+        // the previous height, inside the grace period, under the tip's own target
         assert_eq!(tip.check_job(&parent, 125, 0x1d00_ffff, grace), JobCheck::Current);
-        assert_eq!(tip.check_job(&h(7), 125, 0x1d00_ffff, grace), JobCheck::WrongParent);
+        assert_eq!(tip.check_job(&h(7), 125, 0x1d00_ffff, grace), JobCheck::OtherBranch);
         assert_eq!(tip.check_job(&parent, 125, 0x1c7f_ffff, grace), JobCheck::WrongBits);
         assert_eq!(tip.check_job(&parent, 125, 0x1d00_ffff, Duration::ZERO), JobCheck::Stale);
         assert_eq!(tip.check_job(&h(123), 124, 0x1d00_ffff, grace), JobCheck::Stale);
-        // what the node did not say matches nothing, except a target it never reports
-        tip.parent_le = None;
-        assert_eq!(tip.check_job(&parent, 125, 0x1d00_ffff, grace), JobCheck::WrongParent);
-        tip.next_bits = None;
         // a next target the node never reported is still bounded by the retarget rule: the
         // tip's 0x1d00ffff allows up to 0x1d03fffc, and no more
+        tip.next_bits = None;
         assert_eq!(tip.check_job(&tip_hash, 126, 0x207f_ffff, grace), JobCheck::WrongBits);
         assert_eq!(tip.check_job(&tip_hash, 126, 0x1d03_fffd, grace), JobCheck::WrongBits);
         assert_eq!(tip.check_job(&tip_hash, 126, 0x1d03_fffc, grace), JobCheck::Current);
-        assert_eq!(tip.check_job(&tip_hash, 126, 0x1c7f_ffff, grace), JobCheck::Current);
         assert_eq!(tip.check_job(&tip_hash, 126, 0x0080_0001, grace), JobCheck::WrongBits);
+        // on our own chain the node's figure is the last word even at a retarget; off it, a
+        // retarget block may carry another branch's target, within the rule
+        tip.height = 2015;
+        tip.next_bits = Some(0x1c7f_ffff);
+        assert_eq!(tip.check_job(&tip_hash, 2016, 0x1d00_ffff, grace), JobCheck::WrongBits);
+        assert_eq!(tip.check_job(&h(5), 2016, 0x1d00_ffff, grace), JobCheck::OtherBranch);
+        assert_eq!(tip.check_job(&h(5), 2016, 0x207f_ffff, grace), JobCheck::WrongBits);
+        // what the node did not say about parents matches nothing, and costs nobody a share
         tip.hash_le = None;
-        assert_eq!(tip.check_job(&tip_hash, 126, 0x1c7f_ffff, grace), JobCheck::WrongParent);
+        assert_eq!(tip.check_job(&tip_hash, 2016, 0x1c7f_ffff, grace), JobCheck::OtherBranch);
     }
 
     #[test]
@@ -728,6 +767,12 @@ mod tests {
             }
         }
         assert_eq!(taken, 14, "two of sixteen held back");
+        // and never more than two, however many there are: the slots are for gateways
+        let mut big = Connections::default();
+        let taken = (0..400u32)
+            .filter(|i| big.admit(IpAddr::V4(std::net::Ipv4Addr::from(0xcb00_7100 + i)), 256, 8).is_ok())
+            .count();
+        assert_eq!(taken, 254);
         let house: IpAddr = "127.0.0.1".parse().unwrap();
         assert!(c.admit(house, 16, 8).is_ok());
         assert!(c.admit(house, 16, 8).is_ok());

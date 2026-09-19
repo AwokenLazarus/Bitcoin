@@ -18,7 +18,7 @@ use crate::state::{now, Shared};
 /// (`session::house_stratum`).
 fn house_gateway(cfg: &Config, gateway: &str) -> bool {
     let g = gateway.to_ascii_lowercase();
-    cfg.house_gateways.iter().any(|h| h.len() >= 16 && g.len() >= 16 && h[..16] == g[..16])
+    cfg.house_gateways.iter().any(|h| !h.is_empty() && g.starts_with(&h[..h.len().min(16)]))
 }
 
 /// One unit of window work is one difficulty-1 share: 2^32 hashes.
@@ -235,6 +235,7 @@ pub fn build(shared: &Shared) -> Value {
             // Accepted shares that could not have paid the window had they been a block.
             // Stock DATUM's per-height subsidy-only job lands in `pool_only_shares` and is
             // expected; `pool_only_full_jobs` is the one that should be zero.
+            "uncommitted_shares": t.uncommitted_shares.load(Ordering::Relaxed),
             "pool_only_shares": t.pool_only_shares.load(Ordering::Relaxed),
             "pool_only_full_jobs": t.pool_only_full_jobs.load(Ordering::Relaxed),
             "solo_empty_shares": t.solo_empty_shares.load(Ordering::Relaxed),
