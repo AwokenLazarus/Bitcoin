@@ -15,7 +15,7 @@ RPC **9332**, P2P **9333**. Lightning/mempool keep talking to this node.
 | `umbrel/hooks/pre-start` | Re-bind the prefix `bitcoind` into the Knots compose after app updates, run `ensure-blake2b-services.sh`; then stock Tor HS wait |
 | `umbrel/mempool-hooks/pre-start` | Mempool app hook: widen `blocks.header` for 164-byte headers, `MEMPOOL_BACKEND=electrum` -> host electrs :50011, 800 kWU block weight, local pools JSON |
 | `umbrel/mempool-theme/` | Lazarus look for the mempool frontend: `nginx-mempool.conf` (`sub_filter` injects the theme into the app shell; serves our mining-pool logo and favicons), `www/theme.css` (palette, type, layout), `www/theme.js` (nav + footer links, fee/goggles/chart recolouring), `www/chi-rho*.svg` + `www/favicon*` (the Chi Rho mark and the wreathed crest) |
-| `pools/pools-sync.py`, `pools/pools-overrides.json` | Mining-pool list merge (Kilombino + mempool.guide + ours), priority-ordered pool ids, block re-attribution; runs from `../systemd/pools-sync.timer` |
+| `pools/pools-sync.py`, `pools/pools-overrides.json` | Mining-pool list merge (Kilombino + mempool.guide + ours), priority-ordered pool ids, block re-attribution, and the per-window gateway-tag counts the pie's bands are drawn from; runs from `../systemd/pools-sync.timer` |
 | `umbrel/mempool-patches/` | Backend patch: DATUM template-creator names for any pool (`patch-backend.py` applied by the hook to the pinned image; `datum-template-creator.patch` for upstream) |
 | `umbrel/docker-compose.snippet.yml` | The volume line to add (do not commit a live compose — it has RPC/Tor env) |
 | `bitcoin.conf.example` | Layout B only |
@@ -47,6 +47,25 @@ The app regenerates `umbrel-bitcoin.conf` from `data/app/settings.json` on every
 the chain's backlog sits at ~0.2-0.3 sat/vB, and the stock 1 sat/vB floor kept it out of our mempool
 and out of our block templates.
 
+
+## Mempool explorer: source and license
+
+Lazarus Mempool is a **Lazarus-styled instance of [Retropex/mempool](https://github.com/Retropex/mempool)**
+(the BLAKE2b explorer also at [mempool.guide](https://mempool.guide)), itself
+[The Mempool Open Source Project](https://github.com/mempool/mempool).
+
+All three layers are **GNU AGPL-3.0-or-later**. The official LICENSE / COPYING and our NOTICE
+are served at `/lazarus/LICENSE`, `/lazarus/COPYING.md`, and `/lazarus/NOTICE`. Corresponding
+source: this repo (`node/umbrel/`), [Retropex/mempool](https://github.com/Retropex/mempool), and
+[mempool/mempool](https://github.com/mempool/mempool).
+
+AGPL does **not** include a trademark license. We do not use mempool.space® / Mempool Goggles®
+marks or mempool.guide marks as this site's brand; the Chi Rho and wordmark are Lazarus's.
+
+Retropex work this overlay follows includes BLAKE2b headers, SIGHASH_UNIFIED / the
+replay-protected Features badge, DATUM miner bands in the pool pie, and DATUM pool priority.
+The live frontend image is still official `mempool/frontend:v3.3.1`; Lazarus CSS/JS and the
+compiled backend patches sit on top.
 
 ## Mempool explorer: Lazarus theme
 
@@ -171,3 +190,77 @@ so the backend falls back to stock behaviour. `theme.js` then prefixes the pool 
 block bar reads `Lazarus - <gateway tag>`, and `pools-sync.py` keeps `minerNames` when it patches the cache.
 The recent-blocks window is seeded from `data/cache.json`, so after deploying the patch clear its `blocks`
 across a stop/start to see names on blocks indexed before it.
+
+## Mempool explorer: gateway bands in the mining-pool pie
+
+Each slice of the pie on `/graphs/mining/pools` (and the 1w luck pie on `/mining`) is one pool's blocks in the chosen window. Pools that
+speak DATUM hand template building to their miners' own gateways, and every such block names the
+gateway that built it, so a slice can be read as the gateways behind it. `theme.js` draws that: inside
+a slice, one arc band per gateway tag, ordered smallest to largest outward so the biggest gateway is on
+the rim, and the pool's untagged blocks -- its own stratum -- as the innermost band.
+
+Band sizes are **blocks per coinbase secondary tag**, never per-gateway hashrate: that is the one metric
+any mempool instance can compute for any pool, so the same drawing works for `DATUM miners`, `CONVOY`
+or `Pow.re` and not just for us. `pools-sync.py` writes them to `pool-tags.json` in the theme's `www/`
+(served at `/lazarus/pool-tags.json`, refreshed every 3 min with the rest of the sync):
+
+```json
+{"generated": 1789007433, "rule": "coinbase secondary tag: ...",
+ "windows": {"1w": {"seconds": 604800, "blocks": 4201,
+   "pools": {"lazarus": {"name": "Lazarus", "blocks": 215, "untagged": 188,
+                         "tags": {"Melvyns Miners": 8, "SOVEROOT": 2}}}}}}
+```
+
+Only pools with at least one tagged block are listed, one entry per window the pie offers (`24h` ...
+`all`, months counted as the backend counts them). The tag rule is the same `isDATUMCoinbase` /
+`parseTemplateCreator` as `umbrel/mempool-patches`, ported to Python, so a band and the name on a block
+page always come from the same bytes; a run checks out against the last 300 blocks' `minerNames` exactly.
+Stale rows are skipped because the pool stats the pie is drawn from count only the best chain --
+`stale = 0` is what makes the per-pool totals match `/api/v1/mining/pools/<window>` block for block.
+
+The chart is an ECharts pie rendered as SVG, and this bundle mangles the echarts exports past
+recognition, so the theme does not reach into the chart: it reads the geometry back out of the rendered
+sectors (centre by circle fit over the outer-arc points, radii and angles from the path data) and draws
+the bands into an overlay SVG on top, absolutely positioned so it takes no part in layout. Everything is
+checked before anything is drawn -- the sector count has to be explained by one of the component's share
+thresholds, and every sector's angle has to agree with the share the pools API reports -- and any
+mismatch, missing `pool-tags.json` or unreadable path data leaves the stock pie alone.
+`window.__lazarusTheme.bands` says which happened. A resize or a ctrl+wheel zoom is the one thing the
+chart does not announce -- it rewrites the same path elements in place, which is not the childList
+mutation the theme is driven by -- so the bands also redraw from a `ResizeObserver` on the chart box and
+from `resize` on the window and the visual viewport, per frame for the second that follows, and from a
+250 ms interval that never stops. That last one is the backstop: ECharts rebuilds its container on some
+resizes and takes the overlay with it, and because the sector paths can come back byte-identical, "the
+chart has not changed" is only a reason to skip the redraw while the bands are still on the page --
+otherwise they were simply gone until the next window change. Hovering a slice with no bands used to
+blank every arc: ECharts scales that sector and moves it to the end of the SVG, which mixed radii and
+broke document-order spans; the overlay now owns the pie's pointer (labels stay the chart's), radii are
+taken per sector with the majority setting the pie, and a failed read leaves the overlay in place
+instead of removing it. The overlay is sized from the chart SVG's own width, not the rounded
+`clientWidth`, and is mounted on the ECharts inner box (the pie SVG sits 18px down from
+`.chart`) so a page zoom cannot scale a gap between the bands and the pie. `window.__lazarusTheme.bands.log` keeps the last dozen state changes with timestamps.
+`clientWidth`, because at 110% or 150% zoom those differ and the highlight ring would trace a pixel off
+its band. `window.__lazarusTheme.bands.log` keeps the last dozen state changes with timestamps.
+
+Band thickness is proportional to the tag's share of the pool, plus a floor of a few pixels so a
+one-block gateway is still visible; gateways under 1% of the pool share a single *N smaller gateways*
+band just outside the stratum band, and slices narrower than 3 degrees get no bands at all. Colours are
+the slice's own colour stepped in OKLCH lightness, the stratum band keeping the slice's colour exactly,
+so a pool with gateways reads as its own slice with rings on it.
+
+A band is only a few pixels tall, so hovering one does more than raise a tooltip: the band brightens
+inside a brass ring, every other pool fades back (its bands here, its sector in the chart underneath),
+and the gateway's tag is written at the rim on a leader line. The tag sits on a chip because one side of
+the pie is a solid stack of the chart's own labels with no clear line to move to. The tooltip is pinned
+beside the pie rather than following the pointer, and picks whichever position covers the hovered band
+least, so on a phone -- where the pie fills the box and something must be covered -- it is never the band
+you are pointing at. Hovering gives its blocks, its
+share of the pool and of all blocks, and an estimated hashrate taken from the same figure as the pools
+table (so a pool's bands add up to its row; the short windows only, as upstream). Bands of the pool's
+own slice add a live line from `pool.awokenlazarus.xyz/api/gateways` -- work share now, shares this
+session, how many gateways carry that tag -- which is enrichment only and never changes a band's size.
+
+Getting this into other explorers needs two things upstream: the template-creator patch above, and then
+a backend endpoint aggregating `minerNames` per pool per window plus a nested series in
+`pool-ranking.component.ts` behind a config flag. Until then `pool-tags.json` and the overlay are the
+prototype of both.

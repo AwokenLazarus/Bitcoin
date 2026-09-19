@@ -57,13 +57,26 @@ datum-rebate-bps = 500
 # and owes nothing to the window.
 solo-rebate-bps = 0
 # solo-coinbase-tag = "Lazarus/solo"
-# Signing-key prefixes (hex) of the pool's own public-stratum gateway.
-# Remote DATUM users who run lazarus-gateway are not matched by UA — only
-# loopback (default) and these prefixes pay the higher fee.
-# house-gateways = ["9d992e5cfec05102"]
+# Signing keys (hex) of the pool's own public-stratum gateway: the full 64-digit key, or a
+# prefix of at least 16 digits. Remote DATUM users who run lazarus-gateway are not matched
+# by UA — only loopback (default) and these keys pay the higher fee. A shorter prefix still
+# matches but is warned about at startup. A house gateway is also
+# trusted with its shares' difficulty (its whole-coinbase form carries no target byte), so
+# give the full key, and turn house-loopback off if anything on this host forwards outside
+# connections to the DATUM port: through a local proxy every gateway arrives from 127.0.0.1.
+# house-gateways = ["9d992e5cfec05102..."]
+# A share whose difficulty is not part of what it hashed (an older lazarus-gateway away from
+# the pool host; a gateway with an unfamiliar scriptSig layout) is not refused. It is credited
+# by its hash alone: 2^uncommitted-pot if the hash meets that, nothing otherwise. Fair on
+# average for miners at any vardiff up to it, so keep it at or above the largest vardiff in use.
+# uncommitted-pot = 20
 # house-loopback = true
 # Smallest share difficulty accepted; power of two. Also the vardiff floor sent to gateways.
-min-diff = 1
+# A share under it is not refused: it is credited by its hash alone, at this difficulty, so a
+# small miner behind a gateway that ignores the floor earns the same on average. What the floor
+# buys is that only a hash meeting it touches the ledger, the duplicate set and the identity
+# table; at 1 a flood of those costs an ASIC nothing.
+min-diff = 1024
 # Sats of slack per issued output when checking a coinbase against the split.
 split-tolerance = 2
 # Shares one height behind the tip are accepted for this many seconds after the tip moved.

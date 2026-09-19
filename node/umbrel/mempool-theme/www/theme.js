@@ -199,6 +199,9 @@
   var NEOXA = 'https://neoxa.exchange/register?ref=NEXB9423E49';
   var POOL_SLUG = 'lazarus';
   var ELECTRUM = 'electrum.awokenlazarus.xyz:50002';
+  var RETROPEX = 'https://github.com/Retropex/mempool';
+  var MEMPOOL_UPSTREAM = 'https://github.com/mempool/mempool';
+  var FORK_HEIGHT = 961640;
 
   /* BLAKE2b BTC price (BTCB2): volume-weighted Neoxa + NonKYC, from the pool API.
    * Stock mempool still pulls SHA CoinGecko over REST and the websocket. Rewrite both
@@ -650,7 +653,7 @@
               '<p class="lz-kicker">Miners</p>' +
               '<p class="lz-head">Mine with Lazarus Pool, paid in the block itself</p>' +
               '<p class="lz-stats" id="lz-pool-stats"><span class="lz-dot" aria-hidden="true"></span><span class="lz-stats-text">Loading pool status…</span></p>' +
-              '<p class="lz-copy" id="lz-pool-copy">Every block found pays each miner directly in its coinbase by TIDES window share. 0% fee through your own DATUM gateway, 10% on the public stratum.</p>' +
+              '<p class="lz-copy" id="lz-pool-copy">Every block found pays each miner directly in its coinbase by TIDES window share. 0% fee through your own DATUM gateway, 15% on the public stratum.</p>' +
               '<p class="lz-actions">' +
                 '<a class="btn btn-primary btn-sm" href="' + POOL + '" target="_blank" rel="noopener">Open Lazarus Pool ↗</a>' +
                 '<a class="btn btn-secondary btn-sm" href="/mining/pool/' + POOL_SLUG + '">Blocks found by Lazarus</a>' +
@@ -730,7 +733,10 @@
       [POOL + '/#connect', 'Connect a miner or DATUM gateway'],
       [DISCORD, 'Discord'],
       [NEOXA, 'Exchange'],
-      [REPO, 'Source on GitHub']
+      [REPO, 'Lazarus source'],
+      [RETROPEX, 'Retropex/mempool'],
+      [MEMPOOL_UPSTREAM, 'Mempool Open Source Project'],
+      ['/lazarus/NOTICE', 'License notice (AGPL-3.0)']
     ];
     links.forEach(function (l) {
       var p = el('p');
@@ -747,6 +753,10 @@
     ep.appendChild(copyButton(ELECTRUM, 'Copy Electrum server address'));
     col.appendChild(ep);
     col.appendChild(el('p', { class: 'lz-footer-note' }, 'Electrum server, SSL · header-v2 (BLAKE2b) wallets'));
+    col.appendChild(el('p', { class: 'lz-footer-note lz-source-note' },
+      'Lazarus-styled <a href="' + RETROPEX + '" target="_blank" rel="noopener">Retropex/mempool</a> ' +
+      '(AGPL-3.0), itself <a href="' + MEMPOOL_UPSTREAM + '" target="_blank" rel="noopener">The Mempool Open Source Project</a>. ' +
+      '<a href="/lazarus/NOTICE">NOTICE</a>'));
     // In front of "Legal" so the reading order stays Explore, Learn, Tools, Lazarus, Legal.
     var cols = tree.querySelectorAll('.links');
     var legal = cols.length ? cols[cols.length - 1] : null;
@@ -759,8 +769,128 @@
     var p = document.querySelector('footer .row.version p');
     if (!p || p.querySelector('.lz-theme-ver')) return;
     p.appendChild(document.createTextNode(' · '));
-    p.appendChild(el('span', { class: 'lz-theme-ver', title: 'Lazarus theme: DATUM gateway bands in the mining pie' },
-      'Lazarus bands ' + BUILD));
+    p.appendChild(el('span', { class: 'lz-theme-ver', title: 'Lazarus theme over Retropex/mempool (AGPL-3.0)' },
+      'Lazarus · Retropex ' + BUILD));
+  }
+
+  /* Replay-protected badge. Ported from Retropex/mempool tx-features +
+   * transaction.utils (SIGHASH_UNIFIED 0x20), AGPL-3.0. Stock mempool v3.3.1
+   * has no Features-row badge for BLAKE2b replay protection. */
+  function isCanonicalDerSig(w) {
+    if (!w || w.length < 18 || w.slice(0, 2) !== '30') return false;
+    var compound = parseInt(w.slice(2, 4), 16);
+    if (w.length !== (compound * 2) + 6 || w.slice(4, 6) !== '02') return false;
+    var rLen = parseInt(w.slice(6, 8), 16);
+    if (w.length < (rLen * 2) + 10) return false;
+    var sEnd = 8 + (rLen * 2);
+    if (w.slice(sEnd, sEnd + 2) !== '02') return false;
+    var sLen = parseInt(w.slice(sEnd + 2, sEnd + 4), 16);
+    return w.length === ((rLen + sLen) * 2) + 14;
+  }
+  function validSighash(n) {
+    return (n >= 0 && n <= 3) || (n > 0x20 && n <= 0x23) || (n > 0x80 && n <= 0x83) || (n > 0xa0 && n <= 0xa3);
+  }
+  function vinSighashes(vin) {
+    var out = [], i, hex, ops, w;
+    w = vin.witness || [];
+    for (i = 0; i < w.length; i++) {
+      hex = w[i];
+      if (isCanonicalDerSig(hex)) out.push(parseInt(hex.slice(-2), 16));
+      else if (hex && hex.length === 130) out.push(parseInt(hex.slice(-2), 16));
+      else if (hex && hex.length === 128) out.push(0);
+    }
+    ops = String(vin.scriptsig_asm || '').split(' ');
+    for (i = 0; i < ops.length - 1; i++) {
+      if (ops[i].indexOf('OP_PUSHBYTES_') === 0 && isCanonicalDerSig(ops[i + 1])) {
+        out.push(parseInt(ops[i + 1].slice(-2), 16));
+      }
+    }
+    return out.filter(function (n) { return validSighash(n) || n === 0; });
+  }
+  function classifyReplay(tx) {
+    if (!tx || !tx.vin || !tx.vin.length || tx.vin[0].is_coinbase) return null;
+    var h = tx.status && tx.status.confirmed ? Number(tx.status.block_height) : Infinity;
+    if (h < FORK_HEIGHT) return null;
+    var opted = 0, legacy = 0, i, sigs, allU;
+    for (i = 0; i < tx.vin.length; i++) {
+      sigs = vinSighashes(tx.vin[i]);
+      if (!sigs.length) continue;
+      allU = sigs.every(function (s) { return (s & 0x20) !== 0; });
+      if (allU) opted++; else legacy++;
+    }
+    if (!opted && !legacy) return null;
+    if (!legacy) return 'all';
+    if (!opted) return 'none';
+    return 'partial';
+  }
+  var replayCache = {};
+  function replayBadge() {
+    var host = document.querySelector('app-tx-features');
+    if (!host || host.querySelector('.lz-replay')) return;
+    var m = /\/tx\/([0-9a-fA-F]{64})/.exec(location.pathname);
+    if (!m) return;
+    var txid = m[1].toLowerCase();
+    function paint(kind) {
+      if (!kind || host.querySelector('.lz-replay')) return;
+      var span = el('span', { class: 'badge lz-replay lz-replay-' + kind });
+      if (kind === 'all') {
+        span.className += ' bg-success';
+        span.textContent = 'Replay protected';
+        span.title = 'Every input is signed with SIGHASH_UNIFIED (0x20). Nodes without the BLAKE2b hardfork cannot verify these signatures, so this transaction cannot be replayed onto the SHA256d chain.';
+      } else if (kind === 'partial') {
+        span.className += ' bg-warning';
+        span.textContent = 'Replay protected (partial)';
+        span.title = 'Some inputs use the unified opt-in sighash and some do not. The transaction as a whole cannot be replayed, but the legacy-signed inputs offer no protection on their own.';
+      } else {
+        span.className += ' bg-danger';
+        span.appendChild(el('del', {}, 'Replay protected'));
+        span.title = 'No input is signed with SIGHASH_UNIFIED. This transaction is valid on both chains and can be replayed onto the SHA256d chain.';
+      }
+      host.appendChild(span);
+    }
+    if (replayCache[txid] !== undefined) { paint(replayCache[txid]); return; }
+    if (replayCache[txid + ':p']) return;
+    replayCache[txid + ':p'] = true;
+    fetch('/api/tx/' + txid).then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (tx) {
+        replayCache[txid] = classifyReplay(tx);
+        paint(replayCache[txid]);
+      })
+      .catch(function () { delete replayCache[txid + ':p']; });
+  }
+
+  function forkBanner() {
+    var title = document.querySelector('.title-block h1, .block-title, h1');
+    var onFork = /\/block\/961640\/?$/.test(location.pathname)
+      || (title && /\b961640\b/.test(title.textContent || ''));
+    if (!onFork) return;
+    var wrap = document.querySelector('app-block .container, app-block');
+    if (!wrap || wrap.querySelector('.lz-fork-note')) return;
+    wrap.insertBefore(el('p', { class: 'lz-fork-note' },
+      '<b>BLAKE2b POW change has been activated! \u26cf\ufe0f</b> ' +
+      'Replay protection is SIGHASH_UNIFIED (0x20), shown on transaction Feature rows. ' +
+      'After <a href="' + RETROPEX + '" target="_blank" rel="noopener">Retropex/mempool</a> specialBlocks 961640.'),
+      wrap.firstChild);
+  }
+
+  function specialBlockBlink() {
+    var blk = document.getElementById('bitcoin-block-961640');
+    if (blk) blk.classList.add('blink-bg');
+  }
+
+  function aboutCite() {
+    if (!/^\/about\/?$/.test(location.pathname)) return;
+    var box = document.querySelector('app-about .about, app-about .container, app-about');
+    if (!box || box.querySelector('.lz-about-source')) return;
+    var note = el('div', { class: 'lz-about-source' });
+    note.innerHTML = '<p><b>Lazarus Mempool</b> is a Lazarus-styled instance of ' +
+      '<a href="' + RETROPEX + '" target="_blank" rel="noopener">Retropex/mempool</a> ' +
+      '(the BLAKE2b explorer also running at mempool.guide), itself ' +
+      '<a href="' + MEMPOOL_UPSTREAM + '" target="_blank" rel="noopener">The Mempool Open Source Project</a>, ' +
+      'GNU AGPL-3.0. Trademarks of Mempool Holdings and mempool.guide are not used as this site\u2019s brand. ' +
+      'Corresponding source: <a href="' + REPO + '" target="_blank" rel="noopener">AwokenLazarus/Bitcoin</a>, ' +
+      '<a href="/lazarus/NOTICE">NOTICE</a>, <a href="/lazarus/LICENSE">LICENSE</a>.</p>';
+    box.insertBefore(note, box.firstChild);
   }
 
   // Blocks mined through a DATUM gateway carry the gateway's own tag next to the pool's; the
@@ -813,7 +943,7 @@
   var MIN_SLICE_DEG = 3;      // narrower slices cannot show a readable band
   var SVGNS = 'http://www.w3.org/2000/svg';
   var PIE_START = 270;        // twelve o'clock in SVG angles, where the pie's first slice begins
-  var BUILD = '9';
+  var BUILD = '15';
   var LABEL_STEPS = [0, -15, 15, -30, 30, -46, 46];   // where a hover label may sit, in order
   var bandInfo = (self.__lazarusTheme || {}).bands = { state: 'idle', log: [] };
   function bandState(st) {
@@ -837,6 +967,21 @@
         .then(function (d) {
           c.pending = false;
           if (d) { c.data = d; c.ts = Date.now(); schedule(); }
+        })
+        .catch(function () { c.pending = false; });
+    }
+    return c.data;
+  }
+  function cachedText(key, url, ttl) {
+    var c = httpCache[key] || (httpCache[key] = { ts: 0, data: null, pending: false });
+    var now = Date.now();
+    if (!c.pending && now - c.ts >= ttl) {
+      c.pending = true;
+      c.ts = now;
+      fetch(url).then(function (r) { return r.ok ? r.text() : null; })
+        .then(function (d) {
+          c.pending = false;
+          if (d) { c.data = d.trim(); c.ts = Date.now(); schedule(); }
         })
         .catch(function () { c.pending = false; });
     }
@@ -898,7 +1043,12 @@
   /* Read the pie back out of its own SVG. Filled closed paths are the sectors. Radii come
    * from each path's own arcs (the 1px corner arcs from itemStyle.borderRadius are skipped).
    * Order comes from start-edge angles, not document order: ECharts moves the hovered
-   * sector to the end of the SVG so it paints on top. */
+   * sector to the end of the SVG so it paints on top.
+   *
+   * A window change (and some hover frames) also leaves a filled hairline with no arc —
+   * `M555 40L555 160Z` for a zero-width slice. That is not a sector. Skipping it keeps the
+   * overlay up; treating it as a broken chart used to blank the bands or pin the previous
+   * window's overlay on the new pie. */
   function readPie(svg) {
     var all = svg.querySelectorAll('path'), sectors = [], outer = [], i, p, d, m, a;
     for (i = 0; i < all.length; i++) {
@@ -906,7 +1056,7 @@
       d = p.getAttribute('d') || '';
       if (!(p.getAttribute('fill') || 'none').match(/^(#|rgb)/i) || !/Z\s*$/.test(d)) continue;
       m = MOVE_RE.exec(d);
-      if (!m) return null;
+      if (!m) continue;
       var arcs = [], lo = Infinity, hi = 0;
       ARC_RE.lastIndex = 0;
       while ((a = ARC_RE.exec(d))) {
@@ -914,7 +1064,7 @@
         arcs.push(arc);
         if (arc.r > 2) { lo = Math.min(lo, arc.r); hi = Math.max(hi, arc.r); }  // skip corner arcs
       }
-      if (!arcs.length || !hi) return null;
+      if (!arcs.length || !hi) continue;
       sectors.push({ el: p, x: parseFloat(m[1]), y: parseFloat(m[2]), arcs: arcs,
                      r: hi, r0: lo === hi ? 0 : lo });
     }
@@ -1170,7 +1320,88 @@
     undimAll();
     var stale = document.querySelectorAll('svg.lz-bands, .lz-band-tip, .lz-bands-note');
     for (var i = 0; i < stale.length; i++) stale[i].remove();
+    var hidden = document.querySelectorAll('svg[data-lz-stock="hidden"]');
+    for (var h = 0; h < hidden.length; h++) {
+      hidden[h].style.opacity = '';
+      hidden[h].style.pointerEvents = '';
+      hidden[h].removeAttribute('data-lz-stock');
+    }
     bandInfo.sig = null;
+  }
+
+  /* Retropex/mempool pool-ranking pie (AGPL-3.0): every pool is a slice (no share
+   * threshold), DATUM miners are bands in the wedge, hashrate tooltips are TH/s.
+   * Stock v3.3.1 still folds small pools into Other and has no miner series, so
+   * this draws that pie ourselves and hides the stock SVG. Geometry matches
+   * frontend/src/app/components/pool-ranking/pool-ranking.component.ts at e56a2c6. */
+  var POOL_COLORS = ['#dbb565','#e47164','#65c98c','#e5974c','#c586b7','#7aa3c8',
+    '#a9ab54','#c26576','#63b4b8','#d2764a','#9bba7d','#a08dc3','#68b5a6','#937636','#a34a40','#4b6d8a'];
+  var MAX_MINER_BANDS = 8;
+  var MIN_BAND_DEPTH = 0.08;
+  var BAND_LIGHTEST = 0.84;
+  var BAND_DARKEST = 0.58;
+  var MIN_LABEL_DEG = 8;
+
+  function fmtTh(hs) {
+    if (!(hs > 0)) return '';
+    if (hs >= 1e18) return (hs / 1e18).toFixed(2) + ' EH/s';
+    if (hs >= 1e15) return (hs / 1e15).toFixed(2) + ' PH/s';
+    return (hs / 1e12).toFixed(2) + ' TH/s';
+  }
+  function retropexBandColor(color, lightness) {
+    var hex = String(color || '').replace('#', '');
+    if (hex.length === 3) hex = hex.split('').map(function (c) { return c + c; }).join('');
+    if (hex.length < 6) return color;
+    var r = parseInt(hex.slice(0, 2), 16) / 255, g = parseInt(hex.slice(2, 4), 16) / 255, b = parseInt(hex.slice(4, 6), 16) / 255;
+    var max = Math.max(r, g, b), min = Math.min(r, g, b), chroma = max - min;
+    var saturation = chroma === 0 ? 0 : chroma / (1 - Math.abs(max + min - 1));
+    var hue = 0;
+    if (chroma !== 0) {
+      if (max === r) hue = ((g - b) / chroma) % 6;
+      else if (max === g) hue = (b - r) / chroma + 2;
+      else hue = (r - g) / chroma + 4;
+      hue = (hue * 60 + 360) % 360;
+    }
+    var c = (1 - Math.abs(2 * lightness - 1)) * saturation;
+    var x = c * (1 - Math.abs(((hue / 60) % 2) - 1));
+    var m = lightness - c / 2;
+    var rgb = hue < 60 ? [c, x, 0] : hue < 120 ? [x, c, 0] : hue < 180 ? [0, c, x]
+      : hue < 240 ? [0, x, c] : hue < 300 ? [x, 0, c] : [c, 0, x];
+    return '#' + rgb.map(function (ch) {
+      var n = Math.round((ch + m) * 255);
+      return (n < 16 ? '0' : '') + Math.max(0, Math.min(255, n)).toString(16);
+    }).join('');
+  }
+  function retropexSliceBands(pool, entry, poolColor, a0, span) {
+    var tags = (entry && entry.tags) || {};
+    var miners = Object.keys(tags).map(function (n) { return { name: n, blockCount: tags[n] }; });
+    miners.sort(function (a, b) { return b.blockCount - a.blockCount || (a.name < b.name ? -1 : 1); });
+    if (!miners.length || !pool.blockCount || span <= 0) return [];
+    var shown = miners.slice(0, MAX_MINER_BANDS);
+    var shownBlocks = shown.reduce(function (s, m) { return s + m.blockCount; }, 0);
+    var minerBlockCount = miners.reduce(function (s, m) { return s + m.blockCount; }, 0);
+    var otherMinerBlocks = Math.max(0, minerBlockCount - shownBlocks);
+    var poolBlocks = Math.max(0, pool.blockCount - shownBlocks - otherMinerBlocks);
+    var ordered = [];
+    if (poolBlocks > 0) ordered.push({ name: 'Built by the pool', blockCount: poolBlocks, kind: 'stratum' });
+    if (otherMinerBlocks > 0) ordered.push({ name: 'Other miners', blockCount: otherMinerBlocks, kind: 'folded' });
+    shown.slice().reverse().forEach(function (m) { ordered.push({ name: m.name, blockCount: m.blockCount, kind: 'gateway' }); });
+    var totalBlocks = ordered.reduce(function (s, b) { return s + b.blockCount; }, 0);
+    if (!totalBlocks) return [];
+    var floor = Math.min(MIN_BAND_DEPTH, 0.5 / ordered.length);
+    var toShare = 1 - floor * ordered.length;
+    var depth = 0;
+    return ordered.map(function (band, i) {
+      var inner = depth;
+      depth += floor + toShare * band.blockCount / totalBlocks;
+      return {
+        name: band.name, kind: band.kind, blocks: band.blockCount,
+        poolName: pool.name, slug: pool.slug, own: pool.slug === POOL_SLUG,
+        poolShare: (100 * band.blockCount / pool.blockCount),
+        color: retropexBandColor(poolColor, BAND_DARKEST + (i / Math.max(ordered.length - 1, 1)) * (BAND_LIGHTEST - BAND_DARKEST)),
+        a0: a0, span: span, inner: inner, outer: depth
+      };
+    });
   }
 
   function drawBands() {
@@ -1193,116 +1424,133 @@
     var wdoc = (tagDoc.windows || {})[win];
     if (!wdoc || !wdoc.pools) { bandState('no tag data for ' + win); dropBands(); return; }
 
-    // Redraw when the pie itself changes (window, resize, new block) and not on every one of
-    // the DOM mutations that bring us here.
-    var sig = hash32([win, tagDoc.generated, host.clientWidth, host.clientHeight,
-      svg.getAttribute('width'), svg.getAttribute('height')].join(':') +
-      Array.prototype.map.call(svg.querySelectorAll('path'), function (p) { return p.getAttribute('d'); }).join(''));
-    // ECharts rebuilds its container on some resizes and takes the overlay with it, and the
-    // sector paths can come back byte-identical, so "nothing changed" is only a reason to
-    // skip the redraw while the bands are actually still on the page.
+    var sig = hash32([win, tagDoc.generated, api.blockCount, host.clientWidth, host.clientHeight,
+      svg.getAttribute('width'), svg.getAttribute('height')].join(':'));
     if (bandInfo.sig === sig && host.querySelector('svg.lz-bands')) {
       pinOverlay(host.querySelector('svg.lz-bands'), svg);
       return;
     }
-    undimAll();                       // a redraw ends any hover, so nothing stays faded
-    var hadOverlay = !!host.querySelector('svg.lz-bands');
 
-    var pie = readPie(svg);
-    // A hovered ECharts sector is a different size and lives at the end of the SVG. If the
-    // read still fails, leave whatever overlay is already on the page -- blanking it is
-    // how the bands used to vanish the moment the pointer crossed the pie.
-    if (!pie) { bandState('sectors unreadable'); return; }
-    var slices = expectedSlices(api, pie.sectors.length);
-    if (!slices) { bandState('slice count ' + pie.sectors.length + ' unexplained'); return; }
-    for (var i = 0; i < slices.length; i++) {
-      if (Math.abs(slices[i].share - pie.sectors[i].span / 3.6) > 0.4) {
-        bandState('slice ' + i + ' is ' + (pie.sectors[i].span / 3.6).toFixed(2) + '%, API says ' + slices[i].share.toFixed(2) + '%');
-        return;
-      }
-    }
+    var pools = api.pools || [];
+    var totalBlocks = Number(api.blockCount) || pools.reduce(function (s, p) { return s + (Number(p.blockCount) || 0); }, 0);
+    if (!totalBlocks || !pools.length) { bandState('no pools'); return; }
 
-    // The pool's own slice gets live gateway figures in its tooltip; nothing else needs them.
-    var ownSlice = null;
-    slices.forEach(function (s) { if (s.slug === POOL_SLUG && wdoc.pools[POOL_SLUG]) ownSlice = s; });
-    if (ownSlice) cachedJson('gws', POOL + '/api/gateways', 60000, { mode: 'cors' });
+    svg.setAttribute('data-lz-stock', 'hidden');
+    svg.style.opacity = '0';
+    svg.style.pointerEvents = 'none';
 
+    undimAll();
     var old = host.querySelector('svg.lz-bands');
     if (old) old.remove();
     var mount = svg.parentNode || host;
-    var vw = parseFloat(svg.getAttribute('width')) || host.clientWidth;
-    var vh = parseFloat(svg.getAttribute('height')) || host.clientHeight;
+    var vw = parseFloat(svg.getAttribute('width')) || host.clientWidth || 800;
+    var vh = parseFloat(svg.getAttribute('height')) || host.clientHeight || 400;
+    var ring = isMiningDash() ? [0.15, 0.60] : [0.20, 0.80];
+    var unit = Math.min(vw, vh) / 2;
+    var cx = vw / 2, cy = vh / 2;
+    var r0pie = ring[0] * unit, r1pie = ring[1] * unit;
+    var netHs = windowHashrate(api, win);
+    var ownSlice = null;
+    pools.forEach(function (p) { if (p.slug === POOL_SLUG && wdoc.pools[POOL_SLUG]) ownSlice = p; });
+    if (ownSlice) cachedJson('gws', POOL + '/api/gateways', 60000, { mode: 'cors' });
+
     var ov = document.createElementNS(SVGNS, 'svg');
     ov.setAttribute('class', 'lz-bands');
     ov.setAttribute('width', vw);
     ov.setAttribute('height', vh);
-    ov.setAttribute('viewBox', svg.getAttribute('viewBox') || ('0 0 ' + vw + ' ' + vh));
-    // Own the pie's pointer so ECharts cannot emphasise a sector out from under the bands.
-    // Labels and leader lines sit outside this doughnut and stay the chart's.
-    var catcher = document.createElementNS(SVGNS, 'path');
-    catcher.setAttribute('d', bandSectorPath(pie.cx, pie.cy, pie.r0, pie.r, pie.sectors[0].angle, 359.9));
-    catcher.setAttribute('fill', 'transparent');
-    catcher.setAttribute('class', 'lz-band-catcher');
-    ov.appendChild(catcher);
+    ov.setAttribute('viewBox', '0 0 ' + vw + ' ' + vh);
 
-    var drawn = 0, pools = 0, netHs = windowHashrate(api, win);
-    slices.forEach(function (slice, k) {
-      var sector = pie.sectors[k];
-      if (sector.span < MIN_SLICE_DEG) return;
-      var entry = slice.slug ? wdoc.pools[slice.slug] : null;
-      var list = entry ? poolBands(entry) : null;
-      if (!list) return;
-      var base = sector.el.getAttribute('fill');
-      // The hovered sector is a different size from the rest, so use its own radii.
-      var sr = sector.r > 4 ? sector.r : pie.r, sr0 = sector.r0 > 0 ? sector.r0 : pie.r0;
-      if (sr0 >= sr) { sr = pie.r; sr0 = pie.r0; }
-      var height = sr - sr0;
-      var minT = Math.min(MIN_BAND_PX, height * 0.4 / list.length);
-      var free = height - minT * list.length;
-      var cursor = sr0;
-      var gws = list.filter(function (b) { return b.kind !== 'stratum'; }).length;
-      var seen = 0;
-      list.forEach(function (b) {
-        b.share = b.blocks / entry.blocks;
-        b.poolName = slice.name;
-        b.slug = slice.slug;
-        b.own = slice.slug === POOL_SLUG;
-        b.windowBlocks = api.blockCount;
+    var cursor = PIE_START, drawn = 0, banded = 0, i;
+    var slices = [];
+    for (i = 0; i < pools.length; i++) {
+      var pool = pools[i];
+      var share = (Number(pool.blockCount) || 0) / totalBlocks;
+      var span = share * 360;
+      var color = POOL_COLORS[i % POOL_COLORS.length];
+      var a0 = cursor;
+      cursor += span;
+      slices.push({ pool: pool, a0: a0, span: span, color: color, share: share });
+      var base = document.createElementNS(SVGNS, 'path');
+      base.setAttribute('d', bandSectorPath(cx, cy, r0pie, r1pie, a0, Math.max(span, 0.05)));
+      base.setAttribute('fill', color);
+      base.setAttribute('stroke', 'var(--lz-bg)');
+      base.setAttribute('stroke-width', '1');
+      base.setAttribute('data-lz-slice', pool.slug || '');
+      base.__lzSlice = pool;
+      ov.appendChild(base);
+      var entry = pool.slug ? wdoc.pools[pool.slug] : null;
+      var bands = retropexSliceBands(pool, entry, color, a0, span);
+      bands.forEach(function (b) {
+        b.windowBlocks = totalBlocks;
         b.netHs = netHs;
-        var r0 = cursor, r1 = cursor + minT + free * b.share;
-        cursor = r1;
-        b.sector = sector; b.r0 = r0; b.r1 = r1;      // the hover ring and label need these
-        // The stratum band keeps the slice's own colour, so a pool with gateways still reads
-        // as its slice with rings on it; the gateways step lighter outward.
-        var dL = b.kind === 'stratum' ? 0 : 0.05 + 0.17 * (gws <= 1 ? 1 : seen / (gws - 1));
-        if (b.kind !== 'stratum') seen++;
+        b.r0 = r0pie + b.inner * (r1pie - r0pie);
+        b.r1 = r0pie + b.outer * (r1pie - r0pie);
+        b.sector = { angle: a0, span: span };
         var path = document.createElementNS(SVGNS, 'path');
-        path.setAttribute('d', bandSectorPath(pie.cx, pie.cy, r0, r1, sector.angle, sector.span));
+        path.setAttribute('d', bandSectorPath(cx, cy, b.r0, b.r1, a0, span));
         path.setAttribute('data-lz-band', b.kind);
-        path.style.fill = shade(base, dL);
+        path.style.fill = b.color;
         path.__lzBand = b;
         ov.appendChild(path);
         drawn++;
       });
-      pools++;
-    });
+      if (bands.length) banded++;
+      if (span >= MIN_LABEL_DEG) {
+        var mid = a0 + span / 2;
+        var rim = polar(cx, cy, r1pie + 8, mid);
+        var lab = polar(cx, cy, r1pie + 28, mid);
+        var right = lab.x >= cx;
+        var lead = document.createElementNS(SVGNS, 'polyline');
+        lead.setAttribute('class', 'lz-band-lead');
+        lead.setAttribute('points', rim.x.toFixed(1) + ',' + rim.y.toFixed(1) + ' ' +
+          lab.x.toFixed(1) + ',' + lab.y.toFixed(1));
+        var text = document.createElementNS(SVGNS, 'text');
+        text.setAttribute('class', 'lz-band-label');
+        text.setAttribute('x', (lab.x + (right ? 4 : -4)).toFixed(1));
+        text.setAttribute('y', lab.y.toFixed(1));
+        text.setAttribute('dy', '0.32em');
+        text.setAttribute('text-anchor', right ? 'start' : 'end');
+        text.textContent = pool.name + ' (' + (share * 100).toFixed(2) + '%)';
+        ov.appendChild(lead);
+        ov.appendChild(text);
+      }
+    }
 
-    if (!drawn) { bandState('no gateway blocks in ' + win); bandInfo.sig = sig; dropBands(); return; }
     mount.appendChild(ov);
     pinOverlay(ov, svg);
 
-    /* Hover: the band under the pointer lifts off its slice the way an ECharts sector does,
-     * everything belonging to another pool fades back, and the gateway's own tag is written
-     * at the rim on a leader line -- a band is a few pixels tall, so the name has to be
-     * legible somewhere other than a tooltip that may be across the chart. */
     var tip = bandTip(mount);
-    var hot = null, dimmed = [];
+    var hot = null;
+    function sliceTooltip(pool, share) {
+      var hs = netHs > 0 ? fmtTh(netHs * share) : '';
+      return '<b>' + esc(pool.name) + ' (' + (share * 100).toFixed(2) + '%)</b><span>' +
+        (hs ? hs + ' · ' : '') + pool.blockCount + ' block' + (pool.blockCount === 1 ? '' : 's') + '</span>';
+    }
+    function bandTipHtml(b) {
+      var hs = b.netHs > 0 && b.windowBlocks > 0 ? fmtTh(b.netHs * b.blocks / b.windowBlocks) : '';
+      var lines = ['<b>' + esc(b.name) + '</b>',
+        '<span>' + esc(b.poolName) + ' · ' + pct(b.poolShare) + '</span>',
+        '<span>' + b.blocks + ' block' + (b.blocks === 1 ? '' : 's') + (hs ? ' · est. ' + hs : '') + '</span>'];
+      if (b.own) {
+        var live = b.kind === 'stratum' ? primeAgg(function (g) { return !!g.own; })
+          : b.kind === 'gateway' ? primeTag(b.name) : null;
+        if (live && live.live) {
+          lines.push('<span class="lz-band-live">live: ' + pct(live.workShare * 100) + ' of the pool\'s work now</span>');
+        }
+      }
+      return lines.join('');
+    }
+    function placeTip(html, x, y) {
+      tip.innerHTML = html;
+      tip.setAttribute('data-shown', '');
+      var tw = tip.offsetWidth, th = tip.offsetHeight;
+      tip.style.left = (parseFloat(ov.style.left) || 0) + Math.max(4, Math.min(x, vw - tw - 4)) + 'px';
+      tip.style.top = (parseFloat(ov.style.top) || 0) + Math.max(4, Math.min(y, vh - th - 4)) + 'px';
+    }
     function clearHot() {
       if (hot) { hot.classList.remove('lz-hot'); hot = null; }
-      for (var i = 0; i < dimmed.length; i++) undim(dimmed[i]);
-      dimmed = [];
       ov.removeAttribute('data-hover');
-      var gone = ov.querySelectorAll('.lz-band-label, .lz-band-lead, .lz-band-ring, .lz-band-chip');
+      var gone = ov.querySelectorAll('.lz-band-ring');
       for (var j = 0; j < gone.length; j++) gone[j].remove();
       var lit = ov.querySelectorAll('.lz-dim');
       for (var k = 0; k < lit.length; k++) lit[k].classList.remove('lz-dim');
@@ -1310,132 +1558,203 @@
     }
     function setHot(p) {
       clearHot();
-      var b = p.__lzBand;
       hot = p;
       p.classList.add('lz-hot');
       ov.setAttribute('data-hover', '');
-      var mid = b.sector.angle + b.sector.span / 2;
-      // A ring traced just outside the band, rather than moving the band itself: a band can
-      // be three pixels tall, and shifting it out from under the pointer would flicker.
-      var ring = document.createElementNS(SVGNS, 'path');
-      ring.setAttribute('class', 'lz-band-ring');
-      ring.setAttribute('d', bandSectorPath(pie.cx, pie.cy, Math.max(1, b.r0 - 1.6), b.r1 + 1.6,
-        b.sector.angle, b.sector.span));
-      ov.appendChild(ring);
-      // Fade the other pools -- their bands here, their sectors in the chart underneath.
+      var b = p.__lzBand, sl = p.__lzSlice;
       Array.prototype.forEach.call(ov.querySelectorAll('path'), function (o) {
-        if (o.__lzBand && o.__lzBand.slug !== b.slug) o.classList.add('lz-dim');
+        var slug = (o.__lzBand && o.__lzBand.slug) || (o.__lzSlice && o.__lzSlice.slug);
+        var want = (b && b.slug) || (sl && sl.slug);
+        if (slug && want && slug !== want) o.classList.add('lz-dim');
       });
-      slices.forEach(function (s, k) {
-        if (s.slug === b.slug || !pie.sectors[k]) return;
-        pie.sectors[k].el.style.opacity = '0.55';
-        pie.sectors[k].el.setAttribute('data-lz-dim', '');
-        dimmed.push(pie.sectors[k].el);
-      });
-
-      // The tag, at the rim on the band's own bisector, clamped inside the chart box.
-      var anchor = polar(pie.cx, pie.cy, (b.r1 + b.r0) / 2, mid);
-      var elbow = polar(pie.cx, pie.cy, pie.r + 16, mid);
-      var right = elbow.x >= pie.cx;
-      var tx = elbow.x + (right ? 9 : -9);
-      var lead = document.createElementNS(SVGNS, 'polyline');
-      lead.setAttribute('class', 'lz-band-lead');
-      lead.setAttribute('points', [anchor.x.toFixed(1) + ',' + anchor.y.toFixed(1),
-        elbow.x.toFixed(1) + ',' + elbow.y.toFixed(1), tx.toFixed(1) + ',' + elbow.y.toFixed(1)].join(' '));
-      var text = document.createElementNS(SVGNS, 'text');
-      text.setAttribute('class', 'lz-band-label');
-      text.setAttribute('y', elbow.y.toFixed(1));
-      text.setAttribute('dy', '0.34em');
-      text.textContent = b.kind === 'stratum' ? b.poolName + ' \u00b7 public stratum' : b.label;
-      ov.appendChild(lead);
-      ov.appendChild(text);
-      var w = text.getComputedTextLength ? text.getComputedTextLength() : 80;
-      var x = right ? Math.min(tx + 3, vw - 4 - w) : Math.max(tx - 3, 4 + w);
-      text.setAttribute('x', x.toFixed(1));
-      text.setAttribute('text-anchor', right ? 'start' : 'end');
-      // The pie's own labels crowd both sides, so step the tag off the bisector until it
-      // has a clear line to sit on, the way the chart's own leader lines bend.
-      var hostBox = host.getBoundingClientRect(), taken = [];
-      Array.prototype.forEach.call(svg.querySelectorAll('text'), function (t) {
-        var r = t.getBoundingClientRect();
-        if (r.width) taken.push({ x0: r.left - hostBox.left, x1: r.right - hostBox.left,
-                                  y0: r.top - hostBox.top, y1: r.bottom - hostBox.top });
-      });
-      var lx0 = right ? x : x - w, lx1 = right ? x + w : x, dy = 0;
-      for (var s = 0; s < LABEL_STEPS.length; s++) {
-        var ty = elbow.y + LABEL_STEPS[s], clear = true;
-        for (var q = 0; q < taken.length; q++) {
-          var t2 = taken[q];
-          if (lx1 > t2.x0 - 3 && lx0 < t2.x1 + 3 && ty + 7 > t2.y0 && ty - 7 < t2.y1) { clear = false; break; }
-        }
-        if (clear) { dy = LABEL_STEPS[s]; break; }
+      if (b) {
+        var ring = document.createElementNS(SVGNS, 'path');
+        ring.setAttribute('class', 'lz-band-ring');
+        ring.setAttribute('d', bandSectorPath(cx, cy, Math.max(1, b.r0 - 1.6), b.r1 + 1.6, b.sector.angle, b.sector.span));
+        ov.appendChild(ring);
+        placeTip(bandTipHtml(b), cx + r1pie + 12, cy - 40);
+      } else if (sl) {
+        placeTip(sliceTooltip(sl, sl.blockCount / totalBlocks), cx + r1pie + 12, cy - 40);
       }
-      text.setAttribute('y', (elbow.y + dy).toFixed(1));
-      lead.setAttribute('points', [anchor.x.toFixed(1) + ',' + anchor.y.toFixed(1),
-        elbow.x.toFixed(1) + ',' + elbow.y.toFixed(1),
-        tx.toFixed(1) + ',' + (elbow.y + dy).toFixed(1)].join(' '));
-      // One side of the pie is a solid stack of the chart's own labels, so there is not
-      // always a clear line to move to: the tag sits on a chip and simply covers what it
-      // must, for as long as the pointer is on the band.
-      if (text.getBBox) {
-        var bb = text.getBBox();
-        var chip = document.createElementNS(SVGNS, 'rect');
-        chip.setAttribute('class', 'lz-band-chip');
-        chip.setAttribute('x', (bb.x - 5).toFixed(1));
-        chip.setAttribute('y', (bb.y - 3).toFixed(1));
-        chip.setAttribute('width', (bb.width + 10).toFixed(1));
-        chip.setAttribute('height', (bb.height + 6).toFixed(1));
-        chip.setAttribute('rx', '2');
-        ov.insertBefore(chip, text);
-      }
-
-      // Pinned clear of the pie rather than following the pointer: the bands are fixed
-      // shapes, and a tooltip that chases the cursor across a doughnut spends its time
-      // covering the band it is describing.
-      tip.innerHTML = bandTooltipHtml(b);
-      tip.setAttribute('data-shown', '');
-      var W = vw, H = vh, tw = tip.offsetWidth, th = tip.offsetHeight;
-      var gap = 12, beside = anchor.y - th / 2, spots = [];
-      if (pie.cx + pie.r + gap + tw <= W) spots.push([pie.cx + pie.r + gap, beside]);
-      if (pie.cx - pie.r - gap - tw >= 0) spots.push([pie.cx - pie.r - gap - tw, beside]);
-      spots.push([W - tw - 4, 4], [4, 4], [W - tw - 4, H - th - 4], [4, H - th - 4]);
-      // On a narrow screen the pie fills the box and something has to be covered; whatever
-      // it is, it must not be the band being described.
-      var bb = hot.getBBox ? hot.getBBox() : null, best = spots[0], bestHit = Infinity;
-      spots.forEach(function (sp) {
-        var sx = Math.max(4, Math.min(sp[0], W - tw - 4)), sy = Math.max(4, Math.min(sp[1], H - th - 4));
-        var hit = !bb ? 0 : Math.max(0, Math.min(sx + tw, bb.x + bb.width + 6) - Math.max(sx, bb.x - 6)) *
-                            Math.max(0, Math.min(sy + th, bb.y + bb.height + 6) - Math.max(sy, bb.y - 6));
-        if (hit < bestHit) { bestHit = hit; best = [sx, sy]; }
-      });
-      tip.style.left = (parseFloat(ov.style.left) || 0) + best[0] + 'px';
-      tip.style.top = (parseFloat(ov.style.top) || 0) + best[1] + 'px';
     }
     ov.addEventListener('mousemove', function (ev) {
       var p = ev.target;
-      if (p && p.__lzBand && p !== hot) setHot(p);
+      if (p && (p.__lzBand || p.__lzSlice) && p !== hot) setHot(p);
     });
     ov.addEventListener('mouseleave', clearHot);
-    ov.addEventListener('mouseout', function (ev) {
-      if (ev.target && ev.target.__lzBand && !(ev.relatedTarget && ev.relatedTarget.__lzBand)) clearHot();
-    });
     ov.addEventListener('click', function (ev) {
-      var b = ev.target && ev.target.__lzBand;
-      if (b && b.slug) location.href = '/mining/pool/' + b.slug;
+      var t = ev.target;
+      var slug = (t && t.__lzBand && t.__lzBand.slug) || (t && t.__lzSlice && t.__lzSlice.slug);
+      if (slug) location.href = '/mining/pool/' + slug;
     });
 
     var wrap = host.parentNode;
-    if (isPoolsGraph() && wrap && !wrap.querySelector('.lz-bands-note')) {
-      wrap.insertBefore(el('p', { class: 'lz-bands-note' },
-        '<b>Outer bands: DATUM gateways</b>, largest on the rim, by the tag their coinbase carries. ' +
-        'The inner band is the pool\u2019s blocks with no gateway tag \u2014 its own stratum. ' +
-        'Sizes are blocks found in this window, so a short window moves a lot.'), host.nextSibling);
+    if (isPoolsGraph() && wrap) {
+      var note = wrap.querySelector('.lz-bands-note');
+      if (!note) {
+        note = el('p', { class: 'lz-bands-note' }, '');
+        wrap.insertBefore(note, host.nextSibling);
+      }
+      note.innerHTML = '<b>Pool hashrate pie</b> after <a href="' + RETROPEX + '" target="_blank" rel="noopener">Retropex/mempool</a>: every pool is a slice (no Other-fold), ' +
+        'DATUM miners are the outer bands (largest on the rim), the inner band is blocks the pool built itself. ' +
+        'Hashrate is block-share \u00d7 estimated network hashrate, in TH/s.';
     }
     bandState('ok');
-    bandInfo.pools = pools;
+    bandInfo.pools = banded;
     bandInfo.drawn = drawn;
+    bandInfo.slices = slices.length;
     bandInfo.window = win;
     bandInfo.sig = sig;
+  }
+
+  /* Retropex common.ts getBlockHeaderV2Fields (AGPL-3.0). Stock extras omit headerV2. */
+  function hexLe32(n) {
+    return ('00000000' + (n >>> 0).toString(16)).slice(-8);
+  }
+  function parseHeaderV2(hex) {
+    hex = String(hex || '').replace(/\s+/g, '');
+    if (hex.length < 328) return null;
+    var ver = parseInt(hex.slice(6, 8) + hex.slice(4, 6) + hex.slice(2, 4) + hex.slice(0, 2), 16);
+    if ((ver & 0x80000000) === 0) return null;
+    function le32(s) { return parseInt(s.slice(6, 8) + s.slice(4, 6) + s.slice(2, 4) + s.slice(0, 2), 16); }
+    return {
+      nonce2: le32(hex.slice(160, 168)),
+      nonce3: le32(hex.slice(168, 176)),
+      extranonce: hex.slice(176, 208),
+      h1Flags: parseInt(hex.slice(220, 222), 16),
+      xorKeyMaskClearBits: parseInt(hex.slice(222, 224), 16),
+      xorKey: hex.slice(224, 256)
+    };
+  }
+  function pageBlockHash() {
+    var m = /\/block\/([0-9a-fA-F]{64})/.exec(location.pathname);
+    if (m) return m[1].toLowerCase();
+    var rows = document.querySelectorAll('app-block table tr');
+    for (var i = 0; i < rows.length; i++) {
+      var tds = rows[i].querySelectorAll('td');
+      if (tds.length >= 2 && /^\s*Hash\s*$/i.test(tds[0].textContent || '')) {
+        var t = (tds[1].textContent || '').replace(/\s+/g, '');
+        if (/^[0-9a-f]{64}$/i.test(t)) return t.toLowerCase();
+      }
+    }
+    return null;
+  }
+  function headerV2Rows() {
+    if (!/\/block\//.test(location.pathname)) return;
+    var headerCell = null;
+    var tds = document.querySelectorAll('app-block table td');
+    for (var i = 0; i < tds.length; i++) {
+      if (/Block Header Hex/i.test((tds[i].textContent || '').trim())) { headerCell = tds[i]; break; }
+    }
+    if (!headerCell) return;
+    var tbody = headerCell.parentNode && headerCell.parentNode.parentNode;
+    if (!tbody || tbody.querySelector('.lz-header-v2')) return;
+    var id = pageBlockHash();
+    if (!id) return;
+    var hex = cachedText('hdr-' + id, '/api/block/' + id + '/header', 300000);
+    var v2 = parseHeaderV2(hex);
+    if (!v2) return;
+    function row(label, valueHtml) {
+      var tr = el('tr', { class: 'lz-header-v2' });
+      tr.appendChild(el('td', {}, esc(label)));
+      var td = el('td', {});
+      td.innerHTML = valueHtml;
+      tr.appendChild(td);
+      return tr;
+    }
+    var after = headerCell.parentNode;
+    var rows = [
+      row('Header version', '2 <span class="badge bg-success ms-1" title="BLAKE2b proof-of-work header">BLAKE2b</span>'),
+      row('Nonce2', esc(hexLe32(v2.nonce2))),
+      row('Nonce3', esc(hexLe32(v2.nonce3))),
+      row('Extranonce', '<p class="break-all">' + esc(v2.extranonce) + '</p>'),
+      row('H1 flags', esc(String(v2.h1Flags))),
+      row('XOR key', '<p class="break-all">' + esc(v2.xorKey) + '</p>'),
+      row('XOR key mask clear bits', esc(String(v2.xorKeyMaskClearBits)))
+    ];
+    var next = after.nextSibling;
+    for (var r = 0; r < rows.length; r++) tbody.insertBefore(rows[r], next);
+  }
+
+  /* Retropex mining.service selectedPower = 12 (TH/s). Stock v3.3.1 uses 18 (EH/s)
+   * and rounds this network to 0.01 / 0.00 EH/s. */
+  function fmtThForced(hs) {
+    if (!(hs > 0)) return '0 TH/s';
+    return (hs / 1e12).toLocaleString(undefined, { maximumFractionDigits: 2 }) + ' TH/s';
+  }
+  function miningThs() {
+    if (!isPoolsGraph() && !isMiningDash()) return;
+    var win = bandWindow();
+    var api = cachedJson('pools-' + win, '/api/v1/mining/pools/' + win, 120000);
+    if (!api) return;
+    var netHs = windowHashrate(api, win);
+    var total = Number(api.blockCount) || 0;
+    if (!netHs || !total) return;
+    var byName = {};
+    (api.pools || []).forEach(function (p) { byName[String(p.name).toLowerCase()] = p; });
+    var tables = document.querySelectorAll('app-pool-ranking table');
+    for (var t = 0; t < tables.length; t++) {
+      var ths = tables[t].querySelectorAll('thead th');
+      var hi = -1, pi = -1, i;
+      for (i = 0; i < ths.length; i++) {
+        var h = (ths[i].textContent || '').trim();
+        if (h === 'Hashrate') hi = i;
+        if (h === 'Pool') pi = i;
+      }
+      if (hi < 0 || pi < 0) continue;
+      var rows = tables[t].querySelectorAll('tbody tr');
+      for (var r = 0; r < rows.length; r++) {
+        var cells = rows[r].children;
+        if (cells.length <= hi) continue;
+        var name = (cells[pi].textContent || '').trim();
+        var p = byName[name.toLowerCase()];
+        if (!p) {
+          var keys = Object.keys(byName);
+          for (var k = 0; k < keys.length; k++) {
+            if (name.toLowerCase().indexOf(keys[k]) !== -1) { p = byName[keys[k]]; break; }
+          }
+        }
+        var label = (name || '').toLowerCase();
+        var hs;
+        if (!p && /all miners|total/.test(label)) hs = netHs;
+        else if (p) hs = netHs * (Number(p.blockCount) || 0) / total;
+        else continue;
+        var sig = (p ? String(p.blockCount) : 'net') + ':' + win;
+        if (cells[hi].getAttribute('data-lz-ths') === sig) continue;
+        cells[hi].setAttribute('data-lz-ths', sig);
+        cells[hi].textContent = fmtThForced(hs);
+        cells[hi].title = 'Estimated hashrate after Retropex/mempool (TH/s, not EH/s)';
+      }
+    }
+  }
+
+  var SIGHASH_LABELS = {
+    0: 'SIGHASH_DEFAULT', 1: 'SIGHASH_ALL', 2: 'SIGHASH_NONE', 3: 'SIGHASH_SINGLE',
+    33: 'SIGHASH_ALL | UNIFIED', 34: 'SIGHASH_NONE | UNIFIED', 35: 'SIGHASH_SINGLE | UNIFIED',
+    129: 'SIGHASH_ALL | ACP', 130: 'SIGHASH_NONE | ACP', 131: 'SIGHASH_SINGLE | ACP',
+    161: 'SIGHASH_ALL | ACP | UNIFIED', 162: 'SIGHASH_NONE | ACP | UNIFIED', 163: 'SIGHASH_SINGLE | ACP | UNIFIED'
+  };
+  function sighashKeys() {
+    var cells = document.querySelectorAll('app-transactions-list .sig-td');
+    if (!cells.length) return;
+    var m = /\/tx\/([0-9a-fA-F]{64})/.exec(location.pathname);
+    if (!m) return;
+    var tx = cachedJson('tx-' + m[1].toLowerCase(), '/api/tx/' + m[1], 300000);
+    if (!tx || !tx.vin) return;
+    var n = Math.min(cells.length, tx.vin.length);
+    for (var i = 0; i < n; i++) {
+      if (cells[i].querySelector('.lz-sighash')) continue;
+      var sigs = vinSighashes(tx.vin[i]);
+      var u = sigs.filter(function (s) { return (s & 0x20) !== 0; });
+      if (!u.length) continue;
+      var lock = cells[i].querySelector('.sig-no-lock');
+      if (lock) lock.remove();
+      var span = el('span', {
+        class: 'sig sig-key lz-sighash sighash-' + u[0],
+        title: SIGHASH_LABELS[u[0]] || ('SIGHASH 0x' + u[0].toString(16))
+      }, 'UNIFIED');
+      cells[i].appendChild(span);
+    }
   }
 
   var scheduled = false;
@@ -1447,6 +1766,13 @@
     try { dashboard(); } catch (e) { /* never break the explorer */ }
     try { minerBadges(); } catch (e) { /* never break the explorer */ }
     try { paintClockFiat(); } catch (e) { /* never break the explorer */ }
+    try { replayBadge(); } catch (e) { /* never break the explorer */ }
+    try { forkBanner(); } catch (e) { /* never break the explorer */ }
+    try { specialBlockBlink(); } catch (e) { /* never break the explorer */ }
+    try { aboutCite(); } catch (e) { /* never break the explorer */ }
+    try { headerV2Rows(); } catch (e) { /* never break the explorer */ }
+    try { miningThs(); } catch (e) { /* never break the explorer */ }
+    try { sighashKeys(); } catch (e) { /* never break the explorer */ }
     try { drawBands(); } catch (e) { bandState('error: ' + e); }
   }
   function schedule() {

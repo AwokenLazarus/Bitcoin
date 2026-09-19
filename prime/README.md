@@ -2,13 +2,17 @@
 
 The pool side of the DATUM protocol for the BLAKE2b Bitcoin chain, written from scratch.
 
-Any stock `datum_gateway` — OCEAN, [CONVOY](https://github.com/CONVOYMining/datum_gateway),
-the BLAKE2b forks by [FlyTheElephant1](https://github.com/FlyTheElephant1/datum_gateway) and
-[iohzrd](https://github.com/iohzrd/datum_gateway), or the packaged
-[StartOS](https://github.com/Retropex/datum-gateway-startos/releases) build — points at this
-Prime, unpatched (see [Supported gateways](#supported-gateways)). The
-gateway's own node builds every block template. The Prime never sees or chooses transactions;
-it does three things:
+A split-only `datum_gateway` — house `lazarus-gateway`, or
+[FlyTheElephant1](https://github.com/FlyTheElephant1/datum_gateway) with
+[`../lazarus/patches/datum-gateway-split-only.patch`](../lazarus/patches/datum-gateway-split-only.patch)
+so the hello UA contains `lazarus-split` — points at this Prime (see
+[Supported gateways](#supported-gateways)). Stock OCEAN / Convoy / unpatched FlyTheElephant
+builds still speak the protocol; production Lazarus sets `require-split-gateway = true` and
+refuses their hellos, because empty-first and size-class jobs cannot put a full TIDES split
+in the coinbase. The upstream-facing job fix without the UA bump is
+[FlyTheElephant1#5](https://github.com/FlyTheElephant1/datum_gateway/pull/5); Prime still
+refuses that UA. The gateway's own node builds every block template. The Prime never sees or
+chooses transactions; it does three things:
 
 1. **Dictates the coinbase.** When a gateway asks for a coinbaser, the Prime answers with the
    current TIDES split of the window: one output per miner, proportional to work, after the pool
@@ -59,12 +63,15 @@ Logging is `RUST_LOG` (`info` default; `debug` prints each share decision).
 
 ### Taking over from `lazarus-prime`
 
-An existing `lazarus-prime.toml` loads unchanged (`activation-height`, `verify-shares` and
-`require-split-gateway` are accepted and reported as no longer applying). A data dir the old
-Prime left behind keeps its identity: `lazarus-prime.key` (its 160-byte layout) is read when
-there is no `prime.key`, so the pool pubkey every gateway operator pinned stays the same —
-`primed pubkey` prints it to confirm. Its `ledger.json` is the whole window; import it before
-the first `run`:
+An existing `lazarus-prime.toml` loads unchanged (`activation-height` and `verify-shares`
+are reported as no longer applying). A data dir the old Prime left behind keeps its identity:
+`lazarus-prime.key` (its 160-byte layout) is read when there is no `prime.key`, so the pool
+pubkey every gateway operator pinned stays the same — `primed pubkey` prints it to confirm.
+`require-split-gateway` is honoured: when true, a hello whose UA is not `lazarus-gateway*`
+and does not contain `lazarus-split` is refused. Lazarus production sets it true. Stock
+empty-first and size-class builds cannot put a full TIDES split in the coinbase; closing
+the session is the only pool-side way to stop them hashing those jobs as us. Its
+`ledger.json` is the whole window; import it before the first `run`:
 
 ```bash
 primed -c lazarus-prime.toml import-ledger /path/to/lazarus-prime/ledger.json
@@ -113,10 +120,10 @@ the versions this Prime is checked against.
 
 | Name | Upstream | Ref tracked | Generation |
 |---|---|---|---|
-| `convoy` | `CONVOYMining/datum_gateway` | `master` | Convoy, configure v3 |
-| `fte` | `FlyTheElephant1/datum_gateway` | `test/console-collapse-pr14-pr17` (now also `master`) | OCEAN, configure v1 |
-| `iohzrd` | `iohzrd/datum_gateway` | `master` (has the `blake2b` branch and two commits more) | OCEAN, configure v1 |
-| `startos` | packaged by `Retropex/datum-gateway-startos` | the `datum_gateway` submodule of the newest `pow_*` release | OCEAN, configure v1 |
+| `convoy` | `CONVOYMining/datum_gateway` | `master` (`b9ea7dc`, 2026-09-03) | Convoy, configure v3 |
+| `fte` | `FlyTheElephant1/datum_gateway` | `master` (identical to CONVOY `b9ea7dc`; the old OCEAN empty-first branch is gone) | Convoy, configure v3 |
+| `iohzrd` | `iohzrd/datum_gateway` | `master` (`7491a50`, two commits ahead of CONVOY: YUGE-for-every-BLAKE2b-miner + header weight) | Convoy, configure v3 |
+| `startos` | packaged by `Retropex/datum-gateway-startos` | newest `pow_*` (`pow_0.4.1_23` pins iohzrd `7491a50`) | Convoy, configure v3 |
 
 The StartOS package ships the gateway as a submodule, so a release pins one gateway commit
 rather than naming a branch. `scripts/regtest-e2e.sh startos` resolves that commit from the
@@ -192,12 +199,25 @@ The window holds credits `(ts, identity, work, height)` until its total work rea
 `window × network difficulty` (converted to difficulty-1 shares), then trims from the oldest
 end. A split of value `V` pays `fee = V × fee_bps / 10000` to the pool, then distributes the
 rest to identities proportional to their work in the window, dropping outputs below
-`min-payout` (their share stays with the pool and is reported as unpaid). The output list is
-capped by count and size so the coinbase fits in a gateway's largest coinbase class, with the
-pool's output — fee plus whatever could not be placed — appended last. The list therefore
+`min-payout`. The output list is capped by count and size so the coinbase fits in a
+gateway's largest coinbase class, with the pool's output — fee plus whatever could not be
+placed — appended last. The list therefore
 sums to the requested value; a stock gateway pays it verbatim and only adds a pool output of
 its own when the template turns out to be worth more, and `lazarus-gateway`, which writes
 exactly the list it is given, pays the fee instead of burning it.
+
+**Carry.** What a block cannot place is not forfeited. When a block is found, every identity
+the split dropped for being under `min-payout` (or over the size budget) has what it earned
+in that block added to its *carry*, a per-identity balance persisted in `window.json`. Carry
+rides on top of the earned share in every later split and is paid — out of the pool's
+remainder, which is where those sats went — the first time earned + carry clears the floor.
+Because it is paid from the remainder, a large backlog drains over several blocks rather
+than ever pushing the outputs past the template value. An identity whose work has aged out
+of the window entirely is still a payee while its carry alone clears the floor. Carry is
+adjusted by *deltas* when a block is found (so two blocks found off snapshots that predate
+each other's settlement still add up), reversed if the block is orphaned, and re-applied if
+it comes back. Each `BlockRecord` carries `carry_paid` and `carry_delta`; `stats.json`
+reports `carry_sats` per miner and `carry_total_sats` / `carry_holders` for the window.
 
 Stock gateways build several coinbase sizes and hand small miners those with room for only
 the first few outputs, or none at all while a coinbaser reply is in flight. The Prime
@@ -252,13 +272,21 @@ user-agent bump, filed upstream as
 [FlyTheElephant1#5](https://github.com/FlyTheElephant1/datum_gateway/pull/5);
 `docs/blake2b-unsplit-coinbase-advisory.md` is the plain-language write-up to hand to an operator.
 
+The pool cannot rewrite a job the gateway already handed its miners, and cannot stop the
+gateway's own node from broadcasting a find. Closing the session is the only pool-side
+mitigation. With `require-split-gateway = true` (Lazarus production), a hello whose UA is not
+`lazarus-gateway*` and does not contain `lazarus-split` is refused before `HELLO_REPLY`.
+Unpatched Convoy size-class prefixes and unpatched OCEAN/FTE type-0 full jobs therefore
+cannot hash as us. Capping the issued list at ~17 outputs would make Convoy finds look complete
+while dropping small miners from every split, including house finds — worse than make-good.
+
 How bad it is depends on the build, and there are two severities:
 
 | build | when it publishes a pool-only full job | fix |
 |---|---|---|
-| `FlyTheElephant1` `master` | every BLAKE2b miner, first notify of every height — 100% of shares live | [#5](https://github.com/FlyTheElephant1/datum_gateway/pull/5) |
+| `FlyTheElephant1` `master` (`b9ea7dc`, now CONVOY code) | only when the coinbaser is late (same as CONVOY). Older OCEAN-lineage FTE still empty-firsts every height | CONVOY [#13](https://github.com/CONVOYMining/datum_gateway/pull/13); old [#5](https://github.com/FlyTheElephant1/datum_gateway/pull/5) is gone with the OCEAN tree |
 | `CONVOYMining` `b9ea7dc` | only when the coinbaser is late — 1 share in 167 live | [#13](https://github.com/CONVOYMining/datum_gateway/pull/13) |
-| `iohzrd` `40cf813` | same late-coinbaser case | [#1](https://github.com/iohzrd/datum_gateway/pull/1) |
+| `iohzrd` `7491a50` | same late-coinbaser case; every BLAKE2b miner then gets class YUGE | [#1](https://github.com/iohzrd/datum_gateway/pull/1) |
 | `OCEAN-xyz` `dbc3b14` | same late-coinbaser case, SHA256d (no BLAKE2b code at all) | not filed |
 
 Convoy and iohzrd already return `DATUM_COINBASE_ID_EMPTY` on a new block and pair it with
@@ -424,7 +452,11 @@ Doing this by hand first surfaced three bugs, all fixed:
 * Block notify is fanned out with a broadcast channel; a tip change from the node poller or a
   block candidate from any session reaches every other gateway immediately.
 * Idle gateways get a zero-length INFO frame every 20 s (the client's global timeout is 60 s);
-  a gateway silent for 300 s is dropped. Handshake must complete in 15 s.
+  a gateway silent for 300 s is dropped. Handshake must complete in 15 s. Silent means no
+  whole frame: bytes of a frame that never completes do not count, and a frame may be at most
+  192 KiB unless the session has had a block candidate in the last half hour. The per-address
+  limit counts an IPv6 /64 as one address, and the last two slots are kept for loopback so the
+  house gateway cannot be crowded out.
 * Duplicate shares are caught by hash in one set shared by every session and keyed by block
   height. The hash commits to the job (prev, merkle, nBits, txcount, version) and the miner's
   nonces, so it is unique per height and needs no per-job scoping; nothing a gateway sends —
@@ -434,6 +466,51 @@ Doing this by hand first surfaced three bugs, all fixed:
   whenever the job section changed, which let one share be credited without limit.) Shares one
   height behind are accepted for `stale-grace-secs` after the tip moved, matching template
   refresh latency.
+* A job's target is held to the pool node's chain, not to the gateway's account of it. Under
+  an easy `nbits` every share "is a block", and a block candidate moves carry balances the
+  moment it is recorded, so `nbits` must be what the node sets for that block (`getmininginfo`
+  `next.bits`; on a node that does not report it, the tip's own bits off a retarget boundary).
+  Where the node cannot say (no `next`, or a retarget block on a branch or height our node is
+  not at) it must be no easier than four times the tip's target, which is all consensus
+  allows. Where a job *builds* is reported, not enforced: a gateway whose node is on a
+  competing tip, or one block ahead of ours, is doing honest work that may be on the winning
+  side, and its shares are taken (two or more ahead is refused as stale, as it always was).
+  Work ahead of our tip makes the session ask the node early, at most once per 250 ms across
+  all sessions, so the ask cannot be turned into an RPC flood. Until the node has given any
+  tip, work is still taken and credited (a slow node is not the gateways' fault), but nothing
+  is recorded as a block on a gateway's word.
+* A share's difficulty has to be part of what was hashed, and only hashed bytes may say where
+  it is. The target byte is the first data byte of the scriptSig's third push (height, tags,
+  then the unique-id push, as `generate_coinbase_input` builds it in every C lineage and
+  `ratum-gateway` does too); the job section's `target_byte_index` must name exactly that
+  byte. An index past the end, or one aimed at a tag byte that already holds the pot being
+  claimed, would let one stream of easy hashes be claimed each at the best difficulty it
+  happens to meet. The whole-coinbase form (`lazarus-gateway`) has no target byte at all.
+  None of these is refused. A share whose difficulty is not provably hashed is credited by
+  its hash alone: `2^uncommitted-pot` (default 2^20) if the hash meets that, nothing
+  otherwise, whatever it claims. Credit that depends only on the hash leaves nothing to
+  choose after the fact, and it is fair: work at any difficulty up to the threshold earns,
+  on average, exactly what was done (lumpier, not smaller); only work above it is
+  under-credited. `totals.uncommitted_shares` counts them and the log names the gateway. The
+  one gateway taken at its word is the pool's own: loopback while `house-loopback` is on, or
+  a key in `house-gateways` (give the full 64-digit key; a short prefix still works but is
+  warned about at startup, since it is one a stranger could grind). Turn `house-loopback` off
+  if anything on the host forwards outside connections to the DATUM port.
+* A coinbaser is good for the block it was asked for and the two after. The job names the
+  coinbaser id and a session keeps its last sixteen, so with no limit a gateway could ask once
+  while its share of the window was at its best and mine on that reading for ever. The blocks of
+  grace are for a gateway racing a new tip on the split it already had: that is late, not lying.
+  Past it the job is held to no coinbaser, which for a pool-only coinbase changes nothing.
+* The gateway's own script (learned from its dominant share username, so: anything it likes)
+  may take only what a template is worth beyond the issued list, and at most a sixteenth of
+  the list. That is where a stock gateway configured with that script sends the excess. A
+  coinbase that sends it more (a small coinbase class whose dropped outputs went to the gateway
+  instead of the pool, by accident or not) is not refused: it is that gateway's own solo work,
+  accepted but not credited in the window, and a block found on it owes nobody. Rejecting
+  would punish a gateway with a coinbase bug; crediting would pay window credit for work whose
+  reward the pool never sees. A pool-only coinbase, or a partial one whose remainder goes to
+  the pool, is credited as before. Reward placed in an OP_RETURN is refused outright, as is a
+  coinbase whose scriptSig does not open with its BIP34 height.
 * The coinbase check bounds miner outputs from both sides. An issued output may not be paid
   *less* than its share (scaled down when the template is worth less than the split assumed)
   and may not be paid *more* than Prime issued against its script (scaled up by the same ratio

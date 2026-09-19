@@ -1,14 +1,15 @@
 //! `primed` — the Lazarus DATUM Prime.
 //!
-//! Accepts stock DATUM gateways, tells them the TIDES coinbase split for every template
-//! they build, verifies the BLAKE2b work they send back, credits the window, and relays
-//! found blocks to the node.
+//! Accepts split-only DATUM gateways (`lazarus-gateway*` or UA containing `lazarus-split`),
+//! tells them the TIDES coinbase split for every template they build, verifies the BLAKE2b
+//! work they send back, credits the window, and relays found blocks to the node.
 
 mod address;
 mod config;
 mod node;
 mod rpc;
 mod session;
+mod solo;
 mod state;
 mod stats;
 
@@ -248,6 +249,7 @@ fn run(cfg: Config) -> i32 {
         split_params: SplitParams {
             fee_bps: cfg.fee_bps,
             stratum_fee_bps: cfg.stratum_fee_bps,
+            datum_rebate_bps: cfg.datum_rebate_bps,
             min_payout: cfg.min_payout,
             // The gateway accepts at most 512 coinbaser entries; one is the pool's own
             // output appended after the payees. The byte budget leaves room for it too.
@@ -267,11 +269,13 @@ fn run(cfg: Config) -> i32 {
         tip,
         notify,
         rpc,
+        refresh: Default::default(),
         totals: Totals::default(),
         started: Instant::now(),
         started_ts: now(),
         next_client_id: AtomicU64::new(1),
         coinbaser_base: Mutex::new(None),
+        gateway_payouts: Mutex::new(Shared::load_gateway_payouts(&cfg.data_dir)),
         cfg,
     });
     log::info!("pool pubkey {}", shared.pool.public_hex());

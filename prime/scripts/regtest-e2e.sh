@@ -42,7 +42,7 @@ for t in json.load(sys.stdin).get("tree") or []:
 }
 case "$LINEAGE" in
   convoy) GW_REPO=https://github.com/CONVOYMining/datum_gateway; GW_REF=master ;;
-  fte)    GW_REPO=https://github.com/FlyTheElephant1/datum_gateway; GW_REF=test/console-collapse-pr14-pr17 ;;
+  fte)    GW_REPO=https://github.com/FlyTheElephant1/datum_gateway; GW_REF=master ;;
   # master carries the blake2b branch and two commits more; that is what its users run.
   iohzrd) GW_REPO=https://github.com/iohzrd/datum_gateway; GW_REF=master ;;
   # What the published StartOS "pow" package installs: OCEAN lineage, configure v1.

@@ -394,7 +394,9 @@ fn read_status(c: &mut Cursor) -> Result<ValidationStatus> {
 
 fn read_txn_list(c: &mut Cursor) -> Result<Vec<Vec<u8>>> {
     let n = c.u16()? as usize;
-    let mut txns = Vec::with_capacity(n);
+    // the count is the sender's; reserve for what the bytes that follow could actually hold
+    // (three length bytes a transaction), not for 65 535 vectors on a six-byte message
+    let mut txns = Vec::with_capacity(n.min(c.remaining() / 3));
     for _ in 0..n {
         let lo = c.u16()? as usize;
         let hi = c.u8()? as usize;
@@ -416,7 +418,7 @@ impl JobValidationReply {
                     return Ok(JobValidationReply::ShortIds { job, status, ids: vec![], crosscheck: None });
                 }
                 let n = c.u16()? as usize;
-                let mut ids = Vec::with_capacity(n);
+                let mut ids = Vec::with_capacity(n.min(c.remaining() / 6));
                 for _ in 0..n {
                     let lo = c.u32()? as u64;
                     let hi = c.u16()? as u64;

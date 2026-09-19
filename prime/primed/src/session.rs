@@ -10,6 +10,7 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use datum_wire::coinbase;
 use datum_wire::coinbaser::{self, Output};
 use datum_wire::crypto::{self, Channel, Identity};
 use datum_wire::frame::{Header, KeyStream, CLIENT_INITIAL_KEY};
@@ -25,14 +26,17 @@ use tokio::time::{interval, MissedTickBehavior};
 
 use crate::address::{self};
 use crate::config::Config;
-use crate::state::{now, ClientInfo, Seen, Shared};
+use crate::node;
+use crate::state::{now, ClientInfo, JobCheck, Seen, Shared};
 
-fn house_stratum(cfg: &Config, remote: SocketAddr, gateway_hex: &str) -> bool {
+/// `gateway_key` is the gateway's whole identity key in hex, so a configured full key is
+/// matched in full.
+fn house_stratum(cfg: &Config, remote: SocketAddr, gateway_key: &str) -> bool {
     if cfg.house_loopback && remote.ip().is_loopback() {
         return true;
     }
-    let g = gateway_hex.to_ascii_lowercase();
-    cfg.house_gateways.iter().any(|h| !h.is_empty() && g.starts_with(h))
+    let g = gateway_key.to_ascii_lowercase();
+    cfg.house_gateways.iter().any(|h| !h.is_empty() && g.starts_with(h.as_str()))
 }
 
 const MAX_HELLO: usize = 4096;
@@ -42,6 +46,8 @@ const HANDSHAKE_LIMIT: Duration = Duration::from_secs(15);
 const COINBASERS_KEPT: usize = 16;
 const PENDING_BLOCK_TTL: Duration = Duration::from_secs(120);
 const MAX_IDENTITIES: usize = 1 << 16;
+/// The identity table's hard ceiling, addresses included (about 100 MB of names).
+const MAX_IDENTITIES_HARD: usize = 1 << 20;
 /// Job slots whose coinbase sections stay resident per session; see `Session::touch_slot`.
 const MAX_LIVE_SLOTS: usize = 16;
 /// Coinbaser requests a session may make at once, and how often one is added back. A
@@ -63,6 +69,24 @@ const POOL_ONLY_WARN_EVERY: Duration = Duration::from_secs(300);
 /// a few a second.
 const REJECT_FLOOD: usize = 2_000;
 const REJECT_WINDOW: Duration = Duration::from_secs(10);
+/// 21 million coins, in sats.
+const MAX_MONEY: u64 = 2_100_000_000_000_000;
+/// The largest frame a gateway sends while no block of its is pending: a share with both of
+/// its sections (two `u16`-length coinbase halves, 255 merkle branches, a username). Only the
+/// transactions of a found block need the protocol's full `MAX_CMD_LEN`, and those are asked
+/// for. Every open session can make Prime buffer one frame, so this is what 256 of them cost.
+const MAX_IDLE_FRAME: usize = 192 * 1024;
+/// How long after a block candidate a session may still send a full-size frame.
+const BLOCK_REPLY_WINDOW: Duration = Duration::from_secs(1800);
+/// Blocks past the one it was issued for that a coinbaser is still honoured; see `issued_for`.
+const COINBASER_GRACE_BLOCKS: u32 = 2;
+/// Identities one session's gateway-script vote keeps count of; see `note_identity`.
+const MAX_SESSION_IDENTITIES: usize = 1024;
+/// What one over-rate coinbaser request with nothing to repeat counts as, in rejects.
+const OVER_RATE_COST: usize = 10;
+/// How often one session may have the node asked for its tip because its work is ahead of
+/// ours. A real gateway is ahead once per block, for a moment.
+const AHEAD_REFRESH_EVERY: Duration = Duration::from_secs(1);
 
 #[derive(Debug, thiserror::Error)]
 pub enum SessionError {
@@ -83,8 +107,142 @@ pub enum SessionError {
 struct IssuedCoinbaser {
     id: u8,
     value: u64,
+    /// The block the template it was asked for builds on, as the request gave it, and the
+    /// height that template was for (0 if our node had no tip then). A split is a reading of
+    /// the window at one moment and is not good for ever; see `Session::issued_for`.
+    prev_hash: [u8; 32],
+    height: u32,
     outputs: Vec<Output>,
     payees: Vec<Payee>,
+    /// Identities the split could not place, kept so a block found on this coinbaser can
+    /// roll their earnings into carry.
+    unpaid: Vec<tides::Unpaid>,
+    /// DATUM rebate a block found on this coinbaser credits to each DATUM identity's carry,
+    /// and the `rebate_owed` accounting that goes with it (see `Split::rebate_delta`).
+    rebate_credits: Vec<(String, u64)>,
+    rebate_owed_credited: u64,
+    rebate_deferred: u64,
+}
+
+/// The parts of a coinbaser a found block settles against: one we still hold, or a fresh split
+/// of the live window when the job named one we do not.
+struct Coinbaser<'a> {
+    value: u64,
+    payees: &'a [Payee],
+    unpaid: &'a [tides::Unpaid],
+    rebate_credits: &'a [(String, u64)],
+    rebate_owed_credited: u64,
+    rebate_deferred: u64,
+}
+
+/// What a found block does to the books.
+struct Settlement {
+    kind: &'static str,
+    /// What the window is owed because the coinbase did not place these outputs. The make-good
+    /// (`lazarus-ops/fee_wallet.py`) pays it from the reserved coinbase once that matures.
+    owed: u64,
+    /// Every payee the coinbaser issued, identity → sats, scaled to the real reward when the
+    /// coinbase paid nobody.
+    split: Vec<(String, u64)>,
+    /// Carry the coinbase itself handed out; 0 when it placed no payee.
+    carry_paid: u64,
+    carry_delta: Vec<(String, i64)>,
+    rebate_credited: u64,
+    rebate_delta: i64,
+}
+
+/// Settle a found block against the coinbaser it was mined on.
+///
+/// Carry comes off the books for *every* payee, not only the ones the coinbase placed. A
+/// dropped payee's `sats` includes their carry and `owed` pays that whole figure, so the
+/// make-good discharges their carry exactly as the coinbase discharges a placed payee's.
+/// Leaving it on the books pays it twice — once in the make-good, once when the next coinbaser
+/// hands out a balance that was never cleared. That is what blocks 969973 through 971795 did,
+/// about 1.15 XBT of it.
+///
+/// An orphan reverses the whole `carry_delta` (`node.rs`), which is right either way: the
+/// reserved coinbase dies with the block, so no make-good can ever spend it.
+fn settle(
+    kind: &CoinbaseKind,
+    cb: Option<Coinbaser<'_>>,
+    coinbase_value: u64,
+    paid_to: impl Fn(&[u8]) -> u64,
+) -> Settlement {
+    let bare = |kind: &'static str| Settlement {
+        kind,
+        owed: 0,
+        split: vec![],
+        carry_paid: 0,
+        carry_delta: vec![],
+        rebate_credited: 0,
+        rebate_delta: 0,
+    };
+    let name = match kind {
+        CoinbaseKind::Split => "split",
+        CoinbaseKind::Partial(_) => "partial",
+        CoinbaseKind::PoolOnly => "pool-only",
+        CoinbaseKind::EmptySolo | CoinbaseKind::GatewaySolo => return bare("solo"),
+        CoinbaseKind::Foreign => return bare("unknown"),
+    };
+    // Nothing to settle against: a full split owes the window nothing, anything else we cannot
+    // price, so it is recorded and left alone.
+    let Some(cb) = cb else {
+        return bare(if matches!(kind, CoinbaseKind::Split) { "split" } else { "unknown" });
+    };
+    let full_split = matches!(kind, CoinbaseKind::Split);
+    let pool_only = matches!(kind, CoinbaseKind::PoolOnly);
+    let placed = |p: &Payee| !pool_only && paid_to(&p.script) > 0;
+    let carry_delta = tides::split::carry_delta(cb.payees, cb.unpaid, cb.rebate_credits, |_| true);
+    let rebate_delta = tides::split::rebate_delta(cb.rebate_owed_credited, cb.rebate_deferred);
+
+    // The coinbaser was priced for the value the gateway asked about, and that is the gateway's
+    // number: nothing ties it to the template it then mined. Close to it (a template that
+    // gained a few fees since), the split's own figures stand, as they always have.
+    // A pool-only coinbase paid nobody and owes every figure, so it is always priced for
+    // the reward it carried.
+    if !pool_only && reward_matches(coinbase_value, cb.value) {
+        return Settlement {
+            kind: name,
+            owed: if full_split { 0 } else { cb.payees.iter().filter(|p| !placed(p)).map(|p| p.sats).sum() },
+            split: cb.payees.iter().map(|p| (p.identity.clone(), p.sats)).collect(),
+            carry_paid: cb.payees.iter().filter(|p| full_split || placed(p)).map(|p| p.carry).sum(),
+            carry_delta,
+            rebate_credited: cb.rebate_credits.iter().map(|r| r.1).sum(),
+            rebate_delta,
+        };
+    }
+
+    // Far from it, the split's figures describe a block that was not mined. Asked about at a
+    // hundredth of the real reward, a coinbase paying every miner its dust and the pool the
+    // rest "is the split, in full": nothing owed, while the window got nothing. Asked about at
+    // a hundred times it, every output scales down to a hundredth and each payee's whole carry
+    // is written off against a payment that covered a sliver of it. So price the block for
+    // what it was: a miner's earned share moves with the reward, carry is a fixed debt, and
+    // whatever the coinbase did not pay of that is owed (which is also what discharges the
+    // carry, as for a dropped payee). Earnings and rebate the split deferred move with the
+    // reward too.
+    let rescale = |sats: u64| scale(sats, coinbase_value, cb.value);
+    let entitled = |p: &Payee| rescale(p.sats.saturating_sub(p.carry)).saturating_add(p.carry);
+    let paid = |p: &Payee| if pool_only { 0 } else { paid_to(&p.script).min(entitled(p)) };
+    Settlement {
+        kind: name,
+        owed: cb.payees.iter().map(|p| entitled(p) - paid(p)).sum(),
+        split: cb.payees.iter().map(|p| (p.identity.clone(), entitled(p))).collect(),
+        carry_paid: cb.payees.iter().filter(|p| placed(p)).map(|p| p.carry.min(paid(p))).sum(),
+        carry_delta: carry_delta
+            .into_iter()
+            .map(|(i, d)| if d > 0 { (i, rescale(d as u64).min(i64::MAX as u64) as i64) } else { (i, d) })
+            .collect(),
+        rebate_credited: cb.rebate_credits.iter().map(|r| rescale(r.1)).sum(),
+        rebate_delta,
+    }
+}
+
+/// Whether a coinbase worth `actual` is the template a coinbaser issued for `issued` was asked
+/// about: no less, and no more than a sixteenth more (fees that arrived since; the same band
+/// `classify_coinbase` allows a gateway's own script to take).
+fn reward_matches(actual: u64, issued: u64) -> bool {
+    issued == 0 || (actual >= issued && actual - issued <= issued / 16)
 }
 
 /// How a coinbaser request gets answered. Deliberately has no "drop" variant: a request left
@@ -142,8 +300,10 @@ struct Session {
     last_send: Instant,
     last_recv: Instant,
     gateway_hex: String,
-    /// Last time this session warned that the gateway's node is ahead of ours (rate limit).
-    ahead_warned: Option<Instant>,
+    /// Last time this session warned that the gateway's chain is not our node's (rate limit).
+    chain_warned: Option<Instant>,
+    /// When this session last had the node asked for its tip ahead of the poller.
+    tip_asked: Option<Instant>,
     /// Token bucket for coinbaser requests; see `on_coinbaser_request`.
     coinbaser_tokens: u32,
     coinbaser_refill_at: Instant,
@@ -156,6 +316,35 @@ struct Session {
     /// subsidy-only job and should not be happening.
     pool_only_full_jobs: u64,
     pool_only_warned: Option<Instant>,
+    /// When this session last said its shares are credited by hash alone.
+    uncommitted_warned: Option<Instant>,
+    /// When the house gateway's session last said it is over the reject-flood limit.
+    flood_warned: Option<Instant>,
+    /// When this session last had a block candidate; see `MAX_IDLE_FRAME`.
+    candidate_at: Option<Instant>,
+    /// Work seen per share username on this session; the dominant identity is the
+    /// gateway's payout for the script-flip.
+    identity_work: HashMap<String, u64>,
+    gateway_script: Option<Vec<u8>>,
+    gateway_identity: Option<String>,
+    /// When to send configure(gateway) — only while this tip has no split yet
+    /// (just learned the identity). Once a coinbaser lands they stay on pool.
+    restore_script_at: Option<tokio::time::Instant>,
+    configured_as_gateway: bool,
+    /// This tip already has a coinbaser reply, so jobs should be pool/split.
+    split_ready: bool,
+    /// `prev_hash` of the last flushed coinbaser (hex), i.e. the tip that split is for.
+    last_split_prev: Option<String>,
+    /// Convoy configure v3 resume token; reused for every mid-session configure so the
+    /// gateway does not drop its share queue.
+    resume_token: [u8; mining::RESUME_TOKEN_LEN],
+    /// Test hook: a computed coinbaser sitting until `coinbaser_send_at`. The session
+    /// keeps reading shares while it waits; a sleep on this task would starve receipts
+    /// and make a stock gateway reconnect.
+    pending_coinbaser: Option<(u64, Vec<u8>, [u8; 32])>,
+    coinbaser_send_at: Option<tokio::time::Instant>,
+    /// This session's row for the clients table, until its first frame earns it a place there.
+    row: Option<ClientInfo>,
 }
 
 /// Which of the two gateway-side faults produced a pool-only coinbase, read off the share rather
@@ -210,6 +399,13 @@ pub async fn run(shared: Arc<Shared>, mut stream: TcpStream, remote: SocketAddr)
         return Err(SessionError::Bad("first frame is not a sealed, signed hello"));
     }
     let hello = handshake::parse_client_hello(&shared.pool, &payload)?;
+    if shared.cfg.require_split_gateway && !handshake::is_split_gateway(&hello.user_agent) {
+        log::warn!(
+            "[{id}] {remote} refused ua={:?}: require-split-gateway (need lazarus-gateway or +lazarus-split)",
+            hello.user_agent
+        );
+        return Err(SessionError::Bad("split-only gateway required"));
+    }
     let session_key = Identity::generate();
     let (recv_keys, mut send_keys) = KeyStream::from_seed(hello.seed);
     let (send_nonce, recv_nonce) = crypto::session_nonces(hello.seed, &hello.session_sign_pk);
@@ -222,29 +418,32 @@ pub async fn run(shared: Arc<Shared>, mut stream: TcpStream, remote: SocketAddr)
     write_frame(&mut stream, &h, &reply, &mut send_keys).await?;
 
     let gateway_hex = hex::encode(&hello.identity_sign_pk[..8]);
-    let fee_path = if house_stratum(&shared.cfg, remote, &gateway_hex) { "stratum" } else { "datum" };
+    let gateway_key = hex::encode(hello.identity_sign_pk);
+    let known_script = shared.lookup_gateway_script(&gateway_key);
+    let fee_path = if house_stratum(&shared.cfg, remote, &gateway_key) { "stratum" } else { "datum" };
     log::info!(
         "[{id}] {remote} hello ua={:?} gateway={gateway_hex} gen={:?} fee={fee_path}{}",
         hello.user_agent,
         hello.generation,
         if hello.resume_token.is_some() { " (asked to resume; declined)" } else { "" }
     );
-    shared.clients.lock().unwrap().insert(
+    // Shown as a client once it has proved it holds the session key (`Session::establish`). A
+    // hello can be replayed by anyone who saw one, and re-sealed to us by any other pool its
+    // gateway connects to; whoever does that cannot read our reply or send a frame, but would
+    // otherwise put a row here under the gateway's name.
+    let row = ClientInfo {
         id,
-        ClientInfo {
-            id,
-            remote: remote.to_string(),
-            user_agent: hello.user_agent.clone(),
-            generation: match hello.generation {
-                Generation::Ocean => "ocean",
-                Generation::Convoy => "convoy",
-            },
-            gateway: gateway_hex.clone(),
-            connected_ts: now(),
-            fee_path: fee_path.into(),
-            ..Default::default()
+        remote: remote.to_string(),
+        user_agent: hello.user_agent.clone(),
+        generation: match hello.generation {
+            Generation::Ocean => "ocean",
+            Generation::Convoy => "convoy",
         },
-    );
+        gateway: gateway_hex.clone(),
+        connected_ts: now(),
+        fee_path: fee_path.into(),
+        ..Default::default()
+    };
     shared.totals.add(&shared.totals.connections, 1);
     // Removed on drop, so the clients table cannot keep a row for a session that panicked.
     let _row = ClientRow { shared: shared.clone(), id };
@@ -267,7 +466,8 @@ pub async fn run(shared: Arc<Shared>, mut stream: TcpStream, remote: SocketAddr)
         pending_blocks: HashMap::new(),
         last_send: Instant::now(),
         last_recv: Instant::now(),
-        ahead_warned: None,
+        chain_warned: None,
+        tip_asked: None,
         gateway_hex,
         coinbaser_tokens: COINBASER_BURST,
         coinbaser_refill_at: Instant::now(),
@@ -275,6 +475,24 @@ pub async fn run(shared: Arc<Shared>, mut stream: TcpStream, remote: SocketAddr)
         pool_only_shares: 0,
         pool_only_full_jobs: 0,
         pool_only_warned: None,
+        uncommitted_warned: None,
+        flood_warned: None,
+        candidate_at: None,
+        identity_work: HashMap::new(),
+        gateway_script: known_script,
+        gateway_identity: None,
+        restore_script_at: None,
+        configured_as_gateway: false,
+        split_ready: false,
+        last_split_prev: None,
+        resume_token: {
+            let mut t = [0u8; mining::RESUME_TOKEN_LEN];
+            OsRng.fill_bytes(&mut t);
+            t
+        },
+        pending_coinbaser: None,
+        coinbaser_send_at: None,
+        row: Some(row),
     };
     s.serve().await
 }
@@ -293,8 +511,15 @@ impl Drop for ClientRow {
 }
 
 impl Session {
+    /// A frame decrypted under the session key: whoever sent the hello holds the key it named.
+    fn establish(&mut self) {
+        if let Some(row) = self.row.take() {
+            self.shared.clients.lock().unwrap().insert(self.id, row);
+        }
+    }
+
     fn is_house_stratum(&self) -> bool {
-        house_stratum(&self.shared.cfg, self.remote, &self.gateway_hex)
+        house_stratum(&self.shared.cfg, self.remote, &self.gateway_key_hex())
     }
 
     async fn serve(&mut self) -> Result<(), SessionError> {
@@ -322,20 +547,26 @@ impl Session {
         let mut inbuf = InBuf::default();
         let mut pending: Option<Header> = None;
         loop {
+            let restore = self.restore_script_at;
+            let cb_at = self.coinbaser_send_at;
             inbuf.make_room();
             tokio::select! {
                 n = self.stream.read_buf(&mut inbuf.data) => {
                     if n? == 0 {
                         return Err(SessionError::Io(std::io::ErrorKind::UnexpectedEof.into()));
                     }
-                    self.last_recv = Instant::now();
                     loop {
                         let h = match pending {
                             Some(h) => h,
                             None => {
                                 let Some(hb) = inbuf.take(Header::SIZE) else { break };
                                 let h = Header::decode(hb.try_into().unwrap(), &mut self.recv_keys)?;
-                                if h.len as usize > MAX_CMD_LEN {
+                                // full size while a found block's transactions are owed, and
+                                // for a while after: a slow reply must not cost the connection
+                                let block_about = !self.pending_blocks.is_empty()
+                                    || self.candidate_at.is_some_and(|t| t.elapsed() < BLOCK_REPLY_WINDOW);
+                                let cap = if block_about { MAX_CMD_LEN } else { MAX_IDLE_FRAME };
+                                if h.len as usize > cap {
                                     return Err(SessionError::Bad("frame too large"));
                                 }
                                 pending = Some(h);
@@ -346,12 +577,26 @@ impl Session {
                         let mut payload = payload.to_vec();
                         pending = None;
                         self.handle_frame(h, &mut payload).await?;
+                        // Alive is a whole frame that decrypted, not a byte: a header
+                        // promising megabytes and then one byte a minute would otherwise hold
+                        // a connection slot, and the buffer behind it, for ever.
+                        self.last_recv = Instant::now();
                     }
                 }
                 n = notify.recv() => {
                     match n {
-                        Ok(_) => self.send_mining(&mining::block_notify(), false).await?,
-                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                        // A find (nonzero id): next work is empty on a new tip — solo.
+                        // Node tip (0) or lagged: solo only if this tip has no split yet.
+                        // A second notify after we already answered the coinbaser must
+                        // not flip them back to gateway.
+                        Ok(0) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                            if !self.has_split_for_tip() {
+                                self.solo_until_split().await?;
+                            }
+                            self.send_mining(&mining::block_notify(), false).await?;
+                        }
+                        Ok(_) => {
+                            self.solo_until_split().await?;
                             self.send_mining(&mining::block_notify(), false).await?;
                         }
                         Err(_) => {}
@@ -373,29 +618,128 @@ impl Session {
                         !v.is_empty()
                     });
                 }
+                _ = async {
+                    if let Some(at) = restore {
+                        tokio::time::sleep_until(at).await;
+                    } else {
+                        std::future::pending::<()>().await;
+                    }
+                } => {
+                    if let Some(script) = self.gateway_script.clone() {
+                        self.send_configure_script(&script, true).await?;
+                    }
+                    self.restore_script_at = None;
+                }
+                _ = async {
+                    if let Some(at) = cb_at {
+                        tokio::time::sleep_until(at).await;
+                    } else {
+                        std::future::pending::<()>().await;
+                    }
+                } => {
+                    self.coinbaser_send_at = None;
+                    if let Some((value, encoded, prev)) = self.pending_coinbaser.take() {
+                        self.flush_coinbaser_reply(value, &encoded, prev).await?;
+                    }
+                }
             }
         }
     }
 
-    async fn send_configure(&mut self) -> Result<(), SessionError> {
+    fn solo_tag(&self) -> String {
+        let base = self.shared.cfg.coinbase_tag.as_str();
+        if base.ends_with("/solo") {
+            base.to_string()
+        } else {
+            format!("{base}/solo")
+        }
+    }
+
+    fn configure_body(&self, script: &[u8], tag: &str) -> Vec<u8> {
         let cfg = &self.shared.cfg;
-        let body = match self.hello.generation {
-            Generation::Ocean => {
-                mining::configure_v1(&self.shared.pool_script, cfg.prime_id, &cfg.coinbase_tag, cfg.min_diff)
-            }
+        match self.hello.generation {
+            Generation::Ocean => mining::configure_v1(script, cfg.prime_id, tag, cfg.min_diff),
             Generation::Convoy => {
-                let mut token = [0u8; mining::RESUME_TOKEN_LEN];
-                OsRng.fill_bytes(&mut token);
-                mining::configure_v3(
-                    &self.shared.pool_script,
-                    u64::from(cfg.prime_id),
-                    &token,
-                    &cfg.coinbase_tag,
-                    cfg.min_diff,
-                )
+                mining::configure_v3(script, u64::from(cfg.prime_id), &self.resume_token, tag, cfg.min_diff)
             }
+        }
+    }
+
+    async fn send_configure_script(&mut self, script: &[u8], gateway: bool) -> Result<(), SessionError> {
+        let tag = if gateway { self.solo_tag() } else { self.shared.cfg.coinbase_tag.clone() };
+        let body = self.configure_body(script, &tag);
+        self.send_mining(&body, true).await?;
+        self.configured_as_gateway = gateway;
+        log::debug!(
+            "[{}] configure {} tag={tag} script={}",
+            self.id,
+            if gateway { "gateway" } else { "pool" },
+            hex::encode(&script[..script.len().min(8)]),
+        );
+        Ok(())
+    }
+
+    async fn send_configure(&mut self) -> Result<(), SessionError> {
+        if let Some(script) = self.gateway_script.clone() {
+            self.send_configure_script(&script, true).await
+        } else {
+            let pool = self.shared.pool_script.clone();
+            self.send_configure_script(&pool, false).await
+        }
+    }
+
+    fn stay_on_gateway(&self) -> bool {
+        self.shared.cfg.stock_full_pool_only == "gateway-solo" && self.pool_only_full_jobs > 0
+    }
+
+    fn gateway_key_hex(&self) -> String {
+        hex::encode(self.hello.identity_sign_pk)
+    }
+
+    fn note_identity(&mut self, identity: &str, work: u64) {
+        if self.identity_work.len() >= MAX_SESSION_IDENTITIES && !self.identity_work.contains_key(identity) {
+            // The vote is for the gateway's own payout address, which is there from the first
+            // share; the thousandth distinct username on one session is not a candidate.
+            return;
+        }
+        let w = self.identity_work.entry(identity.to_string()).or_insert(0);
+        *w = w.saturating_add(work);
+        let Some((dom, _)) = self.identity_work.iter().max_by_key(|(_, w)| *w) else {
+            return;
         };
-        self.send_mining(&body, true).await
+        let dom = dom.clone();
+        let Some(script) = address::to_script(&dom, self.shared.network) else {
+            return;
+        };
+        if script == self.shared.pool_script {
+            return;
+        }
+        let changed = self.gateway_script.as_deref() != Some(script.as_slice());
+        self.gateway_script = Some(script.clone());
+        self.gateway_identity = Some(dom.clone());
+        self.shared.remember_gateway(&self.gateway_key_hex(), &dom, &script);
+        if changed && !self.split_ready && !self.configured_as_gateway && self.restore_script_at.is_none() {
+            self.restore_script_at = Some(tokio::time::Instant::now());
+        }
+    }
+
+    /// No split on this tip yet. Known gateways go solo so empty / late jobs
+    /// pay them. Unknown ones stay on the pool script until the first share.
+    fn has_split_for_tip(&self) -> bool {
+        let Some(tip) = self.shared.tip_snapshot() else {
+            return false;
+        };
+        self.split_ready && self.last_split_prev.as_deref() == Some(tip.hash.as_str())
+    }
+
+    async fn solo_until_split(&mut self) -> Result<(), SessionError> {
+        self.split_ready = false;
+        self.last_split_prev = None;
+        self.restore_script_at = None;
+        if let Some(script) = self.gateway_script.clone() {
+            self.send_configure_script(&script, true).await?;
+        }
+        Ok(())
     }
 
     /// Encrypt (and optionally sign with the session key) a mining payload and send it.
@@ -423,6 +767,9 @@ impl Session {
         let mut body: &[u8] = if h.channel { self.channel.decrypt_in_place(payload)? } else { payload };
         if h.signed {
             body = crypto::verify_trailing(&self.hello.session_sign_pk, body)?;
+        }
+        if h.channel {
+            self.establish();
         }
         match h.cmd {
             cmd::MINING => {
@@ -472,6 +819,13 @@ impl Session {
         // two-slot buffer whose index flips per reply, so a spurious one can make a legitimate
         // fetch read the wrong value and fall back to exactly the pool-only coinbase this
         // guards against.
+        // No template is worth nothing or more than every coin there will ever be. Past that
+        // the split's arithmetic is sized for money, not for `u64::MAX`, and the request is
+        // not from a gateway: the one kind that goes unanswered.
+        if value == 0 || value > MAX_MONEY {
+            log::debug!("[{}] coinbaser request for value={value}: not a template", self.id);
+            return self.note_reject();
+        }
         let started = Instant::now();
         let elapsed = self.coinbaser_refill_at.elapsed();
         if elapsed >= COINBASER_REFILL {
@@ -495,13 +849,21 @@ impl Session {
                 if let Some(repeat) = repeat {
                     log::debug!("[{}] coinbaser over rate; repeating #{prev_id} for value={value}", self.id);
                     self.shared.totals.add(&self.shared.totals.coinbasers_repeated, 1);
-                    self.send_mining(&mining::coinbaser_reply(value, &repeat), false).await?;
+                    self.send_coinbaser_reply(value, &repeat, prev_hash).await?;
                     return self.note_coinbaser_latency(started, Some(prev_id));
                 }
                 self.shared.totals.add(&self.shared.totals.coinbasers_over_rate, 1);
             }
             CoinbaserAction::FreshOverRate => {
                 self.shared.totals.add(&self.shared.totals.coinbasers_over_rate, 1);
+                // A fresh split is the dearest thing a session can ask for without doing any
+                // work (it walks the whole window), and asking about a new value every time
+                // gets one computed however empty the bucket is. Still answered, but it counts
+                // toward the flood limit at `OVER_RATE_COST` apiece: a gateway this far over
+                // (a real one asks a few times a block) is dropped after a couple of hundred.
+                for _ in 0..OVER_RATE_COST {
+                    self.note_reject()?;
+                }
             }
         }
 
@@ -511,10 +873,14 @@ impl Session {
         // Computed off a shared snapshot, so a reply never waits on the ledger mutex behind
         // share crediting or the other gateways asking at the same tip change.
         let base = self.shared.coinbaser_base();
-        let split =
-            tides::split::compute(base.miners.clone(), base.total_work, value, &self.shared.split_params, |ident| {
-                base.script_for(ident)
-            });
+        let split = tides::split::compute(
+            base.miners.clone(),
+            base.total_work,
+            value,
+            &self.shared.split_params,
+            base.rebate_owed,
+            |ident| base.script_for(ident),
+        );
         let (target, total_work) = (base.target_work, base.total_work);
         let mut outputs: Vec<Output> =
             split.payees.iter().map(|p| Output { sats: p.sats, script: p.script.clone() }).collect();
@@ -531,26 +897,83 @@ impl Session {
             outputs.push(Output { sats: split.pool_sats.max(1), script: self.shared.pool_script.clone() });
         }
         let encoded = coinbaser::encode_v2(id, &outputs);
-        self.send_mining(&mining::coinbaser_reply(value, &encoded), false).await?;
+        self.send_coinbaser_reply(value, &encoded, prev_hash).await?;
 
         let mut ph = prev_hash;
         ph.reverse();
         log::debug!(
-            "[{}] coinbaser #{id} value={value} prev={} outputs={} pool={} window={}/{}",
+            "[{}] coinbaser #{id} value={value} prev={} outputs={} pool={} carry_paid={} rebate_credit={} rebate_owed_out={} deferred={} window={}/{}",
             self.id,
             &hex::encode(ph)[..16],
             outputs.len(),
             split.pool_sats,
+            split.carry_paid,
+            split.rebate_sats,
+            split.rebate_owed_credited,
+            split.unpaid.iter().filter(|u| u.defers()).count(),
             total_work,
             target
         );
-        self.coinbasers.push_back(IssuedCoinbaser { id, value, outputs, payees: split.payees });
+        self.coinbasers.push_back(IssuedCoinbaser {
+            id,
+            value,
+            prev_hash,
+            height: self.shared.tip_snapshot().map_or(0, |t| t.height + 1),
+            outputs,
+            payees: split.payees,
+            unpaid: split.unpaid,
+            rebate_credits: split.rebate_credits,
+            rebate_owed_credited: split.rebate_owed_credited,
+            rebate_deferred: split.rebate_deferred,
+        });
         while self.coinbasers.len() > COINBASERS_KEPT {
             self.coinbasers.pop_front();
         }
         self.shared.totals.add(&self.shared.totals.coinbasers, 1);
         self.shared.client_update(self.id, |c| c.coinbasers += 1);
         self.note_coinbaser_latency(started, Some(id))
+    }
+
+    /// `configure(pool)` then the coinbaser reply. Stay on the pool script after
+    /// that — they can mine a split now. Solo returns only on the next tip
+    /// (empty work, no coinbaser yet). A test delay, if set, is scheduled on
+    /// the session loop so shares and keepalives still flow; the 5 s fetch
+    /// then times out still holding the gateway script.
+    async fn send_coinbaser_reply(
+        &mut self,
+        value: u64,
+        encoded: &[u8],
+        prev_hash: [u8; 32],
+    ) -> Result<(), SessionError> {
+        let delay = Duration::from_millis(self.shared.cfg.coinbaser_delay_ms);
+        if !delay.is_zero() {
+            log::info!("[{}] delaying coinbaser reply {} ms (test hook)", self.id, delay.as_millis());
+            self.pending_coinbaser = Some((value, encoded.to_vec(), prev_hash));
+            if self.coinbaser_send_at.is_none() {
+                self.coinbaser_send_at = Some(tokio::time::Instant::now() + delay);
+            }
+            return Ok(());
+        }
+        self.flush_coinbaser_reply(value, encoded, prev_hash).await
+    }
+
+    async fn flush_coinbaser_reply(
+        &mut self,
+        value: u64,
+        encoded: &[u8],
+        prev_hash: [u8; 32],
+    ) -> Result<(), SessionError> {
+        self.restore_script_at = None;
+        if !self.stay_on_gateway() {
+            let pool = self.shared.pool_script.clone();
+            self.send_configure_script(&pool, false).await?;
+        }
+        self.send_mining(&mining::coinbaser_reply(value, encoded), false).await?;
+        self.split_ready = true;
+        let mut ph = prev_hash;
+        ph.reverse();
+        self.last_split_prev = Some(hex::encode(ph));
+        Ok(())
     }
 
     /// Record how long a coinbaser reply took to reach the wire, and say so if it came close
@@ -576,6 +999,18 @@ impl Session {
 
     fn issued(&self, id: u8) -> Option<&IssuedCoinbaser> {
         self.coinbasers.iter().rev().find(|c| c.id == id)
+    }
+
+    /// The coinbaser a job may be held to: the one it names, if it was issued for the block
+    /// the job builds on, or no more than a block before it. The id is the gateway's to choose
+    /// and the last `COINBASERS_KEPT` replies stay in hand, so with no limit a gateway could
+    /// ask once while its share of the window was at its best and mine every later block
+    /// against that reading. A couple of blocks of grace, because a gateway racing a new tip can
+    /// publish its first job there on the split it already had, and that is a lag, not a lie:
+    /// refusing it would throw away honest miners' shares over nothing.
+    fn issued_for(&self, id: u8, prev_hash: &[u8; 32], height: u32) -> Option<&IssuedCoinbaser> {
+        self.issued(id)
+            .filter(|c| &c.prev_hash == prev_hash || (c.height > 0 && height <= c.height + COINBASER_GRACE_BLOCKS))
     }
 
     /// Undo a coinbase section this share brought in (it pushed the session over budget).
@@ -643,48 +1078,119 @@ impl Session {
             );
             return self.reject(&s, mining::REJECT_COINBASE_TOO_LARGE).await;
         }
-        let (height, coinbaser_id) = match &self.slots[job_id].job {
-            Some(j) => (j.height, j.coinbaser_id),
+        let (height, coinbaser_id, prev_hash, nbits) = match &self.slots[job_id].job {
+            Some(j) => (j.height, j.coinbaser_id, j.prev_hash, j.nbits_u32()),
             None => return self.reject(&s, mining::REJECT_BAD_JOB_ID).await,
         };
-        if let Some(tip) = self.shared.tip_snapshot() {
-            let expected = tip.height + 1;
+        // The job section is the gateway's account of the chain; the node's is the one that
+        // counts. Height, parent and target are all held to it before any work is credited.
+        // Until the node has answered once there is no chain to hold a job to. That is this
+        // pool's node being slow to start, not anything a gateway did, so their work is still
+        // taken and credited (it is real work: the hash is checked either way). What is not
+        // taken on a gateway's word is a *block*: see `held_to_chain` below.
+        let tip = self.shared.tip_snapshot();
+        let held_to_chain = tip.is_some();
+        if let Some(mut tip) = tip {
             let grace = Duration::from_secs(u64::from(self.shared.cfg.stale_grace_secs));
-            let stale = height < expected && !(height + 1 == expected && tip.seen_at.elapsed() < grace);
-            if height > expected + 1 {
-                // The gateway's node is at least two blocks past ours. That is our node lagging
-                // (peers, sync, or an isolated node), not a stale gateway; say so, once a minute,
-                // because every share from every healthy gateway is being refused meanwhile.
-                if self.ahead_warned.map_or(true, |t| t.elapsed() > Duration::from_secs(60)) {
-                    self.ahead_warned = Some(Instant::now());
-                    log::warn!(
-                        "[{}] {} submits work for height {height} but our node's tip is {}: the pool node is behind the gateway's node; check its peers and sync. Rejecting as stale until it catches up.",
-                        self.id, self.gateway_hex, tip.height
-                    );
+            let mut check = tip.check_job(&prev_hash, height, nbits, grace);
+            let ahead = matches!(check, JobCheck::Ahead | JobCheck::AheadByOne);
+            if ahead && self.tip_asked.is_none_or(|t| t.elapsed() > AHEAD_REFRESH_EVERY) {
+                // A gateway's node can have the next block before our poller does. Ask now
+                // rather than go on working from a tip that may be a block old.
+                self.tip_asked = Some(Instant::now());
+                node::refresh_ahead(&self.shared).await;
+                if let Some(t) = self.shared.tip_snapshot() {
+                    check = t.check_job(&prev_hash, height, nbits, grace);
+                    tip = t;
                 }
-                return self.reject(&s, mining::REJECT_STALE_BLOCK).await;
             }
-            if stale {
-                return self.reject(&s, mining::REJECT_STALE_BLOCK).await;
+            let warn = self.chain_warned.is_none_or(|t| t.elapsed() > Duration::from_secs(60));
+            let code = match check {
+                JobCheck::Current | JobCheck::AheadByOne => None,
+                JobCheck::OtherBranch => {
+                    // Taken: its node is on a tip ours does not have, which is what a fork
+                    // looks like from here. Worth a line, because it is also what a gateway
+                    // inventing parents looks like, and what our own node looks like when it
+                    // is the one on the losing side.
+                    if warn {
+                        self.chain_warned = Some(Instant::now());
+                        let mut prev = prev_hash;
+                        prev.reverse();
+                        log::warn!(
+                            "[{}] {} is working at height {height} on {}, where our node has {} at {}: a competing tip, or a node out of step. Its work is taken.",
+                            self.id,
+                            self.gateway_hex,
+                            hex::encode(prev),
+                            tip.hash,
+                            tip.height,
+                        );
+                    }
+                    None
+                }
+                JobCheck::Stale => Some(mining::REJECT_STALE_BLOCK),
+                JobCheck::Ahead => {
+                    // Two or more past our tip, after asking the node. That is our node lagging
+                    // (peers, sync, or an isolated node) or a gateway making heights up; say
+                    // so, once a minute, because if it is the node then every share from
+                    // every healthy gateway is being refused meanwhile.
+                    if warn {
+                        self.chain_warned = Some(Instant::now());
+                        log::warn!(
+                            "[{}] {} submits work for height {height} but our node's tip is {}: the pool node is behind the gateway's node; check its peers and sync. Rejecting as stale until it catches up.",
+                            self.id, self.gateway_hex, tip.height
+                        );
+                    }
+                    Some(mining::REJECT_STALE_BLOCK)
+                }
+                JobCheck::WrongBits => {
+                    if warn {
+                        self.chain_warned = Some(Instant::now());
+                        log::warn!(
+                            "[{}] {} submits work for height {height} with nbits {nbits:08x}, a target the chain cannot have set there (tip {} bits {}, next bits {}). Rejecting: under it every share would be a block.",
+                            self.id,
+                            self.gateway_hex,
+                            tip.height,
+                            tip.bits.map_or("unknown".into(), |b| format!("{b:08x}")),
+                            tip.next_bits.map_or("unknown".into(), |b| format!("{b:08x}")),
+                        );
+                    }
+                    Some(mining::REJECT_TARGET_MISMATCH)
+                }
+            };
+            debug_assert_eq!(code.is_none(), check.taken());
+            if let Some(code) = code {
+                return self.reject(&s, code).await;
             }
         }
 
-        let issued_outputs = self.issued(coinbaser_id).map(|c| c.outputs.clone());
+        let issued_outputs = self.issued_for(coinbaser_id, &prev_hash, height).map(|c| c.outputs.clone());
         let pool_script = self.shared.pool_script.clone();
+        let gateway_script = self.gateway_script.clone();
         let policy = Policy {
             pool_script: &pool_script,
             issued: issued_outputs.as_deref(),
             tolerance: self.shared.cfg.split_tolerance,
             now: now() as u32,
             min_pot: self.shared.cfg.min_pot(),
+            gateway_script: gateway_script.as_deref(),
+            empty_solo_fee_bps: self.shared.cfg.empty_solo_fee_bps,
+            trusted_target: self.is_house_stratum(),
+            uncommitted_pot: self.shared.cfg.uncommitted_pot,
         };
         let v = match verify::verify(&mut self.slots[job_id], &s, &policy) {
             Ok(v) => v,
             Err(code) => return self.reject(&s, code).await,
         };
         // One credit per hash, pool-wide and for as long as the height is live: the set is
-        // shared, keyed by height, and never cleared by anything a gateway can send.
-        let seen = self.shared.seen.lock().unwrap().insert(v.height, v.hash);
+        // shared, keyed by height, and never cleared by anything a gateway can send. A share
+        // that earned nothing (credited by hash alone, and its hash fell short) has no credit
+        // to take twice and is kept out of the set, which is what makes the set, the ledger
+        // and the identity table cost a hash at the floor to touch rather than any hash.
+        let seen = if v.work == 0 && !v.is_block_candidate {
+            Seen::Fresh
+        } else {
+            self.shared.seen.lock().unwrap().insert(v.height, v.hash)
+        };
         match seen {
             Seen::Fresh => {}
             Seen::Duplicate => return self.reject(&s, mining::REJECT_DUPLICATE_WORK).await,
@@ -698,18 +1204,34 @@ impl Session {
             }
         }
 
-        // credit
+        // credit — empty-solo and gateway-solo are accepted work but not window work.
+        if v.work > 0 {
+            self.note_identity(&identity, v.work);
+        }
         let ts = now();
-        let credited = {
+        let solo = matches!(v.coinbase_kind, CoinbaseKind::EmptySolo | CoinbaseKind::GatewaySolo);
+        let credited = if solo {
+            true
+        } else {
             let mut ledger = self.shared.ledger.lock().unwrap();
-            let table_full =
-                ledger.window.identities().len() >= MAX_IDENTITIES && ledger.window.work_of(&identity) == 0;
-            if table_full && address::to_script(&identity, self.shared.network).is_none() {
+            let known = ledger.window.identities().len();
+            let new = known >= MAX_IDENTITIES && ledger.window.work_of(&identity) == 0;
+            // Past the first limit only an address gets a new row; past the second nothing
+            // does. Rows are never reclaimed, and at the floor each costs real work, so the
+            // second limit is an attack in progress rather than a busy day.
+            let refused = new
+                && v.work > 0
+                && (known >= MAX_IDENTITIES_HARD || address::to_script(&identity, self.shared.network).is_none());
+            if refused {
                 false
             } else {
                 let source = if self.is_house_stratum() { SOURCE_STRATUM } else { SOURCE_DATUM };
-                if let Err(e) = ledger.credit(&identity, v.work, v.height, ts as u32, source) {
-                    log::error!("ledger write failed: {e}");
+                // nothing to write for a share credited by its hash alone that earned nothing
+                // this time (`Policy::uncommitted_pot`); it is accepted like any other
+                if v.work > 0 {
+                    if let Err(e) = ledger.credit(&identity, v.work, v.height, ts as u32, source) {
+                        log::error!("ledger write failed: {e}");
+                    }
                 }
                 true
             }
@@ -718,12 +1240,52 @@ impl Session {
             return self.reject(&s, mining::REJECT_BAD_USERNAME).await;
         }
         self.shared.totals.add(&self.shared.totals.accepted, 1);
-        self.shared.totals.add(&self.shared.totals.work, v.work);
+        if solo {
+            match v.coinbase_kind {
+                CoinbaseKind::EmptySolo => {
+                    self.shared.totals.add(&self.shared.totals.solo_empty_shares, 1);
+                    self.shared.totals.add(&self.shared.totals.solo_empty_work, v.work);
+                    self.shared.client_update(self.id, |c| {
+                        c.solo_empty_shares += 1;
+                        c.solo_empty_work += v.work;
+                    });
+                }
+                CoinbaseKind::GatewaySolo => {
+                    self.shared.totals.add(&self.shared.totals.solo_full_shares, 1);
+                    self.shared.totals.add(&self.shared.totals.solo_full_work, v.work);
+                    self.shared.client_update(self.id, |c| {
+                        c.solo_full_shares += 1;
+                        c.solo_full_work += v.work;
+                    });
+                }
+                _ => {}
+            }
+        } else {
+            self.shared.totals.add(&self.shared.totals.work, v.work);
+            if let (CoinbaseKind::Split, Some(gw)) = (&v.coinbase_kind, gateway_script.as_deref()) {
+                let paid_gw = v.coinbase.paid_to(gw);
+                let issued_gw: u64 = issued_outputs
+                    .as_ref()
+                    .map(|o| o.iter().filter(|x| x.script == gw).map(|x| x.sats).sum())
+                    .unwrap_or(0);
+                if paid_gw > issued_gw {
+                    self.shared.totals.add(&self.shared.totals.remainder_to_gateway_sats, paid_gw - issued_gw);
+                }
+            }
+        }
         self.shared.client_update(self.id, |c| {
             c.accepted += 1;
-            c.work += v.work;
+            if !solo {
+                c.work += v.work;
+            }
             c.last_share_ts = ts;
             c.identity = identity.clone();
+            if !self.is_house_stratum() {
+                let tag = coinbase::secondary_tag(&v.coinbase.script_sig);
+                if !tag.is_empty() {
+                    c.secondary_tag = tag;
+                }
+            }
         });
         let status = if matches!(v.coinbase_kind, CoinbaseKind::Split) {
             mining::ACCEPTED
@@ -734,7 +1296,7 @@ impl Session {
             // Why this job had no miner outputs is the whole question, and the share answers it:
             // `s.coinbase_id` is the gateway's own section index (its `cbselect`), and the
             // coinbaser we issued for the job says whether it had a split to place at all.
-            let payees = self.issued(coinbaser_id).map_or(0, |c| c.payees.len());
+            let payees = self.issued_for(coinbaser_id, &prev_hash, height).map_or(0, |c| c.payees.len());
             self.note_pool_only_share(PoolOnly {
                 subsidy_only: s.subsidy_only(),
                 txcount: v.commitment.txcount,
@@ -745,10 +1307,43 @@ impl Session {
         }
         self.send_mining(&mining::share_receipt(status, 0, s.nonce32, s.target_pot, s.job_id), false).await?;
 
+        if !v.target_committed {
+            self.note_uncommitted_share();
+        } else if v.target_pot < self.shared.cfg.min_pot() {
+            self.shared.totals.add(&self.shared.totals.below_floor_shares, 1);
+        }
         if v.is_block_candidate {
-            self.on_block_candidate(s, v, identity).await?;
+            if held_to_chain {
+                self.on_block_candidate(s, v, identity).await?;
+            } else {
+                // Its `nbits` is whatever the job said, so "meets nbits" proves nothing: at
+                // regtest's target every share does. A candidate moves carry balances the
+                // moment it is recorded, and that is not done on a gateway's word. The gateway
+                // submits its own blocks to its own node regardless.
+                log::warn!(
+                    "[{}] {} share at height {} meets its job's nbits, but our node has given no tip to hold that job to: not recorded as a block (check rpc)",
+                    self.id, self.gateway_hex, v.height
+                );
+            }
         }
         Ok(())
+    }
+
+    /// Say, now and then, that this gateway's shares are being credited by their hash alone.
+    fn note_uncommitted_share(&mut self) {
+        self.shared.totals.add(&self.shared.totals.uncommitted_shares, 1);
+        if self.uncommitted_warned.is_some_and(|t| t.elapsed() < POOL_ONLY_WARN_EVERY) {
+            return;
+        }
+        self.uncommitted_warned = Some(Instant::now());
+        log::warn!(
+            "[{}] {} {} ua={:?}: the difficulty of its shares is not part of what they hash (no target byte where the scriptSig's unique-id push puts one), so they are credited by hash alone at difficulty 2^{}: fair on average up to that difficulty, lumpier than a gateway that commits it. lazarus-gateway away from the pool host does this; if it is the pool's own, give its full key in house-gateways.",
+            self.id,
+            self.remote,
+            self.gateway_hex,
+            self.hello.user_agent,
+            self.shared.cfg.uncommitted_pot.max(self.shared.cfg.min_pot()),
+        );
     }
 
     async fn reject(&mut self, s: &PowSubmit, code: u16) -> Result<(), SessionError> {
@@ -759,7 +1354,8 @@ impl Session {
             c.rejected += 1;
             c.last_reject = Some(name);
         });
-        self.send_mining(&mining::share_receipt(mining::REJECTED, code, s.nonce32, s.target_pot, s.job_id), false).await?;
+        self.send_mining(&mining::share_receipt(mining::REJECTED, code, s.nonce32, s.target_pot, s.job_id), false)
+            .await?;
         self.note_reject()
     }
 
@@ -826,6 +1422,23 @@ impl Session {
             self.recent_rejects.pop_front();
         }
         if self.recent_rejects.len() > REJECT_FLOOD {
+            // The pool's own gateway is one session carrying every stratum miner, and what it
+            // forwards is whatever they send it. Hanging up on it because one of them found a
+            // way to make it forward refusable work would disconnect all of them to punish
+            // one; say so instead, and let the gateway deal with its miner.
+            if self.is_house_stratum() {
+                if self.flood_warned.is_none_or(|t| t.elapsed() > Duration::from_secs(60)) {
+                    self.flood_warned = Some(now);
+                    log::warn!(
+                        "[{}] the house gateway has had {} shares refused in {}s (latest: see its last_reject); not dropping it, but one of its miners is flooding",
+                        self.id,
+                        self.recent_rejects.len(),
+                        REJECT_WINDOW.as_secs()
+                    );
+                }
+                self.recent_rejects.clear();
+                return Ok(());
+            }
             return Err(SessionError::RejectFlood(self.recent_rejects.len(), REJECT_WINDOW.as_secs()));
         }
         Ok(())
@@ -846,41 +1459,82 @@ impl Session {
             v.coinbase_value,
             self.gateway_hex
         );
+        self.candidate_at = Some(Instant::now());
         self.shared.totals.add(&self.shared.totals.block_candidates, 1);
         self.shared.client_update(self.id, |c| c.block_candidates += 1);
 
         // what the window is owed if this coinbase did not pay the full split
-        let job_cb_id = self.slots[usize::from(s.job_id)].job.as_ref().map(|j| j.coinbaser_id);
-        let issued = job_cb_id.and_then(|id| self.issued(id));
+        let job_cb = self.slots[usize::from(s.job_id)].job.as_ref().map(|j| (j.coinbaser_id, j.prev_hash, j.height));
+        let issued = job_cb.and_then(|(id, prev, height)| self.issued_for(id, &prev, height));
         let fee = tides::split::fee_for(v.coinbase_value, self.shared.cfg.fee_bps);
-        let (kind, owed, split): (&str, u64, Vec<(String, u64)>) = match (&v.coinbase_kind, issued) {
-            (CoinbaseKind::Split, Some(c)) => {
-                ("split", 0, c.payees.iter().map(|p| (p.identity.clone(), p.sats)).collect())
-            }
-            (CoinbaseKind::Split, None) => ("split", 0, vec![]),
-            (CoinbaseKind::Partial(_), Some(c)) => {
-                let unpaid: u64 = c.payees.iter().filter(|p| v.coinbase.paid_to(&p.script) == 0).map(|p| p.sats).sum();
-                ("partial", unpaid, c.payees.iter().map(|p| (p.identity.clone(), p.sats)).collect())
-            }
-            (CoinbaseKind::PoolOnly, Some(c)) => {
-                // the reward this block would have split had the gateway carried the outputs
-                let scaled: Vec<(String, u64)> =
-                    c.payees.iter().map(|p| (p.identity.clone(), scale(p.sats, v.coinbase_value, c.value))).collect();
-                let owed = scaled.iter().map(|x| x.1).sum();
-                ("pool-only", owed, scaled)
-            }
-            (CoinbaseKind::PoolOnly, None) => {
-                // no coinbaser was issued for this job: split by the live window instead
-                let ledger = self.shared.ledger.lock().unwrap();
-                let net = self.shared.network;
-                let sp =
-                    ledger.window.split(v.coinbase_value, &self.shared.split_params, |i| address::to_script(i, net));
-                let owed = sp.paid_sats();
-                ("pool-only", owed, sp.payees.iter().map(|p| (p.identity.clone(), p.sats)).collect())
-            }
-            (CoinbaseKind::Partial(_), None) | (CoinbaseKind::Foreign, _) => ("unknown", 0, vec![]),
+        // Carry accounting for this block: minus the carry each placed output included, plus
+        // what every identity the split could not place earned. Applied now — the next
+        // coinbaser must not hand out the same carry twice — and reversed if the block is
+        // orphaned (node.rs).
+        // The DATUM rebate is not an output: the coinbase paid the pool the whole stratum fee,
+        // and the block's `rebate_credits` now join each DATUM identity's carry (inside
+        // `carry_delta`, so an orphan reverses them with everything else). The `rebate_owed`
+        // balance drops by what was credited out of it and grows by a rebate with nobody to
+        // credit. Split, partial and pool-only blocks all credit alike: the pool holds the fee
+        // either way.
+        // A pool-only coinbase whose job named no coinbaser we still hold: split the live
+        // window instead, so the block owes the window what it would have paid.
+        let live = if issued.is_none() && matches!(v.coinbase_kind, CoinbaseKind::PoolOnly) {
+            let ledger = self.shared.ledger.lock().unwrap();
+            let net = self.shared.network;
+            Some(ledger.window.split(v.coinbase_value, &self.shared.split_params, |i| address::to_script(i, net)))
+        } else {
+            None
         };
+        let cb = match (issued, live.as_ref()) {
+            (Some(c), _) => Some(Coinbaser {
+                value: c.value,
+                payees: &c.payees,
+                unpaid: &c.unpaid,
+                rebate_credits: &c.rebate_credits,
+                rebate_owed_credited: c.rebate_owed_credited,
+                rebate_deferred: c.rebate_deferred,
+            }),
+            (None, Some(sp)) => Some(Coinbaser {
+                value: sp.value,
+                payees: &sp.payees,
+                unpaid: &sp.unpaid,
+                rebate_credits: &sp.rebate_credits,
+                rebate_owed_credited: sp.rebate_owed_credited,
+                rebate_deferred: sp.rebate_deferred,
+            }),
+            (None, None) => None,
+        };
+        let (rebate_owed_credited, rebate_deferred) =
+            cb.as_ref().map_or((0, 0), |c| (c.rebate_owed_credited, c.rebate_deferred));
+        let Settlement { kind, owed, split, carry_paid, carry_delta, rebate_credited, rebate_delta } =
+            settle(&v.coinbase_kind, cb, v.coinbase_value, |script| v.coinbase.paid_to(script));
         let _ = fee;
+        // Booked in two steps (`tides::Books`). Now: what this coinbase took off the books, so
+        // that the coinbaser computed a few seconds from now cannot hand the same carry out
+        // again. When the node has the block in its main chain (`node::confirm_blocks`): what
+        // it put on them. Until then this is a share that met its job's target, and balances
+        // are not granted on that.
+        let settles = !carry_delta.is_empty() || rebate_credited > 0 || rebate_delta != 0;
+        let mut books = tides::Books::new(
+            if settles { rebate_owed_credited } else { 0 },
+            if settles { rebate_deferred } else { 0 },
+        );
+        if settles {
+            let (total, holders) = {
+                let mut ledger = self.shared.ledger.lock().unwrap();
+                ledger.book_debits(&carry_delta, &mut books);
+                (ledger.window.total_carry(), ledger.window.carries().len())
+            };
+            let waiting: i64 = carry_delta.iter().map(|d| d.1.max(0)).sum();
+            log::info!(
+                "[{}] block {hash_hex} carry: {carry_paid} sats of carry paid in {} outputs and {} sats of owed DATUM rebate drawn, off the books now; {waiting} sats of deferred earnings and rebate credits ({} entries) and {rebate_deferred} sats of undistributed rebate go on when the node confirms it; pool now holds {total} sats of carry for {holders} miners",
+                self.id,
+                books.debited.len(),
+                books.rebate_debited,
+                carry_delta.iter().filter(|d| d.1 > 0).count(),
+            );
+        }
         let record = BlockRecord {
             ts: now(),
             height: v.height,
@@ -891,18 +1545,25 @@ impl Session {
             owed_sats: owed,
             split,
             pool_sats: v.paid_to_pool,
+            carry_paid,
+            carry_delta,
+            rebate_credited,
+            rebate_delta,
             settled: false,
             submit: "pending".into(),
             gateway: self.gateway_hex.clone(),
+            books: Some(books),
         };
         self.shared.record_block(record);
 
         // ask for the transactions so we can submit the block ourselves as a backup
         let job = s.job_id;
-        self.pending_blocks
-            .entry(job)
-            .or_default()
-            .push(PendingBlock { share: v, submit: s, hash_hex, at: Instant::now() });
+        self.pending_blocks.entry(job).or_default().push(PendingBlock {
+            share: v,
+            submit: s,
+            hash_hex,
+            at: Instant::now(),
+        });
         self.send_mining(&mining::request_full_block(job), false).await?;
         // every other gateway should refresh its template now
         let _ = self.shared.notify.send(self.id as u32);
@@ -967,7 +1628,13 @@ impl Session {
             };
             log::info!("[{id}] submitblock {hash_hex} ({} bytes): {outcome}", block.len());
             shared.totals.add(&shared.totals.blocks_submitted, 1);
-            shared.update_block(&hash_hex, |r| r.submit = outcome);
+            let invalid = node::says_invalid(&outcome);
+            let height = shared.update_block(&hash_hex, |r| r.submit = outcome).map(|r| r.height);
+            if let (true, Some(height)) = (invalid, height) {
+                // The node has looked at the block and said no. There is nothing to wait for:
+                // what it took off the books goes back now, not six blocks from now.
+                node::mark_orphan(&shared, &hash_hex, height, "was refused by the node as invalid");
+            }
         });
     }
 }
@@ -1045,8 +1712,145 @@ async fn write_frame(
 mod tests {
     use super::*;
 
+    fn payee(identity: &str, sats: u64, carry: u64, tag: u8) -> Payee {
+        Payee { identity: identity.into(), work: 1, sats, carry, script: vec![0x00, 0x14, tag] }
+    }
+
+    fn coinbaser<'a>(value: u64, payees: &'a [Payee]) -> Coinbaser<'a> {
+        Coinbaser { value, payees, unpaid: &[], rebate_credits: &[], rebate_owed_credited: 0, rebate_deferred: 0 }
+    }
+
+    fn cleared(s: &Settlement) -> std::collections::HashMap<&str, i64> {
+        s.carry_delta.iter().map(|(i, d)| (i.as_str(), *d)).collect()
+    }
+
+    /// A coinbaser is priced for the value the gateway asked about, which is the gateway's
+    /// number. A block is settled for the reward it actually carried.
+    #[test]
+    fn a_block_is_settled_for_the_reward_it_carried_not_the_one_asked_about() {
+        let real = 312_500_000u64;
+        // earned 1 000 000 / 500 000 of a block worth `asked`, plus A's 400 000 of carry
+        let split_at = |asked: u64| vec![payee("A", asked / 250 + 400_000, 400_000, 1), payee("B", asked / 500, 0, 2)];
+
+        // near enough (a template that gained fees since) is settled on the split's own figures
+        let payees = split_at(real);
+        let s = settle(&CoinbaseKind::Split, Some(coinbaser(real, &payees)), real + real / 100, |_| 1);
+        assert_eq!((s.owed, s.carry_paid), (0, 400_000));
+        assert_eq!(s.split, vec![("A".to_string(), 1_650_000), ("B".to_string(), 625_000)]);
+
+        // Asked about at a hundredth of the reward: each miner gets its dust, the pool the rest,
+        // and that classifies as the split in full. The window is owed the difference.
+        let tiny = split_at(real / 100);
+        let paid_dust = |script: &[u8]| tiny.iter().find(|p| p.script == script).map_or(0, |p| p.sats);
+        let s = settle(&CoinbaseKind::Split, Some(coinbaser(real / 100, &tiny)), real, paid_dust);
+        assert_eq!(
+            s.split,
+            vec![("A".to_string(), 1_650_000), ("B".to_string(), 625_000)],
+            "what they earned of the real block"
+        );
+        assert_eq!(s.owed, (1_650_000 - 412_500) + (625_000 - 6_250), "less the dust they were paid");
+        assert_eq!(cleared(&s).get("A"), Some(&-400_000), "A's carry is discharged: paid in part, owed the rest");
+
+        // Asked about at a hundred times the reward and scaled down to fit: A is paid a
+        // hundredth of an output that was mostly carry. What is left of it is still owed.
+        let huge = split_at(real * 100);
+        let scaled = |script: &[u8]| huge.iter().find(|p| p.script == script).map_or(0, |p| p.sats / 100);
+        let s = settle(&CoinbaseKind::Split, Some(coinbaser(real * 100, &huge)), real, scaled);
+        assert_eq!(s.split, vec![("A".to_string(), 1_650_000), ("B".to_string(), 625_000)]);
+        let a_paid = (real * 100 / 250 + 400_000) / 100;
+        assert_eq!(s.owed, 1_650_000 - a_paid, "B was paid in full; A's carry was not");
+        assert_eq!(s.carry_paid, 400_000.min(a_paid));
+
+        // earnings the split deferred, and rebate it credited, move with the reward as well
+        let unpaid = [tides::Unpaid {
+            identity: "C".into(),
+            sats: 30_000,
+            earned: 30_000,
+            reason: tides::UnpaidReason::BelowMinimum,
+        }];
+        let credits = [("D".to_string(), 50_000u64)];
+        let cb = Coinbaser { unpaid: &unpaid, rebate_credits: &credits, ..coinbaser(real * 100, &huge) };
+        let s = settle(&CoinbaseKind::Split, Some(cb), real, scaled);
+        assert_eq!((cleared(&s).get("C"), cleared(&s).get("D")), (Some(&300), Some(&500)));
+        assert_eq!(s.rebate_credited, 500);
+
+        assert!(reward_matches(real, real) && reward_matches(real + real / 16, real) && reward_matches(5, 0));
+        assert!(!reward_matches(real - 1, real) && !reward_matches(real + real / 16 + 1, real));
+    }
+
+    /// The bug that cost about 1.15 XBT between 969973 and 971795. A gateway that carries only
+    /// the head of the coinbase leaves the rest to the make-good, which pays each dropped payee
+    /// their whole output — carry included. If that carry stays on the books the next coinbaser
+    /// hands out the same balance again and the pool pays twice.
+    #[test]
+    fn a_partial_discharges_the_carry_of_the_payees_it_dropped() {
+        let payees =
+            vec![payee("A", 1_000_000, 400_000, 1), payee("B", 800_000, 300_000, 2), payee("C", 600_000, 0, 3)];
+        let s = settle(&CoinbaseKind::Partial(1), Some(coinbaser(312_500_000, &payees)), 312_500_000, |script| {
+            if script == [0x00, 0x14, 1] {
+                1_000_000
+            } else {
+                0
+            }
+        });
+        assert_eq!(s.kind, "partial");
+        assert_eq!(s.owed, 1_400_000, "B and C are owed their whole outputs");
+        assert_eq!(s.carry_paid, 400_000, "only A's carry rode an output the coinbase actually paid");
+        let d = cleared(&s);
+        assert_eq!(d.get("A"), Some(&-400_000), "placed payee's carry was handed out");
+        assert_eq!(d.get("B"), Some(&-300_000), "dropped payee's carry is paid by the make-good, so it must come off");
+        assert_eq!(d.get("C"), None, "C carried nothing to discharge");
+    }
+
+    /// A pool-only coinbase places nobody, so the make-good owes the whole split — scaled to the
+    /// reward the block really carried — and every payee's carry goes with it.
+    #[test]
+    fn a_pool_only_discharges_every_carry_and_scales_what_it_owes() {
+        let payees = vec![payee("A", 1_000_000, 400_000, 1), payee("B", 800_000, 300_000, 2)];
+        let s = settle(&CoinbaseKind::PoolOnly, Some(coinbaser(200_000_000, &payees)), 100_000_000, |_| 0);
+        // Half the assumed reward, nobody paid. What each earned of this block halves with it;
+        // the carry riding the same output is a debt from earlier blocks and does not. Scaling
+        // the whole output while clearing the whole carry wrote half of that debt off.
+        assert_eq!((s.kind, s.owed, s.carry_paid), ("pool-only", 1_250_000, 0));
+        assert_eq!(s.split, vec![("A".to_string(), 300_000 + 400_000), ("B".to_string(), 250_000 + 300_000)]);
+        assert_eq!(cleared(&s).values().sum::<i64>(), -700_000, "all of it discharged");
+    }
+
+    /// A full split pays every output itself, so it owes nothing and clears all the carry it rode.
+    #[test]
+    fn a_full_split_owes_nothing_and_clears_the_carry_it_paid() {
+        let payees = vec![payee("A", 1_000_000, 400_000, 1), payee("B", 800_000, 300_000, 2)];
+        let s = settle(&CoinbaseKind::Split, Some(coinbaser(312_500_000, &payees)), 312_500_000, |_| 1);
+        assert_eq!((s.kind, s.owed, s.carry_paid), ("split", 0, 700_000));
+        assert_eq!(cleared(&s).values().sum::<i64>(), -700_000);
+    }
+
+    /// Work credited to a solo or foreign coinbase is not the window's, so nothing settles.
+    #[test]
+    fn solo_and_foreign_coinbases_settle_nothing() {
+        for (kind, name) in
+            [(CoinbaseKind::EmptySolo, "solo"), (CoinbaseKind::GatewaySolo, "solo"), (CoinbaseKind::Foreign, "unknown")]
+        {
+            let payees = vec![payee("A", 1_000_000, 400_000, 1)];
+            let s = settle(&kind, Some(coinbaser(312_500_000, &payees)), 312_500_000, |_| 0);
+            assert_eq!((s.kind, s.owed, s.carry_paid), (name, 0, 0));
+            assert!(s.carry_delta.is_empty() && s.split.is_empty(), "{name} touches no books");
+        }
+    }
+
     fn issued(id: u8, value: u64) -> IssuedCoinbaser {
-        IssuedCoinbaser { id, value, outputs: vec![Output { sats: value, script: vec![0x00, 0x14, id] }], payees: vec![] }
+        IssuedCoinbaser {
+            id,
+            value,
+            prev_hash: [id; 32],
+            height: 0,
+            outputs: vec![Output { sats: value, script: vec![0x00, 0x14, id] }],
+            payees: vec![],
+            unpaid: vec![],
+            rebate_credits: vec![],
+            rebate_owed_credited: 0,
+            rebate_deferred: 0,
+        }
     }
 
     /// The property block 968440 came down to: whatever the bucket says, the gateway gets an
@@ -1116,5 +1920,26 @@ mod tests {
     #[test]
     fn the_slow_warning_leaves_room_before_a_gateway_gives_up() {
         assert!(COINBASER_SLOW < STOCK_COINBASER_DEADLINE);
+    }
+
+    /// Who is trusted as the pool's own gateway is decided on the whole key when the whole key
+    /// is configured: sharing its first 16 digits is not being it.
+    #[test]
+    fn a_house_gateway_is_matched_on_as_much_key_as_was_configured() {
+        let text = "rpc = \"http://127.0.0.1:9\"\ndata-dir = \"/tmp\"\npayout-address = \"bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4\"\nhouse-loopback = false\n";
+        let mut cfg: Config = toml::from_str(text).unwrap();
+        let house = format!("9d992e5cfec05102{}", "ab".repeat(24));
+        let lookalike = format!("9d992e5cfec05102{}", "cd".repeat(24));
+        let remote: SocketAddr = "203.0.113.7:5000".parse().unwrap();
+        cfg.house_gateways = vec![house.clone()];
+        assert!(house_stratum(&cfg, remote, &house));
+        assert!(!house_stratum(&cfg, remote, &lookalike));
+        cfg.house_gateways = vec!["9d992e5cfec05102".into()];
+        assert!(house_stratum(&cfg, remote, &lookalike), "a prefix matches whatever starts with it");
+        // loopback is house only while house-loopback says so
+        cfg.house_gateways.clear();
+        assert!(!house_stratum(&cfg, "127.0.0.1:5000".parse().unwrap(), &lookalike));
+        cfg.house_loopback = true;
+        assert!(house_stratum(&cfg, "127.0.0.1:5000".parse().unwrap(), &lookalike));
     }
 }

@@ -9,6 +9,7 @@ payout-address = "<your address>"
 coinbase-tag = "Lazarus"
 prime-id = 1
 window = 8
+# Floor for split outputs, sats. Under it, earnings carry forward to the next output that clears it.
 min-payout = 546
 fee-bps = 50
 activation-height = 961640

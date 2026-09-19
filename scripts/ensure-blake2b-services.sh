@@ -41,7 +41,8 @@ for solo in asic gpu; do
   fi
 done
 #
-# Pool UI (pool/server.py): :8888 local, :8889 lan-edge, :8890 public NPM.
+# Pool UI (pool/server.py): :8888 local writer, :8889 the public dashboard (several readers
+# sharing the port), :8890 a spare read-only mirror for LAN and for checking a worker alone.
 # Static files are read from disk per request, so pool/static/* deploys are live at once;
 # a new server.py needs the processes relaunched. Same trick as electrs above: any instance
 # older than server.py is TERMed here and relaunched below. When this script runs as root
@@ -70,6 +71,22 @@ pool_ui() { # port logfile [extra env]
     env POOL_LISTEN_PORT="$port" "$@" nohup python3 "$POOL_PY" >> "$log" 2>&1 &
   fi
 }
+# :8889 is where the proxy sends the public dashboard, so it runs several readers rather
+# than one. They share the port with SO_REUSEPORT and the kernel deals connections out
+# between them; a single process there was pinned at 100% CPU with its accept queue
+# overflowing (which the proxy reports as 502) while :8888/:8890 idled. Count listeners on
+# the port instead of asking whether anything listens.
+POOL_READERS_8889=${POOL_READERS_8889:-4}
+readers_on() { ss -ltnH "sport = :$1" 2>/dev/null | grep -c .; }
 listening 8888 || pool_ui 8888 "$POOL_LOGS/pool-ui.log"
-listening 8889 || pool_ui 8889 "$POOL_LOGS/pool-ui-8889.log" POOL_UI_NO_WRITE=1
+while have=$(readers_on 8889); (( have < POOL_READERS_8889 )); do
+  pool_ui 8889 "$POOL_LOGS/pool-ui-8889.log" POOL_UI_NO_WRITE=1
+  # Let it bind before starting the next, so a failure is one message and not a fork loop.
+  for _ in $(seq 1 40); do (( $(readers_on 8889) > have )) && break; sleep 0.5; done
+  if (( $(readers_on 8889) <= have )); then
+    echo "pool-ui: a :8889 reader did not bind (see $POOL_LOGS/pool-ui-8889.log); stopping at $have"
+    break
+  fi
+done
+echo "pool-ui: $(readers_on 8889) reader(s) on :8889"
 listening 8890 || pool_ui 8890 "$POOL_LOGS/pool-ui-8890.log" POOL_UI_NO_WRITE=1

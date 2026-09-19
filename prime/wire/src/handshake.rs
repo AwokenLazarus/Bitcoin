@@ -63,6 +63,16 @@ pub struct ClientHello {
     pub resume_token: Option<[u8; RESUME_TOKEN]>,
 }
 
+/// Hello UAs that never publish empty/tiny or size-class-truncated coinbases while pooled.
+///
+/// Stock `v0.4.1-beta` (OCEAN, FlyTheElephant, Convoy, iohzrd) either blasts type 0 on
+/// every new height or hands small miners a prefix of the split. `lazarus-gateway`
+/// and a patched `datum_gateway` that advertises `lazarus-split` do not.
+pub fn is_split_gateway(ua: &str) -> bool {
+    let u = ua.to_ascii_lowercase();
+    u.starts_with("lazarus-gateway") || u.contains("lazarus-split")
+}
+
 /// Open and validate a client hello payload (everything after the 4-byte header).
 pub fn parse_client_hello(pool: &Identity, sealed: &[u8]) -> Result<ClientHello> {
     let plain = pool.unseal(sealed)?;
@@ -216,6 +226,17 @@ mod tests {
         assert_eq!(ssk, srv_sess.sign_pk());
         assert_eq!(sbk, srv_sess.box_pk());
         assert_eq!(motd, "Lazarus");
+    }
+
+    #[test]
+    fn split_gateway_ua() {
+        assert!(is_split_gateway("lazarus-gateway/0.1"));
+        assert!(is_split_gateway("lazarus-gateway/0.2"));
+        assert!(is_split_gateway("v0.4.1-beta+lazarus-split/121edd06"));
+        assert!(!is_split_gateway("v0.4.1-beta/b9ea7dc3eb91352565ab487ec55ed6ee5964a440"));
+        assert!(!is_split_gateway("v0.4.1-beta/e894b8ac29ae06bf6e3b14dafd21f72dcd65fb84"));
+        assert!(!is_split_gateway("v0.4.1-beta/UNKNOWN_GIT_HASH"));
+        assert!(!is_split_gateway(""));
     }
 
     #[test]

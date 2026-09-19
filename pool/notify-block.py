@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Email the pool operator when a block is found, with coinbase payouts."""
+"""Email mrmoore27@pm.me when Lazarus finds a block, with coinbase payouts."""
 from __future__ import annotations
 
 import json
@@ -8,12 +8,12 @@ import time
 import urllib.request
 from pathlib import Path
 
-POOL = "http://127.0.0.1:8888"
-TO = "operator@example.com"
-FROM_ADDR = "pool@example.com"
+POOL = "http://27.69.0.25:8888"
+TO = "mrmoore27@pm.me"
+FROM_ADDR = "pool@awokenlazarus.xyz"
 STATE = Path(__file__).resolve().parent / "notify-state.json"
 PROTONCTL = Path("/home/mike/proton-mail/protonctl.py")
-EXPLORER = "https://mempool.example.com"
+EXPLORER = "https://mempool.awokenlazarus.xyz"
 INTERVAL = 15
 
 
@@ -89,7 +89,7 @@ def compose(block):
         f"When:    {when or '—'}",
         f"Explorer: {EXPLORER}/block/{hx}",
         f"Reward:  {fmt_btc(block.get('reward_btc'))} BTC",
-        f"Fee: {fmt_btc(block.get('pool_fee_btc'))} BTC",
+        f"Pool take: {fmt_btc(block.get('pool_fee_btc'))} BTC (DATUM 0.5% / stratum 5%)",
         f"Miners:  {fmt_btc(miner_total)} BTC (PROP by this-round accepted work)",
         f"Status:  {block.get('status') or 'immature'} (coinbase matures after 100 confirmations)",
         "",

@@ -11,6 +11,10 @@ description = "Lazarus DATUM Prime daemon: accepts DATUM gateways, dictates the 
 name = "primed"
 path = "src/main.rs"
 
+[[bin]]
+name = "stratum-grind"
+path = "src/bin/stratum-grind.rs"
+
 [dependencies]
 datum-wire = { path = "../wire" }
 tides = { path = "../tides" }

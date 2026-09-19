@@ -3,7 +3,7 @@
 
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -13,9 +13,12 @@ use crate::address;
 use crate::config::Config;
 use crate::state::{now, Shared};
 
+/// Display only: `gateway` is the 16 digits of the key that stats show, so a configured key is
+/// compared over those. What a session is trusted with is decided on its whole key
+/// (`session::house_stratum`).
 fn house_gateway(cfg: &Config, gateway: &str) -> bool {
     let g = gateway.to_ascii_lowercase();
-    cfg.house_gateways.iter().any(|h| !h.is_empty() && g.starts_with(&h.to_ascii_lowercase()))
+    cfg.house_gateways.iter().any(|h| !h.is_empty() && g.starts_with(&h[..h.len().min(16)]))
 }
 
 /// One unit of window work is one difficulty-1 share: 2^32 hashes.
@@ -54,6 +57,8 @@ pub fn build(shared: &Shared) -> Value {
     let split = w.split(sample_value, &shared.split_params, |i| address::to_script(i, shared.network));
     let payouts: std::collections::HashMap<&str, u64> =
         split.payees.iter().map(|p| (p.identity.as_str(), p.sats)).collect();
+    let rebates: std::collections::HashMap<&str, u64> =
+        split.rebate_credits.iter().map(|(i, s)| (i.as_str(), *s)).collect();
 
     let miners: Vec<Value> = w
         .miners()
@@ -70,6 +75,11 @@ pub fn build(shared: &Shared) -> Value {
                 "credits": m.credits,
                 "share_percent": if w.total_work() > 0 { 100.0 * m.work as f64 / w.total_work() as f64 } else { 0.0 },
                 "payout_sats": payouts.get(m.identity.as_str()).copied().unwrap_or(0),
+                // DATUM rebate the next found block credits to this identity's carry (not part
+                // of payout_sats; it is paid with a later output once carry clears the floor)
+                "rebate_sats": rebates.get(m.identity.as_str()).copied().unwrap_or(0),
+                // unplaced earnings from earlier blocks, paid on top once they clear the floor
+                "carry_sats": m.carry,
                 "payable": payable,
                 "hashrate_ghs": ghs(rw),
                 "last_share_s": ts.saturating_sub(u64::from(last.max(m.last_ts))),
@@ -110,10 +120,8 @@ pub fn build(shared: &Shared) -> Value {
             })
             .collect();
         // Gateways that found blocks before the last restart, even if they are not connected now.
-        let mut historic: Vec<_> = finds
-            .iter()
-            .filter(|(gw, f)| f.found > 0 && !gw.is_empty() && !present.contains(*gw))
-            .collect();
+        let mut historic: Vec<_> =
+            finds.iter().filter(|(gw, f)| f.found > 0 && !gw.is_empty() && !present.contains(*gw)).collect();
         historic.sort_by(|a, b| b.1.found.cmp(&a.1.found).then_with(|| a.0.cmp(b.0)));
         for (gw, f) in historic {
             let own = house_gateway(&shared.cfg, gw);
@@ -137,6 +145,7 @@ pub fn build(shared: &Shared) -> Value {
                 "last_reject": Value::Null,
                 "offline": true,
                 "own": own,
+                "secondary_tag": "",
             }));
         }
         rows
@@ -168,6 +177,9 @@ pub fn build(shared: &Shared) -> Value {
             "prime_id": shared.cfg.prime_id,
             "fee_bps": shared.cfg.fee_bps,
             "stratum_fee_bps": shared.cfg.stratum_fee_bps,
+            // share of the stratum fee rebated to DATUM work, and of solo rewards owed to it
+            "datum_rebate_bps": shared.cfg.datum_rebate_bps,
+            "solo_rebate_bps": shared.cfg.solo_rebate_bps,
             "window_multiple": shared.cfg.window,
             "min_payout": shared.cfg.min_payout,
             "min_diff": shared.cfg.min_diff,
@@ -189,6 +201,21 @@ pub fn build(shared: &Shared) -> Value {
             "sample_value": sample_value,
             "sample_pool_sats": split.pool_sats,
             "sample_fee_sats": split.fee_sats,
+            // carry the next block would pay out, and what it would defer
+            "sample_carry_paid_sats": split.carry_paid,
+            "sample_deferred_sats": split.unpaid.iter().filter(|u| u.defers()).map(|u| u.earned).sum::<u64>(),
+            // DATUM rebate the next found block credits to DATUM miners' carry, how much of
+            // that is the owed balance going out, and the balance itself (rebate with nobody
+            // to credit yet)
+            "sample_rebate_sats": split.rebate_sats,
+            "sample_rebate_owed_credited_sats": split.rebate_owed_credited,
+            "sample_rebate_deferred_sats": split.rebate_deferred,
+            "rebate_owed_sats": w.rebate_owed(),
+            // solo blocks whose rebate share has been credited (newest first, last 50)
+            "solo_rebates": crate::solo::read_log(&shared.cfg.data_dir).into_iter().rev().take(50).collect::<Vec<_>>(),
+            // everything the pool is holding for miners under the floor, and for whom
+            "carry_total_sats": w.total_carry(),
+            "carry_holders": w.carries().len(),
         },
         "hashrate": { "pool_ghs": ghs(recent_total), "window_s": HASHRATE_WINDOW_S },
         "totals": {
@@ -208,8 +235,15 @@ pub fn build(shared: &Shared) -> Value {
             // Accepted shares that could not have paid the window had they been a block.
             // Stock DATUM's per-height subsidy-only job lands in `pool_only_shares` and is
             // expected; `pool_only_full_jobs` is the one that should be zero.
+            "uncommitted_shares": t.uncommitted_shares.load(Ordering::Relaxed),
+            "below_floor_shares": t.below_floor_shares.load(Ordering::Relaxed),
             "pool_only_shares": t.pool_only_shares.load(Ordering::Relaxed),
             "pool_only_full_jobs": t.pool_only_full_jobs.load(Ordering::Relaxed),
+            "solo_empty_shares": t.solo_empty_shares.load(Ordering::Relaxed),
+            "solo_empty_work": t.solo_empty_work.load(Ordering::Relaxed),
+            "solo_full_shares": t.solo_full_shares.load(Ordering::Relaxed),
+            "solo_full_work": t.solo_full_work.load(Ordering::Relaxed),
+            "remainder_to_gateway_sats": t.remainder_to_gateway_sats.load(Ordering::Relaxed),
             "block_candidates": found_total,
             "blocks_submitted": t.blocks_submitted.load(Ordering::Relaxed),
             "connections": t.connections.load(Ordering::Relaxed),
@@ -253,10 +287,20 @@ pub async fn serve(shared: Arc<Shared>) {
         }
     };
     log::info!("stats on http://{}/stats.json", shared.cfg.stats_listen);
+    // Both documents are built under the ledger mutex, which is the one share crediting and
+    // the coinbaser snapshot wait on, and walk the whole window. Built per request, a few
+    // dozen GETs in parallel park the workers behind it until gateways give up on their
+    // coinbaser (five seconds, then a coinbase paying only the pool). So: one build per
+    // `STATS_TTL` however many ask, and a ceiling on how many may be asking.
+    let cache: Arc<tokio::sync::Mutex<[Built; 2]>> = Default::default();
+    let slots = Arc::new(tokio::sync::Semaphore::new(STATS_MAX_CONNECTIONS));
     loop {
         let Ok((mut sock, _)) = listener.accept().await else { continue };
+        let Ok(slot) = slots.clone().try_acquire_owned() else { continue };
         let shared = shared.clone();
+        let cache = cache.clone();
         tokio::spawn(async move {
+            let _slot = slot;
             let mut buf = [0u8; 2048];
             let n = match tokio::time::timeout(Duration::from_secs(5), sock.read(&mut buf)).await {
                 Ok(Ok(n)) => n,
@@ -264,21 +308,44 @@ pub async fn serve(shared: Arc<Shared>) {
             };
             let req = String::from_utf8_lossy(&buf[..n]);
             let path = req.split_whitespace().nth(1).unwrap_or("/");
+            let document = |which: usize| {
+                let (cache, shared) = (cache.clone(), shared.clone());
+                async move {
+                    let mut held = cache.lock().await;
+                    if let Some((at, body)) = &held[which] {
+                        if at.elapsed() < STATS_TTL {
+                            return body.clone();
+                        }
+                    }
+                    let body = Arc::new(if which == 0 { build(&shared) } else { legacy_ledger(&shared) }.to_string());
+                    held[which] = Some((Instant::now(), body.clone()));
+                    body
+                }
+            };
+            let plain = |text: &str| Arc::new(text.to_string());
             let (status, ctype, body) = match path.split('?').next().unwrap_or("/") {
-                "/" | "/stats.json" | "/stats" => ("200 OK", "application/json", build(&shared).to_string()),
-                "/ledger.json" => ("200 OK", "application/json", legacy_ledger(&shared).to_string()),
-                "/healthz" => ("200 OK", "text/plain", "ok\n".to_string()),
-                _ => ("404 Not Found", "text/plain", "not found\n".to_string()),
+                "/" | "/stats.json" | "/stats" => ("200 OK", "application/json", document(0).await),
+                "/ledger.json" => ("200 OK", "application/json", document(1).await),
+                "/healthz" => ("200 OK", "text/plain", plain("ok\n")),
+                _ => ("404 Not Found", "text/plain", plain("not found\n")),
             };
             let resp = format!(
                 "HTTP/1.1 {status}\r\nContent-Type: {ctype}\r\nContent-Length: {}\r\nAccess-Control-Allow-Origin: *\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n{body}",
                 body.len()
             );
-            let _ = sock.write_all(resp.as_bytes()).await;
+            let _ = tokio::time::timeout(Duration::from_secs(30), sock.write_all(resp.as_bytes())).await;
             let _ = sock.shutdown().await;
         });
     }
 }
+
+/// A stats document and when it was built.
+type Built = Option<(Instant, Arc<String>)>;
+
+/// How long a built stats document is served for before it is built again.
+const STATS_TTL: Duration = Duration::from_millis(500);
+/// Stats connections open at once; past this a new one is closed unanswered.
+const STATS_MAX_CONNECTIONS: usize = 64;
 
 /// Mirror stats and the legacy ledger to files, and flush the ledger, on a timer.
 pub async fn housekeeping(shared: Arc<Shared>) {

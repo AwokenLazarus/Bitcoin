@@ -2,14 +2,16 @@
   "profile": "asic",
   "stratum_listen": "0.0.0.0:23334",
   "api_listen": "127.0.0.1:7152",
-  "vardiff_min": 1024,
+  "vardiff_min": 4096,
   "vardiff_start": 4096,
-  "vardiff_max": 131072,
+  "vardiff_max": 16777216,
+  "vardiff_step": 2,
   "rpc": "http://127.0.0.1:9332",
   "rpc_cookie": "<your knots cookie path>",
   "prime_host": "stratum.awokenlazarus.xyz",
   "prime_port": 28915,
   "pool_pubkey": "<from pool.awokenlazarus.xyz DATUM section /stats.json pool.pubkey>",
+  "identity_key_file": "/home/umbrel/blake2b/etc/lazarus-gateway-identity.key",
   "coinbase_tag": "Lazarus",
   "verify_shares": "enforce"
 }

@@ -43,10 +43,40 @@ pub struct Config {
     pub min_payout: u64,
     #[serde(default)]
     pub fee_bps: u32,
+    /// Fee on an upgraded empty-solo coinbase (gateway + pool), basis points. Default 750
+    /// (7.5%), matching the dedicated solo ports. Stock gateways without a fee output
+    /// still classify as EmptySolo at 0% via the script-flip path.
+    #[serde(default = "d_empty_solo_fee")]
+    pub empty_solo_fee_bps: u32,
+    /// How a stock gateway's *full* pool-only job is treated after Prime has seen one.
+    /// `owe` (default): configure(pool) with each coinbaser so they pool-mine the split
+    /// until the next tip. `gateway-solo`: leave them on their own script so those jobs
+    /// become gateway-solo with no debt.
+    #[serde(default = "d_owe")]
+    pub stock_full_pool_only: String,
+    /// Test hook: sleep this long before answering a coinbaser, so a stock gateway's
+    /// 5 s fetch times out. 0 (default) is production.
+    #[serde(default)]
+    pub coinbaser_delay_ms: u64,
     /// Public house-stratum fee. 0 means use `fee_bps` (same rate for everyone).
     #[serde(default)]
     pub stratum_fee_bps: u32,
-    /// Gateway key prefixes (hex) that are the pool's own public stratum.
+    /// Share of the house-stratum fee handed to DATUM work instead of kept, basis points of
+    /// stratum work's value (750 = 7.5 points of a 15% stratum fee). 0 (default) disables it.
+    #[serde(default)]
+    pub datum_rebate_bps: u32,
+    /// Share of a solo block's reward owed to DATUM work when a `solo-coinbase-tag` block
+    /// paying the pool script lands on chain, basis points of the block's coinbase value.
+    /// Paid down out of the pool's kept fee in later splits. 0 (default) disables it.
+    #[serde(default)]
+    pub solo_rebate_bps: u32,
+    /// Coinbase tag the dedicated solo gateways stamp, for spotting their blocks on chain.
+    #[serde(default = "d_solo_tag")]
+    pub solo_coinbase_tag: String,
+    /// Gateway keys (hex) that are the pool's own public stratum: the full 64-digit identity
+    /// key, or a prefix of it no shorter than 16 digits. These sessions are trusted with
+    /// things no stranger is (`Policy::trusted_target`), and a short prefix is one a stranger
+    /// can grind a key to match, so give the full key.
     #[serde(default)]
     pub house_gateways: Vec<String>,
     /// Treat loopback Prime connections as house stratum. Default on.
@@ -72,6 +102,13 @@ pub struct Config {
     /// Node poll interval, seconds.
     #[serde(default = "d_poll")]
     pub poll: f64,
+    /// How a share is credited when its difficulty is not part of what was hashed and its
+    /// gateway is not the pool's own: `2^this` if the hash meets it, nothing otherwise, whatever
+    /// the share claims (see `Policy::uncommitted_pot`). Fair on average for work at any
+    /// difficulty up to it; only work above it is under-credited, so keep it at or above the
+    /// largest vardiff a gateway's miners run at. A power-of-two exponent: 20 is 1 048 576.
+    #[serde(default = "d_uncommitted_pot")]
+    pub uncommitted_pot: u8,
     /// Shares for a height this many blocks behind the tip are stale. 0 means only the
     /// current height. The default tolerates a template refresh in flight.
     #[serde(default = "d_stale_grace")]
@@ -94,6 +131,13 @@ pub struct Config {
     /// sixteen live slots Prime keeps at eight 20 000-byte sections each is 2.5 MiB.
     #[serde(default = "d_session_coinbase_budget")]
     pub session_coinbase_budget: usize,
+    /// Refuse a hello whose user agent is not `lazarus-gateway*` and does not contain
+    /// `lazarus-split`. Stock OCEAN / FlyTheElephant empty-first jobs and Convoy size-class
+    /// prefixes cannot put a full TIDES split in the coinbase; closing the session is the
+    /// only pool-side way to stop them hashing those jobs as us. Default off; Lazarus sets
+    /// this true.
+    #[serde(default)]
+    pub require_split_gateway: bool,
 
     // Keys the previous Prime used. Accepted so an existing config starts unchanged;
     // `load` reports each one it saw.
@@ -101,8 +145,6 @@ pub struct Config {
     activation_height: Option<u32>,
     #[serde(default)]
     verify_shares: Option<String>,
-    #[serde(default)]
-    require_split_gateway: Option<bool>,
 }
 
 fn d_listen() -> SocketAddr {
@@ -135,6 +177,9 @@ fn d_tolerance() -> u64 {
 fn d_network() -> String {
     "mainnet".into()
 }
+fn d_uncommitted_pot() -> u8 {
+    20
+}
 fn d_poll() -> f64 {
     0.5
 }
@@ -155,6 +200,15 @@ fn d_max_connections_per_ip() -> u32 {
 }
 fn d_session_coinbase_budget() -> usize {
     4 << 20
+}
+fn d_empty_solo_fee() -> u32 {
+    750
+}
+fn d_owe() -> String {
+    "owe".into()
+}
+fn d_solo_tag() -> String {
+    "Lazarus/solo".into()
 }
 
 impl Config {
@@ -179,8 +233,20 @@ impl Config {
         if c.stratum_fee_bps > 10_000 {
             return Err("stratum-fee-bps cannot exceed 10000".into());
         }
+        if c.datum_rebate_bps > c.stratum_fee_bps {
+            return Err("datum-rebate-bps cannot exceed stratum-fee-bps (the rebate comes out of that fee)".into());
+        }
+        if c.solo_rebate_bps > 10_000 {
+            return Err("solo-rebate-bps cannot exceed 10000".into());
+        }
+        if c.solo_coinbase_tag.is_empty() || c.solo_coinbase_tag.len() > 32 {
+            return Err("solo-coinbase-tag must be 1..=32 bytes".into());
+        }
         for g in &mut c.house_gateways {
             *g = g.to_ascii_lowercase();
+        }
+        if c.uncommitted_pot > 63 {
+            return Err("uncommitted-pot is a power-of-two exponent, 63 at most".into());
         }
         if c.coinbase_tag.len() > 32 {
             return Err("coinbase-tag is too long (32 bytes max)".into());
@@ -190,6 +256,13 @@ impl Config {
         }
         if c.session_coinbase_budget < 64 * 1024 {
             return Err("session-coinbase-budget must be at least 65536 bytes (one huge coinbase class)".into());
+        }
+        if c.empty_solo_fee_bps > 10_000 {
+            return Err("empty-solo-fee-bps cannot exceed 10000".into());
+        }
+        match c.stock_full_pool_only.as_str() {
+            "owe" | "gateway-solo" => {}
+            other => return Err(format!("stock-full-pool-only must be owe or gateway-solo, not {other:?}")),
         }
         if c.key_file.is_none() {
             // A data dir left by lazarus-prime keeps its identity: same key file, same pubkey.
@@ -203,14 +276,22 @@ impl Config {
     /// One line per legacy key present in the file, explaining why it no longer applies.
     pub fn legacy_notes(&self) -> Vec<String> {
         let mut v = Vec::new();
+        // Said, not enforced: a Prime that will not start takes every gateway down with it.
+        for g in &self.house_gateways {
+            if !g.bytes().all(|b| b.is_ascii_hexdigit()) || g.len() > 64 {
+                v.push(format!("house-gateways entry {g:?} is not hex digits of a gateway key and matches nothing"));
+            } else if g.len() < 64 {
+                v.push(format!(
+                    "house-gateways entry {g:?} is a {}-digit prefix: a house gateway is trusted with its shares' difficulty, and a short prefix is one a stranger can grind a key to match. Give the full 64-digit key",
+                    g.len()
+                ));
+            }
+        }
         if self.activation_height.is_some() {
             v.push("activation-height is ignored: every share is verified as BLAKE2b header v2; SHA256d shares are rejected as bad-version".into());
         }
         if let Some(mode) = &self.verify_shares {
             v.push(format!("verify-shares = {mode:?} is ignored: shares are always verified and the coinbase is always checked against the issued TIDES split"));
-        }
-        if self.require_split_gateway.is_some() {
-            v.push("require-split-gateway is ignored: stock DATUM gateways pay the split from the coinbaser reply, so none need a patched user agent".into());
         }
         v
     }
@@ -266,11 +347,35 @@ require-split-gateway = true
         assert_eq!(c.window, 8);
         assert_eq!(c.key_file(), dir.join("prime.key"));
         assert_eq!(c.min_pot(), 0);
-        assert_eq!(c.legacy_notes().len(), 3);
+        assert_eq!(c.legacy_notes().len(), 2);
+        assert!(c.require_split_gateway);
         // a data dir the old Prime left behind keeps its key, hence its pubkey
         std::fs::write(dir.join("lazarus-prime.key"), "00").unwrap();
         let c = Config::load(&p).unwrap();
         assert_eq!(c.key_file(), dir.join("lazarus-prime.key"));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn rebate_knobs_load_default_off_and_are_bounded_by_the_stratum_fee() {
+        let dir = std::env::temp_dir().join(format!("primed-cfg-r-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("prime.toml");
+        let base = LEGACY.replace("/home/umbrel/blake2b/lazarus-prime", dir.to_str().unwrap());
+        // legacy config: rebates off, tag defaulted
+        std::fs::write(&p, &base).unwrap();
+        let c = Config::load(&p).unwrap();
+        assert_eq!((c.datum_rebate_bps, c.solo_rebate_bps), (0, 0));
+        assert_eq!(c.solo_coinbase_tag, "Lazarus/solo");
+        // production Lazarus knobs (DATUM 0% is fee-bps in the live toml; this fixture's
+        // legacy body still has fee-bps = 50) plus a solo rebate to prove that knob loads
+        std::fs::write(&p, format!("{base}\nstratum-fee-bps = 1000\ndatum-rebate-bps = 500\nsolo-rebate-bps = 100\n"))
+            .unwrap();
+        let c = Config::load(&p).unwrap();
+        assert_eq!((c.fee_bps, c.stratum_fee_bps, c.datum_rebate_bps, c.solo_rebate_bps), (50, 1000, 500, 100));
+        // a rebate larger than the fee it comes out of is a config error, not a silent clamp
+        std::fs::write(&p, format!("{base}\nstratum-fee-bps = 1000\ndatum-rebate-bps = 1001\n")).unwrap();
+        assert!(Config::load(&p).unwrap_err().contains("datum-rebate-bps"));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -283,5 +388,29 @@ require-split-gateway = true
         let r = Config::load(&p);
         std::fs::remove_dir_all(&dir).unwrap();
         assert!(r.unwrap_err().contains("fee_percent"));
+    }
+
+    /// A house gateway is trusted with its shares' difficulty, so a key prefix short enough to
+    /// grind is worth a warning. It is never worth refusing to start: that takes the pool down.
+    #[test]
+    fn a_weak_house_gateway_entry_is_warned_about_not_fatal() {
+        let dir = std::env::temp_dir().join(format!("primed-cfg-h-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("prime.toml");
+        let base = LEGACY.replace("/home/umbrel/blake2b/lazarus-prime", dir.to_str().unwrap());
+        let load = |entry: &str| {
+            std::fs::write(&p, format!("{base}house-gateways = [\"{entry}\"]\n")).unwrap();
+            Config::load(&p).expect("loads whatever the entry")
+        };
+        let notes = |c: &Config| c.legacy_notes().into_iter().filter(|n| n.contains("house-gateways")).count();
+        let full = "9D992E5CFEC05102".repeat(4);
+        let c = load(&full);
+        assert_eq!(c.house_gateways, vec![full.to_ascii_lowercase()]);
+        assert_eq!(notes(&c), 0);
+        for weak in ["9d99", "9d992e5cfec05102", "9d992e5cfec0510g", &format!("{full}00")] {
+            assert_eq!(notes(&load(weak)), 1, "{weak:?}");
+        }
+        assert_eq!(load(&full).uncommitted_pot, 20);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }
