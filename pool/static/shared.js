@@ -367,8 +367,11 @@
   // `ctx` carries what differs between the two: fee schedule, USD price, the block
   // interval (for maturity ETAs) and whether this is the full page.
   const EXPLORER = "https://mempool.awokenlazarus.xyz";
+  // `name` is a gateway's own coinbase tag: whatever a stranger's gateway chose to call itself,
+  // attached to whichever payout address its shares named. It goes into innerHTML, so it is
+  // escaped here, once, for every caller (t() interpolates its params as they are).
   const pathLabel = (via, name) => {
-    const gw = String(name || "").trim();
+    const gw = esc(String(name || "").trim());
     if (via === "prime" || via === "gateway") return gw || t("path.own");
     if (via === "both") return gw ? t("path.stratumGw", { gw }) : t("path.stratumGwBare");
     return t("path.stratum");
@@ -570,9 +573,9 @@
     const status = !m.online
       ? (relayed.length ? t("miner.stRelayed", { pool: esc(relayed[0].upstream || "other pool") }) : t("miner.stOffline"))
       : isPrimePath(m.via)
-        ? (gwName ? t("miner.stGw", { gw: gwName }) : t("miner.stOwn"))
+        ? (gwName ? t("miner.stGw", { gw: esc(gwName) }) : t("miner.stOwn"))
         : m.via === "both"
-          ? (gwName ? t("miner.stBothNamed", { gw: gwName }) : t("miner.stBoth"))
+          ? (gwName ? t("miner.stBothNamed", { gw: esc(gwName) }) : t("miner.stBoth"))
           : t("miner.stStratum");
     const wp = (m.round_share || 0) * 100;
     const hp = Number(m.hashrate_pool_percent) || 0;

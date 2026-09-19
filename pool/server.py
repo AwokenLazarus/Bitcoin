@@ -2345,6 +2345,19 @@ def pool_output_parts(pool_addr, on_chain_btc, pb, reward_btc=None):
     return 0.0, total
 
 
+def _is_pool_block(blockhash):
+    """Whether this is a block the pool has on record. `/api/found/<hash>` costs the node a
+    verbose `getblock`, and asked about any block on the chain it was a free way to keep the
+    node that builds our templates busy."""
+    for table in ("found_blocks", "solo_blocks"):
+        try:
+            if db(f"SELECT 1 FROM {table} WHERE hash=? LIMIT 1", (blockhash,), one=True):
+                return True
+        except Exception:
+            pass
+    return any(b.get("hash") == blockhash for b in (prime_summary().get("blocks") or []))
+
+
 def found_outputs_payload(blockhash):
     """Coinbase outputs for one found block, with the pool-address fee split applied."""
     splits = coinbase_splits(blockhash)
@@ -5347,8 +5360,10 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json(cached("hardware", 15.0, hardware_payload), cache_s=15)
             return
         if path.startswith("/api/found/"):
-            hx = path.split("/api/found/", 1)[1].strip("/")
-            if not _BLOCKHASH_RE.match(hx):
+            # One spelling per hash: the node reads hex in any case, so every mix of upper and
+            # lower was a fresh cache key, a fresh CDN URL and a fresh verbose getblock.
+            hx = path.split("/api/found/", 1)[1].strip("/").lower()
+            if not _BLOCKHASH_RE.match(hx) or not _is_pool_block(hx):
                 self.send_json({"error": "not found"}, 404)
                 return
             doc = cached(("found", hx), 30.0, lambda: found_outputs_payload(hx))
