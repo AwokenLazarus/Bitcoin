@@ -37,6 +37,9 @@ pub const MAX_COINBASES_PER_SLOT: usize = 8;
 /// `version`), so an unbounded map is attacker-sized, and both fill only from shares whose
 /// work checked out. They are caches: on overflow they are simply emptied.
 const MAX_CB_CACHE: usize = 32;
+/// And in bytes, per slot. Seven size classes of a real 16 kB coinbase fit; a slot full of
+/// pathological ones does not.
+const MAX_CB_CACHE_BYTES: usize = 384 * 1024;
 const MAX_H2_CACHE: usize = 64;
 
 /// What [`JobSlot::absorb`] changed, so the caller can undo a coinbase section the share
@@ -574,7 +577,15 @@ pub fn verify_with_target(
         coinbase: parsed.clone(),
     };
     if let Some(entry) = fresh {
-        if slot.cb_cache.len() >= MAX_CB_CACHE {
+        // Bounded by bytes as well as by count. An entry is a parsed coinbase, and a 20 kB
+        // section of two thousand tiny outputs parses to several times its size: thirty-two
+        // of those in each of sixteen live slots is tens of megabytes a session that the
+        // section budget never sees.
+        let cost = |(legacy, parsed): &(Vec<u8>, Coinbase)| {
+            legacy.len() + parsed.outputs.iter().map(|o| 48 + o.script.len()).sum::<usize>()
+        };
+        let held: usize = slot.cb_cache.values().map(cost).sum();
+        if slot.cb_cache.len() >= MAX_CB_CACHE || held + cost(&entry) > MAX_CB_CACHE_BYTES {
             slot.cb_cache.clear();
         }
         slot.cb_cache.insert(cb_key, entry);

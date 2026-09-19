@@ -341,6 +341,8 @@ struct Session {
     /// and make a stock gateway reconnect.
     pending_coinbaser: Option<(u64, Vec<u8>, [u8; 32])>,
     coinbaser_send_at: Option<tokio::time::Instant>,
+    /// This session's row for the clients table, until its first frame earns it a place there.
+    row: Option<ClientInfo>,
 }
 
 /// Which of the two gateway-side faults produced a pool-only coinbase, read off the share rather
@@ -423,22 +425,23 @@ pub async fn run(shared: Arc<Shared>, mut stream: TcpStream, remote: SocketAddr)
         hello.generation,
         if hello.resume_token.is_some() { " (asked to resume; declined)" } else { "" }
     );
-    shared.clients.lock().unwrap().insert(
+    // Shown as a client once it has proved it holds the session key (`Session::establish`). A
+    // hello can be replayed by anyone who saw one, and re-sealed to us by any other pool its
+    // gateway connects to; whoever does that cannot read our reply or send a frame, but would
+    // otherwise put a row here under the gateway's name.
+    let row = ClientInfo {
         id,
-        ClientInfo {
-            id,
-            remote: remote.to_string(),
-            user_agent: hello.user_agent.clone(),
-            generation: match hello.generation {
-                Generation::Ocean => "ocean",
-                Generation::Convoy => "convoy",
-            },
-            gateway: gateway_hex.clone(),
-            connected_ts: now(),
-            fee_path: fee_path.into(),
-            ..Default::default()
+        remote: remote.to_string(),
+        user_agent: hello.user_agent.clone(),
+        generation: match hello.generation {
+            Generation::Ocean => "ocean",
+            Generation::Convoy => "convoy",
         },
-    );
+        gateway: gateway_hex.clone(),
+        connected_ts: now(),
+        fee_path: fee_path.into(),
+        ..Default::default()
+    };
     shared.totals.add(&shared.totals.connections, 1);
     // Removed on drop, so the clients table cannot keep a row for a session that panicked.
     let _row = ClientRow { shared: shared.clone(), id };
@@ -486,6 +489,7 @@ pub async fn run(shared: Arc<Shared>, mut stream: TcpStream, remote: SocketAddr)
         },
         pending_coinbaser: None,
         coinbaser_send_at: None,
+        row: Some(row),
     };
     s.serve().await
 }
@@ -504,6 +508,13 @@ impl Drop for ClientRow {
 }
 
 impl Session {
+    /// A frame decrypted under the session key: whoever sent the hello holds the key it named.
+    fn establish(&mut self) {
+        if let Some(row) = self.row.take() {
+            self.shared.clients.lock().unwrap().insert(self.id, row);
+        }
+    }
+
     fn is_house_stratum(&self) -> bool {
         house_stratum(&self.shared.cfg, self.remote, &self.gateway_key_hex())
     }
@@ -753,6 +764,9 @@ impl Session {
         let mut body: &[u8] = if h.channel { self.channel.decrypt_in_place(payload)? } else { payload };
         if h.signed {
             body = crypto::verify_trailing(&self.hello.session_sign_pk, body)?;
+        }
+        if h.channel {
+            self.establish();
         }
         match h.cmd {
             cmd::MINING => {

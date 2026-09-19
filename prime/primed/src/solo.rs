@@ -112,14 +112,20 @@ pub fn rebate_for(value_sats: u64, bps: u32) -> u64 {
     ((u128::from(value_sats) * u128::from(bps)) / 10_000) as u64
 }
 
+/// How far behind the tip a block has to be before its solo rebate is booked.
+const SOLO_DEPTH: u32 = 6;
+
 /// Called by the node poller when the tip moves to `tip_height`. Scans up to `tip_height − 1`.
 pub async fn scan(shared: &Shared, tip_height: u32) {
     let bps = shared.cfg.solo_rebate_bps;
-    if bps == 0 || tip_height < 2 {
+    if bps == 0 || tip_height <= SOLO_DEPTH {
         return;
     }
     let dir = shared.cfg.data_dir.as_path();
-    let upto = tip_height - 1;
+    // A rebate booked is carry credited, and carry is paid out by the next block the pool
+    // finds. Booked a block behind the tip, a solo block that a reorg then removed had its
+    // rebate paid anyway; this far back that does not happen.
+    let upto = tip_height - SOLO_DEPTH;
     let start = match read_cursor(dir) {
         Some(h) => h + 1,
         None => {
