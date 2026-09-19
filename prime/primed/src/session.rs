@@ -96,6 +96,87 @@ struct IssuedCoinbaser {
     rebate_deferred: u64,
 }
 
+/// The parts of a coinbaser a found block settles against: one we still hold, or a fresh split
+/// of the live window when the job named one we do not.
+struct Coinbaser<'a> {
+    value: u64,
+    payees: &'a [Payee],
+    unpaid: &'a [tides::Unpaid],
+    rebate_credits: &'a [(String, u64)],
+    rebate_owed_credited: u64,
+    rebate_deferred: u64,
+}
+
+/// What a found block does to the books.
+struct Settlement {
+    kind: &'static str,
+    /// What the window is owed because the coinbase did not place these outputs. The make-good
+    /// (`lazarus-ops/fee_wallet.py`) pays it from the reserved coinbase once that matures.
+    owed: u64,
+    /// Every payee the coinbaser issued, identity → sats, scaled to the real reward when the
+    /// coinbase paid nobody.
+    split: Vec<(String, u64)>,
+    /// Carry the coinbase itself handed out; 0 when it placed no payee.
+    carry_paid: u64,
+    carry_delta: Vec<(String, i64)>,
+    rebate_credited: u64,
+    rebate_delta: i64,
+}
+
+/// Settle a found block against the coinbaser it was mined on.
+///
+/// Carry comes off the books for *every* payee, not only the ones the coinbase placed. A
+/// dropped payee's `sats` includes their carry and `owed` pays that whole figure, so the
+/// make-good discharges their carry exactly as the coinbase discharges a placed payee's.
+/// Leaving it on the books pays it twice — once in the make-good, once when the next coinbaser
+/// hands out a balance that was never cleared. That is what blocks 969973 through 971795 did,
+/// about 1.15 XBT of it.
+///
+/// An orphan reverses the whole `carry_delta` (`node.rs`), which is right either way: the
+/// reserved coinbase dies with the block, so no make-good can ever spend it.
+fn settle(
+    kind: &CoinbaseKind,
+    cb: Option<Coinbaser<'_>>,
+    coinbase_value: u64,
+    paid_to: impl Fn(&[u8]) -> u64,
+) -> Settlement {
+    let bare = |kind: &'static str| Settlement {
+        kind,
+        owed: 0,
+        split: vec![],
+        carry_paid: 0,
+        carry_delta: vec![],
+        rebate_credited: 0,
+        rebate_delta: 0,
+    };
+    let name = match kind {
+        CoinbaseKind::Split => "split",
+        CoinbaseKind::Partial(_) => "partial",
+        CoinbaseKind::PoolOnly => "pool-only",
+        CoinbaseKind::EmptySolo | CoinbaseKind::GatewaySolo => return bare("solo"),
+        CoinbaseKind::Foreign => return bare("unknown"),
+    };
+    // Nothing to settle against: a full split owes the window nothing, anything else we cannot
+    // price, so it is recorded and left alone.
+    let Some(cb) = cb else {
+        return bare(if matches!(kind, CoinbaseKind::Split) { "split" } else { "unknown" });
+    };
+    let full_split = matches!(kind, CoinbaseKind::Split);
+    let pool_only = matches!(kind, CoinbaseKind::PoolOnly);
+    // A pool-only coinbase can carry a different reward than the coinbaser assumed.
+    let amount = |p: &Payee| if pool_only { scale(p.sats, coinbase_value, cb.value) } else { p.sats };
+    let placed = |p: &Payee| !pool_only && paid_to(&p.script) > 0;
+    Settlement {
+        kind: name,
+        owed: if full_split { 0 } else { cb.payees.iter().filter(|p| !placed(p)).map(|p| amount(p)).sum() },
+        split: cb.payees.iter().map(|p| (p.identity.clone(), amount(p))).collect(),
+        carry_paid: cb.payees.iter().filter(|p| full_split || placed(p)).map(|p| p.carry).sum(),
+        carry_delta: tides::split::carry_delta(cb.payees, cb.unpaid, cb.rebate_credits, |_| true),
+        rebate_credited: cb.rebate_credits.iter().map(|r| r.1).sum(),
+        rebate_delta: tides::split::rebate_delta(cb.rebate_owed_credited, cb.rebate_deferred),
+    }
+}
+
 /// How a coinbaser request gets answered. Deliberately has no "drop" variant: a request left
 /// unanswered makes a stock gateway publish a coinbase paying only the pool, so the token
 /// bucket may choose the cost of the answer but never withhold it.
@@ -1128,76 +1209,36 @@ impl Session {
         // balance drops by what was credited out of it and grows by a rebate with nobody to
         // credit. Split, partial and pool-only blocks all credit alike: the pool holds the fee
         // either way.
-        #[allow(clippy::type_complexity)]
-        let (kind, owed, split, carry_paid, carry_delta, rebate): (
-            &str,
-            u64,
-            Vec<(String, u64)>,
-            u64,
-            Vec<(String, i64)>,
-            (u64, i64),
-        ) = match (&v.coinbase_kind, issued) {
-            (CoinbaseKind::Split, Some(c)) => (
-                "split",
-                0,
-                c.payees.iter().map(|p| (p.identity.clone(), p.sats)).collect(),
-                c.payees.iter().map(|p| p.carry).sum(),
-                tides::split::carry_delta(&c.payees, &c.unpaid, &c.rebate_credits, |_| true),
-                (
-                    c.rebate_credits.iter().map(|r| r.1).sum(),
-                    tides::split::rebate_delta(c.rebate_owed_credited, c.rebate_deferred),
-                ),
-            ),
-            (CoinbaseKind::Split, None) => ("split", 0, vec![], 0, vec![], (0, 0)),
-            (CoinbaseKind::Partial(_), Some(c)) => {
-                let placed = |p: &Payee| v.coinbase.paid_to(&p.script) > 0;
-                let unpaid: u64 = c.payees.iter().filter(|p| !placed(p)).map(|p| p.sats).sum();
-                (
-                    "partial",
-                    unpaid,
-                    c.payees.iter().map(|p| (p.identity.clone(), p.sats)).collect(),
-                    c.payees.iter().filter(|p| placed(p)).map(|p| p.carry).sum(),
-                    tides::split::carry_delta(&c.payees, &c.unpaid, &c.rebate_credits, placed),
-                    (
-                        c.rebate_credits.iter().map(|r| r.1).sum(),
-                        tides::split::rebate_delta(c.rebate_owed_credited, c.rebate_deferred),
-                    ),
-                )
-            }
-            (CoinbaseKind::PoolOnly, Some(c)) => {
-                // the reward this block would have split had the gateway carried the outputs
-                let scaled: Vec<(String, u64)> =
-                    c.payees.iter().map(|p| (p.identity.clone(), scale(p.sats, v.coinbase_value, c.value))).collect();
-                let owed = scaled.iter().map(|x| x.1).sum();
-                // nobody was placed, so no carry was paid; the under-floor earnings
-                // still accrue (the dropped payees are covered by `owed` instead)
-                (
-                    "pool-only",
-                    owed,
-                    scaled,
-                    0,
-                    tides::split::carry_delta(&c.payees, &c.unpaid, &c.rebate_credits, |_| false),
-                    (
-                        c.rebate_credits.iter().map(|r| r.1).sum(),
-                        tides::split::rebate_delta(c.rebate_owed_credited, c.rebate_deferred),
-                    ),
-                )
-            }
-            (CoinbaseKind::PoolOnly, None) => {
-                // no coinbaser was issued for this job: split by the live window instead
-                let ledger = self.shared.ledger.lock().unwrap();
-                let net = self.shared.network;
-                let sp =
-                    ledger.window.split(v.coinbase_value, &self.shared.split_params, |i| address::to_script(i, net));
-                let owed = sp.paid_sats();
-                let delta = sp.carry_delta(|_| false);
-                let rebate = (sp.rebate_sats, sp.rebate_delta());
-                ("pool-only", owed, sp.payees.iter().map(|p| (p.identity.clone(), p.sats)).collect(), 0, delta, rebate)
-            }
-            (CoinbaseKind::EmptySolo, _) | (CoinbaseKind::GatewaySolo, _) => ("solo", 0, vec![], 0, vec![], (0, 0)),
-            (CoinbaseKind::Partial(_), None) | (CoinbaseKind::Foreign, _) => ("unknown", 0, vec![], 0, vec![], (0, 0)),
+        // A pool-only coinbase whose job named no coinbaser we still hold: split the live
+        // window instead, so the block owes the window what it would have paid.
+        let live = if issued.is_none() && matches!(v.coinbase_kind, CoinbaseKind::PoolOnly) {
+            let ledger = self.shared.ledger.lock().unwrap();
+            let net = self.shared.network;
+            Some(ledger.window.split(v.coinbase_value, &self.shared.split_params, |i| address::to_script(i, net)))
+        } else {
+            None
         };
-        let (rebate_credited, rebate_delta) = rebate;
+        let cb = match (issued, live.as_ref()) {
+            (Some(c), _) => Some(Coinbaser {
+                value: c.value,
+                payees: &c.payees,
+                unpaid: &c.unpaid,
+                rebate_credits: &c.rebate_credits,
+                rebate_owed_credited: c.rebate_owed_credited,
+                rebate_deferred: c.rebate_deferred,
+            }),
+            (None, Some(sp)) => Some(Coinbaser {
+                value: sp.value,
+                payees: &sp.payees,
+                unpaid: &sp.unpaid,
+                rebate_credits: &sp.rebate_credits,
+                rebate_owed_credited: sp.rebate_owed_credited,
+                rebate_deferred: sp.rebate_deferred,
+            }),
+            (None, None) => None,
+        };
+        let Settlement { kind, owed, split, carry_paid, carry_delta, rebate_credited, rebate_delta } =
+            settle(&v.coinbase_kind, cb, v.coinbase_value, |script| v.coinbase.paid_to(script));
         let _ = fee;
         if rebate_credited > 0 || rebate_delta != 0 {
             let owed_now = self.shared.ledger.lock().unwrap().settle_rebate(rebate_delta);
@@ -1391,6 +1432,79 @@ async fn write_frame(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn payee(identity: &str, sats: u64, carry: u64, tag: u8) -> Payee {
+        Payee { identity: identity.into(), work: 1, sats, carry, script: vec![0x00, 0x14, tag] }
+    }
+
+    fn coinbaser<'a>(value: u64, payees: &'a [Payee]) -> Coinbaser<'a> {
+        Coinbaser {
+            value,
+            payees,
+            unpaid: &[],
+            rebate_credits: &[],
+            rebate_owed_credited: 0,
+            rebate_deferred: 0,
+        }
+    }
+
+    fn cleared(s: &Settlement) -> std::collections::HashMap<&str, i64> {
+        s.carry_delta.iter().map(|(i, d)| (i.as_str(), *d)).collect()
+    }
+
+    /// The bug that cost about 1.15 XBT between 969973 and 971795. A gateway that carries only
+    /// the head of the coinbase leaves the rest to the make-good, which pays each dropped payee
+    /// their whole output — carry included. If that carry stays on the books the next coinbaser
+    /// hands out the same balance again and the pool pays twice.
+    #[test]
+    fn a_partial_discharges_the_carry_of_the_payees_it_dropped() {
+        let payees = vec![payee("A", 1_000_000, 400_000, 1), payee("B", 800_000, 300_000, 2), payee("C", 600_000, 0, 3)];
+        let s = settle(&CoinbaseKind::Partial(1), Some(coinbaser(312_500_000, &payees)), 312_500_000, |script| {
+            if script == [0x00, 0x14, 1] { 1_000_000 } else { 0 }
+        });
+        assert_eq!(s.kind, "partial");
+        assert_eq!(s.owed, 1_400_000, "B and C are owed their whole outputs");
+        assert_eq!(s.carry_paid, 400_000, "only A's carry rode an output the coinbase actually paid");
+        let d = cleared(&s);
+        assert_eq!(d.get("A"), Some(&-400_000), "placed payee's carry was handed out");
+        assert_eq!(d.get("B"), Some(&-300_000), "dropped payee's carry is paid by the make-good, so it must come off");
+        assert_eq!(d.get("C"), None, "C carried nothing to discharge");
+    }
+
+    /// A pool-only coinbase places nobody, so the make-good owes the whole split — scaled to the
+    /// reward the block really carried — and every payee's carry goes with it.
+    #[test]
+    fn a_pool_only_discharges_every_carry_and_scales_what_it_owes() {
+        let payees = vec![payee("A", 1_000_000, 400_000, 1), payee("B", 800_000, 300_000, 2)];
+        let s = settle(&CoinbaseKind::PoolOnly, Some(coinbaser(200_000_000, &payees)), 100_000_000, |_| 0);
+        assert_eq!((s.kind, s.owed, s.carry_paid), ("pool-only", 900_000, 0), "half the assumed reward, nobody paid");
+        assert_eq!(s.split, vec![("A".to_string(), 500_000), ("B".to_string(), 400_000)]);
+        assert_eq!(cleared(&s).values().sum::<i64>(), -700_000, "all of it discharged");
+    }
+
+    /// A full split pays every output itself, so it owes nothing and clears all the carry it rode.
+    #[test]
+    fn a_full_split_owes_nothing_and_clears_the_carry_it_paid() {
+        let payees = vec![payee("A", 1_000_000, 400_000, 1), payee("B", 800_000, 300_000, 2)];
+        let s = settle(&CoinbaseKind::Split, Some(coinbaser(312_500_000, &payees)), 312_500_000, |_| 1);
+        assert_eq!((s.kind, s.owed, s.carry_paid), ("split", 0, 700_000));
+        assert_eq!(cleared(&s).values().sum::<i64>(), -700_000);
+    }
+
+    /// Work credited to a solo or foreign coinbase is not the window's, so nothing settles.
+    #[test]
+    fn solo_and_foreign_coinbases_settle_nothing() {
+        for (kind, name) in [
+            (CoinbaseKind::EmptySolo, "solo"),
+            (CoinbaseKind::GatewaySolo, "solo"),
+            (CoinbaseKind::Foreign, "unknown"),
+        ] {
+            let payees = vec![payee("A", 1_000_000, 400_000, 1)];
+            let s = settle(&kind, Some(coinbaser(312_500_000, &payees)), 312_500_000, |_| 0);
+            assert_eq!((s.kind, s.owed, s.carry_paid), (name, 0, 0));
+            assert!(s.carry_delta.is_empty() && s.split.is_empty(), "{name} touches no books");
+        }
+    }
 
     fn issued(id: u8, value: u64) -> IssuedCoinbaser {
         IssuedCoinbaser {
