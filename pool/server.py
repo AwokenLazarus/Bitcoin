@@ -5512,7 +5512,13 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json(price_payload() if path == "/api/price" else mempool_prices_payload(), cache_s=15)
             return
         if path == "/api/pool":
-            self.send_json(cached("pool", 5.0, pool_payload), cache_s=5)
+            doc = cached("pool", 5.0, pool_payload)
+            # The site's own chart reads /api/history, so its ten-second poll asks for the
+            # payload without the day of per-minute samples (most of its bytes). Anyone else
+            # calling /api/pool gets the same document as before.
+            if parse_qs(u.query).get("h") == ["0"]:
+                doc = {k: v for k, v in doc.items() if k != "history"}
+            self.send_json(doc, cache_s=5)
             return
         if path == "/api/miners":
             self.send_json(cached("miners", 5.0, lambda: public_view(self._miners_payload())), cache_s=5)

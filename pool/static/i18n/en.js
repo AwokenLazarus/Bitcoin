@@ -981,3 +981,171 @@ window.LZ_I18N_DICTS["en"] = {
     "s": "s"
   }
 };
+
+// App shell, hashrate explorer and Learn hub strings.
+window.LZ_I18N_DICTS["en"].app = {
+  "nav": {
+    "home": "Pool",
+    "mine": "Start mining",
+    "payouts": "Payouts & blocks",
+    "network": "Miners",
+    "me": "My stats",
+    "learn": "Learn"
+  },
+  "pal": {
+    "open": "Search or jump (press /)",
+    "button": "Search",
+    "aria": "Search or jump",
+    "placeholder": "Paste a payout address, or jump to…",
+    "foot": "↑ ↓ to move · Enter to open · Esc to close · / or Ctrl K opens this anywhere",
+    "addr": "Open stats for this address",
+    "last": "Your last address",
+    "none": "Nothing matches",
+    "go": {
+      "home": "Pool right now",
+      "chart": "Hashrate chart and blocks found",
+      "connect": "Connect a miner",
+      "datum": "Set up a DATUM gateway",
+      "hardware": "Hardware and earnings",
+      "calc": "Earnings calculator",
+      "payout": "Next payout: the coinbase being built",
+      "blocks": "Blocks found",
+      "miners": "Miners online",
+      "gateways": "DATUM gateways",
+      "me": "My stats",
+      "learn": "Learn: proof of work, DATUM, TIDES",
+      "how": "How the pool works",
+      "pools": "Other pools on this chain"
+    }
+  },
+  "toast": {
+    "block": "Block {h} found by the pool"
+  },
+  "chart": {
+    "title": "Pool hashrate and blocks found",
+    "rangeAria": "Time range",
+    "range": {
+      "1h": "1H",
+      "6h": "6H",
+      "24h": "24H",
+      "3d": "3D",
+      "7d": "7D",
+      "30d": "30D",
+      "all": "All"
+    },
+    "miners": "Miners",
+    "hint": "Hover for a reading · diamonds are blocks the pool found; click one for its payout split · ← → with the chart focused",
+    "empty": "Not enough samples in this range yet.",
+    "error": "The chart could not load. It will retry.",
+    "now": "Now",
+    "avg": "Average",
+    "peak": "Peak",
+    "blocks": "Blocks found",
+    "reward": "Paid out in range",
+    "perDay": "{n} a day",
+    "aria": "Pool hashrate, {range}. Now {now}, average {avg}, peak {peak}. {blocks} blocks found.",
+    "minersN": "{n} miners",
+    "foundHere": {
+      "one": "block {h} found here",
+      "other": "{n} blocks found here"
+    },
+    "block": "Block {h}",
+    "nBlocks": {
+      "one": "{n} block",
+      "other": "{n} blocks"
+    },
+    "clickSplit": "Click for the payout split",
+    "clickList": "Click to list them",
+    "viaGw": "DATUM gateway {gw}",
+    "viaDatum": "a DATUM gateway",
+    "viaStratum": "public stratum",
+    "close": "Close",
+    "back": "Back to the list",
+    "found": "Found",
+    "rewardOne": "Reward",
+    "foundVia": "Found by",
+    "explorer": "Open in the explorer",
+    "loadingSplit": "Loading the payout split…",
+    "splitError": "The split could not load. The explorer has it.",
+    "paidTo": "Paid straight to {n} addresses in the coinbase",
+    "moreOutputs": "and {n} more outputs",
+    "moreZoom": "{n} more. Pick a shorter range to separate them."
+  },
+  "learn": {
+    "eyebrow": "Learn",
+    "title": "New to this? Start here.",
+    "lede": "Six short answers, then the long versions if you want them. No account, no sign-up: mining here only ever needs a payout address.",
+    "c1": {
+      "t": "Proof of work, in one minute",
+      "b": "Miners race to find a number that makes a block’s hash fall below a target. It is pure trial and error, so the only way to win more often is to do more hashes. That cost is what makes rewriting the chain expensive. Difficulty retargets so blocks keep arriving at a steady pace however much hashrate joins.",
+      "a": "How the pool fits in"
+    },
+    "c2": {
+      "t": "Why this chain uses BLAKE2b",
+      "b": "At block 961,640 (30 August 2026) this chain changed its proof of work from SHA-256d to BLAKE2b. Supply, halvings, addresses and every earlier block are unchanged. BLAKE2b is what Siacoin ASICs were built for, so that hardware mines here.",
+      "a": "The fork, and BIP-110"
+    },
+    "c3": {
+      "t": "What DATUM changes",
+      "b": "On an ordinary pool, the pool decides what goes in the block. With your own DATUM gateway and Bitcoin Knots node, you build the block template and the pool only coordinates the reward. That keeps block-building spread across many hands. Here it costs 0% and earns a bonus.",
+      "a": "The DATUM subsidy"
+    },
+    "c4": {
+      "t": "How TIDES pays",
+      "b": "TIDES keeps a rolling window of accepted shares worth about eight network-difficulties of work. When the pool finds a block, every address holding work in the window is paid its proportion. There are no rounds to hop between and nothing resets when a block lands.",
+      "a": "TIDES explained"
+    },
+    "c5": {
+      "t": "Paid in the block itself",
+      "b": "The pool never holds your coins. Each payout is an output of the block’s own coinbase, sent to your address. There is no balance, no threshold and no withdrawal, and anyone can check every payout on chain.",
+      "a": "Non-custodial payouts"
+    },
+    "c6": {
+      "t": "A pool that caps itself",
+      "b": "The public stratum is held to 15% of network hashrate. Past that, new stratum connections are relayed to other pools and paid there. Miners on their own DATUM gateway are never counted, because building your own templates is not what centralizes a chain.",
+      "a": "The 15% self-cap"
+    },
+    "pathTitle": "From zero to mining",
+    "p1": "<b>Get an address.</b> Any wallet that gives you a bc1… address on this chain. That address is your username; there is nothing else to register.",
+    "p2": "<b>Point a miner.</b> Any Siacoin BLAKE2b ASIC. Use the public stratum to start in two minutes, or run a DATUM gateway for 0% and the bonus.",
+    "p3": "<b>Watch it work.</b> Look your address up here: live hashrate, your share of the window, and every coinbase that paid you.",
+    "pathCta": "Connect a miner",
+    "pathCalc": "What would I earn?",
+    "glossTitle": "Words you will meet",
+    "g1": {
+      "t": "Hashrate",
+      "d": "Hashes tried per second. 1 TH/s is a trillion a second; 1 PH/s is a thousand TH/s."
+    },
+    "g2": {
+      "t": "Share",
+      "d": "A hash good enough to prove you are working, though not good enough to be a block. Shares are how the pool measures your work."
+    },
+    "g3": {
+      "t": "Difficulty",
+      "d": "How hard the network’s target is. It retargets so blocks keep their pace as hashrate comes and goes."
+    },
+    "g4": {
+      "t": "Coinbase",
+      "d": "The first transaction in a block, which creates the reward. Here it pays miners directly."
+    },
+    "g5": {
+      "t": "Block template",
+      "d": "The draft block a miner hashes: which transactions are in it, and who the coinbase pays."
+    },
+    "g6": {
+      "t": "Window",
+      "d": "The stretch of recent shares TIDES pays on. Here it is eight network-difficulties of work."
+    },
+    "g7": {
+      "t": "Gateway",
+      "d": "Your own DATUM software. It talks to your node for templates and to the pool for the reward split."
+    },
+    "g8": {
+      "t": "Orphan",
+      "d": "A valid block that lost the race to another found at the same moment. It pays nothing."
+    }
+  }
+};
+window.LZ_I18N_DICTS["en"].app.sub = {"aria": "In this view", "intro": "Overview", "chart": "Hashrate & blocks", "calc": "Calculator", "basics": "The basics"};
+window.LZ_I18N_DICTS["en"].app.sub.intro = "Welcome";
+window.LZ_I18N_DICTS["en"].app.sub.live = "Live numbers";

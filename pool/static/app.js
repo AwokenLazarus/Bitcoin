@@ -1,0 +1,299 @@
+// App shell for the pool site. The page is one document (every section stays in the HTML, so a
+// crawler or a browser without JS reads all of it); this turns it into views so a visitor sees
+// one subject at a time instead of one very long scroll.
+//
+// Loaded before pool.js on purpose: the view has to be on screen before pool.js scrolls to the
+// section the URL asked for, and this file's hashchange listener has to run before pool.js's.
+(function () {
+  "use strict";
+  const $ = (id) => document.getElementById(id);
+  const T = (k, v) => (window.LZ_I18N ? window.LZ_I18N.t("app." + k, v) : k);
+
+  // view -> the <main> sections it shows. `home` is first: it is what "/" opens.
+  const VIEWS = {
+    home: ["fees", "status"],
+    mine: ["connect", "hardware"],
+    payouts: ["payout", "blocks"],
+    network: ["miners", "gateways", "solo"],
+    me: ["dashboard"],
+    learn: ["learn", "how", "pools"],
+  };
+  // Hash targets that are not themselves a top-level section.
+  const ALIAS = { "": "fees", top: "fees", datum: "connect", mine: "connect", window: "payout", payouts: "dashboard" };
+  const SECTION_VIEW = {};
+  for (const [v, ids] of Object.entries(VIEWS)) for (const id of ids) SECTION_VIEW[id] = v;
+
+  const root = document.documentElement;
+  let current = null;
+
+  function viewFor(target) {
+    if (target in ALIAS) target = ALIAS[target];
+    if (SECTION_VIEW[target]) return SECTION_VIEW[target];
+    const node = target ? $(target) : null;
+    const sec = node && node.closest("main > section");
+    if (sec && SECTION_VIEW[sec.id]) return SECTION_VIEW[sec.id];
+    // Anything else in the hash is a payout address: that is the "my stats" view.
+    return target ? "me" : "home";
+  }
+
+  function show(view, opts) {
+    if (!VIEWS[view]) view = "home";
+    const changed = view !== current;
+    current = view;
+    root.dataset.view = view;
+    for (const sec of document.querySelectorAll("main > section")) {
+      const on = SECTION_VIEW[sec.id] === view;
+      sec.classList.toggle("view-off", !on);
+      if (on && changed) sec.classList.add("view-in");
+    }
+    for (const a of document.querySelectorAll("[data-view-link]")) {
+      const on = a.dataset.viewLink === view;
+      a.classList.toggle("is-active", on);
+      if (on) a.setAttribute("aria-current", "page"); else a.removeAttribute("aria-current");
+    }
+    if (changed) {
+      // Canvases drawn while their view was hidden measured zero width; pool.js redraws on resize.
+      requestAnimationFrame(() => window.dispatchEvent(new Event("resize")));
+      if (!(opts && opts.keepScroll)) window.scrollTo({ top: 0, behavior: "instant" });
+      document.dispatchEvent(new CustomEvent("lz:view", { detail: { view } }));
+    }
+  }
+
+  function route(keepScroll) {
+    const hash = decodeURIComponent(location.hash.slice(1));
+    const scroll = root.getAttribute("data-scroll") || "";
+    const target = hash || scroll;
+    show(viewFor(target), { keepScroll });
+    const tops = new Set(Object.values(VIEWS).map((ids) => ids[0]));
+    if (hash && !tops.has(ALIAS[hash] || hash)) {
+      const node = $(ALIAS[hash] || hash);
+      if (node) requestAnimationFrame(() => node.scrollIntoView({ block: "start", behavior: "instant" }));
+    }
+  }
+
+  // ------------------------------------------------------------ sub-navigation
+  // A view with more than one section gets a slim bar of its parts under the header.
+  const SUB = {
+    home: [["fees", "app.sub.intro"], ["hashchart", "app.sub.chart"], ["status", "app.sub.live"]],
+    mine: [["connect", "nav.connect"], ["hardware", "nav.hardware"], ["calc", "app.sub.calc"]],
+    payouts: [["payout", "nav.payout"], ["blocks", "nav.blocks"]],
+    network: [["miners", "nav.miners"], ["gateways", "nav.gateways"], ["solo", "nav.solo"]],
+    learn: [["learn", "app.sub.basics"], ["how", "nav.how"], ["pools", "nav.pools"]],
+  };
+  let subnav = null;
+  function renderSubnav() {
+    const mast = document.querySelector(".site-mast");
+    if (!mast) return;
+    if (!subnav) {
+      subnav = document.createElement("nav");
+      subnav.className = "subnav";
+      subnav.innerHTML = '<div class="wrap"></div>';
+      mast.appendChild(subnav);
+      const setH = () => root.style.setProperty("--mast-h", (mast.querySelector(".site-header")?.offsetHeight || 58) + "px");
+      setH();
+      window.addEventListener("resize", setH);
+    }
+    const items = (SUB[current] || []).filter(([id]) => { const n = $(id); return n && !n.hidden && !n.closest("[hidden]"); });
+    subnav.hidden = items.length < 2;
+    subnav.setAttribute("aria-label", T("sub.aria"));
+    const box = subnav.firstChild;
+    box.innerHTML = "";
+    for (const [id, key] of items) {
+      const a = document.createElement("a");
+      a.href = "#" + (id === "fees" ? "top" : id);
+      a.dataset.sub = id;
+      a.textContent = window.LZ_I18N ? window.LZ_I18N.t(key) : id;
+      box.appendChild(a);
+    }
+    spy();
+  }
+  let spyIO = null;
+  function spy() {
+    if (spyIO) spyIO.disconnect();
+    if (!subnav || subnav.hidden || !("IntersectionObserver" in window)) return;
+    const links = [...subnav.querySelectorAll("a")];
+    const vis = new Map();
+    spyIO = new IntersectionObserver((es) => {
+      for (const e of es) vis.set(e.target.id, e.isIntersecting ? e.intersectionRatio : 0);
+      let best = links[0]?.dataset.sub, top = Infinity;
+      for (const l of links) {
+        const n = $(l.dataset.sub);
+        if (!n || !vis.get(l.dataset.sub)) continue;
+        const y = Math.abs(n.getBoundingClientRect().top - 130);
+        if (y < top) { top = y; best = l.dataset.sub; }
+      }
+      links.forEach((l) => l.classList.toggle("is-on", l.dataset.sub === best));
+    }, { rootMargin: "-120px 0px -45% 0px", threshold: [0, 0.01, 0.2] });
+    links.forEach((l) => { const n = $(l.dataset.sub); if (n) spyIO.observe(n); });
+    links.forEach((l, i) => l.classList.toggle("is-on", i === 0));
+  }
+  document.addEventListener("lz:view", renderSubnav);
+  document.addEventListener("lz:i18n", renderSubnav);
+
+  window.addEventListener("hashchange", () => route(false));
+  // A click on the link for the view already open still means "take me to the top of it".
+  document.addEventListener("click", (e) => {
+    const a = e.target.closest("[data-view-link]");
+    if (a && a.dataset.viewLink === current && a.getAttribute("href") === location.hash) {
+      window.scrollTo({ top: 0, behavior: "smooth" });
+    }
+  });
+
+  // ------------------------------------------------------------ live touches
+  // Numbers that change flash once, so a refresh is felt without anything moving.
+  function watchBumps() {
+    if (!("MutationObserver" in window)) return;
+    const seen = new WeakMap();
+    const mo = new MutationObserver((muts) => {
+      for (const m of muts) {
+        const el = m.target.nodeType === 1 ? m.target : m.target.parentElement;
+        const host = el && el.closest("[data-bump], .stats-grid dd, .hero-stats b, .hx-stats dd");
+        if (!host) continue;
+        const txt = host.textContent;
+        if (seen.get(host) === txt) continue;
+        const first = !seen.has(host);
+        seen.set(host, txt);
+        if (first || txt.includes("—")) continue;
+        host.classList.remove("is-bump");
+        void host.offsetWidth;
+        host.classList.add("is-bump");
+      }
+    });
+    for (const n of document.querySelectorAll(".hero-stats, #stats, #hashchart")) {
+      mo.observe(n, { subtree: true, childList: true, characterData: true });
+    }
+  }
+
+  // A block found while the page is open is the best news this site has; say so.
+  let lastFound = null;
+  document.addEventListener("lz:pool", (e) => {
+    const p = e.detail || {};
+    const n = Number(p.blocks_found);
+    if (Number.isFinite(n)) {
+      if (lastFound != null && n > lastFound) toast(T("toast.block", { h: Number(p.height || 0).toLocaleString() }), "#blocks");
+      lastFound = n;
+    }
+  });
+
+  function toast(text, href) {
+    let box = $("lz-toasts");
+    if (!box) {
+      box = document.createElement("div");
+      box.id = "lz-toasts";
+      box.setAttribute("role", "status");
+      box.setAttribute("aria-live", "polite");
+      document.body.appendChild(box);
+    }
+    const n = document.createElement(href ? "a" : "div");
+    n.className = "lz-toast";
+    if (href) n.href = href;
+    n.innerHTML = '<span class="lz-toast-mark" aria-hidden="true"></span><span></span>';
+    n.lastChild.textContent = text;
+    box.appendChild(n);
+    requestAnimationFrame(() => n.classList.add("is-in"));
+    setTimeout(() => { n.classList.remove("is-in"); setTimeout(() => n.remove(), 400); }, 9000);
+  }
+
+  // ------------------------------------------------------------ command palette
+  const ADDR = /^(bc1[a-z0-9]{20,90}|[13][a-km-zA-HJ-NP-Z1-9]{25,40})$/;
+  let pal = null;
+
+  function destinations() {
+    const d = [
+      ["home", "#status"], ["chart", "#hashchart"], ["connect", "#connect"], ["datum", "#datum"], ["hardware", "#hardware"],
+      ["calc", "#calc"], ["payout", "#payout"], ["blocks", "#blocks"], ["miners", "#miners"], ["gateways", "#gateways"],
+      ["me", "#dashboard"], ["learn", "#learn"], ["how", "#how"], ["pools", "#pools"],
+    ].map(([k, href]) => ({ label: T("pal.go." + k), href }));
+    for (const a of document.querySelectorAll(".nav-out a")) d.push({ label: a.textContent.trim() + " ↗", href: a.href, ext: true });
+    return d;
+  }
+
+  function openPalette() {
+    if (!pal) {
+      pal = document.createElement("div");
+      pal.className = "lz-pal";
+      pal.innerHTML = '<div class="lz-pal-box" role="dialog" aria-modal="true"><input type="text" spellcheck="false" autocomplete="off"><ul role="listbox"></ul><p class="lz-pal-foot"></p></div>';
+      document.body.appendChild(pal);
+      pal.addEventListener("pointerdown", (e) => { if (e.target === pal) closePalette(); });
+      const input = pal.querySelector("input");
+      input.addEventListener("input", renderPalette);
+      input.addEventListener("keydown", (e) => {
+        const items = [...pal.querySelectorAll("li")];
+        let i = items.findIndex((li) => li.classList.contains("is-on"));
+        if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+          e.preventDefault();
+          if (!items.length) return;
+          i = (i + (e.key === "ArrowDown" ? 1 : -1) + items.length) % items.length;
+          items.forEach((li, k) => li.classList.toggle("is-on", k === i));
+          items[i].scrollIntoView({ block: "nearest" });
+        } else if (e.key === "Enter") {
+          e.preventDefault();
+          (items[i] || items[0])?.click();
+        } else if (e.key === "Escape") closePalette();
+      });
+    }
+    pal.hidden = false;
+    pal.querySelector(".lz-pal-box").setAttribute("aria-label", T("pal.aria"));
+    const input = pal.querySelector("input");
+    input.placeholder = T("pal.placeholder");
+    pal.querySelector(".lz-pal-foot").textContent = T("pal.foot");
+    input.value = "";
+    renderPalette();
+    root.classList.add("pal-open");
+    input.focus();
+  }
+  function closePalette() {
+    if (pal) pal.hidden = true;
+    root.classList.remove("pal-open");
+  }
+  function renderPalette() {
+    const q = pal.querySelector("input").value.trim();
+    const ul = pal.querySelector("ul");
+    ul.innerHTML = "";
+    const add = (label, sub, fn, on) => {
+      const li = document.createElement("li");
+      li.setAttribute("role", "option");
+      if (on) li.classList.add("is-on");
+      li.innerHTML = "<b></b><span></span>";
+      li.firstChild.textContent = label;
+      li.lastChild.textContent = sub || "";
+      li.addEventListener("click", () => { closePalette(); fn(); });
+      ul.appendChild(li);
+    };
+    if (ADDR.test(q)) {
+      add(T("pal.addr"), q.slice(0, 12) + "…" + q.slice(-8), () => { location.hash = q; }, true);
+      return;
+    }
+    const ql = q.toLowerCase();
+    let n = 0;
+    try {
+      const last = localStorage.getItem("lz.addr");
+      if (last && ADDR.test(last) && (!ql || last.toLowerCase().includes(ql))) {
+        add(T("pal.last"), last.slice(0, 12) + "…" + last.slice(-8), () => { location.hash = last; }, n++ === 0);
+      }
+    } catch (e) { /* private mode */ }
+    for (const d of destinations()) {
+      if (ql && !d.label.toLowerCase().includes(ql)) continue;
+      add(d.label, "", () => { if (d.ext) window.open(d.href, "_blank", "noreferrer"); else location.hash = d.href; }, n++ === 0);
+    }
+    if (!n) add(T("pal.none"), "", () => {}, true);
+  }
+
+  document.addEventListener("keydown", (e) => {
+    const typing = /^(INPUT|TEXTAREA|SELECT)$/.test((e.target.tagName || "")) || e.target.isContentEditable;
+    if ((e.key === "k" && (e.metaKey || e.ctrlKey)) || (e.key === "/" && !typing)) {
+      e.preventDefault();
+      if (pal && !pal.hidden) closePalette(); else openPalette();
+    }
+  });
+  document.addEventListener("click", (e) => {
+    if (e.target.closest("[data-palette]")) { e.preventDefault(); openPalette(); }
+  });
+
+  // ------------------------------------------------------------ boot
+  root.classList.add("app");
+  route(true);
+  const ready = () => { route(true); renderSubnav(); watchBumps(); };
+  if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", ready); else ready();
+  window.LZ_APP = { show, toast, openPalette };
+})();
