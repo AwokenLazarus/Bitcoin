@@ -310,13 +310,24 @@ pub fn compute(
     let mut paid = 0u64;
     let mut carry_paid = 0u64;
     let mut bytes = 0usize;
-    for ((m, script), earned) in miners.into_iter().zip(scripts).zip(shares) {
+    // Placed by what each is owed in all, this block's share plus carry, largest first. There
+    // are only a few hundred outputs to a coinbase, and placed by work alone the same large
+    // miners take them every block: hashrate spread over that many addresses keeps every
+    // smaller miner out for as long as it likes, their earnings piling up as carry that is
+    // never reached. Counting the carry, whoever is kept waiting climbs each block until they
+    // are in. Ties keep the window's order (by work), so with no carry nothing changes.
+    let mut queue: Vec<((MinerStat, Option<Vec<u8>>), u64)> = miners.into_iter().zip(scripts).zip(shares).collect();
+    queue.sort_by_key(|((m, _), earned)| std::cmp::Reverse(earned.saturating_add(m.carry)));
+    // Two passes, because the room to pay carry from is the pool's remainder, and that is
+    // only known once it is known who is not placed: an identity this block does not place
+    // leaves its earned share with the pool. Deciding both in one walk made a payee's carry
+    // depend on whether the miners left out happened to come before it or after.
+    let mut placed = Vec::new();
+    for ((m, script), earned) in queue {
         let total = earned.saturating_add(m.carry);
         if total == 0 {
             continue;
         }
-        // an identity this block does not place leaves its earned share with the pool, which
-        // is then room to pay someone else's carry from
         // Whether it can be paid at all comes before how much: an identity with no script that
         // is also under the floor must not be filed as merely small. `BelowMinimum` defers,
         // and carry deferred for a username that is not an address is never paid and never
@@ -325,26 +336,33 @@ pub fn compute(
             unpaid.push(Unpaid { identity: m.identity, sats: total, earned, reason: UnpaidReason::NoScript });
             continue;
         };
-        if total < p.min_payout {
-            carry_room = carry_room.saturating_add(earned);
-            unpaid.push(Unpaid { identity: m.identity, sats: total, earned, reason: UnpaidReason::BelowMinimum });
-            continue;
-        }
         let need = 8 + 1 + script.len();
-        if payees.len() >= p.max_outputs || bytes + need > p.output_budget_bytes {
+        let reason = if total < p.min_payout {
+            Some(UnpaidReason::BelowMinimum)
+        } else if placed.len() >= p.max_outputs || bytes + need > p.output_budget_bytes {
+            Some(UnpaidReason::OverBudget)
+        } else {
+            None
+        };
+        if let Some(reason) = reason {
             carry_room = carry_room.saturating_add(earned);
-            unpaid.push(Unpaid { identity: m.identity, sats: total, earned, reason: UnpaidReason::OverBudget });
+            unpaid.push(Unpaid { identity: m.identity, sats: total, earned, reason });
             continue;
         }
+        bytes += need;
+        placed.push((m, script, earned));
+    }
+    for (m, script, earned) in placed {
         let carry = m.carry.min(carry_room);
         let sats = earned + carry;
         if sats < p.min_payout {
+            // it cleared the floor only with carry there is no room to pay this block
             carry_room = carry_room.saturating_add(earned);
+            let total = earned.saturating_add(m.carry);
             unpaid.push(Unpaid { identity: m.identity, sats: total, earned, reason: UnpaidReason::OverBudget });
             continue;
         }
         carry_room -= carry;
-        bytes += need;
         paid += sats;
         carry_paid += carry;
         payees.push(Payee { identity: m.identity, work: m.work, sats, carry, script });
@@ -820,5 +838,43 @@ mod tests {
             assert!(s.payees.iter().all(|x| x.sats >= x.carry));
             assert!(s.payees.iter().all(|x| x.sats >= p.min_payout));
         }
+    }
+
+    /// Outputs are scarce, and placing by work alone lets whoever has the most addresses with
+    /// the most work keep everyone else out for ever. Placing by what is owed lets a miner
+    /// kept waiting climb until it is paid.
+    #[test]
+    fn a_miner_kept_waiting_rises_until_it_is_paid() {
+        let p = SplitParams {
+            fee_bps: 0,
+            stratum_fee_bps: 0,
+            datum_rebate_bps: 0,
+            min_payout: 1,
+            max_outputs: 3,
+            output_budget_bytes: 14_000,
+        };
+        // three large addresses and one small miner, block after block
+        let window = |small_carry: u64| {
+            vec![miner("x1", 300), miner("x2", 300), miner("x3", 300), miner_carry("small", 100, small_carry)]
+        };
+        let mut carry = 0u64;
+        let mut waited = 0;
+        loop {
+            let s = compute(window(carry), 1_000, 1_000_000, &p, 0, script);
+            assert_eq!(s.pool_sats + s.paid_sats(), 1_000_000);
+            if let Some(out) = s.payees.iter().find(|x| x.identity == "small") {
+                assert_eq!(out.sats, 100_000 + carry, "paid this block's share and everything it was kept waiting for");
+                break;
+            }
+            let deferred = s.unpaid.iter().find(|u| u.identity == "small").unwrap();
+            assert!(deferred.defers());
+            carry += deferred.earned;
+            waited += 1;
+            assert!(waited < 10, "placed by work alone it would wait for ever");
+        }
+        assert_eq!(waited, 3, "it outranks a 300 000 output once it is owed more than that");
+        // with nobody carrying anything the order is the window's, as before
+        let s = compute(window(0), 1_000, 1_000_000, &p, 0, script);
+        assert_eq!(s.payees.iter().map(|x| x.identity.as_str()).collect::<Vec<_>>(), ["x1", "x2", "x3"]);
     }
 }
