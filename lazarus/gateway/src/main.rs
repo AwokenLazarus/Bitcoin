@@ -12,7 +12,7 @@ use clap::Parser;
 use lazarus_protocol::cbtx;
 use lazarus_protocol::coinbaser::{parse_coinbaser_v2, CoinbaserOutput, CoinbaserV2};
 use lazarus_protocol::handshake;
-use lazarus_protocol::keys::{generate_pool_keys, generate_session};
+use lazarus_protocol::keys::{generate_pool_keys, generate_session, load_or_create_pool_keys};
 use lazarus_protocol::mining::{self, CoinbaserRequest, PowSubmit, SUB_BLOCKNOTIFY};
 use lazarus_protocol::pow::{self, HeaderV2};
 use lazarus_protocol::{identity_of, identity_script, Header};
@@ -74,6 +74,15 @@ struct GwCfg {
     /// network. Absent means off. See `overflow.rs`.
     #[serde(default)]
     overflow: Option<overflow::OverflowCfg>,
+    /// File holding this gateway's DATUM identity key, created on first use (mode 0600).
+    ///
+    /// Without it the gateway makes a new identity on every connect, so Prime can only know
+    /// the pool's own gateway by where it connects from (loopback), and anything else that
+    /// reaches Prime over loopback is taken for it. With it the identity is stable: put the
+    /// first 64 hex digits of the pubkey this logs at startup in Prime's `house-gateways`, and
+    /// Prime trusts the key rather than the network path. Absent keeps the old behaviour.
+    #[serde(default)]
+    identity_key_file: Option<PathBuf>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -1146,7 +1155,16 @@ fn connect_prime(cfg: &GwCfg) -> Option<(TcpStream, lazarus_protocol::ChannelKey
     let pk = hex::decode(cfg.pool_pubkey.as_deref().unwrap_or("").trim()).ok()?;
     if pk.len() != 64 { log::error!("pool_pubkey must be 128 hex chars"); return None; }
     let mut pool_x = [0u8; 32]; pool_x.copy_from_slice(&pk[32..64]);
-    let local = generate_pool_keys(); let sess = generate_session();
+    let local = match &cfg.identity_key_file {
+        Some(path) => match load_or_create_pool_keys(path) {
+            Ok(k) => k,
+            // an identity that silently changed would be a house gateway Prime no longer
+            // knows, its whole-coinbase shares credited by hash alone: better not to connect
+            Err(e) => { log::error!("identity_key_file {}: {e}", path.display()); return None; }
+        },
+        None => generate_pool_keys(),
+    };
+    let sess = generate_session();
     let (hello, _nk, mut ch) =
         handshake::encode_client_hello(&local, &sess, &pool_x, handshake::SPLIT_GATEWAY_UA).ok()?;
     // Bounded connect and handshake: a Prime (or middlebox) that accepts TCP and goes
@@ -2054,6 +2072,19 @@ fn main() {
     }
     // prime_port 0 means standalone: solo needs nothing from Prime (it builds its own
     // coinbase and submits its own blocks), and a pooled gateway cannot work without it.
+    if let Some(path) = &cfg.identity_key_file {
+        match load_or_create_pool_keys(path) {
+            Ok(k) => log::info!(
+                "DATUM identity {} (key file {}); this is the entry for Prime's house-gateways",
+                hex::encode(k.ed_pk),
+                path.display()
+            ),
+            Err(e) => {
+                log::error!("identity_key_file {}: {e}", path.display());
+                std::process::exit(2);
+            }
+        }
+    }
     let prime_on = cfg.prime_port != 0;
     assert!(prime_on || mode == Mode::Solo, "pooled mode needs a Prime to get the TIDES split from");
     log::info!(
