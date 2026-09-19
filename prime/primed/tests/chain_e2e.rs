@@ -228,3 +228,77 @@ fn a_coinbaser_is_good_for_a_couple_of_blocks_and_no_longer() {
         assert_eq!(gw.submit(share).0, expect[i], "share {i}: a coinbaser issued {i} block(s) back");
     }
 }
+
+/// A found block's books, end to end. The carry its coinbase paid comes off the moment the
+/// candidate is seen (the next coinbaser must not hand it out again); if the node then says
+/// the block is not in the chain, exactly that goes back; and when the node does have it, it
+/// is settled.
+#[test]
+#[ignore]
+fn a_found_block_is_booked_when_seen_and_settled_when_the_node_has_it() {
+    const REGTEST_BITS: u32 = 0x207f_ffff; // every share is a block, honestly: the node says so
+    const OWED: u64 = 1_000_000;
+    let miner = "bc1qrp33g0q5c5txsp9arysrx4k6zdkfs4nce4xj0gdcccefvpysxf3qccfmv3";
+    let tip = [0x42; 32];
+    let mut share = pool_only_share(1, HEIGHT, tip, REGTEST_BITS, 0, unix_now());
+    grind_diff1(&mut share);
+
+    let pool = Identity::generate();
+    let node = MockNode::start(Chain {
+        height: HEIGHT - 1,
+        tip: node_hex(&tip),
+        parent: node_hex(&[0x41; 32]),
+        bits: REGTEST_BITS,
+        next_bits: Some(REGTEST_BITS),
+    });
+    let cfg = format!("{}\nhouse-loopback = false", node.config(0.2));
+    let (primed, port) = start_primed_seeded(&pool, &cfg, |dir| {
+        let meta = serde_json::json!({"target_work": 8, "lifetime_shares": 0, "lifetime_work": 0, "carry": {miner: OWED}, "rebate_owed": 0});
+        std::fs::write(dir.join("window.json"), meta.to_string()).unwrap();
+    });
+    wait_for_tip(&primed);
+    let carry = |p: &Primed| settled_stats(p)["window"]["carry_total_sats"].as_u64().unwrap();
+    assert_eq!(carry(&primed), OWED);
+
+    // the split for this template hands the miner its carry; the gateway then mines a coinbase
+    // that pays only the pool, so the block owes that carry through the make-good instead
+    let mut gw = Gateway::connect(port, &pool, &Identity::generate());
+    share.job.as_mut().unwrap().coinbaser_id = gw.request_coinbaser(VALUE, &tip);
+    let (status, code) = gw.submit(&share);
+    assert_eq!(status, mining::ACCEPTED_TENTATIVELY, "code {code}");
+
+    let st = settled_stats(&primed);
+    let block = st["blocks"].as_array().unwrap().last().expect("the candidate is recorded").clone();
+    let hash = block["hash"].as_str().unwrap().to_string();
+    assert_eq!(block["kind"], "pool-only", "{block}");
+    assert_eq!(block["owed_sats"], OWED, "{block}");
+    assert_eq!(block["settled"], false);
+    assert_eq!(block["books"]["debits_live"], true, "{block}");
+    assert_eq!(block["books"]["credits_live"], false, "{block}");
+    assert_eq!(st["window"]["carry_total_sats"], 0, "off the books at once: {st}");
+
+    let wait_for = |what: &str, done: &dyn Fn(&serde_json::Value) -> bool| {
+        let deadline = Instant::now() + Duration::from_secs(45);
+        loop {
+            let st = settled_stats(&primed);
+            let b = st["blocks"].as_array().unwrap().iter().rev().find(|b| b["hash"] == hash.as_str()).unwrap().clone();
+            if done(&b) {
+                return st;
+            }
+            assert!(Instant::now() < deadline, "never {what}: {b}");
+        }
+    };
+    // the node: not in the main chain
+    node.confirmations.lock().unwrap().insert(hash.clone(), -1);
+    let st = wait_for("orphaned", &|b| b["kind"] == "orphan:pool-only");
+    assert_eq!(st["window"]["carry_total_sats"], OWED, "exactly what it took comes back: {st}");
+
+    // ...and then it is after all (the branch it was on won)
+    node.confirmations.lock().unwrap().insert(hash.clone(), 2);
+    let st = wait_for("settled", &|b| b["settled"] == true);
+    let b = st["blocks"].as_array().unwrap().iter().rev().find(|b| b["hash"] == hash.as_str()).unwrap().clone();
+    assert_eq!(b["kind"], "pool-only", "{b}");
+    assert_eq!(b["books"]["debits_live"], true, "{b}");
+    assert_eq!(b["books"]["credits_live"], true, "{b}");
+    assert_eq!(st["window"]["carry_total_sats"], 0, "{st}");
+}

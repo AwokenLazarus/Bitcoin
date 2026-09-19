@@ -32,12 +32,15 @@ pub async fn run(shared: Arc<Shared>) {
                         }
                     }
                 }
-                if confirm_at <= Instant::now() {
+                let hash = shared.tip_snapshot().map(|t| t.hash);
+                let moved = hash.is_some() && hash != scanned;
+                // on the timer, and at once when the tip moves: that is when a block of ours
+                // is confirmed or left behind, and what it earned people waits on it
+                if moved || confirm_at <= Instant::now() {
                     confirm_at = Instant::now() + Duration::from_secs(30);
                     confirm_blocks(&shared, height).await;
                 }
-                let hash = shared.tip_snapshot().map(|t| t.hash);
-                if hash.is_some() && hash != scanned {
+                if moved {
                     scanned = hash;
                     // book the DATUM rebate share of any solo block the chain just buried
                     crate::solo::scan(&shared, height).await;
@@ -195,27 +198,7 @@ async fn confirm_blocks(shared: &Shared, tip_height: u32) {
                 let conf = h.get("confirmations").and_then(|v| v.as_i64()).unwrap_or(0);
                 if conf > 0 {
                     log::info!("block {hash} at {height} confirmed ({conf})");
-                    let mut reapply = Vec::new();
-                    let mut rebate = 0i64;
-                    shared.update_block(&hash, |r| {
-                        if let Some(kind) = r.kind.strip_prefix("orphan:") {
-                            log::info!("block {} at {} is back in the main chain", r.hash, r.height);
-                            r.kind = kind.to_string();
-                            // mark_orphan reversed its carry and rebate; put them back
-                            reapply = r.carry_delta.clone();
-                            rebate = r.rebate_delta;
-                        }
-                        r.settled = true;
-                    });
-                    if !reapply.is_empty() || rebate != 0 {
-                        let mut ledger = shared.ledger.lock().unwrap();
-                        ledger.settle_carry(&reapply);
-                        let owed = ledger.settle_rebate(rebate);
-                        log::info!(
-                            "block {hash}: re-applied carry for {} identities, DATUM rebate {rebate:+} -> owed {owed}",
-                            reapply.len()
-                        );
-                    }
+                    settle_confirmed(shared, &hash);
                 } else if conf < 0 {
                     mark_orphan(shared, &hash, height, "is not in the main chain");
                 }
@@ -231,9 +214,82 @@ async fn confirm_blocks(shared: &Shared, tip_height: u32) {
     }
 }
 
+/// The node has the block in its main chain: mark it settled and put on the ledger what it
+/// earned people (`tides::Books`), along with anything an earlier orphaning took off.
+fn settle_confirmed(shared: &Shared, hash: &str) {
+    let mut legacy_reapply = Vec::new();
+    let mut legacy_rebate = 0i64;
+    let mut booked = None;
+    // the ledger before the block log, the same order everywhere (`stats::build` holds the
+    // ledger while it reads the blocks)
+    let mut ledger = shared.ledger.lock().unwrap();
+    shared.update_block(hash, |r| {
+        let was_orphan = r.kind.starts_with("orphan:");
+        if let Some(kind) = r.kind.strip_prefix("orphan:") {
+            log::info!("block {} at {} is back in the main chain", r.hash, r.height);
+            r.kind = kind.to_string();
+        }
+        match r.books.as_mut() {
+            Some(books) => {
+                ledger.book_debits(&r.carry_delta, books);
+                ledger.book_credits(&r.carry_delta, books);
+                booked =
+                    Some((books.credited.len(), books.credited.iter().map(|c| c.1).sum::<u64>(), books.rebate_added));
+            }
+            // a record from before blocks were booked in two steps: all of it went on at
+            // candidate time, and an orphaning took all of it off
+            None if was_orphan => {
+                legacy_reapply = r.carry_delta.clone();
+                legacy_rebate = r.rebate_delta;
+            }
+            None => {}
+        }
+        r.settled = true;
+    });
+    if let Some((n, sats, rebate)) = booked {
+        if n > 0 || rebate > 0 {
+            log::info!("block {hash}: credited {sats} sats of deferred earnings and DATUM rebate to {n} identities' carry, {rebate} sats added to the owed rebate");
+        }
+    }
+    if !legacy_reapply.is_empty() || legacy_rebate != 0 {
+        ledger.settle_carry(&legacy_reapply);
+        let owed = ledger.settle_rebate(legacy_rebate);
+        log::info!(
+            "block {hash}: re-applied carry for {} identities, DATUM rebate {legacy_rebate:+} -> owed {owed}",
+            legacy_reapply.len()
+        );
+    }
+    if let Err(e) = ledger.sync() {
+        log::error!("ledger sync after settling {hash} failed: {e}");
+    }
+}
+
+/// Whether a `submitblock` result proves the block the miner hashed is invalid.
+///
+/// Only verdicts on the header and the coinbase count, because those are what the share
+/// committed to. Prime assembles the rest of the block from a transaction list the gateway
+/// sends afterwards, so `bad-txnmrklroot` and the other `bad-txns-*` / `bad-blk-*` answers may
+/// only mean Prime was handed the wrong list, while the gateway's own submission of the same
+/// header was fine. Treating those as an orphan would hand back carry that a real block paid
+/// out. `duplicate` and `inconclusive` mean the node already has it, and `rejected: ...` is a
+/// failure to ask. Anything not listed here waits for `confirm_blocks`, as it always did.
+pub fn says_invalid(outcome: &str) -> bool {
+    matches!(
+        outcome,
+        "high-hash"
+            | "bad-diffbits"
+            | "bad-prevblk"
+            | "bad-version"
+            | "bad-cb-height"
+            | "time-too-old"
+            | "time-too-new"
+            | "duplicate-invalid"
+    )
+}
+
 /// Label a recorded block as orphaned, once. Orphans stay unsettled so `confirm_blocks` keeps
 /// re-checking them for a while; this must not stack a prefix per pass.
-fn mark_orphan(shared: &Shared, hash: &str, height: u32, why: &str) {
+pub fn mark_orphan(shared: &Shared, hash: &str, height: u32, why: &str) {
     let already = shared
         .blocks
         .lock()
@@ -248,21 +304,74 @@ fn mark_orphan(shared: &Shared, hash: &str, height: u32, why: &str) {
     log::warn!("block {hash} at {height} {why}");
     let mut reverse = Vec::new();
     let mut rebate = 0i64;
+    let mut unbooked = None;
+    let mut ledger = shared.ledger.lock().unwrap();
     shared.update_block(hash, |r| {
         r.kind = format!("orphan:{}", r.kind);
-        // an orphan's coinbase paid nobody: give back the carry it cleared and take back
-        // the earnings it deferred (the work is still in the window to be paid properly);
-        // likewise the DATUM rebate it paid down is still owed
-        reverse = r.carry_delta.iter().map(|(i, d)| (i.clone(), -*d)).collect();
-        rebate = -r.rebate_delta;
+        r.settled = false;
+        match r.books.as_mut() {
+            // exactly what it has on the ledger comes off, and nothing else
+            Some(books) => {
+                let (debits, credits) = (books.debited.len(), books.credited.len());
+                unbooked = Some((debits, credits, ledger.unbook(books)));
+            }
+            // an orphan's coinbase paid nobody: give back the carry it cleared and take back
+            // the earnings it deferred (the work is still in the window to be paid properly);
+            // likewise the DATUM rebate it paid down is still owed
+            None => {
+                reverse = r.carry_delta.iter().map(|(i, d)| (i.clone(), -*d)).collect();
+                rebate = -r.rebate_delta;
+            }
+        }
     });
+    if let Some((debits, credits, short)) = unbooked {
+        log::info!(
+            "block {hash}: gave back the carry it had cleared for {debits} identities and took back {credits} credits"
+        );
+        if short > 0 {
+            log::error!("block {hash}: {short} sats of its credits had already been paid out and cannot be taken back");
+        }
+    }
     if !reverse.is_empty() || rebate != 0 {
-        let mut ledger = shared.ledger.lock().unwrap();
         ledger.settle_carry(&reverse);
         let owed = ledger.settle_rebate(rebate);
         log::info!(
             "block {hash}: reversed carry for {} identities, DATUM rebate {rebate:+} -> owed {owed}",
             reverse.len()
         );
+    }
+    if let Err(e) = ledger.sync() {
+        log::error!("ledger sync after orphaning {hash} failed: {e}");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Only a verdict on what the miner hashed orphans a block at once. What Prime assembled
+    /// around it (from a transaction list the gateway sent later) can be wrong on its own.
+    #[test]
+    fn only_a_verdict_on_the_header_or_coinbase_proves_a_block_invalid() {
+        for proof in ["high-hash", "bad-diffbits", "bad-prevblk", "bad-cb-height", "duplicate-invalid", "time-too-new"]
+        {
+            assert!(says_invalid(proof), "{proof}");
+        }
+        for not_proof in [
+            "accepted",
+            "duplicate",
+            "inconclusive",
+            "duplicate-inconclusive",
+            "bad-txnmrklroot",
+            "bad-txns-inputs-missingorspent",
+            "bad-blk-weight",
+            "bad-cb-amount",
+            "bad-witness-merkle-match",
+            "rejected: timeout",
+            "no-transactions",
+            "pending",
+        ] {
+            assert!(!says_invalid(not_proof), "{not_proof}");
+        }
     }
 }

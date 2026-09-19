@@ -1412,29 +1412,33 @@ impl Session {
             }),
             (None, None) => None,
         };
+        let (rebate_owed_credited, rebate_deferred) =
+            cb.as_ref().map_or((0, 0), |c| (c.rebate_owed_credited, c.rebate_deferred));
         let Settlement { kind, owed, split, carry_paid, carry_delta, rebate_credited, rebate_delta } =
             settle(&v.coinbase_kind, cb, v.coinbase_value, |script| v.coinbase.paid_to(script));
         let _ = fee;
-        if rebate_credited > 0 || rebate_delta != 0 {
-            let owed_now = self.shared.ledger.lock().unwrap().settle_rebate(rebate_delta);
-            log::info!(
-                "[{}] block {hash_hex} DATUM rebate: {rebate_credited} sats credited to DATUM miners' carry, owed balance {rebate_delta:+} -> {owed_now} sats",
-                self.id
-            );
-        }
-        if !carry_delta.is_empty() {
+        // Booked in two steps (`tides::Books`). Now: what this coinbase took off the books, so
+        // that the coinbaser computed a few seconds from now cannot hand the same carry out
+        // again. When the node has the block in its main chain (`node::confirm_blocks`): what
+        // it put on them. Until then this is a share that met its job's target, and balances
+        // are not granted on that.
+        let settles = !carry_delta.is_empty() || rebate_credited > 0 || rebate_delta != 0;
+        let mut books = tides::Books::new(
+            if settles { rebate_owed_credited } else { 0 },
+            if settles { rebate_deferred } else { 0 },
+        );
+        if settles {
             let (total, holders) = {
                 let mut ledger = self.shared.ledger.lock().unwrap();
-                ledger.settle_carry(&carry_delta);
+                ledger.book_debits(&carry_delta, &mut books);
                 (ledger.window.total_carry(), ledger.window.carries().len())
             };
-            // positive entries are under-floor earnings plus the DATUM rebate credits
-            let added: i64 = carry_delta.iter().map(|d| d.1.max(0)).sum();
-            let deferred = added.saturating_sub(rebate_credited.min(i64::MAX as u64) as i64);
+            let waiting: i64 = carry_delta.iter().map(|d| d.1.max(0)).sum();
             log::info!(
-                "[{}] block {hash_hex} carry: paid {carry_paid} sats of carry in {} outputs, deferred {deferred} sats, credited {rebate_credited} sats of DATUM rebate ({} entries); pool now holds {total} sats of carry for {holders} miners",
+                "[{}] block {hash_hex} carry: {carry_paid} sats of carry paid in {} outputs and {} sats of owed DATUM rebate drawn, off the books now; {waiting} sats of deferred earnings and rebate credits ({} entries) and {rebate_deferred} sats of undistributed rebate go on when the node confirms it; pool now holds {total} sats of carry for {holders} miners",
                 self.id,
-                carry_delta.iter().filter(|d| d.1 < 0).count(),
+                books.debited.len(),
+                books.rebate_debited,
                 carry_delta.iter().filter(|d| d.1 > 0).count(),
             );
         }
@@ -1455,6 +1459,7 @@ impl Session {
             settled: false,
             submit: "pending".into(),
             gateway: self.gateway_hex.clone(),
+            books: Some(books),
         };
         self.shared.record_block(record);
 
@@ -1530,7 +1535,13 @@ impl Session {
             };
             log::info!("[{id}] submitblock {hash_hex} ({} bytes): {outcome}", block.len());
             shared.totals.add(&shared.totals.blocks_submitted, 1);
-            shared.update_block(&hash_hex, |r| r.submit = outcome);
+            let invalid = node::says_invalid(&outcome);
+            let height = shared.update_block(&hash_hex, |r| r.submit = outcome).map(|r| r.height);
+            if let (true, Some(height)) = (invalid, height) {
+                // The node has looked at the block and said no. There is nothing to wait for:
+                // what it took off the books goes back now, not six blocks from now.
+                node::mark_orphan(&shared, &hash_hex, height, "was refused by the node as invalid");
+            }
         });
     }
 }
@@ -1613,14 +1624,7 @@ mod tests {
     }
 
     fn coinbaser<'a>(value: u64, payees: &'a [Payee]) -> Coinbaser<'a> {
-        Coinbaser {
-            value,
-            payees,
-            unpaid: &[],
-            rebate_credits: &[],
-            rebate_owed_credited: 0,
-            rebate_deferred: 0,
-        }
+        Coinbaser { value, payees, unpaid: &[], rebate_credits: &[], rebate_owed_credited: 0, rebate_deferred: 0 }
     }
 
     fn cleared(s: &Settlement) -> std::collections::HashMap<&str, i64> {
@@ -1633,9 +1637,14 @@ mod tests {
     /// hands out the same balance again and the pool pays twice.
     #[test]
     fn a_partial_discharges_the_carry_of_the_payees_it_dropped() {
-        let payees = vec![payee("A", 1_000_000, 400_000, 1), payee("B", 800_000, 300_000, 2), payee("C", 600_000, 0, 3)];
+        let payees =
+            vec![payee("A", 1_000_000, 400_000, 1), payee("B", 800_000, 300_000, 2), payee("C", 600_000, 0, 3)];
         let s = settle(&CoinbaseKind::Partial(1), Some(coinbaser(312_500_000, &payees)), 312_500_000, |script| {
-            if script == [0x00, 0x14, 1] { 1_000_000 } else { 0 }
+            if script == [0x00, 0x14, 1] {
+                1_000_000
+            } else {
+                0
+            }
         });
         assert_eq!(s.kind, "partial");
         assert_eq!(s.owed, 1_400_000, "B and C are owed their whole outputs");
@@ -1669,11 +1678,9 @@ mod tests {
     /// Work credited to a solo or foreign coinbase is not the window's, so nothing settles.
     #[test]
     fn solo_and_foreign_coinbases_settle_nothing() {
-        for (kind, name) in [
-            (CoinbaseKind::EmptySolo, "solo"),
-            (CoinbaseKind::GatewaySolo, "solo"),
-            (CoinbaseKind::Foreign, "unknown"),
-        ] {
+        for (kind, name) in
+            [(CoinbaseKind::EmptySolo, "solo"), (CoinbaseKind::GatewaySolo, "solo"), (CoinbaseKind::Foreign, "unknown")]
+        {
             let payees = vec![payee("A", 1_000_000, 400_000, 1)];
             let s = settle(&kind, Some(coinbaser(312_500_000, &payees)), 312_500_000, |_| 0);
             assert_eq!((s.kind, s.owed, s.carry_paid), (name, 0, 0));

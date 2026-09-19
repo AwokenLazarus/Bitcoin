@@ -44,8 +44,14 @@ pub fn free_port() -> u16 {
 
 /// Start a Prime. `node` is the `rpc`/`poll` part of its config, and anything else a test sets.
 pub fn start_primed(pool: &Identity, node: &str) -> (Primed, u16) {
+    start_primed_seeded(pool, node, |_| {})
+}
+
+/// [`start_primed`], with a chance to put files in the data directory before the Prime opens it.
+pub fn start_primed_seeded(pool: &Identity, node: &str, seed: impl FnOnce(&std::path::Path)) -> (Primed, u16) {
     let dir = std::env::temp_dir().join(format!("primed-replay-{}-{}", std::process::id(), free_port()));
     std::fs::create_dir_all(&dir).unwrap();
+    seed(&dir);
     std::fs::write(dir.join("prime.key"), format!("{}\n", hex::encode(pool.secret_bytes()))).unwrap();
     let listen = free_port();
     let stats = free_port();
@@ -344,6 +350,9 @@ pub struct MockNode {
     pub port: u16,
     pub chain: Arc<std::sync::Mutex<Chain>>,
     pub calls: Arc<AtomicU64>,
+    /// What `getblockheader` says of a block that is not the tip: its `confirmations`
+    /// (negative: not in the main chain). A hash not listed is one the node has never seen.
+    pub confirmations: Arc<std::sync::Mutex<std::collections::HashMap<String, i64>>>,
 }
 
 impl MockNode {
@@ -352,11 +361,12 @@ impl MockNode {
         let port = listener.local_addr().unwrap().port();
         let chain = Arc::new(std::sync::Mutex::new(chain));
         let calls = Arc::new(AtomicU64::new(0));
-        let (c, n) = (chain.clone(), calls.clone());
+        let confirmations: Arc<std::sync::Mutex<std::collections::HashMap<String, i64>>> = Default::default();
+        let (c, n, confs) = (chain.clone(), calls.clone(), confirmations.clone());
         std::thread::spawn(move || {
             for conn in listener.incoming() {
                 let Ok(mut conn) = conn else { continue };
-                let (c, n) = (c.clone(), n.clone());
+                let (c, n, confs) = (c.clone(), n.clone(), confs.clone());
                 std::thread::spawn(move || {
                     let _ = conn.set_read_timeout(Some(Duration::from_secs(5)));
                     let mut buf = Vec::new();
@@ -389,7 +399,15 @@ impl MockNode {
                             serde_json::json!({"chain": "main", "blocks": ch.height, "bestblockhash": ch.tip, "difficulty": 1.0})
                         }
                         "getblockheader" => {
-                            serde_json::json!({"previousblockhash": ch.parent, "bits": format!("{:08x}", ch.bits), "height": ch.height})
+                            let asked = req["params"][0].as_str().unwrap_or("").to_string();
+                            if asked == ch.tip {
+                                serde_json::json!({"previousblockhash": ch.parent, "bits": format!("{:08x}", ch.bits), "height": ch.height, "confirmations": 1})
+                            } else {
+                                match confs.lock().unwrap().get(&asked) {
+                                    Some(n) => serde_json::json!({"confirmations": n}),
+                                    None => serde_json::json!({"__error": -5}),
+                                }
+                            }
                         }
                         "getmininginfo" => match ch.next_bits {
                             Some(b) => serde_json::json!({"blocks": ch.height, "next": {"bits": format!("{b:08x}")}}),
@@ -397,7 +415,9 @@ impl MockNode {
                         },
                         _ => serde_json::Value::Null,
                     };
-                    let out = if result.is_null() {
+                    let out = if let Some(code) = result.get("__error") {
+                        serde_json::json!({"result": null, "error": {"code": code, "message": "Block not found"}, "id": req["id"]})
+                    } else if result.is_null() {
                         serde_json::json!({"result": null, "error": {"code": -32601, "message": "Method not found"}, "id": req["id"]})
                     } else {
                         serde_json::json!({"result": result, "error": null, "id": req["id"]})
@@ -407,7 +427,7 @@ impl MockNode {
                 });
             }
         });
-        MockNode { port, chain, calls }
+        MockNode { port, chain, calls, confirmations }
     }
 
     /// The `rpc` part of a Prime config pointing at this node.

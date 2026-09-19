@@ -504,6 +504,79 @@ impl Ledger {
         self.window.adjust_rebate_owed(delta)
     }
 
+    /// First step of booking a found block, when the candidate is seen: take off what its
+    /// coinbase paid out. Does nothing if that is already on the ledger. See [`Books`].
+    pub fn book_debits(&mut self, carry_delta: &[(String, i64)], books: &mut Books) {
+        if books.debits_live {
+            return;
+        }
+        books.debited.clear();
+        for (identity, d) in carry_delta.iter().filter(|d| d.1 < 0) {
+            let before = self.window.carry_of(identity);
+            let after = self.window.adjust_carry(identity, *d);
+            if before > after {
+                books.debited.push((identity.clone(), before - after));
+            }
+        }
+        let before = self.window.rebate_owed();
+        let after = self.window.adjust_rebate_owed(-(books.rebate_owed_credited.min(i64::MAX as u64) as i64));
+        books.rebate_debited = before - after;
+        books.debits_live = true;
+        self.dirty = true;
+    }
+
+    /// Second step, once the node has the block in its main chain: put on what the block
+    /// earned people. Does nothing if that is already on the ledger.
+    pub fn book_credits(&mut self, carry_delta: &[(String, i64)], books: &mut Books) {
+        if books.credits_live {
+            return;
+        }
+        books.credited.clear();
+        for (identity, d) in carry_delta.iter().filter(|d| d.1 > 0) {
+            let known = self.window.ident_index.contains_key(identity);
+            let before = self.window.carry_of(identity);
+            let after = self.window.adjust_carry(identity, *d);
+            if !known {
+                let _ = self.idents_out.write_all(format!("{identity}\n").as_bytes());
+            }
+            if after > before {
+                books.credited.push((identity.clone(), after - before));
+            }
+        }
+        let before = self.window.rebate_owed();
+        let after = self.window.adjust_rebate_owed(books.rebate_deferred.min(i64::MAX as u64) as i64);
+        books.rebate_added = after - before;
+        books.credits_live = true;
+        self.dirty = true;
+    }
+
+    /// The block is not in the chain: undo exactly what it has on the ledger. Returns what a
+    /// credit could not take back because it had already been paid out (only possible for a
+    /// block the node confirmed and then reorganised away).
+    pub fn unbook(&mut self, books: &mut Books) -> u64 {
+        let mut short = 0u64;
+        if books.credits_live {
+            for (identity, sats) in std::mem::take(&mut books.credited) {
+                let before = self.window.carry_of(&identity);
+                let after = self.window.adjust_carry(&identity, -(sats.min(i64::MAX as u64) as i64));
+                short = short.saturating_add(sats - (before - after));
+            }
+            self.window.adjust_rebate_owed(-(books.rebate_added.min(i64::MAX as u64) as i64));
+            books.rebate_added = 0;
+            books.credits_live = false;
+        }
+        if books.debits_live {
+            for (identity, sats) in std::mem::take(&mut books.debited) {
+                self.window.adjust_carry(&identity, sats.min(i64::MAX as u64) as i64);
+            }
+            self.window.adjust_rebate_owed(books.rebate_debited.min(i64::MAX as u64) as i64);
+            books.rebate_debited = 0;
+            books.debits_live = false;
+        }
+        self.dirty = true;
+        short
+    }
+
     /// Set the owed DATUM rebate outright and schedule a flush.
     pub fn set_rebate_owed(&mut self, sats: u64) {
         self.window.set_rebate_owed(sats);
@@ -746,6 +819,53 @@ pub struct BlockRecord {
     /// Which gateway (identity key, hex prefix) sent the winning share.
     #[serde(default)]
     pub gateway: String,
+    /// What this block has on the ledger right now, for blocks booked in two steps (see
+    /// [`Books`]). `None` on records written before that: their whole `carry_delta` and
+    /// `rebate_delta` went on when the candidate was seen and come off as one on an orphan.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub books: Option<Books>,
+}
+
+/// A found block's effect on the ledger, booked in two steps and undone exactly.
+///
+/// What a block takes *off* the books goes at once, when the candidate is seen: the carry its
+/// coinbase paid out and the owed DATUM rebate it credited out. The next coinbaser is computed
+/// seconds later and must not hand the same carry out again, and nobody gains from a balance
+/// going down, so there is nothing to wait for.
+///
+/// What it puts *on* the books waits until the node has the block in its main chain: earnings
+/// it could not place, DATUM rebate credits, rebate with nobody to credit. A candidate is a
+/// gateway's share that met its job's target; balances granted on that alone are paid out by
+/// the very next block, and if the candidate then turns out to be no block at all (refused by
+/// the node, or orphaned) the money has been paid for a block that never was, and taking it
+/// back stops at zero.
+///
+/// Every amount here is what actually moved, not what was asked for (a balance can be short of
+/// a debit), so [`Ledger::unbook`] puts back precisely that and no more.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Books {
+    /// The two halves of `rebate_delta`: owed rebate this block credits out, and stratum
+    /// rebate it had no DATUM miner to credit.
+    pub rebate_owed_credited: u64,
+    pub rebate_deferred: u64,
+    #[serde(default)]
+    pub debits_live: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub debited: Vec<(String, u64)>,
+    #[serde(default)]
+    pub rebate_debited: u64,
+    #[serde(default)]
+    pub credits_live: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub credited: Vec<(String, u64)>,
+    #[serde(default)]
+    pub rebate_added: u64,
+}
+
+impl Books {
+    pub fn new(rebate_owed_credited: u64, rebate_deferred: u64) -> Books {
+        Books { rebate_owed_credited, rebate_deferred, ..Books::default() }
+    }
 }
 
 /// Append-only JSON-lines block log.
@@ -1153,6 +1273,7 @@ mod tests {
             settled: true,
             submit: "accepted".into(),
             gateway: "ab".into(),
+            books: None,
         };
         log.append(&r).unwrap();
         assert_eq!(log.read_all().unwrap(), vec![r.clone()]);
@@ -1181,6 +1302,7 @@ mod tests {
             settled: kind == "split",
             submit: "accepted".into(),
             gateway: gw.into(),
+            books: None,
         }
     }
 
@@ -1267,6 +1389,75 @@ mod tests {
         }
         assert_eq!(work.len(), 3, "{work:?}");
         assert_eq!(fs::metadata(dir.join("credits.bin")).unwrap().len() as usize % Credit::SIZE, 0);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A found block is booked in two steps: what it takes off the books at once, what it puts
+    /// on them only when the node has it. A candidate that never becomes a block must leave the
+    /// ledger exactly as it found it, whatever happened in between.
+    #[test]
+    fn a_block_that_never_was_costs_the_ledger_nothing() {
+        let dir = std::env::temp_dir().join(format!("tides-test-{}-{}", std::process::id(), line!()));
+        let _ = fs::remove_dir_all(&dir);
+        let mut l = Ledger::open(&dir).unwrap();
+        let carry = |l: &Ledger, who: &str| l.window.carry_of(who);
+        l.settle_carry(&[("alice".into(), 5_000), ("bob".into(), 300)]);
+        l.set_rebate_owed(1_000);
+        // the block's coinbase paid alice her 5 000 of carry, could not place carol's 700 of
+        // earnings, credits dave 400 of DATUM rebate, draws 250 from the owed rebate and defers 90
+        let delta: Vec<(String, i64)> = vec![("alice".into(), -5_000), ("carol".into(), 700), ("dave".into(), 400)];
+        let mut books = Books::new(250, 90);
+
+        l.book_debits(&delta, &mut books);
+        assert_eq!(
+            (carry(&l, "alice"), carry(&l, "carol"), carry(&l, "dave")),
+            (0, 0, 0),
+            "paid carry is gone at once"
+        );
+        assert_eq!(l.window.rebate_owed(), 750);
+        l.book_debits(&delta, &mut books);
+        assert_eq!(l.window.rebate_owed(), 750, "booking twice is booking once");
+
+        // The next block is found before the node has said anything about this one, and pays
+        // out every balance there is. Today carol and dave would be among them.
+        assert_eq!(carry(&l, "carol") + carry(&l, "dave"), 0, "nothing to pay out for a block not yet confirmed");
+        l.settle_carry(&[("bob".into(), -300)]);
+
+        // the node refuses it: everything goes back, and only that
+        assert_eq!(l.unbook(&mut books), 0);
+        assert_eq!((carry(&l, "alice"), carry(&l, "bob"), carry(&l, "carol"), carry(&l, "dave")), (5_000, 0, 0, 0));
+        assert_eq!(l.window.rebate_owed(), 1_000);
+        assert_eq!(books, Books::new(250, 90), "nothing of it left on the ledger");
+        assert_eq!(l.unbook(&mut books), 0, "undoing twice is undoing once");
+        assert_eq!(carry(&l, "alice"), 5_000);
+
+        // and if the node takes it after all (it was on a competing tip that won)
+        l.book_debits(&delta, &mut books);
+        l.book_credits(&delta, &mut books);
+        l.book_credits(&delta, &mut books);
+        assert_eq!((carry(&l, "alice"), carry(&l, "carol"), carry(&l, "dave")), (0, 700, 400));
+        assert_eq!(l.window.rebate_owed(), 1_000 - 250 + 90);
+
+        // a confirmed block reorganised away after carol was paid: what cannot come back is said
+        l.settle_carry(&[("carol".into(), -700)]);
+        assert_eq!(l.unbook(&mut books), 700);
+        assert_eq!((carry(&l, "alice"), carry(&l, "carol"), carry(&l, "dave")), (5_000, 0, 0));
+        assert_eq!(l.window.rebate_owed(), 1_000);
+
+        // a debit larger than the balance takes what is there, and gives back what it took
+        let mut short = Books::new(5_000, 0);
+        l.book_debits(&[("alice".into(), -9_000)], &mut short);
+        assert_eq!((carry(&l, "alice"), l.window.rebate_owed()), (0, 0));
+        l.unbook(&mut short);
+        assert_eq!((carry(&l, "alice"), l.window.rebate_owed()), (5_000, 1_000));
+
+        // old records carry no books and read back as they were written
+        let old: BlockRecord = serde_json::from_str(
+            r#"{"ts":1,"height":2,"hash":"ab","finder":null,"coinbase_value":3,"kind":"split","owed_sats":0,"split":[],"pool_sats":0,"settled":true}"#,
+        )
+        .unwrap();
+        assert_eq!(old.books, None);
+        assert!(!serde_json::to_string(&old).unwrap().contains("books"));
         let _ = fs::remove_dir_all(&dir);
     }
 }
