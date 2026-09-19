@@ -1,0 +1,24 @@
+# No Content-Security-Policy on purpose: the Angular app, Google Fonts and the cross-origin pool
+# API calls would all break. _worker.js sets the same three headers on what it serves.
+/*
+  Strict-Transport-Security: max-age=15552000
+  X-Frame-Options: SAMEORIGIN
+  Permissions-Policy: geolocation=(), microphone=(), camera=(), payment=()
+/resources/*
+  Cache-Control: public, max-age=3600
+/resources/config.*
+  ! Cache-Control
+  Cache-Control: public, max-age=300
+/resources/customize.*
+  ! Cache-Control
+  Cache-Control: public, max-age=300
+/lazarus/*
+  Cache-Control: public, max-age=300
+# The licence files have no extension, so Pages would not call them text.
+/lazarus/NOTICE
+  Content-Type: text/plain; charset=utf-8
+/lazarus/LICENSE
+  Content-Type: text/plain; charset=utf-8
+/resources/mining-pools/lazarus.svg
+  ! Cache-Control
+  Cache-Control: public, max-age=300

@@ -1,0 +1,17 @@
+/*
+  X-Content-Type-Options: nosniff
+  Cache-Control: public, max-age=0, s-maxage=300
+/static/*
+  ! Cache-Control
+  Cache-Control: public, max-age=600
+/robots.txt
+  ! Cache-Control
+  Cache-Control: public, max-age=0, s-maxage=3600
+/sitemap.xml
+  ! Cache-Control
+  Cache-Control: public, max-age=0, s-maxage=3600
+/llms.txt
+  ! Cache-Control
+  Cache-Control: public, max-age=0, s-maxage=3600
+/stratum-protocol.md
+  Content-Type: text/markdown; charset=utf-8

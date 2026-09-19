@@ -1,29 +1,51 @@
 /* Lazarus theme for the mempool frontend (v3.x).
- * Injected after styles.css by nginx sub_filter, so equal-specificity rules here win.
+ * Injected after styles.css by nginx sub_filter, so equal-specificity rules here win; the
+ * app's component styles are injected later still and carry an attribute, so anything that
+ * has to beat one of those is written with one more class rather than !important.
  * Palette and type mirror pool/static/pool.css: warm near-black, brass accent,
  * IBM Plex Sans / Newsreader / IBM Plex Mono. Chart colours live in JS and are left alone.
+ * Fonts: theme.js adds the preconnects and the Google Fonts <link> from <head>; there is
+ * deliberately no @import here (it was a serial, render-blocking chain).
+ * Shape: pills for buttons and chips, 12px for cards and boxes, 2-4px for badges, inputs
+ * and tables. Space: 8 / 12 / 16 / 24.
  */
-@import url("https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;1,400&family=Newsreader:ital,opsz,wght@0,6..72,500;1,6..72,400;1,6..72,500&display=swap");
 
 :root {
-  /* Lazarus tokens (hex fallbacks of the oklch values in pool.css) */
-  --lz-bg: #100d08;
-  --lz-bg-raised: #17130d;
-  --lz-bg-inset: #0b0906;
-  --lz-ink: #eee9de;
-  --lz-muted: #a69d8f;
-  --lz-faint: #6e685e;
-  --lz-line: #332d24;
-  --lz-line-strong: #534c41;
-  --lz-brass: #dbb565;
-  --lz-brass-dim: #9d824c;
+  /* Lazarus tokens: the same values as pool/static/pool.css (hex fallbacks first, oklch
+     below). One deliberate difference: --lz-faint is lighter than the pool's --faint so
+     that small text in it reaches 4.5:1 on both the page and a raised panel. */
+  --lz-bg: #0b0804;
+  --lz-bg-raised: #130f09;
+  --lz-bg-inset: #070502;
+  --lz-bg-card: #100d07;
+  --lz-ink: #efebe1;
+  --lz-muted: #a8a094;
+  --lz-faint: #867f74;
+  --lz-line: #28231c;
+  --lz-line-strong: #484137;
+  --lz-brass: #dfb866;
+  --lz-brass-hi: #ecc97b;          /* hover brass */
+  --lz-brass-dim: #a0854e;
   --lz-brass-ink: #201301;
   --lz-brass-wash: #3b3020;
+  --lz-track: #2a251d;             /* meters, secondary fills, skeleton base */
+  --lz-track-hi: #3d362b;          /* skeleton sweep */
+  --lz-select: #6d5a2e;            /* ::selection */
+  --lz-steel: #7aa3c8;             /* the one cool accent (series palette in theme.js) */
   --lz-good: #65c98c;
   --lz-bad: #e47164;
   --lz-warn: #e1b75c;
-  --lz-sans: "IBM Plex Sans", "Helvetica Neue", Helvetica, Arial, sans-serif;
-  --lz-serif: "Newsreader", "Iowan Old Style", Palatino, "Times New Roman", serif;
+  /* Fee faces that CSS controls (mined blocks): dark copper -> copper-brass, both dark
+     enough for the white block text (9.4:1 and 5.6:1). */
+  --lz-face-lo: #613f1a;
+  --lz-face-hi: #866125;
+  --lz-radius-pill: 999px;
+  --lz-radius-card: 12px;
+  --lz-radius-tight: 4px;
+  /* The explorer ships zh / ja / ko: same CJK fallbacks as the pool site. */
+  --lz-cjk: "PingFang SC", "Hiragino Sans GB", "Noto Sans SC", "Source Han Sans SC", "Microsoft YaHei", "WenQuanYi Micro Hei", sans-serif;
+  --lz-sans: "IBM Plex Sans", var(--lz-cjk), "Helvetica Neue", Helvetica, Arial, sans-serif;
+  --lz-serif: "Newsreader", "Songti SC", "Noto Serif SC", "Source Han Serif SC", "STSong", "SimSun", "Iowan Old Style", Palatino, "Times New Roman", serif;
   --lz-mono: "IBM Plex Mono", ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
   /* Chi Rho (labarum): the Lazarus mark, geometry identical to chi-rho.svg next door and to
      --chi-rho in pool/static/pool.css. Masked so it takes --lz-brass where it is used; the .svg
@@ -40,24 +62,24 @@
   --navbar-bg: var(--lz-bg);
   --title-fg: var(--lz-brass);
   --primary: var(--lz-brass);
-  --secondary: #2a251d;
+  --secondary: var(--lz-track);
   --tertiary: var(--lz-brass-wash);
   --success: var(--lz-good);
   --info: var(--lz-brass);
   --link-color: var(--lz-brass);
-  --link-hover-color: #f0d08a;
+  --link-hover-color: var(--lz-brass-hi);
   --icon: var(--lz-ink);
-  --skeleton-bg: #2a251d;
-  --skeleton-bg-light: #3d362b;
+  --skeleton-bg: var(--lz-track);
+  --skeleton-bg-light: var(--lz-track-hi);
   --box-bg: var(--lz-bg-raised);
   --stat-box-bg: var(--lz-bg-inset);
-  --alert-bg: #2a251d;
-  --transparent-fg: #eee9debb;
-  --fade-out-box-bg-start: rgba(23, 19, 13, 0);
-  --fade-out-box-bg-end: rgba(23, 19, 13, 1);
+  --alert-bg: var(--lz-track);
+  --transparent-fg: #efebe1bb;
+  --fade-out-box-bg-start: rgba(19, 15, 9, 0);
+  --fade-out-box-bg-end: rgba(19, 15, 9, 1);
   --mainnet-alt: var(--lz-brass-dim);
   --taproot: var(--lz-brass);
-  --taproot-light: #e1b75c;
+  --taproot-light: var(--lz-warn);
   --taproot-dark: var(--lz-brass-dim);
   --green: var(--lz-good);
   --red: var(--lz-bad);
@@ -68,21 +90,24 @@
   --search-button: var(--lz-brass-wash);
   --search-button-border: var(--lz-line-strong);
   --search-button-focus: #4a3c21;
-  --search-button-shadow: #dbb56540;
+  --search-button-shadow: #dfb86640;
   color-scheme: dark;
 }
 @supports (color: oklch(50% 0.1 80)) {
   :root {
-    --lz-bg: oklch(14% 0.012 78);
-    --lz-bg-raised: oklch(17.5% 0.014 78);
-    --lz-bg-inset: oklch(12% 0.012 78);
-    --lz-ink: oklch(93.5% 0.016 86);
-    --lz-muted: oklch(70% 0.022 80);
-    --lz-faint: oklch(52% 0.018 80);
-    --lz-line: oklch(30% 0.016 78);
-    --lz-line-strong: oklch(42% 0.02 78);
-    --lz-brass: oklch(79% 0.108 84);
-    --lz-brass-dim: oklch(62% 0.08 84);
+    --lz-bg: oklch(13.5% 0.011 78);
+    --lz-bg-raised: oklch(17% 0.013 78);
+    --lz-bg-inset: oklch(11.5% 0.011 78);
+    --lz-bg-card: oklch(16% 0.013 78);
+    --lz-ink: oklch(94% 0.014 86);
+    --lz-muted: oklch(71% 0.02 80);
+    --lz-faint: oklch(60% 0.018 80);      /* pool.css has 54%; 60% is what clears 4.5:1 */
+    --lz-line: oklch(26% 0.015 78);
+    --lz-line-strong: oklch(38% 0.02 78);
+    --lz-brass: oklch(80% 0.11 84);
+    --lz-brass-hi: oklch(85% 0.105 86);
+    --lz-brass-dim: oklch(63% 0.08 84);
+    --lz-brass-ink: oklch(20% 0.04 75);
     --lz-good: oklch(76% 0.13 155);
     --lz-bad: oklch(68% 0.145 28);
     --lz-warn: oklch(80% 0.12 85);
@@ -99,21 +124,50 @@ body {
     var(--lz-bg) !important;
   text-rendering: optimizeLegibility;
 }
-::selection { background: #6d5a2e; color: var(--lz-ink); }
-:focus-visible { outline: 2px solid var(--lz-brass); outline-offset: 2px; }
+::selection { background: var(--lz-select); color: var(--lz-ink); }
+/* Focus: one visible ring everywhere, for keyboard users only. Bootstrap zeroes the outline
+   on .btn / .form-control and substitutes a glow; the explicit list puts the ring back. */
+:focus-visible,
+a:focus-visible,
+button:focus-visible,
+.btn:focus-visible,
+.nav-link:focus-visible,
+.page-link:focus-visible,
+.dropdown-item:focus-visible,
+.form-control:focus-visible,
+.custom-select:focus-visible,
+[tabindex]:focus-visible { outline: 2px solid var(--lz-brass); outline-offset: 2px; }
 a { color: var(--lz-brass); }
-a:hover { color: #f0d08a; }
+a:hover { color: var(--lz-brass-hi); }
 .text-monospace, code, .txid, .hash, .address-text {
   font-family: var(--lz-mono) !important;
   font-feature-settings: "tnum" 1;
 }
+/* Data is mono and tabular, so live updates do not make columns jitter: hashes, txids and
+   addresses (app-truncate), amounts, fee rates, block heights and the figures on a block
+   face. Everything else numeric keeps the sans but gets tabular figures. */
+app-truncate .truncate-link,
+app-truncate .first,
+app-truncate .last-four,
+app-amount,
+app-fee-rate,
+.fee-text,
+.block-height,
+.bitcoin-block .fee-span,
+.bitcoin-block .transaction-count {
+  font-family: var(--lz-mono);
+  font-variant-numeric: tabular-nums;
+}
+/* 700 is not among the loaded mono weights; 600 is. Three classes to outrank the component. */
+.bitcoin-block .block-body .block-size { font-family: var(--lz-mono); font-variant-numeric: tabular-nums; font-weight: 600; }
+.table td, .table th, app-fiat, app-time, app-timestamp, .card-text, .progress-bar { font-variant-numeric: tabular-nums; }
 h1, h2, h3, h4, .h1, .h2, .h3 { text-wrap: balance; }
 .text-white, .text-white a { color: var(--lz-ink) !important; }
 .text-muted { color: var(--lz-muted) !important; }
 
 /* --- header ---------------------------------------------------------------- */
 .sticky-header {
-  background: rgba(16, 13, 8, 0.82) !important;
+  background: rgba(11, 8, 4, 0.82) !important;
   border-bottom: 1px solid var(--lz-line);
 }
 /* Blur behind the header via a pseudo-element: backdrop-filter on the header itself would
@@ -185,7 +239,8 @@ h1, h2, h3, h4, .h1, .h2, .h3 { text-wrap: balance; }
   border-top: 2px solid transparent;
 }
 .lz-btc-price-item .lz-btc-price {
-  display: flex !important;
+  display: flex;
+  min-width: 4.5ch;               /* "…" -> "$0.12" must not shove the nav along */
   align-items: center;
   justify-content: center;
   height: 100%;
@@ -217,16 +272,18 @@ h1, h2, h3, h4, .h1, .h2, .h3 { text-wrap: balance; }
   align-self: stretch;
   border-top: 2px solid transparent;
 }
-.lz-pool-item .nav-link,
-.lz-discord-item .nav-link,
-.lz-neoxa-item .nav-link {
-  display: flex !important;
+/* .navbar-nav in front: Bootstrap's .navbar-expand-lg .navbar-nav .nav-link sets the inline
+   padding with three classes, and matching that beats it without !important. */
+.navbar-nav .lz-pool-item .nav-link,
+.navbar-nav .lz-discord-item .nav-link,
+.navbar-nav .lz-neoxa-item .nav-link {
+  display: flex;
   align-items: center;
   justify-content: center;
   gap: 0.45rem;
   height: 100%;
   line-height: 1;
-  padding-inline: 0.7rem !important;
+  padding-inline: 0.7rem;
 }
 .lz-pool-item .lz-mark {
   display: block;
@@ -254,45 +311,76 @@ h1, h2, h3, h4, .h1, .h2, .h3 { text-wrap: balance; }
 @media (max-width: 991.98px) {
   /* Bottom tab bar on small screens: icon only, like the stock items. */
   .lz-pool-item .lz-label { display: none; }
-  .lz-pool-item .nav-link { padding: 12px 0 !important; }
+  .lz-pool-item { min-width: 44px; }            /* icon only: keep a full tap target */
+  .navbar-nav .lz-pool-item .nav-link { padding: 12px 0; min-height: 44px; }
   .lz-discord-item,
   .lz-neoxa-item { display: none; }
 }
 
-/* Search */
+/* Inputs: tight corners, inset ground */
 .form-control, .custom-select {
   background-color: var(--lz-bg-inset) !important;
-  border: 1px solid var(--lz-line) !important;
-  border-radius: 2px !important;
+  border: 1px solid var(--lz-line-strong) !important;
+  border-radius: var(--lz-radius-tight) !important;
   color: var(--lz-ink) !important;
 }
-.form-control::placeholder { color: var(--lz-faint); }
-.form-control:focus { border-color: var(--lz-brass-dim) !important; box-shadow: 0 0 0 0.15rem #dbb56533 !important; }
+.form-control::placeholder { color: var(--lz-faint); opacity: 1; }
+.form-control:focus { border-color: var(--lz-brass) !important; box-shadow: 0 0 0 0.15rem #dfb86633 !important; }
+/* Header search: the one input that is a pill, like the pool site's address field, because
+   it sits against a pill button. Taller and roomier than the stock 38px box. */
+app-search-form .search-box-container .form-control {
+  height: 2.6rem;
+  padding: 0 1.1rem;
+  border-radius: var(--lz-radius-pill) !important;
+  font-size: 0.94rem;
+  text-overflow: ellipsis;
+}
+app-search-form .btn { height: 2.6rem; }
+
+/* Buttons: the pool site's treatment. Pill, 600, brightness on hover; .btn-secondary and
+   the outline buttons are its ghost variant. Inside a .btn-group Bootstrap's own, more
+   specific rules square the inner corners, so a segmented control keeps pill ends only. */
+.btn { border-radius: var(--lz-radius-pill); font-weight: 600; letter-spacing: 0.01em; }
 .btn-purple, .btn-primary {
   background-color: var(--lz-brass) !important;
   border-color: var(--lz-brass) !important;
   color: var(--lz-brass-ink) !important;
-  border-radius: 2px;
 }
 .btn-purple:hover, .btn-primary:hover, .btn-purple:focus, .btn-primary:focus {
-  background-color: #e6c579 !important;
-  border-color: #e6c579 !important;
+  filter: brightness(1.07);
   box-shadow: none !important;
 }
 .btn-purple svg, .btn-primary svg { fill: var(--lz-brass-ink); }
-.btn-secondary { background-color: var(--lz-bg-raised) !important; border-color: var(--lz-line-strong) !important; color: var(--lz-ink) !important; }
+.btn-secondary { background-color: transparent !important; border-color: var(--lz-line-strong) !important; color: var(--lz-ink) !important; }
+.btn-secondary:hover, .btn-secondary:focus { border-color: var(--lz-brass) !important; color: var(--lz-brass) !important; box-shadow: none !important; }
 .btn-outline-info, .btn-outline-primary { color: var(--lz-brass) !important; border-color: var(--lz-brass-dim) !important; }
 .btn-outline-info:hover, .btn-outline-primary:hover { background-color: var(--lz-brass) !important; color: var(--lz-brass-ink) !important; }
-.btn { border-radius: 2px; }
 
 /* --- surfaces ---------------------------------------------------------------- */
+/* Flat, calm panels: one hairline, no shadow, 12px corners, 16px inside (12 on phones). */
 .box, .card {
   background-color: var(--lz-bg-raised) !important;
   border: 1px solid var(--lz-line) !important;
-  border-radius: 2px !important;
+  border-radius: var(--lz-radius-card) !important;
   box-shadow: none !important;
 }
-.card-header { background-color: var(--lz-bg-inset) !important; border-bottom: 1px solid var(--lz-line) !important; }
+.box { padding: 16px; }
+@media (max-width: 575.98px) { .box { padding: 12px; } }
+.card-header {
+  background-color: var(--lz-bg-inset) !important;
+  border-bottom: 1px solid var(--lz-line) !important;
+  border-radius: calc(var(--lz-radius-card) - 1px) calc(var(--lz-radius-card) - 1px) 0 0 !important;
+}
+/* Dashboard card titles as micro-labels (the pool site's kicker). Three classes: the
+   components set .card-title to 1rem with an attribute selector of their own. */
+.dashboard-container .card .card-title,
+.dashboard-container .card-body .card-title {
+  font-family: var(--lz-mono);
+  font-size: 0.69rem;
+  font-weight: 500;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+}
 .title-link, .title-link:hover, .title-link:focus { color: var(--lz-brass) !important; }
 .box h5, .box .title, .card h5 {
   font-family: var(--lz-serif);
@@ -301,33 +389,41 @@ h1, h2, h3, h4, .h1, .h2, .h3 { text-wrap: balance; }
 }
 .table { color: var(--lz-ink); }
 .table td, .table th { border-color: var(--lz-line) !important; }
-.table thead th { border-bottom: 1px solid var(--lz-line-strong) !important; color: var(--lz-muted); font-weight: 500; }
-.table-hover tbody tr:hover, .table tr:hover td { background-color: rgba(219, 181, 101, 0.05); color: inherit; }
+.table thead th {
+  border-bottom: 1px solid var(--lz-line-strong) !important;
+  color: var(--lz-muted);
+  font-size: 0.69rem;
+  font-weight: 500;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+/* Row hover is a wash, never a size change. */
+.table-hover tbody tr:hover, .table tr:hover td { background-color: rgba(223, 184, 102, 0.06); color: inherit; }
 .table-striped tbody tr:nth-of-type(odd) { background-color: rgba(255, 255, 255, 0.015); }
 hr { border-color: var(--lz-line); }
 
 /* Badges / pills: brass = primary, muted greys for secondary */
-.badge { border-radius: 2px; font-weight: 500; }
+.badge { border-radius: 3px; font-weight: 500; }
 .badge-primary, .badge-info { background-color: var(--lz-brass) !important; color: var(--lz-brass-ink) !important; }
-.badge-secondary { background-color: #2a251d !important; color: var(--lz-ink) !important; border: 1px solid var(--lz-line-strong); }
+.badge-secondary { background-color: var(--lz-track) !important; color: var(--lz-ink) !important; border: 1px solid var(--lz-line-strong); }
 .badge-success { background-color: var(--lz-good) !important; color: #0b2214 !important; }
 .badge-danger { background-color: var(--lz-bad) !important; color: #2a0b06 !important; }
 .badge-warning { background-color: var(--lz-warn) !important; color: var(--lz-brass-ink) !important; }
 .badge-dark { background-color: var(--lz-bg-inset) !important; border: 1px solid var(--lz-line); }
 
 /* Progress meters */
-.progress { background-color: #2a251d !important; border-radius: 2px !important; }
+.progress { background-color: var(--lz-track) !important; border-radius: var(--lz-radius-pill) !important; }
 .progress-bar { background-color: var(--lz-brass) !important; color: var(--lz-brass-ink); }
 .progress-bar.bg-success { background-color: var(--lz-good) !important; }
 .progress-bar.bg-warning { background-color: var(--lz-warn) !important; }
 .progress-bar.bg-danger { background-color: var(--lz-bad) !important; }
 
 /* Dropdowns, tooltips, alerts, pagination */
-.dropdown-menu { background-color: var(--lz-bg-raised) !important; border: 1px solid var(--lz-line) !important; border-radius: 2px !important; color: var(--lz-ink); }
+.dropdown-menu { background-color: var(--lz-bg-raised) !important; border: 1px solid var(--lz-line-strong) !important; border-radius: 8px !important; color: var(--lz-ink); }
 .dropdown-item { color: var(--lz-ink) !important; }
 .dropdown-item:hover, .dropdown-item:focus { background-color: var(--lz-brass-wash) !important; }
-.tooltip-inner { background-color: var(--lz-bg-inset) !important; border: 1px solid var(--lz-line-strong); color: var(--lz-ink); border-radius: 2px; font-family: var(--lz-sans); }
-.alert, .alert-mempool { background-color: var(--lz-bg-raised) !important; border: 1px solid var(--lz-line-strong) !important; color: var(--lz-ink) !important; border-radius: 2px; }
+.tooltip-inner { background-color: var(--lz-bg-inset) !important; border: 1px solid var(--lz-line-strong); color: var(--lz-ink); border-radius: var(--lz-radius-tight); font-family: var(--lz-sans); }
+.alert, .alert-mempool { background-color: var(--lz-bg-raised) !important; border: 1px solid var(--lz-line-strong) !important; color: var(--lz-ink) !important; border-radius: 8px; }
 .page-link { background-color: var(--lz-bg-raised) !important; border-color: var(--lz-line) !important; color: var(--lz-brass) !important; }
 .page-item.active .page-link { background-color: var(--lz-brass) !important; border-color: var(--lz-brass) !important; color: var(--lz-brass-ink) !important; }
 .page-item.disabled .page-link { color: var(--lz-faint) !important; }
@@ -345,16 +441,45 @@ hr { border-color: var(--lz-line); }
 .bg-danger { background-color: var(--lz-bad) !important; }
 
 /* Blockchain strip: the 3-D block side faces are hard-coded blue-greys in component CSS.
- * Face gradients and fee colours come from JS (see theme.js). */
+ * Projected (mempool) block faces are inline gradients from the fee ramp in theme.js and
+ * are not reachable from here. Mined block faces are: the app paints them from
+ * var(--mainnet-alt) to var(--primary), which on this theme meant dim brass to full brass
+ * under white text (under 2:1). Scoping the two variables to the block keeps the rest of the
+ * UI brass and gives the face a dark copper -> copper-brass ramp the white text can sit on. */
+.bitcoin-block.mined-block { --mainnet-alt: var(--lz-face-lo); --primary: var(--lz-face-hi); }
+/* --yellow on copper is under 4.5:1; the ink is not. Three classes to outrank the component. */
+.mined-block .block-body .fee-span { color: var(--lz-ink); }
+/* theme.js (faceInk) marks a projected block or the fee-priority bar whose fee colours are
+   bright -- the brass and amber steps of the ramp -- and those take the dark ink instead. */
+.lz-face-bright,
+.lz-face-bright a,
+.lz-face-bright .fee-label,
+.lz-face-bright .block-body .fee-span,
+.bitcoin-block.blink-bg,
+.bitcoin-block.blink-bg a,
+.bitcoin-block.blink-bg .block-body .fee-span { color: var(--lz-brass-ink) !important; }
+/* Block tiles: hover is an inset hairline. No transition of our own (the component animates
+   background / position on these and a second transition list would replace it), no filter
+   (it would re-stack the z-index:-1 side face), no size change. */
+.bitcoin-block.mined-block:hover,
+.mempool-block.bitcoin-block:hover { box-shadow: inset 0 0 0 1px var(--lz-brass); }
 .bitcoin-block::after { background-color: #2b261e !important; }
 .bitcoin-block::before { background-color: #1d1912 !important; }
 .mempool-block.bitcoin-block::after { background-color: #3a3328 !important; }
 .mempool-block.bitcoin-block::before { background-color: #251f17 !important; }
-.band-separator.fill { background: repeating-linear-gradient(90deg, #3a3328, #3a3328 2px, #17130d 2px 4px) !important; }
+.band-separator.fill { background: repeating-linear-gradient(90deg, var(--lz-track-hi), var(--lz-track-hi) 2px, var(--lz-bg-raised) 2px 4px) !important; }
 .badge.badge-accelerated { background-color: var(--lz-brass-dim) !important; box-shadow: none !important; animation: none !important; }
 
-/* Skeleton loaders */
-.skeleton-loader { background: linear-gradient(90deg, #2a251d 25%, #3d362b 37%, #2a251d 63%) !important; }
+/* Skeleton loaders: the stock sweep (keyframes "progress", a 200px band travelling across)
+   on a warm track. Longhands only -- the old `background` shorthand here reset the band's
+   size and position, which is why the shimmer never moved. */
+.skeleton-loader {
+  background-color: var(--lz-track) !important;
+  background-image: linear-gradient(90deg, transparent, var(--lz-track-hi) 45%, rgba(223, 184, 102, 0.16) 50%, var(--lz-track-hi) 55%, transparent) !important;
+  background-repeat: no-repeat !important;
+  background-size: 200px 100% !important;
+  border-radius: 3px;
+}
 
 /* --- footer ---------------------------------------------------------------- */
 footer { border-top: 1px solid var(--lz-line); background-color: var(--lz-bg) !important; }
@@ -371,12 +496,11 @@ footer .lz-footer-endpoint code { font-size: 0.78rem; color: var(--lz-ink); word
 footer .lz-footer-note { font-size: 0.74rem; color: var(--lz-faint) !important; }
 footer .lz-source-note a { color: var(--lz-brass) !important; }
 app-tx-features .lz-replay { margin-left: 0.25rem; font-weight: 500; }
-app-tx-features .lz-replay-none del { text-decoration: line-through; }
 .lz-fork-note, .lz-about-source {
   margin: 0.75rem 0 1rem;
   padding: 0.7rem 0.9rem;
   border: 1px solid var(--lz-line-strong);
-  border-radius: 4px;
+  border-radius: var(--lz-radius-card);
   background: var(--lz-bg-raised);
   color: var(--lz-muted);
   font-size: 0.92rem;
@@ -395,13 +519,14 @@ app-block tr.lz-header-v2 td:first-child { color: var(--lz-muted); }
   vertical-align: middle;
 }
 .sig.sighash-33, .sig.sighash-1 { color: var(--green, #3fb950); }
-.sig.sighash-34, .sig.sighash-2 { color: gold; }
-.sig.sighash-35, .sig.sighash-3 { color: cornflowerblue; }
+.sig.sighash-34, .sig.sighash-2 { color: var(--lz-warn); }
+.sig.sighash-35, .sig.sighash-3 { color: var(--lz-steel); }
 #bitcoin-block-961640.blink-bg { box-shadow: 0 0 0 1px var(--lz-brass); }
 
 /* --- Lazarus dashboard card (theme.js dashboard()) -------------------------------------- */
 /* Full-width row in the dashboard grid (the stock cols are 50% on md+). */
-.lz-col { flex: 0 0 100% !important; max-width: 100% !important; }
+/* Plain .col from Bootstrap is one class too, and this file loads after it. */
+.lz-col { flex: 0 0 100%; max-width: 100%; }
 .lz-card { text-align: left; }
 .lz-card .card-title { color: var(--lz-brass); text-align: center; margin-bottom: 0.9rem; }
 .lz-grid {
@@ -429,6 +554,7 @@ app-block tr.lz-header-v2 td:first-child { color: var(--lz-muted); }
   flex-wrap: wrap;
   padding: 0.45rem 0.6rem;
   border: 1px solid var(--lz-line-strong);
+  border-radius: var(--lz-radius-tight);
   background: var(--lz-bg-inset);
 }
 .lz-endpoint code { color: var(--lz-brass); font-size: 0.86rem; word-break: break-all; }
@@ -438,17 +564,17 @@ app-block tr.lz-header-v2 td:first-child { color: var(--lz-muted); }
 .lz-dot.live { background: var(--lz-good); box-shadow: 0 0 0 3px rgba(101, 201, 140, 0.2); }
 .lz-dot.stale { background: var(--lz-bad); box-shadow: 0 0 0 3px rgba(228, 113, 100, 0.2); }
 .lz-actions { display: flex; flex-wrap: wrap; gap: 0.4rem; margin-top: 0.5rem; }
-.lz-actions .btn-sm { font-size: 0.78rem; font-weight: 600; letter-spacing: 0.02em; }
+.lz-actions .btn-sm { padding: 0.42rem 0.9rem; font-size: 0.78rem; font-weight: 600; letter-spacing: 0.01em; }
 .lz-actions .btn-secondary:hover { border-color: var(--lz-brass) !important; color: var(--lz-brass) !important; }
 
 /* Copy button, same glyph as pool.css */
 .lz-copy-btn {
   flex: 0 0 auto;
-  width: 1.55rem;
-  height: 1.55rem;
+  width: 2rem;                    /* tap target */
+  height: 2rem;
   padding: 0;
-  border: 1px solid var(--lz-line);
-  border-radius: 2px;
+  border: 1px solid var(--lz-line-strong);
+  border-radius: var(--lz-radius-tight);
   background: var(--lz-bg-inset);
   color: var(--lz-muted);
   cursor: pointer;
@@ -465,18 +591,27 @@ app-block tr.lz-header-v2 td:first-child { color: var(--lz-muted); }
   mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect x='5' y='5' width='8' height='9' rx='1' fill='none' stroke='black' stroke-width='1.5'/%3E%3Cpath d='M3 11V3.5A1.5 1.5 0 0 1 4.5 2H11' fill='none' stroke='black' stroke-width='1.5'/%3E%3C/svg%3E") center / contain no-repeat;
 }
 .lz-copy-btn:hover { color: var(--lz-brass); border-color: var(--lz-brass); }
-.lz-copy-btn[data-copied] { color: var(--lz-good); border-color: var(--lz-good); }
+.lz-copy-btn[data-copied] { color: var(--lz-good); border-color: var(--lz-good); animation: lz-copied 600ms ease-out 1; }
+/* One pulse when a copy lands; theme.js sets data-copied for 1.4s. */
+@keyframes lz-copied {
+  from { box-shadow: 0 0 0 0 rgba(101, 201, 140, 0.55); }
+  to { box-shadow: 0 0 0 7px rgba(101, 201, 140, 0); }
+}
 .lz-copy-btn[data-copied]::before {
   -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M3 8.5 6.5 12 13 4' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") center / contain no-repeat;
   mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M3 8.5 6.5 12 13 4' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") center / contain no-repeat;
 }
 
 /* Angular Material / ng-bootstrap bits that show up on tx pages */
-.modal-content { background-color: var(--lz-bg-raised) !important; border: 1px solid var(--lz-line-strong) !important; color: var(--lz-ink); border-radius: 2px; }
+.modal-content { background-color: var(--lz-bg-raised) !important; border: 1px solid var(--lz-line-strong) !important; color: var(--lz-ink); border-radius: var(--lz-radius-card); }
 .close { color: var(--lz-ink); text-shadow: none; }
-::-webkit-scrollbar { width: 10px; height: 10px; }
+/* Thin themed scrollbars: the standard properties, then the WebKit pseudo-elements. */
+html { scrollbar-width: thin; scrollbar-color: var(--lz-line-strong) var(--lz-bg); }
+::-webkit-scrollbar { width: 8px; height: 8px; }
 ::-webkit-scrollbar-track { background: var(--lz-bg); }
-::-webkit-scrollbar-thumb { background: var(--lz-line-strong); border-radius: 2px; }
+::-webkit-scrollbar-thumb { background: var(--lz-line-strong); border-radius: var(--lz-radius-pill); border: 2px solid var(--lz-bg); }
+::-webkit-scrollbar-thumb:hover { background: var(--lz-brass-dim); }
+::-webkit-scrollbar-corner { background: var(--lz-bg); }
 
 /* --- gateway bands in the mining-pool pie (theme.js drawBands) --------------------------
    An overlay SVG sits on top of the ECharts pie, so it must stay out of layout: the chart
@@ -486,6 +621,8 @@ app-block tr.lz-header-v2 td:first-child { color: var(--lz-muted); }
 .chart-widget svg.lz-bands { position: absolute; left: 0; top: 0; z-index: 3; overflow: visible; pointer-events: none; }
 svg.lz-bands path { pointer-events: auto; cursor: pointer; stroke: var(--lz-bg); stroke-width: 0.75; }
 svg.lz-bands path:hover { stroke: var(--lz-brass); stroke-width: 1.1; }
+/* Slices are keyboard links (theme.js): the ring is the stroke, an outline would be a box. */
+svg.lz-bands path:focus-visible { outline: none; stroke: var(--lz-brass); stroke-width: 2; }
 svg.lz-bands path.lz-band-catcher,
 svg.lz-bands path.lz-band-catcher:hover { fill: transparent; stroke: none; cursor: default; }
 /* Hovering a band: it brightens, everything belonging to another pool falls back, and the
@@ -514,10 +651,10 @@ svg.lz-bands rect.lz-band-chip { fill: var(--lz-bg-raised); stroke: var(--lz-lin
   top: 0;
   z-index: 6;
   display: none;
-  max-width: 21rem;
+  max-width: min(21rem, calc(100vw - 2rem));
   padding: 0.45rem 0.6rem;
   border: 1px solid var(--lz-line-strong);
-  border-radius: 2px;
+  border-radius: 8px;
   background: var(--lz-bg-raised);
   box-shadow: 0 6px 18px rgba(0, 0, 0, 0.5);
   font-family: var(--lz-sans);
@@ -541,3 +678,54 @@ svg.lz-bands rect.lz-band-chip { fill: var(--lz-bg-raised); stroke: var(--lz-lin
 }
 .lz-bands-note b { color: var(--lz-muted); font-weight: 600; }
 
+/* --- fee box caption (theme.js feeNote) ------------------------------------------------ */
+.lz-fee-note {
+  margin: 8px 0 0;
+  text-align: center;
+  font-size: 0.74rem;
+  line-height: 1.4;
+  color: var(--lz-muted);
+}
+
+/* --- stock theme selector --------------------------------------------------------------
+   Its alternative palettes (contrast, softsimon, bukele) are stylesheets appended after
+   this one, so picking one half-overrides the Lazarus theme. The element is the component's
+   own tag, which is as stable a hook as the app offers. */
+app-theme-selector { display: none !important; }
+
+/* --- small screens ------------------------------------------------------------------------
+   Below 992px the nav is a fixed bottom tab bar, below 576px everything is one column. */
+/* The stock footer stacks its columns, centred, at 1019px and gives each 20px below through
+   a component-scoped rule the injected column cannot match; do the same for it, and centre
+   the Electrum row, which is a flex line and ignores text-align. */
+@media (max-width: 1019px) {
+  footer .lz-links { margin-bottom: 20px; }
+  footer .lz-footer-endpoint { justify-content: center; flex-wrap: wrap; }
+}
+@media (max-width: 767.98px) {
+  /* A wide free-layout table scrolls inside its own panel, not the page. (:has is
+     progressive: without it the page behaves as it did before.) */
+  .box:has(> table.table:not(.table-fixed)),
+  .box:has(> .table-responsive) { overflow-x: auto; }
+  .lz-fork-note, .lz-about-source { overflow-wrap: anywhere; }
+}
+@media (max-width: 575.98px) {
+  .navbar-brand { font-size: 1.45rem; }
+  app-search-form .search-box-container .form-control { height: 2.4rem; font-size: 0.88rem; padding: 0 0.9rem; }
+  app-search-form .btn { height: 2.4rem; }
+  .lz-endpoint code { font-size: 0.8rem; }
+}
+
+/* --- reduced motion -----------------------------------------------------------------------
+   No transitions, no looping animation (skeleton sweep, flashing blocks, the fork block's
+   pulse), and no backdrop blur, which is the expensive part of the header. */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+  .sticky-header { background: var(--lz-bg) !important; }
+  .sticky-header::after { backdrop-filter: none; -webkit-backdrop-filter: none; }
+}
