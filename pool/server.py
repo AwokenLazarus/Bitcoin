@@ -206,6 +206,11 @@ db_conn.executescript(
     CREATE TABLE IF NOT EXISTS pool_samples (
       ts INTEGER PRIMARY KEY, hr_ghs REAL, miners INTEGER, shares_acc INTEGER, shares_rej INTEGER
     );
+    -- Hour averages of pool_samples, kept for good. pool_samples is pruned at seven days, so
+    -- this is what the 30-day and all-time hashrate charts are drawn from.
+    CREATE TABLE IF NOT EXISTS pool_hourly (
+      ts INTEGER PRIMARY KEY, hr_ghs REAL, miners REAL, n INTEGER
+    );
     CREATE TABLE IF NOT EXISTS found_blocks (
       height INTEGER PRIMARY KEY, hash TEXT, ts INTEGER, reward_btc REAL,
       finder TEXT, pool_fee_btc REAL, miner_btc REAL, coinbase TEXT
@@ -1479,17 +1484,53 @@ _resp_cache = {}
 _resp_cache_lock = threading.Lock()
 _RESP_CACHE_MAX = 512
 _BLOCKHASH_RE = re.compile(r"^[0-9a-fA-F]{64}$")
-_cache_compute_locks = {}
+_PEER_V4_RE = re.compile(r"^(\d{1,3})\.(\d{1,3})\.\d{1,3}\.\d{1,3}(?::\d+)?$")
+_PEER_V4_PART_RE = re.compile(r"^(\d{1,3})(?:\.(\d{1,3}))?[\d.:]*$")
+_PEER_V6_RE = re.compile(r"^\[?([0-9a-fA-F]{0,4}):([0-9a-fA-F]{0,4}):[0-9a-fA-F:.]*\]?(?::\d+)?$")
+
+
+def _mask_peer(value):
+    """A miner's network address, coarse enough to tell two rigs apart and no finer. The API is
+    public and CORS-open, and served whole it mapped every payout address to a home IP and the
+    firmware behind it."""
+    out = []
+    for part in str(value or "").split("+"):
+        m = _PEER_V4_RE.match(part)
+        if m:
+            out.append(f"{m.group(1)}.{m.group(2)}.x.x")
+            continue
+        # Several sessions are joined with "+" and the string is cut at a fixed length, so the
+        # last one can be the front of an address: all digits and dots, but not a whole one.
+        m = _PEER_V4_PART_RE.match(part)
+        if m:
+            out.append(f"{m.group(1)}.{m.group(2)}.x.x" if m.group(2) else "x")
+            continue
+        m = _PEER_V6_RE.match(part) if ":" in part else None
+        out.append(f"{m.group(1)}:{m.group(2)}::x" if m else part)
+    return "+".join(out)
+
+
+def public_view(doc):
+    """`doc` with every miner peer address masked, for anything that leaves over HTTP. The
+    full value stays in memory, where it is only used to tell sessions apart."""
+    if isinstance(doc, dict):
+        return {k: (_mask_peer(v) if k == "host" and isinstance(v, str) else public_view(v)) for k, v in doc.items()}
+    if isinstance(doc, list):
+        return [public_view(v) for v in doc]
+    return doc
+
+# A fixed set of locks shared by hash of the key. One lock per key, kept for ever, was a table
+# any client could grow without limit: keys are request paths (`/api/miner/<anything>`).
+_cache_compute_locks = [threading.Lock() for _ in range(64)]
 _cache_refreshing = set()
+# Stale hits are answered at once and refreshed in the background. Without a ceiling those
+# refreshes (an RPC, a database walk, a curl fork each) escaped the request throttle entirely:
+# a few hundred primed keys asked for again every few seconds ran a few hundred at a time.
+_BG_REFRESH = threading.BoundedSemaphore(4)
 
 
 def _compute_lock(key):
-    with _resp_cache_lock:
-        lock = _cache_compute_locks.get(key)
-        if lock is None:
-            lock = threading.Lock()
-            _cache_compute_locks[key] = lock
-        return lock
+    return _cache_compute_locks[hash(key) % len(_cache_compute_locks)]
 
 
 def cache_peek(key):
@@ -1528,13 +1569,20 @@ def cached(key, ttl, fn):
                 except Exception as e:
                     print("cache", key, e, flush=True)
                 finally:
+                    _BG_REFRESH.release()
                     with _resp_cache_lock:
                         _cache_refreshing.discard(key)
 
-            with _resp_cache_lock:
-                if key not in _cache_refreshing:
-                    _cache_refreshing.add(key)
+            # no slot free: the stale copy goes out and the next request for it tries again
+            if _BG_REFRESH.acquire(blocking=False):
+                with _resp_cache_lock:
+                    start = key not in _cache_refreshing
+                    if start:
+                        _cache_refreshing.add(key)
+                if start:
                     threading.Thread(target=_bg, daemon=True).start()
+                else:
+                    _BG_REFRESH.release()
         return stale
     with _compute_lock(key):
         now = time.time()
@@ -2206,6 +2254,7 @@ def scrape():
     last_prune = int(state.get("last_prune_ts") or 0)
     if ts - last_prune >= 1800:
         db("DELETE FROM samples WHERE ts < ?", (ts - 3 * 86400,), write=True)
+        rollup_pool_hourly(ts)
         db("DELETE FROM pool_samples WHERE ts < ?", (ts - 7 * 86400,), write=True)
         state["last_prune_ts"] = ts
         _checkpoint_wal()
@@ -2343,6 +2392,19 @@ def pool_output_parts(pool_addr, on_chain_btc, pb, reward_btc=None):
             fee_btc = min(total, int(fee_sats) / 1e8)
             return max(0.0, total - fee_btc), fee_btc
     return 0.0, total
+
+
+def _is_pool_block(blockhash):
+    """Whether this is a block the pool has on record. `/api/found/<hash>` costs the node a
+    verbose `getblock`, and asked about any block on the chain it was a free way to keep the
+    node that builds our templates busy."""
+    for table in ("found_blocks", "solo_blocks"):
+        try:
+            if db(f"SELECT 1 FROM {table} WHERE hash=? LIMIT 1", (blockhash,), one=True):
+                return True
+        except Exception:
+            pass
+    return any(b.get("hash") == blockhash for b in (prime_summary().get("blocks") or []))
 
 
 def found_outputs_payload(blockhash):
@@ -2542,7 +2604,7 @@ def learn_gateway_tags(budget=4):
     own = {
         c.get("gateway")
         for c in meta.get("clients") or []
-        if str(c.get("user_agent") or "").startswith(OWN_GATEWAY_UA_PREFIX)
+        if _is_own_gateway(c)
     }
     best = {}
     for b in blocks:
@@ -2584,7 +2646,7 @@ def refresh_gateway_identities():
     for c in (state.get("prime_meta") or {}).get("clients") or []:
         gw = str(c.get("gateway") or "")
         ident = str(c.get("identity") or "").strip()
-        if not gw or str(c.get("user_agent") or "").startswith(OWN_GATEWAY_UA_PREFIX):
+        if not gw or _is_own_gateway(c):
             continue
         tag = str(c.get("secondary_tag") or c.get("name") or "").strip()[:40]
         if ident:
@@ -2616,7 +2678,7 @@ def gateway_names_by_address():
     live = set()
     for c in meta.get("clients") or []:
         ident = str(c.get("identity") or "").strip()
-        if not ident or str(c.get("user_agent") or "").startswith(OWN_GATEWAY_UA_PREFIX):
+        if not ident or _is_own_gateway(c):
             continue
         gw = str(c.get("gateway") or "")
         live.add(ident)
@@ -2796,6 +2858,11 @@ def pool_fee_script():
     return (((prime_doc().get("pool") or {}).get("script")) or CONF.get("payout_script") or "").lower()
 
 
+# Least share of a solo block's reward that has to reach the pool's fee script for the block to
+# be listed (the fee is several times this; see `record_solo_block`).
+SOLO_MIN_FEE_SHARE = 0.01
+
+
 def record_solo_block(height, blockhash, blk, tx0, coinbase_text):
     """A block found by a solo miner: logged, never settled.
 
@@ -2818,6 +2885,12 @@ def record_solo_block(height, blockhash, blk, tx0, coinbase_text):
         a = spk.get("address") or (spk.get("addresses") or [None])[0]
         if a and not finder:
             finder = a
+    # A solo block from the pool's gateways pays the pool its fee. The tag alone is free to
+    # forge (and with it a finder of the forger's choosing); a coinbase that also pays the
+    # pool a real share of the reward is, whoever mined it, a block that paid the pool.
+    if fee_spk and fee_btc < reward * SOLO_MIN_FEE_SHARE:
+        print("solo_tag_without_pool_fee", height, blockhash, "ignored", flush=True)
+        return
     db(
         "INSERT OR REPLACE INTO solo_blocks(height,hash,ts,reward_btc,finder,pool_fee_btc,miner_btc,coinbase)"
         " VALUES(?,?,?,?,?,?,?,?)",
@@ -2825,6 +2898,15 @@ def record_solo_block(height, blockhash, blk, tx0, coinbase_text):
         write=True,
     )
     print("solo_block", height, finder or "?", "reward", round(reward, 8), "fee", round(fee_btc, 8), flush=True)
+
+
+def _prime_knows_block(blockhash):
+    """Whether primed's block log has this hash; None when there is no log to ask (a host
+    without primed), in which case the coinbase tag is all there is to go on."""
+    sig, latest = _block_log_latest()
+    if sig is None:
+        return None
+    return blockhash in latest
 
 
 def scan_found_blocks():
@@ -2861,6 +2943,15 @@ def scan_found_blocks():
             record_solo_block(height, h, blk, tx0, text)
             continue
         if COINBASE_TAG not in text:
+            continue
+        # The tag is a string anyone can put in a coinbase. On its own it let whoever mined a
+        # block make this site announce it as the pool's: a row in the found table and the
+        # luck figures, the round closed and its work deleted, the operator emailed, and with
+        # one output a public "the pool kept a whole block". A block is the pool's if primed
+        # recorded the share that found it, which it does before the block reaches any node.
+        known = _prime_knows_block(h)
+        if known is False:
+            print("tagged_block_not_in_prime_log", height, h, "ignored", flush=True)
             continue
         reward = sum(float(v.get("value") or 0) for v in vouts)
         addrs = []
@@ -3170,6 +3261,17 @@ def luck_and_ttf(pool_hr_ghs, net_hs, difficulty, first_ts=None, tip_height=None
 OWN_GATEWAY_UA_PREFIX = "lazarus-gateway/"
 
 
+def _is_own_gateway(client):
+    """Whether a DATUM session is the pool's own public stratum. primed decides that (by where
+    it connects from, or its key) and reports it as the session's fee path. The user agent is
+    whatever the gateway chose to send: any stranger sending ours was listed as the pool's own
+    and dropped from the DATUM figures, and every third party running lazarus-gateway was too."""
+    path = str(client.get("fee_path") or "")
+    if path:
+        return path == "stratum"
+    return str(client.get("user_agent") or "").startswith(OWN_GATEWAY_UA_PREFIX)
+
+
 def _gateway_row(c):
     ua = str(c.get("user_agent") or "")
     tag = str(c.get("secondary_tag") or c.get("name") or "").strip()[:40]
@@ -3179,7 +3281,7 @@ def _gateway_row(c):
         "user_agent": ua,
         "generation": c.get("generation"),
         # The pool's own public stratum connects to Prime like anyone else's gateway.
-        "own": ua.startswith(OWN_GATEWAY_UA_PREFIX),
+        "own": _is_own_gateway(c),
         "fee_path": str(c.get("fee_path") or "").lower(),
         "identity": c.get("identity") or "",
         "secondary_tag": tag,
@@ -4163,6 +4265,93 @@ def _public_prime_blocks(blocks):
             d["split"] = []
         slim.append(d)
     return slim
+
+
+def rollup_pool_hourly(now):
+    """Fold pool_samples into pool_hourly. Every hour that still has samples is rewritten, so the
+    first run backfills the whole retained week and later runs only really change the last hour.
+    The hour in progress is left out until it is complete."""
+    this_hour = (int(now) // 3600) * 3600
+    last = db("SELECT MAX(ts) AS t FROM pool_hourly", one=True)
+    since = int(last["t"] or 0) if last else 0
+    db(
+        "INSERT OR REPLACE INTO pool_hourly(ts,hr_ghs,miners,n) "
+        "SELECT (ts / 3600) * 3600, AVG(hr_ghs), AVG(miners), COUNT(*) FROM pool_samples "
+        "WHERE ts >= ? AND ts < ? GROUP BY (ts / 3600)",
+        (since, this_hour),
+        write=True,
+    )
+
+
+# Chart ranges: how far back, and the bucket each point averages over. Buckets are sized so every
+# range comes back as a few hundred points whatever its span.
+_HISTORY_RANGES = {
+    "1h": (3600, 30),
+    "6h": (6 * 3600, 120),
+    "24h": (86400, 300),
+    "3d": (3 * 86400, 900),
+    "7d": (7 * 86400, 1800),
+    "30d": (30 * 86400, 4 * 3600),
+    "all": (0, 12 * 3600),
+}
+
+
+def history_payload(rng):
+    """Pool hashrate over a range, with every block the pool found inside it.
+
+    Ranges up to a week read the ten-second samples; longer ones read the hourly rollup and
+    finish with the samples newer than its last hour, so the right-hand edge is always live.
+    """
+    span, step = _HISTORY_RANGES[rng]
+    now = int(time.time())
+    since = (now - span) if span else 0
+    if span and span <= 7 * 86400:
+        rows = db(
+            "SELECT (ts / ?) * ? AS t, AVG(hr_ghs) AS hr, AVG(miners) AS m FROM pool_samples "
+            "WHERE ts > ? GROUP BY (ts / ?) ORDER BY 1",
+            (step, step, since, step),
+        )
+    else:
+        rows = db(
+            "SELECT (ts / ?) * ? AS t, AVG(hr) AS hr, AVG(m) AS m FROM ("
+            "  SELECT ts, hr_ghs AS hr, miners AS m FROM pool_hourly WHERE ts > ?"
+            "  UNION ALL"
+            "  SELECT ts, hr_ghs, miners FROM pool_samples"
+            "  WHERE ts > ? AND ts >= COALESCE((SELECT MAX(ts) + 3600 FROM pool_hourly), 0)"
+            ") GROUP BY (ts / ?) ORDER BY 1",
+            (step, step, since, since, step),
+        )
+    points = [[int(r["t"]), round(float(r["hr"] or 0), 3), int(round(float(r["m"] or 0)))] for r in (rows or [])]
+    first_ts = points[0][0] if points else since
+    # Blocks are never pruned, but a marker left of the first hashrate point has nothing to sit on.
+    fbs = db(
+        "SELECT height, hash, ts, reward_btc FROM found_blocks WHERE ts >= ? ORDER BY height",
+        (max(since, first_ts),),
+    )
+    prime_blocks = {b.get("hash"): b for b in (prime_summary().get("blocks") or []) if b.get("hash")}
+    blocks = []
+    for fb in fbs or []:
+        pb = prime_blocks.get(fb["hash"]) or {}
+        blocks.append(
+            {
+                "height": int(fb["height"]),
+                "hash": fb["hash"],
+                "ts": int(fb["ts"] or 0),
+                "reward_btc": round(float(fb["reward_btc"] or 0), 8),
+                "kind": pb.get("kind") or "",
+                "gateway": pb.get("gateway") or "",
+                "status": pb.get("status") or "",
+            }
+        )
+    return {
+        "range": rng,
+        "since": since,
+        "until": now,
+        "step_s": step,
+        "points": points,
+        "blocks": blocks,
+        "ranges": list(_HISTORY_RANGES),
+    }
 
 
 # Public origin for canonical / sitemap / OG. Override in config.json if the UI is mirrored.
@@ -5300,23 +5489,55 @@ class Handler(BaseHTTPRequestHandler):
             self._head_only = False
 
     def do_GET(self):
+        # Anything a handler did not expect (`/static/%00` made pathlib raise) used to drop the
+        # connection and write a traceback to the log, once per request, for as long as asked.
+        try:
+            if "\x00" in unquote(self.path):
+                self.send_json({"error": "not found"}, 404)
+                return
+            self._get()
+        except (BrokenPipeError, ConnectionResetError, TimeoutError):
+            raise
+        except Exception as e:
+            print("request", self.path[:120].encode("ascii", "replace").decode(), type(e).__name__, str(e)[:160], flush=True)
+            try:
+                self.send_json({"error": "server"}, 500)
+            except Exception:
+                pass
+
+    def _get(self):
         u = urlparse(self.path)
         path = unquote(u.path)
         if path in ("/api/price", "/api/v1/prices"):
             self.send_json(price_payload() if path == "/api/price" else mempool_prices_payload(), cache_s=15)
             return
         if path == "/api/pool":
-            self.send_json(cached("pool", 5.0, pool_payload), cache_s=5)
+            doc = cached("pool", 5.0, pool_payload)
+            # The site's own chart reads /api/history, so its ten-second poll asks for the
+            # payload without the day of per-minute samples (most of its bytes). Anyone else
+            # calling /api/pool gets the same document as before.
+            if parse_qs(u.query).get("h") == ["0"]:
+                doc = {k: v for k, v in doc.items() if k != "history"}
+            self.send_json(doc, cache_s=5)
             return
         if path == "/api/miners":
-            self.send_json(cached("miners", 5.0, self._miners_payload), cache_s=5)
+            self.send_json(cached("miners", 5.0, lambda: public_view(self._miners_payload())), cache_s=5)
             return
         if path.startswith("/api/miner/"):
             addr = path.split("/api/miner/", 1)[1].strip("/")
             if not _ADDRESS_RE.match(addr):
                 self.send_json({"error": "not found"}, 404)
                 return
-            self.send_json(cached(("miner", addr), 5.0, lambda: miner_payload(addr)), cache_s=5)
+            self.send_json(cached(("miner", addr), 5.0, lambda: public_view(miner_payload(addr))), cache_s=5)
+            return
+        if path == "/api/history":
+            rng = (parse_qs(u.query).get("range") or ["24h"])[0]
+            if rng not in _HISTORY_RANGES:
+                self.send_json({"error": "unknown range", "ranges": list(_HISTORY_RANGES)}, 400)
+                return
+            # A longer range moves slower, so it can sit in the cache longer.
+            ttl = 10.0 if rng == "1h" else 30.0 if rng in ("6h", "24h") else 120.0
+            self.send_json(cached(("history", rng), ttl, lambda: history_payload(rng)), cache_s=int(ttl))
             return
         if path == "/api/blocks":
             self.send_json(cached("blocks", 15.0, lambda: {"blocks": mempool_blocks()}), cache_s=15)
@@ -5347,8 +5568,10 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json(cached("hardware", 15.0, hardware_payload), cache_s=15)
             return
         if path.startswith("/api/found/"):
-            hx = path.split("/api/found/", 1)[1].strip("/")
-            if not _BLOCKHASH_RE.match(hx):
+            # One spelling per hash: the node reads hex in any case, so every mix of upper and
+            # lower was a fresh cache key, a fresh CDN URL and a fresh verbose getblock.
+            hx = path.split("/api/found/", 1)[1].strip("/").lower()
+            if not _BLOCKHASH_RE.match(hx) or not _is_pool_block(hx):
                 self.send_json({"error": "not found"}, 404)
                 return
             doc = cached(("found", hx), 30.0, lambda: found_outputs_payload(hx))

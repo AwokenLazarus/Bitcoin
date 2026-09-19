@@ -1,0 +1,13 @@
+/resources/*
+  Cache-Control: public, max-age=3600, no-transform
+/resources/config.*
+  ! Cache-Control
+  Cache-Control: public, max-age=300, no-transform
+/resources/customize.*
+  ! Cache-Control
+  Cache-Control: public, max-age=300, no-transform
+/lazarus/*
+  Cache-Control: public, max-age=300
+/resources/mining-pools/lazarus.svg
+  ! Cache-Control
+  Cache-Control: public, max-age=300

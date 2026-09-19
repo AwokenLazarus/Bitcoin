@@ -1393,20 +1393,9 @@
       return;
     }
     showChart(true);
-    // Same trend markers, but from this address's side: the blocks its work was paid in.
-    draw(
-      $("chart"),
-      m.history || [],
-      "hr_ghs",
-      (m.blocks_found || [])
-        .filter((b) => Number(b.ts) > 0)
-        .map((b) => ({
-          ts: Number(b.ts),
-          title: (b.height ? t("chart.blockN", { h: num(b.height) }) : t("chart.block")) + " · " + clock(b.ts),
-          sub: t("chart.toYou", { amt: amt(b.miner_btc) }) + (payStatus(b) === "immature" ? t("chart.immature") : ""),
-        }))
-    );
-    chartLegend($("chart-legend"), $("chart"), t("chart.blockPaidYou", {n:1}), t("chart.blockPaidYou", {n:2}));
+    // Same explorer as the pool's chart, from this address's side: its hashrate, and the blocks
+    // its work was paid in. chart.js loads after this file, hence the lookup at call time.
+    window.LZ_HashChart?.mount($("minerchart"), "miner")?.setData(m);
   }
   // Tab clicks inside the card switch panels and update the URL without a reload.
   $("miner").addEventListener("click", (e) => {
@@ -1523,12 +1512,14 @@
   let lastPays = { payouts: [], prime_blocks: [] };
   let lastBlocks = { blocks: [] };
   async function refresh() {
-    if (refreshBusy) return;
+    // A tab nobody is looking at has no one to refresh for; it catches up when it is shown.
+    if (refreshBusy || document.hidden) return;
     refreshBusy = true;
     try {
       // Stats first. Payouts used to be a 7 MB Found-by-Lazarus dump that stalled /api/pool.
       const [p, cb, px, so] = await Promise.all([
-        j("/api/pool"),
+        // h=0: leave out the day of per-minute history; chart.js reads /api/history instead.
+        j("/api/pool?h=0"),
         j("/api/coinbaser").catch(() => ({})),
         j("/api/price").catch(() => null),
         j("/api/solo").catch(() => null),
@@ -1540,8 +1531,7 @@
       coinbase(cb || {});
       gateways(p.prime || {});
       solo(so);
-      draw($("poolchart"), p.history || [], "hr_ghs", $("poolchart")?.__marks || []);
-      chartLegend($("poolchart-legend"), $("poolchart"), t("chart.blockFound", {n:1}), t("chart.blockFound", {n:2}));
+      document.dispatchEvent(new CustomEvent("lz:pool", { detail: p }));
 
       const miners = await j("/api/miners").catch(() => ({ online: [], seen: [] }));
       const online = (miners.online || []).filter((m) => m.address);
@@ -1615,8 +1605,7 @@
       const blocks = lastBlocks;
       const pays = lastPays;
       const marks = blockMarks(foundBlocks(pays, p));
-      draw($("poolchart"), p.history || [], "hr_ghs", marks);
-      chartLegend($("poolchart-legend"), $("poolchart"), t("chart.blockFound", {n:1}), t("chart.blockFound", {n:2}));
+
       table(
         $("blocktable"),
         [t("blocks.thHeight"), t("blocks.thTag"), t("blocks.thTime"), t("blocks.thTxs"), ""],
@@ -1638,7 +1627,7 @@
   // retired anchors kept so old bookmarks still land somewhere sensible.
   const SECTIONS = new Set([
     "", "top", "fees", "status", "payout", "window", "connect", "hardware", "gw-pick", "dashboard", "miners", "gateways",
-    "blocks", "payouts", "pools", "how", "datum", "mine", "solo", "calc",
+    "blocks", "payouts", "pools", "how", "datum", "mine", "solo", "calc", "learn", "hashchart",
   ]);
 
   function fromHash() {
@@ -1734,13 +1723,15 @@
   }
   refresh().catch((e) => console.error(e));
   setInterval(() => refresh().catch((e) => console.error(e)), 10000);
+  document.addEventListener("visibilitychange", () => {
+    if (!document.hidden) refresh().catch((e) => console.error(e));
+  });
   document.addEventListener("lz:i18n", () => {
     LZ_I18N.apply();
     refresh().catch((e) => console.error(e));
   });
   window.addEventListener("resize", () => {
     for (const [id, legend, one, many] of [
-      ["poolchart", "poolchart-legend", t("chart.blockFound", {n:1}), t("chart.blockFound", {n:2})],
       ["chart", "chart-legend", t("chart.blockPaidYou", {n:1}), t("chart.blockPaidYou", {n:2})],
     ]) {
       const c = $(id);

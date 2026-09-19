@@ -1922,8 +1922,11 @@
     list-style: none;
     padding: 0;
   }
-  @container (min-width: 64rem) { .pool-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); } }
+  @container (min-width: 48rem) { .pool-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+  @container (min-width: 80rem) { .pool-grid { grid-template-columns: repeat(5, minmax(0, 1fr)); } }
   @container (max-width: 34rem) { .pool-grid { grid-template-columns: 1fr; } }
+  .overflow-fee-table { margin: 0 0 1rem; }
+  .overflow-fee-table table { min-width: 28rem; }
   .pool-card {
     display: grid;
     gap: 0.55rem;

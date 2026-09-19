@@ -685,20 +685,24 @@ window.LZ_I18N_DICTS["en"] = {
     "eyebrow": "Decentralize the hashrate",
     "title": "Other pools that speak DATUM and TIDES.",
     "lede": "No single pool should hold a third of this chain. We cap our own stratum at 15% of the network; hashrate behind a miner’s own DATUM gateway builds its own blocks and is not counted. Past that line, new stratum connections are relayed to one of these pools and paid there. Each one lets you build your own block through a DATUM gateway and pays by a TIDES window, so splitting your fleet across them costs you nothing in principle. Keep one as a failover in your miner either way.",
-    "riptideFee": "<b>0%</b> DATUM · <b>1%</b> stratum",
-    "riptide": "Maveth’s TIDES pool. Zero fee through your own gateway; the stratum skim is variable and half of it goes back to live miners. Prefers a CONVOY gateway with the largest-coinbase patch.",
-    "convoyFee": "<b>1%</b> · 2% on node failover",
-    "convoy": "The pool behind the CONVOY DATUM gateway. Non-custodial, TIDES rewards, and a 50% fee discount for miners who build their own templates.",
+    "riptideFee": "<b>0%</b> DATUM · <b>1%</b> stratum, variable",
+    "riptide": "Maveth’s TIDES pool. Zero fee through your own gateway; the SV1 skim is variable (currently 1%) and half of it goes back to live DATUM miners as STRATUM BOOST. Prefers a CONVOY gateway with the largest-coinbase patch.",
+    "convoyFee": "<b>1%</b> DATUM · 2% failover",
+    "convoy": "The pool behind the CONVOY DATUM gateway. Non-custodial TIDES; DATUM is their standard 1% fee, and mining on their failover stratum (they build the template) is 2%.",
     "getStarted": "Get Started",
-    "b2fee": "<b>1%</b> TIDES · solo on 3334",
-    "b2": "Regions in Frankfurt, Helsinki, Chicago, Los Angeles and Kyiv. Stratum V1, V2 and DATUM on every one; GPU and CPU ports too.",
+    "b2fee": "<b>0%</b> DATUM · <b>1%</b> TIDES",
+    "b2": "DATUM on 28915 is 0%. Shared TIDES on 3333 is 1% over a window of four times difficulty; solo on 3334. Regions in Frankfurt, Helsinki, Chicago, Los Angeles, Kyiv and Hong Kong.",
     "onRegion": "on any region",
-    "xorpoolFee": "<b>1%</b> DATUM · <b>5%</b> stratum",
-    "xorpool": "Bitcoin Xor’s TIDES pool. Coinbase-direct payouts, a 25% self-cap, and DATUM-first: you build the template at 1%, or use their public stratum at 5%. <a href=\"https://xorpool.com/\" target=\"_blank\" rel=\"noreferrer\">xorpool.com</a>.",
-    "iohzrdFee": "RATUM Prime · DATUM gateway required",
-    "iohzrd": "Run by the author of the <a href=\"https://github.com/iohzrd/datum_gateway\" target=\"_blank\" rel=\"noreferrer\">gateway we recommend</a>. Miners connect through a gateway — ratum-gateway or CONVOY, v3 protocol with anti-block-withholding — and are paid from a TIDES window.",
+    "xorpoolFee": "<b>1%</b> DATUM · <b>2%</b> pooled stratum",
+    "xorpool": "Bitcoin Xor’s TIDES pool. Coinbase-direct payouts, DATUM-first: you build the template at 1%, or mine on their pooled stratum (they build the template) at 2%. <a href=\"https://xorpool.com/\" target=\"_blank\" rel=\"noreferrer\">xorpool.com</a>.",
+    "iohzrdFee": "<b>0%</b> DATUM · <b>10%</b> their public gateway",
+    "iohzrd": "Omega Pool, run by the author of the <a href=\"https://github.com/iohzrd/datum_gateway\" target=\"_blank\" rel=\"noreferrer\">gateway we recommend</a>. Own gateway is 0%; their public gateway is 10%. Miners connect through ratum-gateway or CONVOY and are paid from a TIDES window of eight times difficulty.",
     "theirGw": "· their public gateway",
-    "note": "These five are the pools our stratum relays to when Lazarus is over its share of the network. A relayed miner is paid by the pool it lands on, not by us — see <a href=\"#miners\">Relayed to other pools</a> under Miners. Own-gateway (DATUM) miners are never relayed. Fees and endpoints are as each pool publishes them; check their site before you point hashrate.",
+    "note": "These five are the pools our stratum relays to when Lazarus is over its share of the network. A relayed miner is paid by the pool it lands on, not by us — see <a href=\"#miners\">Relayed to other pools</a> under Miners. Own-gateway (DATUM) miners are never relayed. Fees above are as each pool published them on 18 September 2026; check their site before you point hashrate.",
+    "feeTableCaption": "The five pools we relay to — fees as each advertises them, 18 September 2026",
+    "colPool": "Pool",
+    "colDatum": "Own DATUM gateway",
+    "colStratum": "Their stratum / public gateway",
     "dtStratum": "Stratum",
     "dtDatum": "DATUM"
   },
@@ -977,3 +981,176 @@ window.LZ_I18N_DICTS["en"] = {
     "s": "s"
   }
 };
+
+// App shell, hashrate explorer and Learn hub strings.
+window.LZ_I18N_DICTS["en"].app = {
+  "nav": {
+    "home": "Pool",
+    "mine": "Start mining",
+    "payouts": "Payouts & blocks",
+    "network": "Miners",
+    "me": "My stats",
+    "learn": "Learn"
+  },
+  "pal": {
+    "open": "Search or jump (press /)",
+    "button": "Search",
+    "aria": "Search or jump",
+    "placeholder": "Paste a payout address, or jump to…",
+    "foot": "↑ ↓ to move · Enter to open · Esc to close · / or Ctrl K opens this anywhere",
+    "addr": "Open stats for this address",
+    "last": "Your last address",
+    "none": "Nothing matches",
+    "go": {
+      "home": "Pool right now",
+      "chart": "Hashrate chart and blocks found",
+      "connect": "Connect a miner",
+      "datum": "Set up a DATUM gateway",
+      "hardware": "Hardware and earnings",
+      "calc": "Earnings calculator",
+      "payout": "Next payout: the coinbase being built",
+      "blocks": "Blocks found",
+      "miners": "Miners online",
+      "gateways": "DATUM gateways",
+      "me": "My stats",
+      "learn": "Learn: proof of work, DATUM, TIDES",
+      "how": "How the pool works",
+      "pools": "Other pools on this chain"
+    }
+  },
+  "toast": {
+    "block": "Block {h} found by the pool"
+  },
+  "chart": {
+    "title": "Pool hashrate and blocks found",
+    "rangeAria": "Time range",
+    "range": {
+      "1h": "1H",
+      "6h": "6H",
+      "24h": "24H",
+      "3d": "3D",
+      "7d": "7D",
+      "30d": "30D",
+      "all": "All"
+    },
+    "miners": "Miners",
+    "hint": "Hover for a reading · diamonds are blocks the pool found; click one for its payout split · ← → with the chart focused",
+    "empty": "Not enough samples in this range yet.",
+    "error": "The chart could not load. It will retry.",
+    "now": "Now",
+    "avg": "Average",
+    "peak": "Peak",
+    "blocks": "Blocks found",
+    "reward": "Paid out in range",
+    "perDay": "{n} a day",
+    "aria": "Pool hashrate, {range}. Now {now}, average {avg}, peak {peak}. {blocks} blocks found.",
+    "minersN": "{n} miners",
+    "foundHere": {
+      "one": "block {h} found here",
+      "other": "{n} blocks found here"
+    },
+    "block": "Block {h}",
+    "nBlocks": {
+      "one": "{n} block",
+      "other": "{n} blocks"
+    },
+    "clickSplit": "Click for the payout split",
+    "clickList": "Click to list them",
+    "viaGw": "DATUM gateway {gw}",
+    "viaDatum": "a DATUM gateway",
+    "viaStratum": "public stratum",
+    "close": "Close",
+    "back": "Back to the list",
+    "found": "Found",
+    "rewardOne": "Reward",
+    "foundVia": "Found by",
+    "explorer": "Open in the explorer",
+    "loadingSplit": "Loading the payout split…",
+    "splitError": "The split could not load. The explorer has it.",
+    "paidTo": "Paid straight to {n} addresses in the coinbase",
+    "moreOutputs": "and {n} more outputs",
+    "moreZoom": "{n} more. Pick a shorter range to separate them."
+  },
+  "learn": {
+    "eyebrow": "Learn",
+    "title": "New to this? Start here.",
+    "lede": "Six short answers, then the long versions if you want them. No account, no sign-up: mining here only ever needs a payout address.",
+    "c1": {
+      "t": "Proof of work, in one minute",
+      "b": "Miners race to find a number that makes a block’s hash fall below a target. It is pure trial and error, so the only way to win more often is to do more hashes. That cost is what makes rewriting the chain expensive. Difficulty retargets so blocks keep arriving at a steady pace however much hashrate joins.",
+      "a": "How the pool fits in"
+    },
+    "c2": {
+      "t": "Why this chain uses BLAKE2b",
+      "b": "At block 961,640 (30 August 2026) this chain changed its proof of work from SHA-256d to BLAKE2b. Supply, halvings, addresses and every earlier block are unchanged. BLAKE2b is what Siacoin ASICs were built for, so that hardware mines here.",
+      "a": "The fork, and BIP-110"
+    },
+    "c3": {
+      "t": "What DATUM changes",
+      "b": "On an ordinary pool, the pool decides what goes in the block. With your own DATUM gateway and Bitcoin Knots node, you build the block template and the pool only coordinates the reward. That keeps block-building spread across many hands. Here it costs 0% and earns a bonus.",
+      "a": "The DATUM subsidy"
+    },
+    "c4": {
+      "t": "How TIDES pays",
+      "b": "TIDES keeps a rolling window of accepted shares worth about eight network-difficulties of work. When the pool finds a block, every address holding work in the window is paid its proportion. There are no rounds to hop between and nothing resets when a block lands.",
+      "a": "TIDES explained"
+    },
+    "c5": {
+      "t": "Paid in the block itself",
+      "b": "The pool never holds your coins. Each payout is an output of the block’s own coinbase, sent to your address. There is no balance, no threshold and no withdrawal, and anyone can check every payout on chain.",
+      "a": "Non-custodial payouts"
+    },
+    "c6": {
+      "t": "A pool that caps itself",
+      "b": "The public stratum is held to 15% of network hashrate. Past that, new stratum connections are relayed to other pools and paid there. Miners on their own DATUM gateway are never counted, because building your own templates is not what centralizes a chain.",
+      "a": "The 15% self-cap"
+    },
+    "pathTitle": "From zero to mining",
+    "p1": "<b>Get an address.</b> Any wallet that gives you a bc1… address on this chain. That address is your username; there is nothing else to register.",
+    "p2": "<b>Point a miner.</b> Any Siacoin BLAKE2b ASIC. Use the public stratum to start in two minutes, or run a DATUM gateway for 0% and the bonus.",
+    "p3": "<b>Watch it work.</b> Look your address up here: live hashrate, your share of the window, and every coinbase that paid you.",
+    "pathCta": "Connect a miner",
+    "pathCalc": "What would I earn?",
+    "glossTitle": "Words you will meet",
+    "g1": {
+      "t": "Hashrate",
+      "d": "Hashes tried per second. 1 TH/s is a trillion a second; 1 PH/s is a thousand TH/s."
+    },
+    "g2": {
+      "t": "Share",
+      "d": "A hash good enough to prove you are working, though not good enough to be a block. Shares are how the pool measures your work."
+    },
+    "g3": {
+      "t": "Difficulty",
+      "d": "How hard the network’s target is. It retargets so blocks keep their pace as hashrate comes and goes."
+    },
+    "g4": {
+      "t": "Coinbase",
+      "d": "The first transaction in a block, which creates the reward. Here it pays miners directly."
+    },
+    "g5": {
+      "t": "Block template",
+      "d": "The draft block a miner hashes: which transactions are in it, and who the coinbase pays."
+    },
+    "g6": {
+      "t": "Window",
+      "d": "The stretch of recent shares TIDES pays on. Here it is eight network-difficulties of work."
+    },
+    "g7": {
+      "t": "Gateway",
+      "d": "Your own DATUM software. It talks to your node for templates and to the pool for the reward split."
+    },
+    "g8": {
+      "t": "Orphan",
+      "d": "A valid block that lost the race to another found at the same moment. It pays nothing."
+    }
+  }
+};
+window.LZ_I18N_DICTS["en"].app.sub = {"aria": "In this view", "intro": "Overview", "chart": "Hashrate & blocks", "calc": "Calculator", "basics": "The basics"};
+window.LZ_I18N_DICTS["en"].app.sub.intro = "Welcome";
+window.LZ_I18N_DICTS["en"].app.sub.live = "Live numbers";
+window.LZ_I18N_DICTS["en"].app.chart.rangeSoon = "Longer ranges arrive with the next node update";
+window.LZ_I18N_DICTS["en"].app.scroll = {"prev": "Scroll left", "next": "Scroll right"};
+Object.assign(window.LZ_I18N_DICTS["en"].app.learn, {"pathTitle": "From zero to mining, the DATUM way", "p1": "<b>Get a payout address.</b> Any wallet that gives you a bc1… address on this chain. That address is your username; there is nothing to register.", "p2": "<b>Run your own node.</b> Bitcoin Knots for this chain, with <code>server=1</code> and a cookie or RPC user your gateway can read. Your node is what chooses the transactions in your blocks.", "p3": "<b>Start a DATUM gateway.</b> Build one (iohzrd is the recommended build), paste in the Lazarus host, port and pubkey from the Connect page, and set <code>mining.pool_address</code> to your address.", "p4": "<b>Point your miner at your gateway.</b> Any Siacoin BLAKE2b ASIC, aimed at your own gateway’s stratum port, with the username <code>address.worker</code>.", "p5": "<b>Watch it work.</b> Your gateway shows up under Gateways and your address under Miners. You pay 0%, you build your own blocks, and every block the pool finds pays you the DATUM bonus on top.", "pathCta": "Set up DATUM", "pathCalc": "What would I earn?"});
+window.LZ_I18N_DICTS["en"].app.chart.m = {"title": "Your hashrate and the blocks that paid you", "blocks": "Blocks that paid you", "reward": "Paid to you in range", "rewardOne": "Paid to you", "toYou": "to you {amt}", "immature": "maturing", "spendable": "spendable", "hint": "Hover for a reading · diamonds are blocks that paid this address; click one for its payout split · ← → with the chart focused", "aria": "Hashrate for this address, {range}. Now {now}, average {avg}, peak {peak}. {blocks} blocks paid it.", "clickSplit": "Click for the payout split", "empty": "No samples for this address in this range."};
+window.LZ_I18N_DICTS["en"].app.chart.n = {"title": "Hashrate and the blocks that paid this address", "blocks": "Blocks that paid it", "reward": "Paid to it in range", "rewardOne": "Paid to this address", "toYou": "to this address {amt}"};

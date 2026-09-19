@@ -1,0 +1,4 @@
+/index.html / 301
+/miner/* /miner 200
+/zh/miner /miner 200
+/zh/miner/* /miner 200
