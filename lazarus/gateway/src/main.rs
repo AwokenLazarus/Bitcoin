@@ -227,6 +227,8 @@ impl Drop for SessionGuard {
 }
 
 struct Miner {
+    /// When the connection was accepted; see `reap_silent`.
+    since: Instant,
     host: String, user: String, ua: String, vdiff: u64,
     acc: u64, acc_n: u64, rej: u64, rej_n: u64, last: Instant,
     /// The difficulty in force before the last retarget, honoured for a grace window so
@@ -268,6 +270,7 @@ struct Miner {
 fn new_miner(host: String, vstart: u64) -> Miner {
     let now = Instant::now();
     Miner {
+        since: now,
         host, user: String::new(), ua: String::new(), vdiff: vstart, acc: 0, acc_n: 0, rej: 0, rej_n: 0, last: now,
         vdiff_prev: vstart, vdiff_prev_until: now, last_retarget: now, retarget_acc_n: 0,
         recent: VecDeque::new(), job_diffs: VecDeque::new(), seen: HashSet::new(), seen_order: VecDeque::new(),
@@ -1387,8 +1390,19 @@ fn handle_miner(mut sock: TcpStream, st: Arc<Shared>, ip: IpAddr) {
             "mining.authorize" => {
                 let raw = msg.get("params").and_then(|p| p.as_array()).and_then(|a| a.first()).and_then(|x| x.as_str()).unwrap_or("");
                 let ident = canon_identity(raw);
-                let ok = payable_user(raw);
-                if ok { user = raw.to_string(); } else { user.clear(); }
+                // While new miners are being relayed, a session is local because of who it said
+                // it was. Any grandfathered address (they are public) got it past the gate, and
+                // a second authorize under the miner's own address then kept it here, its IP
+                // grandfathered by its first share. A different name on a gated session has to
+                // be one we would have let in.
+                let swapped = !user.is_empty()
+                    && canon_identity(&user) != ident
+                    && st.overflow.as_ref().is_some_and(|ov| ov.considering() && !ov.ident_grandfathered(&ident));
+                let ok = payable_user(raw) && !swapped;
+                if swapped {
+                    log::info!("{host_label}: re-authorize as {} refused while overflow is relaying new miners", short(&ident));
+                }
+                if ok { user = raw.to_string(); } else if !swapped { user.clear(); }
                 send_line(&mut sock, &json!({"id": mid, "result": ok, "error": if ok { Value::Null } else { json!([14, "BadUsername", null]) }}));
                 if let Some(m) = lk(&st.miners).get_mut(&id) {
                     m.user = user.clone();
@@ -1817,7 +1831,48 @@ fn maybe_submit_block(st: &Shared, j: &Job, hdr: &HeaderV2) {
         save_solo_book(st);
     }
 }
+/// How long a connection may stay open without authorizing.
+const AUTHORIZE_DEADLINE: Duration = Duration::from_secs(60);
+
+/// Close connections that have been open a minute and never authorized. The read timeout is
+/// per read and ten minutes long, so a client sending a byte now and then held its slot and
+/// its thread indefinitely, and 8 192 of those is every slot there is. A miner authorizes in
+/// its first second; nothing real is caught by this.
+fn reap_silent(st: &Shared) {
+    let silent: Vec<u64> = lk(&st.miners)
+        .iter()
+        .filter(|(_, m)| m.user.is_empty() && m.since.elapsed() > AUTHORIZE_DEADLINE)
+        .map(|(id, _)| *id)
+        .collect();
+    if silent.is_empty() {
+        return;
+    }
+    let socks = lk(&st.miner_socks);
+    for id in &silent {
+        if let Some(s) = socks.get(id) {
+            let _ = s.shutdown(std::net::Shutdown::Both);
+        }
+    }
+    drop(socks);
+    log::info!("closed {} connections that never authorized within {}s", silent.len(), AUTHORIZE_DEADLINE.as_secs());
+}
+
+fn api_bind_is_safe(listen: &str, allow_public: bool) -> bool {
+    use std::net::ToSocketAddrs;
+    allow_public || listen.to_socket_addrs().map(|mut a| a.all(|x| x.ip().is_loopback())).unwrap_or(false)
+}
+
 fn api_loop(st: Arc<Shared>) {
+    // The API has no authentication: it lists every miner's address and network address and
+    // can switch the overflow valve. Loopback is its whole access control, so it is not
+    // started anywhere else unless that is said out loud.
+    if !api_bind_is_safe(&st.cfg.api_listen, std::env::var("LAZARUS_API_ALLOW_PUBLIC").is_ok()) {
+        log::error!(
+            "api_listen {} is not a loopback address; the API is unauthenticated, so it is not started (set LAZARUS_API_ALLOW_PUBLIC=1 to override)",
+            st.cfg.api_listen
+        );
+        return;
+    }
     let Ok(lis) = TcpListener::bind(&st.cfg.api_listen) else { log::error!("api bind {}", st.cfg.api_listen); return; };
     log::info!("api {}", st.cfg.api_listen);
     // A handful of requests in flight at once; one stalled client must not freeze the
@@ -2207,6 +2262,7 @@ fn main() {
     }
     { let s = st.clone(); thread::spawn(move || api_loop(s)); }
     { let s = st.clone(); thread::spawn(move || gbt_loop(s)); }
+    { let s = st.clone(); thread::spawn(move || loop { thread::sleep(Duration::from_secs(10)); reap_silent(&s); }); }
     let lis = TcpListener::bind(&st.cfg.stratum_listen).expect("stratum bind");
     log::info!("stratum {}", st.cfg.stratum_listen);
     let mut refused_logged = Instant::now() - Duration::from_secs(60);
@@ -2243,7 +2299,7 @@ mod limits_tests {
 
     fn miner() -> Miner {
         let now = Instant::now();
-        Miner { host: String::new(), user: String::new(), ua: String::new(), vdiff: 1, acc: 0, acc_n: 0, rej: 0, rej_n: 0, last: now,
+        Miner { since: now, host: String::new(), user: String::new(), ua: String::new(), vdiff: 1, acc: 0, acc_n: 0, rej: 0, rej_n: 0, last: now,
             vdiff_prev: 1, vdiff_prev_until: now, last_retarget: now, retarget_acc_n: 0, job_diffs: VecDeque::new(),
             recent: VecDeque::new(), seen: HashSet::new(), seen_order: VecDeque::new(), tokens: SUBMIT_BURST, tokens_at: now, flood: 0, low_n: 0, low_at: now,
             jobs: VecDeque::new(), ident: String::new() }
@@ -2796,5 +2852,16 @@ mod vardiff_tests {
         assert_eq!(resolve_vardiff_step(Some(2)), 2);
         assert_eq!(resolve_vardiff_step(Some(3)), 2);
         assert_eq!(resolve_vardiff_step(Some(1)), 2);
+    }
+
+    /// The API lists every miner and can switch the overflow valve, with no authentication.
+    #[test]
+    fn the_api_only_starts_on_loopback_unless_told_otherwise() {
+        assert!(api_bind_is_safe("127.0.0.1:7152", false));
+        assert!(api_bind_is_safe("[::1]:7152", false));
+        assert!(!api_bind_is_safe("0.0.0.0:7152", false));
+        assert!(!api_bind_is_safe("192.168.1.10:7152", false));
+        assert!(!api_bind_is_safe("not an address", false));
+        assert!(api_bind_is_safe("0.0.0.0:7152", true));
     }
 }

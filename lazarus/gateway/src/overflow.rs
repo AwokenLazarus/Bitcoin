@@ -190,13 +190,19 @@ pub struct Grandfather {
     ips: HashMap<String, u64>,
 }
 impl Grandfather {
+    // Bounded: an entry costs one accepted share under a fresh address, the whole set is
+    // written out every minute, and its lock is taken on every connection and share. A known
+    // entry is always refreshed; past the cap a new one simply waits for room.
     pub fn note_ident(&mut self, ident: &str, now: u64) {
-        if !ident.is_empty() {
+        if !ident.is_empty() && (self.idents.len() < GRANDFATHER_MAX || self.idents.contains_key(ident)) {
             self.idents.insert(ident.to_string(), now);
         }
     }
     pub fn note_ip(&mut self, ip: IpAddr, now: u64) {
-        self.ips.insert(ip.to_string(), now);
+        let ip = ip.to_string();
+        if self.ips.len() < GRANDFATHER_MAX || self.ips.contains_key(&ip) {
+            self.ips.insert(ip, now);
+        }
     }
     pub fn has_ident(&self, ident: &str, now: u64, ttl: u64) -> bool {
         self.idents.get(ident).map(|t| now.saturating_sub(*t) <= ttl).unwrap_or(false)
@@ -292,6 +298,10 @@ pub struct Overflow {
     /// refused authorize. Such a miner has no accepted hashrate here either, so holding it
     /// local does not move our network share.
     unpayable_ips: Mutex<HashMap<IpAddr, u64>>,
+    /// Sources whose relays died with no share: how many times, and when last.
+    churn_ips: Mutex<HashMap<IpAddr, (u32, u64)>>,
+    /// `proxied_total` and `relays_churned` as of the last churn warning check, and when.
+    churn_mark: Mutex<(u64, u64, u64)>,
     shadow_would: AtomicU64,
     fail_open: AtomicU64,
     state_file: PathBuf,
@@ -320,6 +330,17 @@ const GATE_MAX_LINES: usize = 6;
 const UNPAYABLE_LOCAL_SECS: u64 = 600;
 /// Cap on that set, so a spray of forged source addresses cannot grow it without bound.
 const UNPAYABLE_IPS_MAX: usize = 4096;
+/// Most identities, and most addresses, remembered as ours at once.
+const GRANDFATHER_MAX: usize = 200_000;
+/// A source whose relays keep dying with no share is served locally after this many, for
+/// this long. Relaying it again helps nobody: it is a scanner, or a miner the upstream will
+/// not talk to, and the second kind is mining nowhere for as long as we keep sending it away.
+const CHURN_LOCAL_AFTER: u32 = 3;
+const CHURN_LOCAL_SECS: u64 = 3600;
+/// Lines a relayed miner may send in one second. The local path has a token bucket and a flood
+/// limit; relayed lines went upstream unmetered, from our address, which is the address an
+/// upstream bans when someone uses the relay to throw garbage at it.
+const RELAY_LINES_PER_SEC: u32 = 400;
 const UPSTREAM_CONNECT: Duration = Duration::from_secs(5);
 const HEALTH_EVERY: Duration = Duration::from_secs(60);
 const SAVE_EVERY: Duration = Duration::from_secs(60);
@@ -389,6 +410,8 @@ impl Overflow {
             relays_bounced: AtomicU64::new(0),
             relays_unpayable: AtomicU64::new(0),
             unpayable_ips: Mutex::new(HashMap::new()),
+            churn_ips: Mutex::new(HashMap::new()),
+            churn_mark: Mutex::new((0, 0, 0)),
             shadow_would: AtomicU64::new(0),
             fail_open: AtomicU64::new(0),
             state_file,
@@ -436,6 +459,22 @@ impl Overflow {
         if m.len() < UNPAYABLE_IPS_MAX {
             m.insert(ip, now);
         }
+    }
+    fn note_churn_ip(&self, ip: IpAddr) {
+        let now = unix_now();
+        let mut m = lk(&self.churn_ips);
+        m.retain(|_, (_, t)| now.saturating_sub(*t) <= CHURN_LOCAL_SECS);
+        if m.len() < UNPAYABLE_IPS_MAX || m.contains_key(&ip) {
+            let e = m.entry(ip).or_insert((0, now));
+            *e = (e.0.saturating_add(1), now);
+        }
+    }
+    fn ip_churned(&self, ip: IpAddr) -> bool {
+        let now = unix_now();
+        lk(&self.churn_ips)
+            .get(&ip)
+            .map(|(n, t)| *n >= CHURN_LOCAL_AFTER && now.saturating_sub(*t) <= CHURN_LOCAL_SECS)
+            .unwrap_or(false)
     }
     fn ip_unpayable(&self, ip: IpAddr) -> bool {
         let now = unix_now();
@@ -545,7 +584,22 @@ impl Overflow {
                 let (total, churned) = (self.proxied_total.load(Ordering::Relaxed), self.relays_churned.load(Ordering::Relaxed));
                 log::info!("overflow: stratum share {:.1}% (stratum {:.2} PH/s, datum {:.2} PH/s unmetered, net {:.2} PH/s) active={} hold={} proxied={} relays={} churned={}",
                     m.share_pct, m.stratum_hs / 1e15, (m.pool_hs - m.stratum_hs).max(0.0) / 1e15, m.net_hs / 1e15, na, nh, lk(&self.proxied).len(), total, churned);
-                if total >= 10 && churned * 2 > total {
+                // Over what has happened since the last look, not since the process started:
+                // lifetime totals kept this warning firing every poll for as long as the
+                // gateway ran, hours after the burst that set it off, relaying or not.
+                let (new_total, new_churned) = {
+                    let mut mark = lk(&self.churn_mark);
+                    let (dt, dc) = (total.saturating_sub(mark.0), churned.saturating_sub(mark.1));
+                    let now = unix_now();
+                    if dt >= 10 || now.saturating_sub(mark.2) >= 600 {
+                        *mark = (total, churned, now);
+                        (dt, dc)
+                    } else {
+                        (0, 0)
+                    }
+                };
+                let (total, churned) = (new_total, new_churned);
+                if self.considering() && total >= 10 && churned * 2 > total {
                     log::warn!("overflow: {churned} of {total} relays died within {}s with no share; relayed miners are not mining anywhere. Check the handshake or set mode=off.", CHURN_SECS);
                 }
             }
@@ -625,7 +679,7 @@ impl Overflow {
         canon: &dyn Fn(&str) -> String,
         payable: &dyn Fn(&str) -> bool,
     ) -> Gate {
-        if !self.considering() || self.ip_grandfathered(ip) || self.ip_unpayable(ip) {
+        if !self.considering() || self.ip_grandfathered(ip) || self.ip_unpayable(ip) || self.ip_churned(ip) {
             return Gate::Local(Vec::new());
         }
         // Hold the subscribe reply until the authorize names the miner.
@@ -633,10 +687,14 @@ impl Overflow {
         let mut buf: Vec<String> = Vec::new();
         let mut user = String::new();
         let deadline = Instant::now() + AUTHORIZE_WAIT;
+        let mut gone = false;
         while buf.len() < GATE_MAX_LINES && Instant::now() < deadline {
             let mut line = String::new();
             match rdr.take(RELAY_MAX_LINE + 1).read_line(&mut line) {
-                Ok(0) => break,
+                Ok(0) => {
+                    gone = true;
+                    break;
+                }
                 Err(_) if !line.is_empty() && !line.ends_with('\n') => {
                     // The wait ran out mid-line: the bytes read so far are in `line` and
                     // gone from the reader. Finish the line at the normal timeout rather
@@ -665,6 +723,12 @@ impl Overflow {
             }
         }
         let _ = sock.set_read_timeout(Some(idle));
+        // Subscribed and hung up: a scanner, an uptime check, another pool's probe (ours does
+        // exactly this). There is nobody to relay, and dialling an upstream for it spent one of
+        // their connections from our address and counted a "miner" that died on the handshake.
+        if gone && user.is_empty() {
+            return Gate::Local(buf);
+        }
         // A relay only helps a miner if the pool at the other end can pay it, and every
         // upstream pays the username we forward. A name we would answer `BadUsername`
         // ourselves is one no pool can pay: some refuse the authorize outright, the rest
@@ -760,7 +824,7 @@ impl Overflow {
             let ident = canon(u);
             let worker = u.split_once('.').map(|(_, w)| w.to_string()).unwrap_or_default();
             if let Some(p) = lk(&self.proxied).get_mut(&id) {
-                p.user = u.to_string();
+                p.user = printable(u);
                 p.identity = ident.clone();
                 p.worker = worker;
             }
@@ -804,6 +868,7 @@ impl Overflow {
         } else if !was_refused && lasted < CHURN_SECS && submits == 0 {
             // A relay we ended ourselves is not the miner hanging up on the handshake.
             self.relays_churned.fetch_add(1, Ordering::Relaxed);
+            self.note_churn_ip(ip);
         }
         let up = &self.upstreams[idx];
         let up_submits = up.submits.fetch_add(submits, Ordering::Relaxed) + submits;
@@ -820,7 +885,7 @@ impl Overflow {
             ""
         };
         log::info!("overflow: relay ended {host} user={} -> {} after {}s, {} submits / {} accepted / {} rejected{}{}",
-            if user.is_empty() { "(never authorized)" } else { &user }, name, lasted,
+            if user.is_empty() { "(never authorized)".to_string() } else { printable(&user) }, name, lasted,
             submits, accepted, rejected, ending,
             if last_reject.is_empty() { String::new() } else { format!(", last reject: {last_reject}") });
         if up_submits >= BLACKHOLE_SUBMITS && up_accepted == 0 {
@@ -1103,6 +1168,12 @@ pub fn pump(
             }
             down_stats.upstream_lines.fetch_add(1, Ordering::Relaxed);
             down_stats.note_reply(&line);
+            // An upstream telling the miner to go somewhere else is not passed on: firmware
+            // that obeys it leaves for a host of the upstream's choosing until it is power
+            // cycled, and an empty one sends it round again through this relay.
+            if line.contains("client.reconnect") && is_method(&line, "client.reconnect") {
+                continue;
+            }
             if miner_w.write_all(line.as_bytes()).is_err() {
                 break;
             }
@@ -1121,6 +1192,7 @@ pub fn pump(
         return;
     }
     // miner -> upstream, on the caller's thread
+    let (mut sec_at, mut sec_lines) = (Instant::now(), 0u32);
     let mut line = String::new();
     loop {
         line.clear();
@@ -1128,6 +1200,15 @@ pub fn pump(
             Ok(0) | Err(_) => break,
             Ok(n) if n as u64 > RELAY_MAX_LINE || !line.ends_with('\n') => break,
             Ok(_) => {}
+        }
+        if sec_at.elapsed() >= Duration::from_secs(1) {
+            sec_at = Instant::now();
+            sec_lines = 0;
+        }
+        sec_lines += 1;
+        if sec_lines > RELAY_LINES_PER_SEC {
+            log::warn!("overflow: relayed miner over {RELAY_LINES_PER_SEC} lines a second; closing the relay");
+            break;
         }
         stats.miner_lines.fetch_add(1, Ordering::Relaxed);
         stats.note_submit(&line);
@@ -1148,11 +1229,21 @@ pub fn pump(
 
 /// A reply with an id whose result is literally `true`: the authorize answer during the
 /// handshake, a share accept afterwards. Either way the miner is past `initiate_stratum`.
+fn is_method(line: &str, method: &str) -> bool {
+    serde_json::from_str::<Value>(line).ok().and_then(|v| v.get("method")?.as_str().map(|m| m == method)).unwrap_or(false)
+}
+
 fn is_true_result(line: &str) -> bool {
     let Ok(v) = serde_json::from_str::<Value>(line) else { return false };
     v.get("method").is_none()
         && v.get("id").map(|i| !i.is_null()).unwrap_or(false)
         && v.get("result").and_then(|r| r.as_bool()) == Some(true)
+}
+
+/// A username as far as it is fit to store, show and log: printable ASCII, bounded. What comes
+/// in a mid-relay authorize has been through no other check, newlines and escape codes included.
+fn printable(s: &str) -> String {
+    s.chars().filter(|c| c.is_ascii_graphic()).take(128).collect()
 }
 
 fn short(s: &str) -> String {
@@ -1949,5 +2040,48 @@ mod tests {
         assert!(again.ident_grandfathered("bc1qkeep"));
         assert!(again.ip_grandfathered("192.0.2.50".parse().unwrap()));
         assert!(!again.ident_grandfathered("bc1qother"));
+    }
+
+    /// A source whose relays keep dying with no share is served locally: relaying it again
+    /// helps nobody, and if it is a real miner it is mining nowhere while we keep doing it.
+    #[test]
+    fn a_source_that_keeps_churning_is_served_locally() {
+        let ov = overflow_for_test(vec![], "force");
+        let ip: IpAddr = "203.0.113.9".parse().unwrap();
+        for n in 1..=CHURN_LOCAL_AFTER {
+            assert!(!ov.ip_churned(ip), "not after {} churns", n - 1);
+            ov.note_churn_ip(ip);
+        }
+        assert!(ov.ip_churned(ip));
+        assert!(!ov.ip_churned("203.0.113.10".parse().unwrap()), "only that source");
+        // and it wears off
+        lk(&ov.churn_ips).insert(ip, (CHURN_LOCAL_AFTER, unix_now() - CHURN_LOCAL_SECS - 1));
+        assert!(!ov.ip_churned(ip));
+    }
+
+    #[test]
+    fn an_upstream_cannot_send_a_relayed_miner_elsewhere() {
+        assert!(is_method(r#"{"id":null,"method":"client.reconnect","params":["evil.example",3333]}"#, "client.reconnect"));
+        assert!(!is_method(r#"{"id":null,"method":"mining.notify","params":["client.reconnect"]}"#, "client.reconnect"));
+        assert!(!is_method("client.reconnect not json", "client.reconnect"));
+    }
+
+    #[test]
+    fn a_username_is_stored_and_logged_without_control_characters() {
+        assert_eq!(printable("bc1qabc.rig\n2026-09-19 WARN forged\x1b[2J"), "bc1qabc.rig2026-09-19WARNforged[2J");
+        assert_eq!(printable(&"a".repeat(500)).len(), 128);
+    }
+
+    #[test]
+    fn the_grandfather_set_is_bounded_but_never_forgets_who_it_has() {
+        let mut g = Grandfather::default();
+        for i in 0..GRANDFATHER_MAX {
+            g.idents.insert(format!("id{i}"), 1);
+        }
+        g.note_ident("newcomer", 5);
+        assert!(!g.has_ident("newcomer", 5, 100), "no room");
+        g.note_ident("id7", 5);
+        assert_eq!(g.idents["id7"], 5, "a known one is still refreshed");
+        assert_eq!(g.idents.len(), GRANDFATHER_MAX);
     }
 }
