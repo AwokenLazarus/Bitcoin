@@ -318,6 +318,8 @@ struct Session {
     pool_only_warned: Option<Instant>,
     /// When this session last said its shares are credited by hash alone.
     uncommitted_warned: Option<Instant>,
+    /// When the house gateway's session last said it is over the reject-flood limit.
+    flood_warned: Option<Instant>,
     /// When this session last had a block candidate; see `MAX_IDLE_FRAME`.
     candidate_at: Option<Instant>,
     /// Work seen per share username on this session; the dominant identity is the
@@ -474,6 +476,7 @@ pub async fn run(shared: Arc<Shared>, mut stream: TcpStream, remote: SocketAddr)
         pool_only_full_jobs: 0,
         pool_only_warned: None,
         uncommitted_warned: None,
+        flood_warned: None,
         candidate_at: None,
         identity_work: HashMap::new(),
         gateway_script: known_script,
@@ -1419,6 +1422,23 @@ impl Session {
             self.recent_rejects.pop_front();
         }
         if self.recent_rejects.len() > REJECT_FLOOD {
+            // The pool's own gateway is one session carrying every stratum miner, and what it
+            // forwards is whatever they send it. Hanging up on it because one of them found a
+            // way to make it forward refusable work would disconnect all of them to punish
+            // one; say so instead, and let the gateway deal with its miner.
+            if self.is_house_stratum() {
+                if self.flood_warned.is_none_or(|t| t.elapsed() > Duration::from_secs(60)) {
+                    self.flood_warned = Some(now);
+                    log::warn!(
+                        "[{}] the house gateway has had {} shares refused in {}s (latest: see its last_reject); not dropping it, but one of its miners is flooding",
+                        self.id,
+                        self.recent_rejects.len(),
+                        REJECT_WINDOW.as_secs()
+                    );
+                }
+                self.recent_rejects.clear();
+                return Ok(());
+            }
             return Err(SessionError::RejectFlood(self.recent_rejects.len(), REJECT_WINDOW.as_secs()));
         }
         Ok(())
