@@ -102,7 +102,7 @@
     const items = (SUB[current] || []).filter(([id]) => { const n = $(id); return n && !n.hidden && !n.closest("[hidden]"); });
     subnav.hidden = items.length < 2;
     subnav.setAttribute("aria-label", T("sub.aria"));
-    const box = subnav.firstChild;
+    const box = subnav.querySelector(".wrap");
     box.innerHTML = "";
     for (const [id, key] of items) {
       const a = document.createElement("a");
@@ -144,6 +144,70 @@
       window.scrollTo({ top: 0, behavior: "smooth" });
     }
   });
+
+  // ------------------------------------------------------------ scrollable bars
+  // The header tabs and the sub-bar scroll sideways when they do not fit. A hidden scrollbar is
+  // only reachable by touch or trackpad, so a mouse gets three more ways: arrows that appear at
+  // whichever edge has more to show, the wheel, and drag. The open tab is always brought into view.
+  function scroller(bar) {
+    if (!bar || bar.__scroller) return;
+    bar.__scroller = true;
+    const host = document.createElement("div");
+    host.className = "scroller" + (bar.classList.contains("views") ? " scroller-views" : "");
+    bar.parentNode.insertBefore(host, bar);
+    host.appendChild(bar);
+    const mk = (dir) => {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.className = "scroller-btn scroller-" + dir;
+      b.setAttribute("aria-label", T(dir === "prev" ? "scroll.prev" : "scroll.next"));
+      b.addEventListener("click", () => bar.scrollBy({ left: (dir === "prev" ? -1 : 1) * Math.max(160, bar.clientWidth * 0.6), behavior: "smooth" }));
+      host.appendChild(b);
+      return b;
+    };
+    const prev = mk("prev"), next = mk("next");
+    const update = () => {
+      const max = bar.scrollWidth - bar.clientWidth;
+      host.classList.toggle("can-prev", bar.scrollLeft > 4);
+      host.classList.toggle("can-next", max - bar.scrollLeft > 4);
+      prev.tabIndex = bar.scrollLeft > 4 ? 0 : -1;
+      next.tabIndex = max - bar.scrollLeft > 4 ? 0 : -1;
+    };
+    bar.addEventListener("scroll", update, { passive: true });
+    bar.addEventListener("wheel", (e) => {
+      if (bar.scrollWidth <= bar.clientWidth || Math.abs(e.deltaX) > Math.abs(e.deltaY)) return;
+      e.preventDefault();
+      bar.scrollLeft += e.deltaY;
+    }, { passive: false });
+    let drag = null;
+    bar.addEventListener("pointerdown", (e) => { if (e.pointerType === "mouse" && e.button === 0) drag = { x: e.clientX, left: bar.scrollLeft, moved: false }; });
+    window.addEventListener("pointermove", (e) => {
+      if (!drag) return;
+      const dx = e.clientX - drag.x;
+      if (Math.abs(dx) > 5) drag.moved = true;
+      if (drag.moved) bar.scrollLeft = drag.left - dx;
+    });
+    window.addEventListener("pointerup", () => { if (drag && drag.moved) bar.__dragged = Date.now(); drag = null; });
+    bar.addEventListener("click", (e) => { if (bar.__dragged && Date.now() - bar.__dragged < 120) { e.preventDefault(); e.stopPropagation(); } }, true);
+    if ("ResizeObserver" in window) new ResizeObserver(update).observe(bar);
+    window.addEventListener("resize", update);
+    document.addEventListener("lz:i18n", () => setTimeout(update, 0));
+    bar.__update = update;
+    update();
+  }
+  function reveal(bar, sel) {
+    const a = bar && bar.querySelector(sel);
+    if (!a || bar.scrollWidth <= bar.clientWidth) return;
+    const pad = 44, l = a.offsetLeft - pad, r = a.offsetLeft + a.offsetWidth + pad;
+    if (l < bar.scrollLeft) bar.scrollTo({ left: Math.max(0, l), behavior: "smooth" });
+    else if (r > bar.scrollLeft + bar.clientWidth) bar.scrollTo({ left: r - bar.clientWidth, behavior: "smooth" });
+    bar.__update && bar.__update();
+  }
+  document.addEventListener("lz:view", () => requestAnimationFrame(() => {
+    reveal(document.querySelector(".nav.views"), "a.is-active");
+    const sb = document.querySelector(".subnav .wrap");
+    if (sb) { scroller(sb); sb.scrollLeft = 0; sb.__update && sb.__update(); }
+  }));
 
   // ------------------------------------------------------------ live touches
   // Numbers that change flash once, so a refresh is felt without anything moving.
@@ -299,7 +363,14 @@
   // ------------------------------------------------------------ boot
   root.classList.add("app");
   route(true);
-  const ready = () => { route(true); renderSubnav(); watchBumps(); };
+  const ready = () => {
+    route(true);
+    renderSubnav();
+    scroller(document.querySelector(".nav.views"));
+    scroller(document.querySelector(".subnav .wrap"));
+    reveal(document.querySelector(".nav.views"), "a.is-active");
+    watchBumps();
+  };
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", ready); else ready();
   window.LZ_APP = { show, toast, openPalette };
 })();

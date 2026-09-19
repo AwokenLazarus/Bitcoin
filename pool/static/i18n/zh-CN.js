@@ -1150,3 +1150,4 @@ window.LZ_I18N_DICTS["zh-CN"].app.sub = {"aria": "本页内容", "intro": "概�
 window.LZ_I18N_DICTS["zh-CN"].app.sub.intro = "欢迎";
 window.LZ_I18N_DICTS["zh-CN"].app.sub.live = "实时数据";
 window.LZ_I18N_DICTS["zh-CN"].app.chart.rangeSoon = "更长的时间范围将随下一次节点更新提供";
+window.LZ_I18N_DICTS["zh-CN"].app.scroll = {"prev": "向左滚动", "next": "向右滚动"};

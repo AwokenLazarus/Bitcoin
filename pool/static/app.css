@@ -323,3 +323,55 @@ html.app { scroll-padding-top: calc(var(--mast-full, 7.5rem) + 14px); }
   .app .promo-copy { font-size: 0.84rem; line-height: 1.35; }
   .app .promo-tag { display: none; }
 }
+
+/* ------------------------------------------------------------------ bars that scroll sideways */
+.scroller { position: relative; min-width: 0; display: flex; align-items: center; }
+.scroller > .nav, .scroller > .wrap { flex: 1 1 auto; min-width: 0; }
+.scroller > .wrap { overflow-x: auto; }
+.scroller-views > .nav { -webkit-mask: none; mask: none; cursor: default; }
+.scroller-btn {
+  position: absolute;
+  top: 50%;
+  z-index: 2;
+  width: 1.9rem;
+  height: 1.9rem;
+  translate: 0 -50%;
+  display: none;
+  place-items: center;
+  border: 1px solid var(--line-strong);
+  border-radius: 50%;
+  background: var(--bg-raised);
+  color: var(--ink);
+  cursor: pointer;
+  box-shadow: 0 6px 16px -6px rgb(0 0 0 / 0.9);
+  transition: border-color 0.15s, color 0.15s;
+}
+.scroller-btn:hover { border-color: var(--brass); color: var(--brass); }
+.scroller-btn::before { content: ""; width: 0.42rem; height: 0.42rem; border: solid currentColor; border-width: 0 0 1.8px 1.8px; }
+.scroller-prev { left: 0; }
+.scroller-prev::before { rotate: 45deg; translate: 1px 0; }
+.scroller-next { right: 0; }
+.scroller-next::before { rotate: -135deg; translate: -1px 0; }
+.scroller.can-prev > .scroller-prev, .scroller.can-next > .scroller-next { display: grid; }
+/* Fade the clipped edge behind its arrow, so it reads as "more this way" rather than cut off. */
+.scroller.can-prev::before, .scroller.can-next::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  z-index: 1;
+  width: 3.4rem;
+  pointer-events: none;
+}
+.scroller.can-prev::before { left: 0; background: linear-gradient(90deg, var(--bg) 35%, transparent); }
+.scroller.can-next::after { right: 0; background: linear-gradient(270deg, var(--bg) 35%, transparent); }
+.subnav .scroller { max-width: var(--measure); margin-inline: auto; }
+
+/* Give the six tabs the room before anything has to scroll: the side of the header sheds its
+   least important pieces first as the window narrows. */
+@media (max-width: 1320px) { .app .pal-label { display: none; } .app .pal-btn { padding: 0 0.65rem; } }
+@media (max-width: 1240px) { .app .nav.views > a[data-view-link] { padding-inline: 0.62rem; } .app .topbar { gap: 0.8rem; } }
+@media (max-width: 1160px) { .app .topbar-side .chip.nav-live { display: none; } }
+@media (max-width: 1060px) { .app .topbar-side > a.btn.small { display: none; } .app .pal-btn kbd { display: none; } }
+@media (max-width: 980px) { .app .wordmark { font-size: 1.25rem; } .app .nav.views { font-size: 0.78rem; } }
+@media (max-width: 860px) { .app .scroller-views { grid-area: nav; } }

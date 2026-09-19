@@ -1150,3 +1150,4 @@ window.LZ_I18N_DICTS["en"].app.sub = {"aria": "In this view", "intro": "Overview
 window.LZ_I18N_DICTS["en"].app.sub.intro = "Welcome";
 window.LZ_I18N_DICTS["en"].app.sub.live = "Live numbers";
 window.LZ_I18N_DICTS["en"].app.chart.rangeSoon = "Longer ranges arrive with the next node update";
+window.LZ_I18N_DICTS["en"].app.scroll = {"prev": "Scroll left", "next": "Scroll right"};
