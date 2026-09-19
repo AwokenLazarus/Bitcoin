@@ -1480,6 +1480,7 @@ _resp_cache_lock = threading.Lock()
 _RESP_CACHE_MAX = 512
 _BLOCKHASH_RE = re.compile(r"^[0-9a-fA-F]{64}$")
 _PEER_V4_RE = re.compile(r"^(\d{1,3})\.(\d{1,3})\.\d{1,3}\.\d{1,3}(?::\d+)?$")
+_PEER_V4_PART_RE = re.compile(r"^(\d{1,3})(?:\.(\d{1,3}))?[\d.:]*$")
 _PEER_V6_RE = re.compile(r"^\[?([0-9a-fA-F]{0,4}):([0-9a-fA-F]{0,4}):[0-9a-fA-F:.]*\]?(?::\d+)?$")
 
 
@@ -1492,6 +1493,12 @@ def _mask_peer(value):
         m = _PEER_V4_RE.match(part)
         if m:
             out.append(f"{m.group(1)}.{m.group(2)}.x.x")
+            continue
+        # Several sessions are joined with "+" and the string is cut at a fixed length, so the
+        # last one can be the front of an address: all digits and dots, but not a whole one.
+        m = _PEER_V4_PART_RE.match(part)
+        if m:
+            out.append(f"{m.group(1)}.{m.group(2)}.x.x" if m.group(2) else "x")
             continue
         m = _PEER_V6_RE.match(part) if ":" in part else None
         out.append(f"{m.group(1)}:{m.group(2)}::x" if m else part)
