@@ -1,0 +1,21 @@
+[Unit]
+Description=Lazarus gateway: solo ASIC (staging) - lazarus-hub
+After=bitcoind-mining.service 
+RequiresMountsFor=/srv/pool
+
+[Service]
+User=gateway
+Group=gateway
+SupplementaryGroups=btc-mining
+ExecStart=/opt/lazarus/bin/lazarus-gateway --config /etc/lazarus/gateway-solo-asic.json
+Restart=always
+RestartSec=5
+LimitNOFILE=1048576
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/srv/pool/prime-production /srv/pool/gateway
+
+[Install]
+WantedBy=multi-user.target

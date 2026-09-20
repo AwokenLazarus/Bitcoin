@@ -1,0 +1,11 @@
+#!/usr/bin/env python3
+# One line of staging-pool health per run, for the phase 7 soak review.
+import json,time,urllib.request,re,subprocess
+def get(u):
+    try: return urllib.request.urlopen(u,timeout=5).read().decode()
+    except Exception as e: return ""
+s=json.loads(get("http://127.0.0.1:28916/stats.json") or "{}"); g=get("http://127.0.0.1:7152/")
+num=lambda k: (re.search(k+r": ([-0-9.]+)",g) or [0,"0"])[1]
+t=s.get("totals",{}); n=s.get("node",{})
+tip=subprocess.run(["sudo","-u","btc-mining","/opt/knots/current/bin/bitcoin-cli","-datadir=/srv/node-mining/bitcoin","-rpcport=9332","getblockcount"],capture_output=True,text=True).stdout.strip()
+print(json.dumps({"ts":int(time.time()),"node_height":tip,"prime_height":n.get("height"),"tip_age_s":n.get("tip_age_s"),"gw_accepted":num("Local Shares Accepted"),"gw_rejected":num("Local Shares Rejected"),"gw_hashrate":(re.search(r"Estimated Hashrate: ([^<]+)",g) or [0,""])[1].strip(),"gw_published_height":num("Published height"),"pow_missed":(re.search(r"missed: (\d+)",g) or [0,"0"])[1],"prime_accepted":t.get("shares_accepted"),"prime_rejected":t.get("shares_rejected"),"pool_only_shares":t.get("pool_only_shares"),"block_candidates":t.get("block_candidates"),"gateways":s.get("gateways"),"conns":s.get("connections_open")}))

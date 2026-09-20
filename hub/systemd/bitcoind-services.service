@@ -1,0 +1,26 @@
+[Unit]
+Description=Bitcoin Knots (BLAKE2b) - lazarus-hub services node
+After=network-online.target srv-node\x2dservices.mount
+Wants=network-online.target
+RequiresMountsFor=/srv/node-services
+
+[Service]
+User=btc-services
+Group=btc-services
+ExecStart=/opt/knots/current/bin/bitcoind -conf=/etc/bitcoin-services/bitcoin.conf -datadir=/srv/node-services/bitcoin -startupnotify='systemd-notify --ready' -shutdownnotify='systemd-notify --stopping'
+Type=notify
+NotifyAccess=all
+Restart=always
+RestartSec=15
+TimeoutStartSec=infinity
+TimeoutStopSec=900
+LimitNOFILE=1048576
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/srv/node-services/bitcoin
+MemoryDenyWriteExecute=yes
+
+[Install]
+WantedBy=multi-user.target

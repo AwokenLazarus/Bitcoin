@@ -1,0 +1,21 @@
+[Unit]
+Description=Lazarus Prime (production) - lazarus-hub
+After=bitcoind-mining.service 
+RequiresMountsFor=/srv/pool
+
+[Service]
+User=prime
+Group=prime
+SupplementaryGroups=btc-mining
+ExecStart=/opt/lazarus/bin/primed --config /etc/lazarus/prime.toml run
+Restart=always
+RestartSec=5
+LimitNOFILE=1048576
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/srv/pool/prime-production /srv/pool/gateway
+
+[Install]
+WantedBy=multi-user.target

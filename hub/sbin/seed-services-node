@@ -1,0 +1,11 @@
+#!/bin/bash
+# one-off: consistent local copy of the mining node's datadir to seed the services node
+set -e
+exec >> /var/log/seed-services-node.log 2>&1
+echo "$(date -u +%FT%TZ) stopping mining node for a consistent copy"
+systemctl stop bitcoind-mining
+rsync -a --delete --exclude=.cookie --exclude=bitcoind.pid --exclude=debug.log --exclude=peers.dat --exclude=anchors.dat --exclude=banlist.json --exclude=mempool.dat --exclude=.lock /srv/node-mining/bitcoin/ /srv/node-services/bitcoin/
+chown -R btc-services:btc-services /srv/node-services/bitcoin
+echo "$(date -u +%FT%TZ) copy done, restarting mining node"
+systemctl start bitcoind-mining
+echo "$(date -u +%FT%TZ) SEED COMPLETE"

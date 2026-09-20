@@ -1,0 +1,14 @@
+#!/usr/bin/env python3
+import json,os
+env=dict(l.strip().split("=",1) for l in open("/srv/pool/secrets/explorer.env") if "=" in l)
+cfg={"MEMPOOL":{"NETWORK":"mainnet","BACKEND":"electrum","ENABLED":True,"OFFICIAL":False,"HTTP_PORT":8999,"SPAWN_CLUSTER_PROCS":0,"API_URL_PREFIX":"/api/v1/","POLL_RATE_MS":2000,
+ "CACHE_DIR":"/srv/node-services/explorer/backend-cache","CACHE_ENABLED":True,"CLEAR_PROTECTION_MINUTES":20,"RECOMMENDED_FEE_PERCENTILE":50,"BLOCK_WEIGHT_UNITS":4000000,
+ "INITIAL_BLOCKS_AMOUNT":8,"MEMPOOL_BLOCKS_AMOUNT":8,"EXTERNAL_ASSETS":[],"USER_AGENT":"mempool","STDOUT_LOG_MIN_PRIORITY":"info",
+ "INDEXING_BLOCKS_AMOUNT":-1,"BLOCKS_SUMMARIES_INDEXING":True,"GOGGLES_INDEXING":False,"AUTOMATIC_POOLS_UPDATE":False,"AUDIT":True,"RUST_GBT":True,"CPFP_INDEXING":True,
+ "MAX_PUSH_TX_SIZE_WEIGHT":4000000,"ALLOW_UNREACHABLE":True,"POOLS_JSON_URL":"http://127.0.0.1:8765/pools-v2.json","POOLS_UPDATE_DELAY":604800,"PRICE_UPDATES_PER_HOUR":1,"MAX_TRACKED_ADDRESSES":100},
+ "CORE_RPC":{"HOST":"127.0.0.1","PORT":9342,"USERNAME":env["CORE_RPC_USERNAME"],"PASSWORD":env["CORE_RPC_PASSWORD"],"TIMEOUT":120000,"COOKIE":False,"COOKIE_PATH":"","DEBUG_LOG_PATH":""},
+ "ELECTRUM":{"HOST":"127.0.0.1","PORT":50011,"TLS_ENABLED":False},
+ "DATABASE":{"ENABLED":True,"HOST":"127.0.0.1","PORT":3306,"SOCKET":"","DATABASE":"mempool","USERNAME":"mempool","PASSWORD":env["MYSQL_PASSWORD"],"TIMEOUT":180000,"PID_DIR":"","POOL_SIZE":100},
+ "SYSLOG":{"ENABLED":False},"STATISTICS":{"ENABLED":True,"TX_PER_SECOND_SAMPLE_PERIOD":150},"LIGHTNING":{"ENABLED":False},"MAXMIND":{"ENABLED":False},"SOCKS5PROXY":{"ENABLED":False},"EXTERNAL_DATA_SERVER":{},"REDIS":{"ENABLED":False},"FIAT_PRICE":{"ENABLED":True}}
+p="/run/mempool-backend/mempool-config.json"; os.makedirs(os.path.dirname(p),exist_ok=True)
+fd=os.open(p,os.O_WRONLY|os.O_CREAT|os.O_TRUNC,0o640); os.write(fd,json.dumps(cfg,indent=1).encode()); os.close(fd)

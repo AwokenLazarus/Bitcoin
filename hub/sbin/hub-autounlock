@@ -1,0 +1,12 @@
+#!/bin/bash
+# Auto-unlock /srv/pool at boot via Tang (clevis, LUKS slot 1) over Tailscale. Waits up to 5 min for
+# tailscaled to connect and Tang to answer. If it never does, the manual path still works:
+#   cat ~/.config/lazarus-hub/luks-pool.key | ssh lazarus-hub sudo hub-unlock   (from AgentLaz)
+[ -e /dev/mapper/pool ] && exit 0
+for i in $(seq 1 60); do
+  if curl -s -m 5 http://100.102.29.117:7500/adv -o /dev/null; then
+    clevis luks unlock -d /dev/hub/pool -n pool && { echo "pool unlocked via Tang"; exit 0; }
+  fi
+  sleep 5
+done
+echo "Tang unreachable after 5 min; /srv/pool stays locked (manual unlock needed)" >&2; exit 1

@@ -1,0 +1,8 @@
+FEE_COOKIE=/srv/node-services/bitcoin/.cookie
+FEE_RPC=http://127.0.0.1:9342
+FEE_WALLET=lazarus-fees
+FEE_POOL_ADDR_FILE=/etc/lazarus/fee-wallet/lazarus-fees-address.txt
+FEE_BLOCKS=/srv/pool/prime-production/blocks.jsonl
+MAKEGOOD_QUEUE=/srv/pool/fee-wallet/makegood-queue
+FEE_SETTLEMENTS=/srv/pool/lazarus-pool/owed-settlements.json
+HA_ENV=/etc/lazarus/fee-wallet/ha.env

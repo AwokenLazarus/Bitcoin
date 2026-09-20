@@ -1,0 +1,15 @@
+[Unit]
+Description=Auto-unlock the encrypted pool volume via Tang over Tailscale
+After=network-online.target tailscaled.service
+Wants=network-online.target tailscaled.service
+DefaultDependencies=no
+Before=srv-pool.mount
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/hub-autounlock
+TimeoutStartSec=6min
+
+[Install]
+WantedBy=multi-user.target

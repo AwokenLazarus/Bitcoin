@@ -1,0 +1,10 @@
+[Unit]
+Description=Run the Lazarus fee wallet every minute (hub)
+
+[Timer]
+OnBootSec=120
+OnUnitActiveSec=60
+AccuracySec=5
+
+[Install]
+WantedBy=timers.target

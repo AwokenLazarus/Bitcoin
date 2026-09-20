@@ -1,0 +1,16 @@
+#!/bin/bash
+# Build primed and lazarus-gateway from the public repo's main branch (= what production runs).
+set -e
+exec >> /var/log/build-lazarus.log 2>&1
+export HOME=/var/lib/electrum CARGO_HOME=/var/lib/electrum/.cargo RUSTUP_HOME=/var/lib/electrum/.rustup PATH=/var/lib/electrum/.cargo/bin:$PATH
+cd /var/lib/electrum/src
+if [ -d Bitcoin/.git ]; then git -C Bitcoin fetch -q origin "${REF:-main}" && git -C Bitcoin checkout -q FETCH_HEAD; else git clone -q --branch main https://github.com/AwokenLazarus/Bitcoin Bitcoin; fi
+cd Bitcoin; echo "$(date -u +%FT%TZ) source: $(git rev-parse --short HEAD) $(git log -1 --format=%s | cut -c1-80)"
+rustc --version
+( cd prime && (cargo build --release --locked 2>/dev/null || cargo build --release) 2>&1 | tail -2 && cargo test --release -q 2>&1 | grep -E "^test result|FAILED|failed" | sort | uniq -c )
+( cd lazarus && cargo build --release -p lazarus-gateway 2>&1 | tail -2 || cargo build --release 2>&1 | tail -2 )
+install -d /opt/lazarus/stage
+install -m 755 prime/target/release/primed /opt/lazarus/stage/primed
+install -m 755 lazarus/target/release/lazarus-gateway /opt/lazarus/stage/lazarus-gateway
+git rev-parse HEAD > /opt/lazarus/stage/SOURCE_COMMIT
+echo "$(date -u +%FT%TZ) BUILD DONE"; md5sum /opt/lazarus/stage/primed /opt/lazarus/stage/lazarus-gateway

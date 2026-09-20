@@ -1,0 +1,7 @@
+#!/bin/bash
+# Unlock and mount the encrypted pool volume. Passphrase is read from stdin; it is never stored on this host.
+# From AgentLaz:  cat ~/.config/lazarus-hub/luks-pool.key | ssh lazarus-hub sudo hub-unlock
+set -e
+[ -e /dev/mapper/pool ] || cryptsetup open --key-file=- /dev/hub/pool pool
+mountpoint -q /srv/pool || mount -o noatime /dev/mapper/pool /srv/pool
+echo "pool volume mounted"

@@ -1,0 +1,6 @@
+UUID=6AAE-0275	/boot/efi	vfat	errors=remount-ro	0	2
+UUID=36b3dc55-6e71-438e-8395-5c35073c07aa	/	ext4	errors=remount-ro	0	1
+LABEL=node-mining    /srv/node-mining    ext4  noatime,nofail  0 2
+LABEL=node-services  /srv/node-services  ext4  noatime,nofail  0 2
+LABEL=scratch        /srv/scratch        ext4  noatime,nofail  0 2
+/dev/mapper/pool  /srv/pool  ext4  noatime,_netdev,x-systemd.requires=hub-autounlock.service,x-systemd.device-timeout=6min,nofail  0 0

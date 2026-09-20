@@ -1,0 +1,16 @@
+network = "bitcoin"
+daemon_dir = "/srv/node-services/bitcoin"
+daemon_rpc_addr = "127.0.0.1:9342"
+daemon_p2p_addr = "127.0.0.1:9343"
+electrum_rpc_addr = "127.0.0.1:50011"
+monitoring_addr = "127.0.0.1:4225"
+db_dir = "/srv/node-services/electrs-db"
+log_filters = "INFO"
+jsonrpc_timeout = 120
+# tuned for the hub: fast local node, NVMe mirror, 32 threads
+index_batch_size = 100
+db_parallelism = 8
+# no cap on address history length (production caps at 5000 to protect the old server)
+index_lookup_limit = 0
+server_banner = "Lazarus Hub electrs header-v2 (BLAKE2b)"
+legacy_protocol_clients = "mempool-v2"

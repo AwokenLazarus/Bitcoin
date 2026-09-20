@@ -1,0 +1,19 @@
+[Unit]
+Description=Cloudflare Tunnel (lazarus-hub): explorer origin only
+After=hub-autounlock.service network-online.target
+Wants=network-online.target
+RequiresMountsFor=/srv/pool
+
+[Service]
+User=cloudflared
+EnvironmentFile=/srv/pool/secrets/cloudflared.env
+ExecStart=/usr/bin/cloudflared --no-autoupdate tunnel run
+Restart=always
+RestartSec=10
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target

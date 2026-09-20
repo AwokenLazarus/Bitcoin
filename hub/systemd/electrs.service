@@ -1,0 +1,23 @@
+[Unit]
+Description=electrs header-v2 (BLAKE2b) - lazarus-hub
+After=hub-autounlock.service bitcoind-services.service
+Wants=bitcoind-services.service
+RequiresMountsFor=/srv/node-services
+
+[Service]
+User=electrum
+Group=electrum
+SupplementaryGroups=btc-services
+ExecStart=/opt/electrs/electrs --conf /etc/electrs/electrs.toml
+Restart=always
+RestartSec=3
+LimitNOFILE=1048576
+Nice=5
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/srv/node-services/electrs-db
+
+[Install]
+WantedBy=multi-user.target

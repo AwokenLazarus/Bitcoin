@@ -1,0 +1,22 @@
+[Unit]
+Description=Lazarus explorer backend (mempool 3.3.1, Lazarus build) - lazarus-hub
+After=hub-autounlock.service bitcoind-services.service electrs.service docker.service
+RequiresMountsFor=/srv/pool /srv/node-services
+
+[Service]
+User=explorer
+Group=explorer
+RuntimeDirectory=mempool-backend
+WorkingDirectory=/opt/mempool-backend
+Environment=NODE_OPTIONS=--max-old-space-size=16384
+Environment=MEMPOOL_CONFIG_FILE=/run/mempool-backend/mempool-config.json
+ExecStartPre=+/bin/sh -c '/usr/local/sbin/mempool-backend-config && chown explorer:explorer /run/mempool-backend/mempool-config.json && ln -sf /run/mempool-backend/mempool-config.json /opt/mempool-backend/mempool-config.json'
+ExecStart=/opt/node/bin/node /opt/mempool-backend/package/index.js
+Restart=on-failure
+RestartSec=10
+LimitNOFILE=1048576
+NoNewPrivileges=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target

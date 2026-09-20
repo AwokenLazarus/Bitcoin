@@ -1,0 +1,20 @@
+[Unit]
+Description=Lazarus pool site backend: writer (:8888)
+After=hub-autounlock.service lazarus-prime.service lazarus-gateway-asic.service mempool-backend.service
+RequiresMountsFor=/srv/pool
+[Service]
+User=web
+Group=web
+SupplementaryGroups=btc-mining
+WorkingDirectory=/opt/lazarus-pool
+Environment=POOL_LISTEN_PORT=8888 POOL_DB=/srv/pool/lazarus-pool/pool.sqlite
+ExecStart=/usr/bin/python3 /opt/lazarus-pool/server.py
+Restart=always
+RestartSec=5
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/srv/pool/lazarus-pool
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,19 @@
+#!/bin/bash
+# Phase 8 step 4-5: switch the hub from staging to the production prime identity. Idempotent-ish; run once.
+set -euo pipefail
+ST=/etc/lazarus/cutover-staged
+test -f /srv/pool/prime-production/lazarus-prime.key || { echo "no production key in /srv/pool/prime-production"; exit 1; }
+systemctl stop lazarus-gateway-asic lazarus-gateway-solo lazarus-prime datum-stock-test 2>/dev/null || true
+[ -d /srv/pool/prime-staging ] && mv /srv/pool/prime-staging /srv/pool/prime-staging.retired-$(date -u +%Y%m%d)
+chown -R prime:prime /srv/pool/prime-production
+install -o root -g gateway -m 640 $ST/gateway-asic.json $ST/gateway-gpu.json $ST/gateway-solo-asic.json $ST/gateway-solo-gpu.json /etc/lazarus/
+sed -i -E 's#--config /etc/lazarus/prime-staging.toml#--config /etc/lazarus/prime.toml#' /etc/systemd/system/lazarus-prime.service
+cp $ST/nftables.conf /etc/nftables.conf && nft -f /etc/nftables.conf
+systemctl daemon-reload
+sudo -u prime -g prime /opt/lazarus/bin/primed -c /etc/lazarus/prime.toml check
+PK=$(sudo -u prime -g prime /opt/lazarus/bin/primed -c /etc/lazarus/prime.toml pubkey); [ "${PK:0:8}" = "29120606" ] || { echo "pubkey mismatch: ${PK:0:8}"; exit 1; }
+systemctl start lazarus-prime; sleep 4
+systemctl start lazarus-gateway-asic lazarus-gateway-gpu lazarus-gateway-solo lazarus-gateway-solo-gpu
+systemctl enable -q lazarus-gateway-gpu lazarus-gateway-solo-gpu
+sleep 3; systemctl is-active lazarus-prime lazarus-gateway-asic lazarus-gateway-gpu lazarus-gateway-solo lazarus-gateway-solo-gpu
+curl -s 127.0.0.1:28916/stats.json | python3 -c "import sys,json;s=json.load(sys.stdin);print('prime_id',s.get('prime_id'),'| window miners',len(s.get('window',{}).get('miners',s.get('miners',[]))),'| gateways',s.get('gateways'),'| open',s.get('connections_open'))"

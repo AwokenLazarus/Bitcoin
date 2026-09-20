@@ -1,0 +1,38 @@
+# Lazarus DATUM Prime
+listen = "0.0.0.0:28915"
+stats-listen = "127.0.0.1:28916"
+advertise-address = "stratum.awokenlazarus.xyz:28915"
+data-dir = "/srv/pool/prime-production"
+motd = "Proverbs 11:1 — a just weight is his delight."
+min-diff = 1024
+payout-address = "bc1qmzl8n5xctw0k93wxvuy7cjmrfpneu9l50dxumm"
+coinbase-tag = "Lazarus"
+prime-id = 1
+window = 8
+min-payout = 500000
+max-connections = 512
+max-connections-per-ip = 32
+fee-bps = 0
+stratum-fee-bps = 1500
+# Five points of the 10% above are not kept: on every block found they are credited
+# to the DATUM miners in the window, pro rata by DATUM work, and paid with each
+# one's next output that clears min-payout. Dedicated solo is untouched: 5% fee,
+# no rebate.
+datum-rebate-bps = 750
+empty-solo-fee-bps = 750
+solo-rebate-bps = 0
+house-gateways = ["bca3020faff7b43ca90d9fad8c4a8ab6a3f70dc3937a494e52beccc1f208865b"]
+activation-height = 961640
+headline = "Lazarus"
+rpc = "http://127.0.0.1:9332"
+rpc-cookie = "/srv/node-mining/bitcoin/.cookie"
+poll = 0.5
+verify-shares = "enforce"
+
+# Refuse stock OCEAN empty-first gateways. lazarus-gateway UA is allowlisted.
+require-split-gateway = false
+# balances of miners who have stopped mining (prime/README.md, Stale balances)
+stale-after-days = 7
+stale-min-payout = 10000
+stale-coinbase = true
+stale-per-block = 25
