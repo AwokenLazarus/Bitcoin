@@ -53,11 +53,8 @@
 </script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link rel="preload" as="style" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;1,400&family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,500;1,6..72,400;1,6..72,500&display=swap">
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;1,400&family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,500;1,6..72,400;1,6..72,500&display=swap" media="print" onload="this.media='all'">
-<noscript><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;1,400&family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,500;1,6..72,400;1,6..72,500&display=swap"></noscript>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;1,400&family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,500;1,6..72,400;1,6..72,500&display=swap">
 <link rel="stylesheet" href="/static/pool.css?v=fees18">
-<link rel="stylesheet" href="/static/app.css?v=app3">
 <link rel="icon" href="data:image/svg+xml,%3Csvg%20xmlns=%22http://www.w3.org/2000/svg%22%20viewBox=%220%200%2032%2032%22%3E%3Crect%20width=%2232%22%20height=%2232%22%20fill=%22%231c1914%22/%3E%3Cpath%20fill=%22%23dbb565%22%20d=%22M21.64%204.46C21.64%203.23%2021.25%202.37%2020.33%201.92C19.86%201.69%2019.25%201.58%2018.47%201.58H15.44L15.52%200.4H19.38C20.47%200.4%2021.35%200.58%2022.02%200.93C22.69%201.28%2023.18%201.76%2023.49%202.36C23.8%202.96%2023.95%203.63%2023.95%204.37C23.95%205.12%2023.79%205.81%2023.47%206.44C23.16%207.07%2022.66%207.57%2021.99%207.95C21.32%208.33%2020.99%208.52%2019.74%208.52H15.52L15.44%207.34H19.14C20.11%207.34%2020.88%206.89%2021.31%206.04C21.53%205.61%2021.64%205.08%2021.64%204.46ZM17.36%200.4%2017.36%2010.96V30.57L18.92%2031.16V31.6H13.09V31.16L14.66%2030.57V10.96V1.43L13.09%200.84V0.4ZM15.63%2020.2%209.86%2026.79%2011.94%2027.49V28.01H6.07V27.49L8.1%2026.79L14.87%2019.31L15.8%2018.63L20.88%2012.69L18.8%2011.99V11.48H24.67V11.99L22.64%2012.69L16.57%2019.52ZM19.77%2026.79%2014.88%2020.67%2014.46%2020.29%208.36%2012.72%206.37%2011.99V11.48H14.78V11.99L12.52%2012.69L16.71%2018L17.17%2018.43L23.94%2026.77L25.93%2027.49V28.01H17.51V27.49Z%22/%3E%3C/svg%3E">
 <link rel="apple-touch-icon" href="/static/chi-rho-crest-icon.svg">
 </head>
@@ -74,15 +71,19 @@
 <header class="site-header" id="top">
   <div class="topbar wrap">
     <a class="wordmark" href="/">Lazarus <em>Pool</em></a>
-    <nav class="nav views" data-i18n-aria="nav.sections" aria-label="Sections">
-      <a href="#top" data-view-link="home" data-i18n="app.nav.home">Pool</a>
-      <a href="#connect" data-view-link="mine" data-i18n="app.nav.mine">Start mining</a>
-      <a href="#payout" data-view-link="payouts" data-i18n="app.nav.payouts">Payouts &amp; blocks</a>
-      <a href="#miners" data-view-link="network" data-i18n="app.nav.network">Miners</a>
-      <a href="#dashboard" data-view-link="me" data-i18n="app.nav.me">My stats</a>
-      <a href="#learn" data-view-link="learn" data-i18n="app.nav.learn">Learn</a>
+    <nav class="nav" data-i18n-aria="nav.sections" aria-label="Sections">
+      <a href="#status" data-i18n="nav.overview">Overview</a>
+      <a href="#payout" data-i18n="nav.payout">Next payout</a>
+      <a href="#connect" data-i18n="nav.connect">Connect</a>
+      <a href="#hardware" data-i18n="nav.hardware">Hardware</a>
+      <a href="#dashboard" data-i18n="nav.stats">Your stats</a>
       <a href="#dashboard" id="nav-payouts" hidden data-i18n="nav.payouts">Payouts</a>
+      <a href="#miners" data-i18n="nav.miners">Miners</a>
+      <a href="#gateways" data-i18n="nav.gateways">Gateways</a>
       <a href="#solo" id="nav-solo" hidden data-i18n="nav.solo">Solo</a>
+      <a href="#blocks" data-i18n="nav.blocks">Blocks</a>
+      <a href="#pools" data-i18n="nav.pools">Other pools</a>
+      <a href="#how" data-i18n="nav.how">How it works</a>
       <span class="nav-out">
         <a href="https://mempool.awokenlazarus.xyz" target="_blank" rel="noreferrer" data-i18n-title="nav.explorerTitle" title="Lazarus Mempool — block explorer for this chain"><span data-i18n="nav.explorer">Explorer</span><span class="ext" aria-hidden="true"></span></a>
         <a href="https://discord.gg/fD33dJXnzz" target="_blank" rel="noreferrer"><span data-i18n="nav.discord">Discord</span><span class="ext" aria-hidden="true"></span></a>
@@ -95,7 +96,6 @@
         <button type="button" class="lang-btn" data-lang="zh-CN">中文</button>
         <button type="button" class="lang-btn" data-lang="en" aria-pressed="true">English</button>
       </div>
-      <button type="button" class="pal-btn" data-palette data-i18n-aria="app.pal.open" aria-label="Search or jump (press /)"><span class="pal-ico" aria-hidden="true"></span><span class="pal-label" data-i18n="app.pal.button">Search</span><kbd>/</kbd></button>
       <span class="chip nav-live" data-live id="nav-live" data-i18n-title="nav.navHr" title="Pool hashrate right now"><b id="nav-hr">—</b></span>
       <a class="btn small" href="#connect" data-i18n="nav.connect">Connect</a>
     </div>
@@ -140,8 +140,6 @@
         <span class="chip"><span data-i18n="hero.gateways">Gateways</span> <b id="live-gateways">—</b></span>
         <span class="chip"><span data-i18n="hero.tip">Chain tip</span> <b id="live-tip">—</b></span>
       </div>
-
-      <div class="card hx-card" id="hashchart" data-i18n-aria="app.chart.title" aria-label="Pool hashrate and blocks found"></div>
 
       <div class="fee-lede" aria-labelledby="fees-title">
         <div class="fee-lede-head">
@@ -211,6 +209,10 @@
             <p class="path-hr-note" data-i18n="status.gwNote">Of DATUM hashrate only — same live credit as the chart to the left. Largest gateways listed; the rest are in Other.</p>
           </div>
         </div>
+      </div>
+      <div class="chart-wrap pool-chart">
+        <div class="chart-caption"><span data-i18n="status.chart">Pool hashrate · last 24h</span> <span class="chart-legend" id="poolchart-legend" hidden></span></div>
+        <canvas id="poolchart" width="1100" height="180" data-i18n-aria="status.chartAria" aria-label="Pool hashrate over the last 24 hours" role="img"></canvas>
       </div>
       <p class="note offline-note" id="prime-offline" hidden data-i18n="status.offline">Prime is not answering right now. Window, gateway and payout figures are the last ones it published.</p>
       <p class="note callout" id="overflow-note" hidden></p>
@@ -548,8 +550,9 @@
         <button class="btn" id="go" type="button" data-i18n="dash.go">Look up</button>
       </div>
       <div id="miner"></div>
-      <div class="hx-wrap" id="chart-wrap" hidden>
-        <div class="card hx-card" id="minerchart"></div>
+      <div class="chart-wrap" id="chart-wrap" hidden>
+        <div class="chart-caption"><span data-i18n="dash.chart">Your hashrate · last 24h</span> <span class="chart-legend" id="chart-legend" hidden></span></div>
+        <canvas id="chart" width="1100" height="150" data-i18n-aria="dash.chartAria" aria-label="Your hashrate over the last 24 hours" role="img"></canvas>
       </div>
     </div>
   </section>
@@ -623,113 +626,6 @@
       <div class="scroll tall"><table id="found"></table></div>
       <p class="kicker table-label" data-i18n="blocks.recent">Recent on this chain</p>
       <div class="scroll tall"><table id="blocktable"></table></div>
-    </div>
-  </section>
-
-  <section id="learn" class="section" aria-labelledby="learn-title">
-    <div class="wrap">
-      <header class="section-head">
-        <p class="eyebrow" data-i18n="app.learn.eyebrow">Learn</p>
-        <h2 id="learn-title" data-i18n="app.learn.title">New to this? Start here.</h2>
-        <p class="section-lede" data-i18n="app.learn.lede">Six short answers, then the long versions if you want them. No account, no sign-up: mining here only ever needs a payout address.</p>
-      </header>
-      <div class="learn-grid">
-        <article class="learn-card">
-          <span class="learn-n" aria-hidden="true">1</span>
-          <h3 data-i18n="app.learn.c1.t">Proof of work, in one minute</h3>
-          <p data-i18n="app.learn.c1.b">Miners race to find a number that makes a block’s hash fall below a target. It is pure trial and error, so the only way to win more often is to do more hashes. That cost is what makes rewriting the chain expensive. Difficulty retargets so blocks keep arriving at a steady pace however much hashrate joins.</p>
-          <a class="learn-more" href="/how"><span data-i18n="app.learn.c1.a">How the pool fits in</span><span aria-hidden="true"> →</span></a>
-        </article>
-        <article class="learn-card">
-          <span class="learn-n" aria-hidden="true">2</span>
-          <h3 data-i18n="app.learn.c2.t">Why this chain uses BLAKE2b</h3>
-          <p data-i18n="app.learn.c2.b">At block 961,640 (30 August 2026) this chain changed its proof of work from SHA-256d to BLAKE2b. Supply, halvings, addresses and every earlier block are unchanged. BLAKE2b is what Siacoin ASICs were built for, so that hardware mines here.</p>
-          <a class="learn-more" href="/bip110"><span data-i18n="app.learn.c2.a">The fork, and BIP-110</span><span aria-hidden="true"> →</span></a>
-        </article>
-        <article class="learn-card">
-          <span class="learn-n" aria-hidden="true">3</span>
-          <h3 data-i18n="app.learn.c3.t">What DATUM changes</h3>
-          <p data-i18n="app.learn.c3.b">On an ordinary pool, the pool decides what goes in the block. With your own DATUM gateway and Bitcoin Knots node, you build the block template and the pool only coordinates the reward. That keeps block-building spread across many hands. Here it costs 0% and earns a bonus.</p>
-          <a class="learn-more" href="/datum-subsidy"><span data-i18n="app.learn.c3.a">The DATUM subsidy</span><span aria-hidden="true"> →</span></a>
-        </article>
-        <article class="learn-card">
-          <span class="learn-n" aria-hidden="true">4</span>
-          <h3 data-i18n="app.learn.c4.t">How TIDES pays</h3>
-          <p data-i18n="app.learn.c4.b">TIDES keeps a rolling window of accepted shares worth about eight network-difficulties of work. When the pool finds a block, every address holding work in the window is paid its proportion. There are no rounds to hop between and nothing resets when a block lands.</p>
-          <a class="learn-more" href="/tides"><span data-i18n="app.learn.c4.a">TIDES explained</span><span aria-hidden="true"> →</span></a>
-        </article>
-        <article class="learn-card">
-          <span class="learn-n" aria-hidden="true">5</span>
-          <h3 data-i18n="app.learn.c5.t">Paid in the block itself</h3>
-          <p data-i18n="app.learn.c5.b">The pool never holds your coins. Each payout is an output of the block’s own coinbase, sent to your address. There is no balance, no threshold and no withdrawal, and anyone can check every payout on chain.</p>
-          <a class="learn-more" href="/non-custodial"><span data-i18n="app.learn.c5.a">Non-custodial payouts</span><span aria-hidden="true"> →</span></a>
-        </article>
-        <article class="learn-card">
-          <span class="learn-n" aria-hidden="true">6</span>
-          <h3 data-i18n="app.learn.c6.t">A pool that caps itself</h3>
-          <p data-i18n="app.learn.c6.b">The public stratum is held to 15% of network hashrate. Past that, new stratum connections are relayed to other pools and paid there. Miners on their own DATUM gateway are never counted, because building your own templates is not what centralizes a chain.</p>
-          <a class="learn-more" href="/self-cap"><span data-i18n="app.learn.c6.a">The 15% self-cap</span><span aria-hidden="true"> →</span></a>
-        </article>
-      </div>
-      <div class="learn-split">
-        <div class="card learn-path">
-          <h3 data-i18n="app.learn.pathTitle">From zero to mining, the DATUM way</h3>
-          <ol>
-            <li data-i18n-html="app.learn.p1"><b>Get a payout address.</b> Any wallet that gives you a bc1… address on this chain. That address is your username; there is nothing to register.</li>
-            <li data-i18n-html="app.learn.p2"><b>Run your own node.</b> Bitcoin Knots for this chain, with <code>server=1</code> and a cookie or RPC user your gateway can read. Your node is what chooses the transactions in your blocks.</li>
-            <li data-i18n-html="app.learn.p3"><b>Start a DATUM gateway.</b> Build one (iohzrd is the recommended build), paste in the Lazarus host, port and pubkey from the Connect page, and set <code>mining.pool_address</code> to your address.</li>
-            <li data-i18n-html="app.learn.p4"><b>Point your miner at your gateway.</b> Any Siacoin BLAKE2b ASIC, aimed at your own gateway’s stratum port, with the username <code>address.worker</code>.</li>
-            <li data-i18n-html="app.learn.p5"><b>Watch it work.</b> Your gateway shows up under Gateways and your address under Miners. You pay 0%, you build your own blocks, and every block the pool finds pays you the DATUM bonus on top.</li>
-          </ol>
-          <p class="learn-actions"><a class="btn" href="#connect" data-tab="tab-datum" data-i18n="app.learn.pathCta">Set up DATUM</a> <a class="btn ghost" href="#calc" data-i18n="app.learn.pathCalc">What would I earn?</a></p>
-        </div>
-        <div class="card learn-gloss">
-          <h3 data-i18n="app.learn.glossTitle">Words you will meet</h3>
-          <dl>
-          <div><dt data-i18n="app.learn.g1.t">Hashrate</dt><dd data-i18n="app.learn.g1.d">Hashes tried per second. 1 TH/s is a trillion a second; 1 PH/s is a thousand TH/s.</dd></div>
-          <div><dt data-i18n="app.learn.g2.t">Share</dt><dd data-i18n="app.learn.g2.d">A hash good enough to prove you are working, though not good enough to be a block. Shares are how the pool measures your work.</dd></div>
-          <div><dt data-i18n="app.learn.g3.t">Difficulty</dt><dd data-i18n="app.learn.g3.d">How hard the network’s target is. It retargets so blocks keep their pace as hashrate comes and goes.</dd></div>
-          <div><dt data-i18n="app.learn.g4.t">Coinbase</dt><dd data-i18n="app.learn.g4.d">The first transaction in a block, which creates the reward. Here it pays miners directly.</dd></div>
-          <div><dt data-i18n="app.learn.g5.t">Block template</dt><dd data-i18n="app.learn.g5.d">The draft block a miner hashes: which transactions are in it, and who the coinbase pays.</dd></div>
-          <div><dt data-i18n="app.learn.g6.t">Window</dt><dd data-i18n="app.learn.g6.d">The stretch of recent shares TIDES pays on. Here it is eight network-difficulties of work.</dd></div>
-          <div><dt data-i18n="app.learn.g7.t">Gateway</dt><dd data-i18n="app.learn.g7.d">Your own DATUM software. It talks to your node for templates and to the pool for the reward split.</dd></div>
-          <div><dt data-i18n="app.learn.g8.t">Orphan</dt><dd data-i18n="app.learn.g8.d">A valid block that lost the race to another found at the same moment. It pays nothing.</dd></div>
-          </dl>
-        </div>
-      </div>
-    </div>
-  </section>
-
-  <section id="how" class="section" aria-labelledby="how-title">
-    <div class="wrap">
-      <header class="section-head">
-        <p class="eyebrow" data-i18n="how.eyebrow">How it works</p>
-        <h2 id="how-title" data-i18n="how.title">How your share becomes a payout.</h2>
-        <p class="section-lede" data-i18n="how.lede">For newcomers and operators alike. Your ASIC never sees any of this — it hashes a plain BLAKE2b header.</p>
-      </header>
-      <ol class="how-grid">
-        <li class="how-step">
-          <span class="how-n" aria-hidden="true">01</span>
-          <h3 data-i18n="how.s1t">You hash, the pool counts</h3>
-          <p class="copy" data-i18n="how.s1">Point a miner at the public stratum, or at a DATUM gateway you run. Either way your username is your Bitcoin address. Every share you send is rebuilt into a full BLAKE2b header and hashed by Prime; accepted work is credited to your address in the TIDES window.</p>
-        </li>
-        <li class="how-step">
-          <span class="how-n" aria-hidden="true">02</span>
-          <h3 data-i18n="how.s2t">The window decides the split</h3>
-          <p class="copy" data-i18n-html="how.s2">The window holds the last <strong><span id="how-window">8</span> × network difficulty</strong> of accepted work — days of pool work at typical hashrate, not the last hour. A found block pays each address in proportion to its share of that window, less its fee. A new rig starts near 0% and ramps as its work enters and older work ages out.</p>
-        </li>
-        <li class="how-step">
-          <span class="how-n" aria-hidden="true">03</span>
-          <h3 data-i18n="how.s3t">The block pays you directly</h3>
-          <p class="copy" data-i18n-html="how.s3">Prime hands every gateway the same coinbase output list — the one shown under <a href="#payout">Next payout</a>. A share whose coinbase pays anything else is refused, so whoever finds the block, it pays the window. There is no pool balance to withdraw and no operator to trust with your coins.</p>
-        </li>
-        <li class="how-step reco" id="how-step-bonus" hidden>
-          <span class="how-n" aria-hidden="true">04</span>
-          <h3 data-i18n="how.s4t">DATUM work is paid the bonus</h3>
-          <p class="copy" id="how-bonus-copy"></p>
-        </li>
-      </ol>
-      <p class="note" id="how-fees"></p>
     </div>
   </section>
 
@@ -826,6 +722,38 @@
     </div>
   </section>
 
+  <section id="how" class="section" aria-labelledby="how-title">
+    <div class="wrap">
+      <header class="section-head">
+        <p class="eyebrow" data-i18n="how.eyebrow">How it works</p>
+        <h2 id="how-title" data-i18n="how.title">How your share becomes a payout.</h2>
+        <p class="section-lede" data-i18n="how.lede">For newcomers and operators alike. Your ASIC never sees any of this — it hashes a plain BLAKE2b header.</p>
+      </header>
+      <ol class="how-grid">
+        <li class="how-step">
+          <span class="how-n" aria-hidden="true">01</span>
+          <h3 data-i18n="how.s1t">You hash, the pool counts</h3>
+          <p class="copy" data-i18n="how.s1">Point a miner at the public stratum, or at a DATUM gateway you run. Either way your username is your Bitcoin address. Every share you send is rebuilt into a full BLAKE2b header and hashed by Prime; accepted work is credited to your address in the TIDES window.</p>
+        </li>
+        <li class="how-step">
+          <span class="how-n" aria-hidden="true">02</span>
+          <h3 data-i18n="how.s2t">The window decides the split</h3>
+          <p class="copy" data-i18n-html="how.s2">The window holds the last <strong><span id="how-window">8</span> × network difficulty</strong> of accepted work — days of pool work at typical hashrate, not the last hour. A found block pays each address in proportion to its share of that window, less its fee. A new rig starts near 0% and ramps as its work enters and older work ages out.</p>
+        </li>
+        <li class="how-step">
+          <span class="how-n" aria-hidden="true">03</span>
+          <h3 data-i18n="how.s3t">The block pays you directly</h3>
+          <p class="copy" data-i18n-html="how.s3">Prime hands every gateway the same coinbase output list — the one shown under <a href="#payout">Next payout</a>. A share whose coinbase pays anything else is refused, so whoever finds the block, it pays the window. There is no pool balance to withdraw and no operator to trust with your coins.</p>
+        </li>
+        <li class="how-step reco" id="how-step-bonus" hidden>
+          <span class="how-n" aria-hidden="true">04</span>
+          <h3 data-i18n="how.s4t">DATUM work is paid the bonus</h3>
+          <p class="copy" id="how-bonus-copy"></p>
+        </li>
+      </ol>
+      <p class="note" id="how-fees"></p>
+    </div>
+  </section>
 </main>
 
 <footer class="site-footer">
@@ -889,21 +817,11 @@
   </div>
 </footer>
 
-<nav class="tabbar" data-i18n-aria="nav.sections" aria-label="Sections">
-  <a href="#top" data-view-link="home"><i class="tb-ico tb-home" aria-hidden="true"></i><span data-i18n="app.nav.home">Pool</span></a>
-  <a href="#connect" data-view-link="mine"><i class="tb-ico tb-mine" aria-hidden="true"></i><span data-i18n="app.nav.mine">Start mining</span></a>
-  <a href="#payout" data-view-link="payouts"><i class="tb-ico tb-pay" aria-hidden="true"></i><span data-i18n="app.nav.payouts">Payouts &amp; blocks</span></a>
-  <a href="#dashboard" data-view-link="me"><i class="tb-ico tb-me" aria-hidden="true"></i><span data-i18n="app.nav.me">My stats</span></a>
-  <a href="#learn" data-view-link="learn"><i class="tb-ico tb-learn" aria-hidden="true"></i><span data-i18n="app.nav.learn">Learn</span></a>
-</nav>
-
-<script src="/static/i18n.js?v=fees15"></script>
-<script src="/static/i18n/en.js?v=fees15"></script>
-<script src="/static/i18n/zh-CN.js?v=fees15"></script>
+<script src="/static/i18n.js?v=fees18"></script>
+<script src="/static/i18n/en.js?v=fees18"></script>
+<script src="/static/i18n/zh-CN.js?v=fees18"></script>
 <script>LZ_I18N.boot();</script>
-<script src="/static/shared.js?v=fees15"></script>
-<script src="/static/app.js?v=app3"></script>
-<script src="/static/pool.js?v=fees15"></script>
-<script src="/static/chart.js?v=app3"></script>
+<script src="/static/shared.js?v=fees18"></script>
+<script src="/static/pool.js?v=fees18"></script>
 </body>
 </html>
