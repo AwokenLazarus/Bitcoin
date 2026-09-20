@@ -1,7 +1,11 @@
 // Pages worker for the mempool explorer: the routing nginx-mempool.conf does on the node.
 //
 //   /api/*, /ws     proxied to ORIGIN_URL (websocket upgrades included); the node's own nginx
-//                   keeps deciding which backend answers which path
+//                   keeps deciding which backend answers which path. Visitor cookies never go
+//                   up, origin cookies never come down, and a few read-only GETs are held in
+//                   the edge cache for seconds so a busy page does not hammer a home server
+//   /api/v1/services/*  answered here with []: the node would relay it to mempool.space, which
+//                   is a different chain and 800+ ms away
 //   everything else try /<lang>/<path>, then /<path>, then /en-US/<path>, then the locale's
 //                   app shell, where <lang> comes from the `lang` cookie or Accept-Language
 //
@@ -14,7 +18,29 @@ const PREFIX_RE = /^\/(ar|bg|bs|cs|da|de|et|el|es|eo|eu|fa|fr|gl|ko|hr|id|it|he|
 // The same URL answers in a different language per visitor. Cloudflare's edge cache ignores
 // Vary on Accept-Language and Cookie, so a shared cache would hand one visitor's language to
 // everyone; `private` keeps these in the browser's cache only.
-const LOCALE_CACHE = "private, max-age=600, no-transform";
+const LOCALE_CACHE = "private, max-age=600";
+// Hashed chunks never change under their name, but the same name holds a different language per
+// visitor, so they are immutable in the browser and still never shared.
+const HASHED_RE = /\.[0-9a-f]{16}\.(js|css)$/;
+const HASHED_CACHE = "private, max-age=2592000, immutable";
+
+// Edge cache lifetimes, in seconds, for API GETs whose answer is the same for every visitor.
+const API_TTL = [
+  [/^\/api\/v1\/(mining\/|historical-price$|statistics\/)/, 60],
+  [/^\/api\/v1\/(blocks(\/\d+)?$|prices$|fees\/|difficulty-adjustment$|backend-info$)/, 10],
+  [/^\/api\/(v1\/)?block\/[0-9a-f]{64}\/(header|summary|txids)$/, 300],
+];
+
+// No Content-Security-Policy on purpose: the Angular app uses inline styles and scripts, the
+// theme loads Google Fonts and calls the pool API cross-origin, and a policy tight enough to be
+// worth having would break all three. HSTS carries no includeSubDomains and no preload.
+function secure(headers) {
+  headers.set("Strict-Transport-Security", "max-age=15552000");
+  headers.set("X-Frame-Options", "SAMEORIGIN");
+  headers.set("Permissions-Policy", "geolocation=(), microphone=(), camera=(), payment=()");
+  if (!headers.has("X-Content-Type-Options")) headers.set("X-Content-Type-Options", "nosniff");
+  if (!headers.has("Referrer-Policy")) headers.set("Referrer-Policy", "strict-origin-when-cross-origin");
+}
 
 function pick(value) {
   const v = (value || "").toLowerCase();
@@ -44,30 +70,81 @@ async function shell(env, request, lang, status = 200) {
   const out = new Response(request.method === "HEAD" ? null : res.body, { status: res.status === 200 ? status : res.status, headers: res.headers });
   out.headers.set("Cache-Control", LOCALE_CACHE);
   out.headers.set("Vary", "Accept-Encoding, Accept-Language, Cookie");
+  secure(out.headers);
   return out;
 }
 
-function proxy(request, env, url) {
+// What a visitor sees when the node cannot answer. Never the origin's own error page or the
+// Access login redirect: both name the origin hostname.
+function unavailable() {
+  return new Response('{"error":"explorer backend unavailable"}', {
+    status: 503,
+    headers: { "Content-Type": "application/json", "Retry-After": "15", "Cache-Control": "no-store" },
+  });
+}
+
+async function proxy(request, env, ctx, url) {
   if (!env.ORIGIN_URL) return new Response("origin not configured", { status: 500 });
   const target = env.ORIGIN_URL.replace(/\/$/, "") + url.pathname + url.search;
   const headers = new Headers(request.headers);
+  // The API is public and stateless. A visitor's cookies are none of the origin's business, and
+  // without them every visitor's GET is the same request, which is what makes it cacheable.
+  headers.delete("Cookie");
   headers.set("X-Forwarded-Host", url.host);
+
+  const rule = request.method === "GET" && !request.headers.get("Upgrade") && API_TTL.find(([re]) => re.test(url.pathname));
+  const key = rule && new Request(url.toString(), { method: "GET" });
+  if (rule) {
+    const hit = await caches.default.match(key);
+    if (hit) {
+      const out = new Response(hit.body, hit);
+      out.headers.set("X-Edge-Cache", "HIT");
+      return out;
+    }
+    // Ask for the whole answer so there is a 200 to store, not a 304 for one browser's copy.
+    headers.delete("If-None-Match");
+    headers.delete("If-Modified-Since");
+  }
   // The origin hostname sits behind Cloudflare Access; this service token is the only way in.
   if (env.ACCESS_CLIENT_ID) {
     headers.set("CF-Access-Client-Id", env.ACCESS_CLIENT_ID);
     headers.set("CF-Access-Client-Secret", env.ACCESS_CLIENT_SECRET);
   }
-  return fetch(new Request(target, { method: request.method, headers, body: request.body, redirect: "manual" }));
+  let res;
+  try {
+    res = await fetch(new Request(target, { method: request.method, headers, body: request.body, redirect: "manual" }));
+  } catch {
+    return unavailable();
+  }
+  // A websocket handshake has to go back exactly as it came.
+  if (res.status === 101 || res.webSocket) return res;
+  // A 3xx here is Access sending the service token to its login page (304 is a real answer).
+  if ((res.status >= 300 && res.status < 400 && res.status !== 304) || res.status === 502 || res.status === 503 || res.status >= 520) return unavailable();
+
+  const out = new Response(res.body, res);
+  // Access sets its CF_Authorization session cookie on every answer; relayed, it would hand each
+  // visitor a session for the origin.
+  out.headers.delete("Set-Cookie");
+  out.headers.delete("X-Powered-By");
+  if (rule && res.status === 200 && !out.headers.has("Set-Cookie")) {
+    out.headers.set("Cache-Control", `public, max-age=5, s-maxage=${rule[1]}`);
+    ctx.waitUntil(caches.default.put(key, out.clone()));
+    out.headers.set("X-Edge-Cache", "MISS");
+  }
+  return out;
 }
 
 export default {
-  async fetch(request, env) {
+  async fetch(request, env, ctx) {
     const url = new URL(request.url);
     const path = url.pathname;
 
     // nginx: `location = /api` and `= /api/` are the static API docs, in English.
     if (path === "/api" || path === "/api/") return shell(env, request, "en-US");
-    if (path.startsWith("/api/") || path === "/ws" || path.startsWith("/ws/")) return proxy(request, env, url);
+    if (path.startsWith("/api/v1/services/")) {
+      return new Response("[]", { headers: { "Content-Type": "application/json", "Cache-Control": "public, max-age=3600" } });
+    }
+    if (path.startsWith("/api/") || path === "/ws" || path.startsWith("/ws/")) return proxy(request, env, ctx, url);
 
     if (request.method !== "GET" && request.method !== "HEAD") return new Response(null, { status: 405 });
 
@@ -85,8 +162,9 @@ export default {
         const hit = await asset(env, request, p);
         if (hit) {
           const out = new Response(hit.body, hit);
-          out.headers.set("Cache-Control", LOCALE_CACHE);
+          out.headers.set("Cache-Control", HASHED_RE.test(path) ? HASHED_CACHE : LOCALE_CACHE);
           out.headers.set("Vary", "Accept-Encoding, Accept-Language, Cookie");
+          secure(out.headers);
           return out;
         }
       }

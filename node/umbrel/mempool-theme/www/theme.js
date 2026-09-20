@@ -1,3 +1,28 @@
+/* Fonts first, before anything else in this file runs: theme.js is a synchronous <head>
+ * script, so the preconnects and the stylesheet go out while the app bundle is still being
+ * fetched. This replaces the @import theme.css used to carry (a serial, render-blocking chain
+ * with no preconnect). Only the weights the theme uses; display=swap. Idempotent. */
+(function () {
+  try {
+    var head = document.head || document.getElementsByTagName('head')[0];
+    if (!head || document.getElementById('lz-fonts')) return;
+    var add = function (attrs) {
+      var l = document.createElement('link');
+      Object.keys(attrs).forEach(function (k) { l.setAttribute(k, attrs[k]); });
+      head.appendChild(l);
+      return l;
+    };
+    add({ rel: 'preconnect', href: 'https://fonts.googleapis.com' });
+    add({ rel: 'preconnect', href: 'https://fonts.gstatic.com', crossorigin: '' });
+    add({
+      id: 'lz-fonts', rel: 'stylesheet',
+      href: 'https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600' +
+        '&family=IBM+Plex+Sans:wght@400;500;600' +
+        '&family=Newsreader:ital,opsz,wght@0,6..72,500;1,6..72,400&display=swap'
+    });
+  } catch (_) { /* system fallbacks from the --lz-* stacks */ }
+})();
+
 /* Lazarus additions to the mempool frontend: a "Lazarus Pool" entry in the top nav and a
  * "Lazarus" column in the footer link tree. The app is an Angular SPA that re-renders the
  * shell on navigation, so both are (re)inserted from a MutationObserver. Idempotent. */
@@ -415,11 +440,14 @@
     if (typeof ofetch === 'function') {
       window.fetch = function (input, init) {
         var url = '';
+        // The caller's arguments: inside the .catch callback below, `arguments` would be the
+        // callback's own (the Error), not the original request.
+        var args = arguments;
         try { url = typeof input === 'string' ? input : (input && input.url) || ''; } catch (e) { url = ''; }
         var addr = rewriteAddress(url);
         if (addr) {
           return addr.then(jsonResponse).catch(function () {
-            return ofetch.apply(window, arguments);
+            return ofetch.apply(window, args);
           });
         }
         var p = ofetch.apply(this, arguments);
@@ -569,6 +597,7 @@
       href: 'https://neoxa.exchange/trade/BTCB2_USDC',
       target: '_blank',
       rel: 'noopener',
+      'aria-label': 'BTCB2 price, opens Neoxa in a new tab',
       title: 'BLAKE2b BTC (BTCB2) · volume-weighted Neoxa BTCB2/USDC and NonKYC BTCB2/USDT'
     }, blakeConv ? fmtUsd(blakeConv.USD) : '…');
     li.appendChild(a);
@@ -594,8 +623,12 @@
       ev.stopPropagation();
       var done = function () {
         b.setAttribute('data-copied', '');
+        b.setAttribute('aria-label', 'Copied');
         clearTimeout(b._t);
-        b._t = setTimeout(function () { b.removeAttribute('data-copied'); }, 1400);
+        b._t = setTimeout(function () {
+          b.removeAttribute('data-copied');
+          b.setAttribute('aria-label', label || 'Copy');
+        }, 1400);
       };
       if (navigator.clipboard && navigator.clipboard.writeText) {
         navigator.clipboard.writeText(text).then(done, function () { fallback(); });
@@ -843,7 +876,9 @@
         span.title = 'Some inputs use the unified opt-in sighash and some do not. The transaction as a whole cannot be replayed, but the legacy-signed inputs offer no protection on their own.';
       } else {
         span.className += ' bg-danger';
-        span.appendChild(el('del', {}, 'Replay protected'));
+        // Plain words: screen readers do not announce <del>, so a struck-through
+        // "Replay protected" read as the opposite of what it meant.
+        span.textContent = 'Not replay protected';
         span.title = 'No input is signed with SIGHASH_UNIFIED. This transaction is valid on both chains and can be replayed onto the SHA256d chain.';
       }
       host.appendChild(span);
@@ -867,9 +902,10 @@
     var wrap = document.querySelector('app-block .container, app-block');
     if (!wrap || wrap.querySelector('.lz-fork-note')) return;
     wrap.insertBefore(el('p', { class: 'lz-fork-note' },
-      '<b>BLAKE2b POW change has been activated! \u26cf\ufe0f</b> ' +
-      'Replay protection is SIGHASH_UNIFIED (0x20), shown on transaction Feature rows. ' +
-      'After <a href="' + RETROPEX + '" target="_blank" rel="noopener">Retropex/mempool</a> specialBlocks 961640.'),
+      '<b>BLAKE2b proof of work since block ' + FORK_HEIGHT.toLocaleString('en-US') + ' \u26cf\ufe0f</b> ' +
+      'This is the first block mined with BLAKE2b instead of SHA-256. ' +
+      'Transactions signed for this chain only are marked \u201cReplay protected\u201d on their Features row. ' +
+      'Explorer based on <a href="' + RETROPEX + '" target="_blank" rel="noopener">Retropex/mempool</a>.'),
       wrap.firstChild);
   }
 
@@ -902,6 +938,8 @@
     for (var i = 0; i < badges.length; i++) {
       var a = badges[i];
       var img = a.querySelector('img.pool-logo');
+      // English-only: the alt text is translated in other locales and nothing else on the
+      // badge carries the pool's display name, so there the badge simply stays stock.
       var m = img && /^Logo of (.+) mining pool$/.exec(img.getAttribute('alt') || '');
       if (!m) continue;
       var text = null;
@@ -931,20 +969,15 @@
    * tooltip come from the pool's own API and never change a band's size.
    *
    * The chart is an ECharts pie drawn with the SVG renderer, and this bundle mangles the
-   * echarts exports past recognition, so rather than reaching into the chart the geometry is
-   * read back out of the rendered sectors -- centre by circle fit, radii and angles from the
-   * path data -- and the bands go into an overlay SVG above it. The reading is checked
-   * against the pools API before anything is drawn: if the sectors disagree with the shares
-   * the API reports, or either source is missing, the stock pie is left untouched.
+   * echarts exports past recognition, so rather than reaching into the chart the whole pie
+   * is redrawn from the pools API into an overlay SVG above it and the stock SVG is hidden
+   * (see drawBands). If either data source is missing the stock pie is left untouched.
+   * (An earlier design read the geometry back out of the rendered sectors; that code is gone.)
    */
   var TAGS_URL = '/lazarus/pool-tags.json';
-  var FOLD_SHARE = 0.01;      // gateways under 1% of the pool share one band
-  var MIN_BAND_PX = 3.5;      // every band stays visible; the rest is share-proportional
-  var MIN_SLICE_DEG = 3;      // narrower slices cannot show a readable band
   var SVGNS = 'http://www.w3.org/2000/svg';
   var PIE_START = 270;        // twelve o'clock in SVG angles, where the pie's first slice begins
   var BUILD = '15';
-  var LABEL_STEPS = [0, -15, 15, -30, 30, -46, 46];   // where a hover label may sit, in order
   var bandInfo = (self.__lazarusTheme || {}).bands = { state: 'idle', log: [] };
   function bandState(st) {
     if (bandInfo.state !== st) {
@@ -1006,175 +1039,6 @@
     var a = deg * Math.PI / 180;
     return { x: cx + r * Math.cos(a), y: cy + r * Math.sin(a) };
   }
-  function norm360(a) { a %= 360; return a < 0 ? a + 360 : a; }
-
-  var NUM = '(-?[0-9.]+(?:e[-+]?[0-9]+)?)';
-  var ARC_RE = new RegExp('A' + NUM + '[\\s,]+' + NUM + '[\\s,]+' + NUM + '[\\s,]+([01])[\\s,]+([01])[\\s,]+' + NUM + '[\\s,]+' + NUM, 'gi');
-  var MOVE_RE = new RegExp('^M[\\s,]*' + NUM + '[\\s,]+' + NUM);
-
-  // Kasa circle fit: solve x^2+y^2 = ax + by + c for the outer-arc points, which all sit on
-  // the pie's outer circle. Gives the centre without assuming echarts' default of 50%/50%.
-  function fitCircle(pts) {
-    var n = pts.length, sx = 0, sy = 0, sxx = 0, syy = 0, sxy = 0, sz = 0, sxz = 0, syz = 0, i, p, z;
-    if (n < 3) return null;
-    for (i = 0; i < n; i++) {
-      p = pts[i]; z = p.x * p.x + p.y * p.y;
-      sx += p.x; sy += p.y; sxx += p.x * p.x; syy += p.y * p.y; sxy += p.x * p.y;
-      sz += z; sxz += p.x * z; syz += p.y * z;
-    }
-    var m = [[sxx, sxy, sx], [sxy, syy, sy], [sx, sy, n]], v = [sxz, syz, sz];
-    function det3(a) {
-      return a[0][0] * (a[1][1] * a[2][2] - a[1][2] * a[2][1])
-           - a[0][1] * (a[1][0] * a[2][2] - a[1][2] * a[2][0])
-           + a[0][2] * (a[1][0] * a[2][1] - a[1][1] * a[2][0]);
-    }
-    var d = det3(m);
-    if (!isFinite(d) || Math.abs(d) < 1e-9) return null;
-    var sol = [0, 1, 2].map(function (col) {
-      var a = m.map(function (row, ri) { return row.map(function (x, ci) { return ci === col ? v[ri] : x; }); });
-      return det3(a) / d;
-    });
-    var cx = sol[0] / 2, cy = sol[1] / 2;
-    var rr = sol[2] + cx * cx + cy * cy;
-    if (!(rr > 0)) return null;
-    return { cx: cx, cy: cy, r: Math.sqrt(rr) };
-  }
-
-  /* Read the pie back out of its own SVG. Filled closed paths are the sectors. Radii come
-   * from each path's own arcs (the 1px corner arcs from itemStyle.borderRadius are skipped).
-   * Order comes from start-edge angles, not document order: ECharts moves the hovered
-   * sector to the end of the SVG so it paints on top.
-   *
-   * A window change (and some hover frames) also leaves a filled hairline with no arc —
-   * `M555 40L555 160Z` for a zero-width slice. That is not a sector. Skipping it keeps the
-   * overlay up; treating it as a broken chart used to blank the bands or pin the previous
-   * window's overlay on the new pie. */
-  function readPie(svg) {
-    var all = svg.querySelectorAll('path'), sectors = [], outer = [], i, p, d, m, a;
-    for (i = 0; i < all.length; i++) {
-      p = all[i];
-      d = p.getAttribute('d') || '';
-      if (!(p.getAttribute('fill') || 'none').match(/^(#|rgb)/i) || !/Z\s*$/.test(d)) continue;
-      m = MOVE_RE.exec(d);
-      if (!m) continue;
-      var arcs = [], lo = Infinity, hi = 0;
-      ARC_RE.lastIndex = 0;
-      while ((a = ARC_RE.exec(d))) {
-        var arc = { r: parseFloat(a[1]), x: parseFloat(a[6]), y: parseFloat(a[7]) };
-        arcs.push(arc);
-        if (arc.r > 2) { lo = Math.min(lo, arc.r); hi = Math.max(hi, arc.r); }  // skip corner arcs
-      }
-      if (!arcs.length || !hi) continue;
-      sectors.push({ el: p, x: parseFloat(m[1]), y: parseFloat(m[2]), arcs: arcs,
-                     r: hi, r0: lo === hi ? 0 : lo });
-    }
-    if (!sectors.length) return null;
-
-    /* Radii are read per sector and the pie's own radius is the one most sectors share.
-     * The sector under the pointer is not the same size as the others -- ECharts scales it
-     * on hover -- and mid-resize the chart can briefly hold two sizes at once. Taking the
-     * largest radius anywhere would follow the hovered sector and draw every band into the
-     * few pixels it grew by; refusing to read at all would blank the bands whenever the
-     * pointer crosses the chart. So: the majority sets the pie, and a sector that differs
-     * keeps its own radii and has its bands drawn to match. */
-    var tally = {}, best = null;
-    sectors.forEach(function (s) {
-      var k = s.r.toFixed(1);
-      tally[k] = (tally[k] || 0) + 1;
-      if (!best || tally[k] > tally[best] || (tally[k] === tally[best] && s.r < parseFloat(best))) best = k;
-    });
-    var r = parseFloat(best), base = sectors.filter(function (s) { return Math.abs(s.r - r) < 0.6; });
-    if (base.length * 2 < sectors.length) return null;      // no majority: a half-drawn chart
-    var inner = {}, bestIn = null;
-    base.forEach(function (s) {
-      var k = s.r0.toFixed(1);
-      inner[k] = (inner[k] || 0) + 1;
-      if (!bestIn || inner[k] > inner[bestIn]) bestIn = k;
-    });
-    var r0 = parseFloat(bestIn);
-    if (!(r > 4) || !(r0 >= 0) || r0 >= r) return null;
-    base.forEach(function (s) {
-      outer.push({ x: s.x, y: s.y });
-      s.arcs.forEach(function (arc) { if (Math.abs(arc.r - r) < 0.5) outer.push({ x: arc.x, y: arc.y }); });
-    });
-    var fit = fitCircle(outer);
-    if (!fit || Math.abs(fit.r - r) > 3) return null;
-
-    /* Order comes from the angles, not from the document: ECharts moves the sector under
-     * the pointer to the end of the SVG so it paints on top, and reading spans between
-     * whatever paths happen to be adjacent then gives nonsense. Sorted clockwise from
-     * twelve o'clock -- where the pie starts -- the sectors are back in data order, which
-     * the per-slice share check downstream then confirms. */
-    var n = sectors.length;
-    sectors.forEach(function (s) { s.angle = norm360(Math.atan2(s.y - fit.cy, s.x - fit.cx) * 180 / Math.PI); });
-    sectors.sort(function (a2, b2) { return norm360(a2.angle - PIE_START) - norm360(b2.angle - PIE_START); });
-    var sum = 0;
-    sectors.forEach(function (s, k) {
-      s.span = n === 1 ? 360 : norm360(sectors[(k + 1) % n].angle - s.angle);
-      sum += s.span;
-    });
-    if (Math.abs(sum - 360) > 1) return null;      // not one pie
-    return { cx: fit.cx, cy: fit.cy, r: r, r0: r0, sectors: sectors };
-  }
-
-  /* What the pools API says the slices are, in the order the chart draws them. The chart
-   * keeps the pools above a share threshold that depends on the viewport and sweeps the
-   * rest into "Other", but the threshold itself does not have to be known: the API is
-   * already sorted by blocks, so n sectors means the first n-1 pools and an Other. Every
-   * span is checked against these shares afterwards, which is what actually proves it. */
-  function expectedSlices(api, n) {
-    var total = Number(api && api.blockCount) || 0;
-    if (!total || !api.pools || n < 1 || n > api.pools.length + 1) return null;
-    function take(k, withOther) {
-      var keep = [], rest = 0;
-      api.pools.forEach(function (p, i) {
-        var share = p.blockCount / total * 100;
-        if (i < k) keep.push({ slug: p.slug, name: p.name, blocks: p.blockCount, share: share });
-        else rest += share;
-      });
-      if (withOther) keep.push({ slug: null, name: 'Other', blocks: null, share: rest });
-      return keep.length === n ? keep : null;
-    }
-    return take(n - 1, true) || take(n, false);
-  }
-
-  /* The bands of one pool, innermost first: untagged blocks, then the gateways that are too
-   * small to draw on their own, then the rest ascending so the largest ends up on the rim. */
-  function poolBands(entry) {
-    var blocks = Number(entry && entry.blocks) || 0;
-    var names = Object.keys((entry && entry.tags) || {});
-    if (!blocks || !names.length) return null;
-    var tagged = names.map(function (t) { return { label: t, blocks: entry.tags[t], kind: 'gateway' }; });
-    tagged.sort(function (a, b) { return a.blocks - b.blocks || (a.label < b.label ? -1 : 1); });
-    var small = tagged.filter(function (b) { return b.blocks / blocks < FOLD_SHARE; });
-    var out = [];
-    if (entry.untagged > 0) out.push({ label: null, blocks: entry.untagged, kind: 'stratum' });
-    if (small.length > 1) {
-      tagged = tagged.filter(function (b) { return small.indexOf(b) < 0; });
-      out.push({
-        label: small.length + ' smaller gateways', kind: 'folded', members: small,
-        blocks: small.reduce(function (s, b) { return s + b.blocks; }, 0)
-      });
-    }
-    return out.concat(tagged);
-  }
-
-  function parseRgb(css) {
-    var m = /^#([0-9a-f]{3}|[0-9a-f]{6})$/i.exec(String(css || ''));
-    if (m) {
-      var x = m[1];
-      if (x.length === 3) x = x.split('').map(function (c) { return c + c; }).join('');
-      return [parseInt(x.slice(0, 2), 16), parseInt(x.slice(2, 4), 16), parseInt(x.slice(4, 6), 16)];
-    }
-    m = /^rgba?\(\s*(\d+)[\s,]+(\d+)[\s,]+(\d+)/i.exec(String(css || ''));
-    return m ? [+m[1], +m[2], +m[3]] : null;
-  }
-  function shade(css, dL) {
-    var rgb = parseRgb(css), o = self.__lzOklch;
-    if (!rgb || !o) return css;
-    var lch = o.to(rgb[0], rgb[1], rgb[2]);
-    return 'rgb(' + o.from(Math.max(0.14, Math.min(0.93, lch[0] + dL)), lch[1], lch[2]).join(',') + ')';
-  }
 
   function bandSectorPath(cx, cy, r0, r1, a0, span) {
     var a1 = a0 + Math.min(span, 359.9);
@@ -1223,38 +1087,6 @@
     var want = normTag(tag);
     if (!want) return null;
     return primeAgg(function (g) { return normTag(g.secondary_tag || g.name) === want; });
-  }
-
-  function bandTooltipHtml(b) {
-    var lines = [];
-    var head = esc(b.poolName) + (b.kind === 'stratum' ? ' \u00b7 public stratum'
-      : b.kind === 'folded' ? ' \u00b7 ' + esc(b.label) : ' \u00b7 ' + esc(b.label));
-    lines.push('<b>' + head + '</b>');
-    lines.push('<span>' + b.blocks + ' block' + (b.blocks === 1 ? '' : 's') + ' \u00b7 ' +
-      pct(b.share * 100) + ' of the pool \u00b7 ' + pct(b.blocks / b.windowBlocks * 100) + ' of all blocks</span>');
-    if (b.netHs > 0 && b.windowBlocks > 0) {
-      lines.push('<span>est. ' + fmtHr(b.netHs * b.blocks / b.windowBlocks / 1e9) + '</span>');
-    }
-    if (b.kind === 'stratum') {
-      lines.push('<span class="lz-band-sub">no gateway tag in the coinbase</span>');
-    } else if (b.kind === 'folded') {
-      lines.push('<span class="lz-band-sub">' + esc(b.members.slice(-4).reverse().map(function (m) { return m.label; }).join(', ')) +
-        (b.members.length > 4 ? ' and ' + (b.members.length - 4) + ' more' : '') + '</span>');
-    }
-    if (!b.own) return lines.join('');
-    var live = b.kind === 'stratum' ? primeAgg(function (g) { return !!g.own; })
-      : b.kind === 'gateway' ? primeTag(b.label) : null;
-    if (live && !live.live) {
-      lines.push('<span class="lz-band-live">no gateway with this tag is connected right now</span>');
-    } else if (live) {
-      lines.push('<span class="lz-band-live">live: ' + pct(live.workShare * 100) + ' of the pool\'s work now \u00b7 ' +
-        live.shares.toLocaleString() + ' shares this session' +
-        (b.kind === 'gateway'
-          ? (live.live > 1 ? ' \u00b7 ' + live.live + ' gateways' : '') +
-            (live.feePath ? ' \u00b7 ' + esc(live.feePath) + ' fee path' : '')
-          : '') + '</span>');
-    }
-    return lines.join('');
   }
 
   function bandTip(mount) {
@@ -1407,7 +1239,11 @@
   function drawBands() {
     // The full pools graph and the /mining dashboard widget (1w luck pie). Other pies
     // (pool pages, tiny tiles) stay stock.
-    if (!isPoolsGraph() && !isMiningDash()) { bandState('inactive'); dropBands(); return; }
+    if (!isPoolsGraph() && !isMiningDash()) {
+      // Every other page: tear down once on the way out, then cost nothing per tick.
+      if (bandInfo.state !== 'inactive') { bandState('inactive'); dropBands(); }
+      return;
+    }
     var host = document.querySelector('app-pool-ranking [_echarts_instance_]');
     var svg = host && host.querySelector('svg:not(.lz-bands)');
     if (!svg) { bandState('no chart yet'); dropBands(); return; }
@@ -1476,6 +1312,13 @@
       base.setAttribute('stroke', 'var(--lz-bg)');
       base.setAttribute('stroke-width', '1');
       base.setAttribute('data-lz-slice', pool.slug || '');
+      if (pool.slug) {
+        // One tab stop per pool; its bands lead to the same page, so they stay pointer-only.
+        base.setAttribute('role', 'link');
+        base.setAttribute('tabindex', '0');
+        base.setAttribute('aria-label', pool.name + ', ' + (share * 100).toFixed(2) + '% of blocks, ' +
+          pool.blockCount + ' block' + (pool.blockCount === 1 ? '' : 's'));
+      }
       base.__lzSlice = pool;
       ov.appendChild(base);
       var entry = pool.slug ? wdoc.pools[pool.slug] : null;
@@ -1582,10 +1425,18 @@
       if (p && (p.__lzBand || p.__lzSlice) && p !== hot) setHot(p);
     });
     ov.addEventListener('mouseleave', clearHot);
-    ov.addEventListener('click', function (ev) {
-      var t = ev.target;
+    function follow(t) {
       var slug = (t && t.__lzBand && t.__lzBand.slug) || (t && t.__lzSlice && t.__lzSlice.slug);
       if (slug) location.href = '/mining/pool/' + slug;
+      return !!slug;
+    }
+    ov.addEventListener('click', function (ev) { follow(ev.target); });
+    // Keyboard: focus shows what hover shows, Enter / Space does what a click does.
+    ov.addEventListener('focusin', function (ev) { if (ev.target && ev.target.__lzSlice) setHot(ev.target); });
+    ov.addEventListener('focusout', clearHot);
+    ov.addEventListener('keydown', function (ev) {
+      if (ev.key !== 'Enter' && ev.key !== ' ' && ev.key !== 'Spacebar') return;
+      if (follow(ev.target)) ev.preventDefault();
     });
 
     var wrap = host.parentNode;
@@ -1630,14 +1481,18 @@
     var m = /\/block\/([0-9a-fA-F]{64})/.exec(location.pathname);
     if (m) return m[1].toLowerCase();
     var rows = document.querySelectorAll('app-block table tr');
+    var firstHex = null;
     for (var i = 0; i < rows.length; i++) {
       var tds = rows[i].querySelectorAll('td');
-      if (tds.length >= 2 && /^\s*Hash\s*$/i.test(tds[0].textContent || '')) {
-        var t = (tds[1].textContent || '').replace(/\s+/g, '');
-        if (/^[0-9a-f]{64}$/i.test(t)) return t.toLowerCase();
-      }
+      if (tds.length < 2) continue;
+      var t = (tds[1].textContent || '').replace(/\s+/g, '');
+      if (!/^[0-9a-f]{64}$/i.test(t)) continue;
+      if (/^\s*Hash\s*$/i.test(tds[0].textContent || '')) return t.toLowerCase();
+      if (!firstHex) firstHex = t.toLowerCase();
     }
-    return null;
+    // Other locales translate the "Hash" label: the block hash is the first 64-hex value in
+    // the block's tables. A wrong guess only costs a 404 on the header fetch, i.e. no rows.
+    return firstHex;
   }
   function headerV2Rows() {
     if (!/\/block\//.test(location.pathname)) return;
@@ -1645,6 +1500,12 @@
     var tds = document.querySelectorAll('app-block table td');
     for (var i = 0; i < tds.length; i++) {
       if (/Block Header Hex/i.test((tds[i].textContent || '').trim())) { headerCell = tds[i]; break; }
+    }
+    // Locale-robust fallback: the header row is the one whose value is a long run of hex
+    // (80 bytes stock, 164 here), whatever its label is called.
+    for (var j = 0; !headerCell && j < tds.length; j++) {
+      var prev = tds[j].previousElementSibling;
+      if (prev && /^[0-9a-f]{160,}$/i.test((tds[j].textContent || '').replace(/\s+/g, ''))) headerCell = prev;
     }
     if (!headerCell) return;
     var tbody = headerCell.parentNode && headerCell.parentNode.parentNode;
@@ -1701,6 +1562,13 @@
         if (h === 'Hashrate') hi = i;
         if (h === 'Pool') pi = i;
       }
+      // The header labels above are English; in other locales find the columns by what is
+      // in them: the pool column links to /mining/pool/, the hashrate column ends in H/s.
+      var probe = tables[t].querySelector('tbody tr');
+      for (i = 0; probe && i < probe.children.length; i++) {
+        if (pi < 0 && probe.children[i].querySelector('a[href*="/mining/pool/"]')) pi = i;
+        if (hi < 0 && /H\/s\s*$/.test(probe.children[i].textContent || '')) hi = i;
+      }
       if (hi < 0 || pi < 0) continue;
       var rows = tables[t].querySelectorAll('tbody tr');
       for (var r = 0; r < rows.length; r++) {
@@ -1716,6 +1584,7 @@
         }
         var label = (name || '').toLowerCase();
         var hs;
+        // English-only: the totals row has no link or class to go by.
         if (!p && /all miners|total/.test(label)) hs = netHs;
         else if (p) hs = netHs * (Number(p.blockCount) || 0) / total;
         else continue;
@@ -1757,7 +1626,67 @@
     }
   }
 
-  var scheduled = false;
+  /* Document title. Angular writes "<page> - mempool - Bitcoin Explorer" (or just the tail on
+   * the dashboard); only that brand tail is rewritten. The result no longer matches the
+   * pattern, and nothing is written when the title is already right, so this cannot fight
+   * Angular in a loop. */
+  var TITLE_RE = /(^|\s-\s)mempool(?:\s-\s.*)?$/;
+  function brandTitle() {
+    var t = document.title || '';
+    var m = TITLE_RE.exec(t);
+    if (!m) return;
+    var next = t.slice(0, m.index) + m[1] + 'Lazarus Mempool' + (m[1] ? '' : ' - BLAKE2b BTC Explorer');
+    if (next !== t) document.title = next;
+  }
+
+  /* Fee box: on this chain the recommended tiers are usually all the same (1 sat/vB), and
+   * four identical numbers read as a broken widget. Say what it means, only while it is
+   * true. Compares the rendered numbers, so it is locale-independent. */
+  function feeNote() {
+    var boxes = document.querySelectorAll('app-fees-box');
+    for (var b = 0; b < boxes.length; b++) {
+      var cells = boxes[b].querySelectorAll('.fee-estimation-container:not(.loading-container) .fee-text');
+      var same = cells.length >= 3, first = null;
+      for (var i = 0; same && i < cells.length; i++) {
+        var m = /\d[\d.,\s]*/.exec(cells[i].textContent || '');
+        if (!m) same = false;
+        else if (first === null) first = m[0].trim();
+        else if (m[0].trim() !== first) same = false;
+      }
+      var note = boxes[b].querySelector('.lz-fee-note');
+      if (same && !note) {
+        boxes[b].appendChild(el('p', { class: 'lz-fee-note' },
+          'Mempool is clear: any fee confirms in the next block.'));
+      } else if (!same && note) note.remove();
+    }
+  }
+
+  /* Text on fee-coloured faces. The projected blocks and the fee-priority bar are painted by
+   * inline gradients from the fee ramp with white text on top; on the brass / amber steps
+   * white drops under 3:1. Mark a face whose fee colours are bright so theme.css can switch
+   * it to dark ink (crossover with the dark ink is relative luminance ~0.197). The grey
+   * #554b45 "unfilled" part of a projected block is not a fee colour; a face that is mostly
+   * unfilled keeps white. Anything unparseable keeps the stock white. */
+  function relLum(r, g, b) {
+    function f(c) { c /= 255; return c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4); }
+    return 0.2126 * f(r) + 0.7152 * f(g) + 0.0722 * f(b);
+  }
+  function faceInk() {
+    var faces = document.querySelectorAll('.mempool-block.bitcoin-block, app-fees-box .fee-progress-bar');
+    for (var i = 0; i < faces.length; i++) {
+      var f = faces[i], bg = f.style.backgroundImage || f.style.background || f.style.backgroundColor || '';
+      if (f.__lzBg === bg) continue;
+      f.__lzBg = bg;
+      var re = /rgba?\(\s*(\d+),\s*(\d+),\s*(\d+)[^)]*\)(?:\s+([\d.]+)%)?/g, m, sum = 0, n = 0, empty = 0;
+      while ((m = re.exec(bg))) {
+        if (+m[1] === 85 && +m[2] === 75 && +m[3] === 69) { if (m[4]) empty = Math.max(empty, +m[4]); continue; }
+        sum += relLum(+m[1], +m[2], +m[3]); n++;
+      }
+      f.classList.toggle('lz-face-bright', n > 0 && empty < 50 && sum / n > 0.197);
+    }
+  }
+
+  var scheduled = false, dirty = false;
   function apply() {
     scheduled = false;
     try { nav(); } catch (e) { /* never break the explorer */ }
@@ -1773,10 +1702,15 @@
     try { headerV2Rows(); } catch (e) { /* never break the explorer */ }
     try { miningThs(); } catch (e) { /* never break the explorer */ }
     try { sighashKeys(); } catch (e) { /* never break the explorer */ }
+    try { feeNote(); } catch (e) { /* never break the explorer */ }
+    try { faceInk(); } catch (e) { /* never break the explorer */ }
     try { drawBands(); } catch (e) { bandState('error: ' + e); }
   }
+  // Coalesced: however many DOM mutations a websocket frame causes, apply() runs at most once
+  // per animation frame, and not at all in a background tab (it catches up on return).
   function schedule() {
     if (scheduled) return;
+    if (document.hidden) { dirty = true; return; }
     scheduled = true;
     (window.requestAnimationFrame || setTimeout)(apply);
   }
@@ -1789,11 +1723,20 @@
     // Last line of defence for the bands: whatever moves the chart -- a zoom, a resize, a
     // re-render that drops the overlay -- this notices within a tick. drawBands hashes the
     // sector paths and returns immediately when they are unchanged and the overlay is still
-    // there, so an idle page pays a hash four times a second and nothing else.
+    // there, so the pools pages pay a hash four times a second; every other page, and any
+    // background tab, pays a route test and nothing else.
     setInterval(function () {
+      if (document.hidden) return;
       try { drawBands(); } catch (e) { bandState('error: ' + e); }
     }, 250);
     new MutationObserver(schedule).observe(document.body, { childList: true, subtree: true });
+    document.addEventListener('visibilitychange', function () {
+      if (!document.hidden && dirty) { dirty = false; schedule(); }
+    });
+    // <title> lives in <head>, outside the body observer; Angular replaces its text node.
+    var titleEl = document.querySelector('head > title');
+    if (titleEl) new MutationObserver(brandTitle).observe(titleEl, { childList: true, characterData: true, subtree: true });
+    brandTitle();
     self.addEventListener('resize', bandsReflow, { passive: true });
     if (self.visualViewport) self.visualViewport.addEventListener('resize', bandsReflow, { passive: true });
   }

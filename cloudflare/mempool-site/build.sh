@@ -10,6 +10,9 @@
 # _worker.js then does what nginx-mempool.conf does: pick the locale, fall back to the app
 # shell, and proxy /api and the websocket to the node.
 #
+# The node is only ever read. What the public site says differently from it (name, canonical
+# URL, colours, config.js keys, theme cache-busting) is applied to the copy by postprocess.py.
+#
 #   ./build.sh http://27.69.0.25:3006
 set -euo pipefail
 ORIGIN="${1:?usage: build.sh <running mempool web origin>}"
@@ -37,13 +40,24 @@ get /resources/customize.js "$DIST/resources/customize.js" || rm -f "$DIST/resou
 mkdir -p "$DIST/lazarus" "$DIST/resources/mining-pools" "$DIST/resources/favicons"
 for f in "$THEME"/*; do
   name="$(basename "$f")"
-  case "$name" in *.bak*|LICENSE|NOTICE|COPYING.md) continue ;; esac
-  get "/lazarus/$name" "$DIST/lazarus/$name"
+  case "$name" in *.bak*) continue ;; esac
+  # LICENSE, NOTICE and COPYING.md ship too: mempool is AGPL-3.0 and the footer links to them.
+  # If the node's nginx does not serve one of them, the checkout's copy is the same file.
+  case "$name" in
+    # The checkout is the source of truth for theme assets: a theme change ships with a Pages deploy,
+    # without first having to be copied onto the node that serves the capture.
+    *) cp "$f" "$DIST/lazarus/$name" ;;
+  esac
 done
 get /lazarus/pool-tags.json "$DIST/lazarus/pool-tags.json" || true
 get /resources/mining-pools/lazarus.svg "$DIST/resources/mining-pools/lazarus.svg"
 for f in favicon.ico favicon-16x16.png favicon-32x32.png apple-touch-icon.png; do
   get "/resources/favicons/$f" "$DIST/resources/favicons/$f"
+done
+
+python3 "$HERE/postprocess.py" "$DIST"
+for f in LICENSE NOTICE; do
+  [ -s "$DIST/lazarus/$f" ] || { echo "lazarus/$f missing: the footer links to it" >&2; exit 1; }
 done
 
 cp "$HERE/_worker.js" "$HERE/_routes.json" "$HERE/_headers" "$DIST/"
