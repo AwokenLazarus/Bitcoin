@@ -4152,6 +4152,11 @@ def miner_payload(address):
         "makegood_pending_btc": sum(r["sats"] for r in mg_pending) / 1e8,
         "makegood_pending_blocks": len(mg_pending),
         "makegood_next_payable_at": min((r["payable_at"] for r in mg_pending), default=0),
+        # Knots #419: a pending make-good on a block in the long-maturity window pays at the
+        # release height, not 100 blocks on; the page explains that next to the number.
+        "makegood_long_maturity": any(int(r.get("height") or 0) >= LONG_MATURITY_START and int(r.get("payable_at") or 0) >= LONG_MATURITY_RELEASE for r in mg_pending),
+        "long_maturity_start": LONG_MATURITY_START,
+        "long_maturity_release": LONG_MATURITY_RELEASE,
         "makegood_paid_btc": sum(r["sats"] for r in makegoods if r["status"] == "paid") / 1e8,
         "makegood_failed_blocks": sum(1 for r in makegoods if r["status"] == "failed"),
         "tip_height": int(tip or 0),

@@ -508,7 +508,7 @@
     return `
         <div>
           <p class="kicker table-label">${pend.length ? t("miner.mgLabelPending", { n: pend.length, amt: satsExact(pendSats) }) : t("miner.mgLabel")}</p>
-          <p class="note">${t("miner.mgHelp", { need: num(m.maturity_confs || 100) })}</p>
+          <p class="note">${t("miner.mgHelp", { need: num(m.maturity_confs || 100) })}${m.makegood_long_maturity ? " " + t("miner.mgLongMaturity", { start: num(m.long_maturity_start), release: num(m.long_maturity_release) }) : ""}</p>
           <div class="scroll${ctx.full ? "" : " tall"}"><table class="pending"><thead><tr><th class="num">${t("miner.thBlock")}</th><th class="num">${t("miner.thAmt")}</th><th>${t("miner.thKind")}</th><th class="num">${t("miner.thPayableAt")}</th><th>${t("miner.thLands")}</th><th>${t("miner.thStatus")}</th><th>${t("miner.thTx")}</th></tr></thead><tbody>${body}</tbody></table></div>
         </div>`;
   }
@@ -623,7 +623,8 @@
       else if (mgPend.length) sub = mgLeft ? t("miner.mgCellSub", { n: mgPend.length, height: num(mgNextAt), left: num(mgLeft) }) : t("miner.mgCellNow", { n: mgPend.length });
       else if (Number(m.makegood_failed_blocks) > 0) sub = t("miner.mgCellFailed");
       else sub = t("miner.mgCellAllPaid", { amt: satsExact(Math.round(mgPaidBtc * 1e8)) });
-      return `<div><dt>${t("miner.makegood")}</dt><dd title="${amtExact(mgPendBtc)}">${amt(mgPendBtc)}${money(mgPendBtc)}<small>${sub}</small></dd></div>`;
+      const lm = m.makegood_long_maturity ? `<br>${t("miner.mgLongMaturity", { start: num(m.long_maturity_start), release: num(m.long_maturity_release) })}` : "";
+      return `<div><dt>${t("miner.makegood")}</dt><dd title="${amtExact(mgPendBtc)}">${amt(mgPendBtc)}${money(mgPendBtc)}<small>${sub}${lm}</small></dd></div>`;
     };
     // The DATUM bonus for this address. On the gateway path it is money already accruing, so
     // it gets a ticker cell; on the stratum path it is money being left on the table, so it
