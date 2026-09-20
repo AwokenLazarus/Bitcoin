@@ -944,6 +944,11 @@ impl Ledger {
             work: u64,
             #[serde(default)]
             height: u32,
+            /// `SOURCE_STRATUM` / `SOURCE_DATUM`; absent (or anything else) imports as untagged,
+            /// which the split treats as DATUM. Set it when making good hosted-stratum work, so
+            /// the imported work is charged the stratum fee like the rest of that miner's work.
+            #[serde(default)]
+            source: u8,
         }
         #[derive(Deserialize)]
         struct Doc {
@@ -953,7 +958,12 @@ impl Ledger {
             serde_json::from_slice(&fs::read(path)?).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
         let n = doc.credits.len();
         for r in doc.credits {
-            self.credit(&r.identity, r.work, r.height, r.ts, SOURCE_UNKNOWN)?;
+            let source = match r.source {
+                SOURCE_STRATUM => SOURCE_STRATUM,
+                SOURCE_DATUM => SOURCE_DATUM,
+                _ => SOURCE_UNKNOWN,
+            };
+            self.credit(&r.identity, r.work, r.height, r.ts, source)?;
         }
         self.flush()?;
         Ok(n)
@@ -1481,13 +1491,18 @@ mod tests {
         let json = dir.join("old.json");
         fs::write(
             &json,
-            r#"{"credits":[{"ts":1,"identity":"bc1qa","work":56},{"ts":2,"identity":"1Fw8","work":8192}],"carry":{},"shares":2}"#,
+            r#"{"credits":[{"ts":1,"identity":"bc1qa","work":56},{"ts":2,"identity":"1Fw8","work":8192},{"ts":3,"identity":"bc1qs","work":100,"source":1},{"ts":3,"identity":"bc1qs","work":20,"source":2}],"carry":{},"shares":2}"#,
         )
         .unwrap();
         let mut l = Ledger::open(&dir).unwrap();
-        assert_eq!(l.import_json_credits(&json).unwrap(), 2);
+        assert_eq!(l.import_json_credits(&json).unwrap(), 4);
         assert_eq!(l.window.work_of("1Fw8"), 8192);
-        assert_eq!(l.window.total_work(), 8248);
+        assert_eq!(l.window.total_work(), 8368);
+        // an explicit source survives the import: the stratum part is charged as stratum
+        let m = l.window.miners();
+        let s = m.iter().find(|m| m.identity == "bc1qs").unwrap();
+        assert_eq!((s.work, s.stratum_work), (120, 100));
+        assert_eq!(m.iter().find(|m| m.identity == "1Fw8").unwrap().stratum_work, 0, "untagged is not stratum");
         let _ = fs::remove_dir_all(&dir);
     }
 
