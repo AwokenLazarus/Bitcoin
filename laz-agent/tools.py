@@ -1,5 +1,6 @@
 """Read-only tools for the Lazarus Bitcoin stack. No wallet, send, or admin calls."""
 from __future__ import annotations
+import os
 
 import json
 import socket
@@ -10,7 +11,7 @@ from typing import Any
 
 POOL = "https://pool.awokenlazarus.xyz"
 MEMPOOL = "https://mempool.awokenlazarus.xyz"
-ELECTRUM_HOST = "27.69.0.75"
+ELECTRUM_HOST = os.environ.get("LAZ_ELECTRUM_HOST", "127.0.0.1")
 ELECTRUM_PORT = 50002
 ELECTRUM_NAME = "electrum.awokenlazarus.xyz"
 
@@ -248,7 +249,7 @@ def _electrum(method: str, params: list | None = None) -> Any:
     # Prefer public TLS, then LAN electrs (plaintext, protocol 1.8).
     targets = [
         ("tls", ELECTRUM_NAME, ELECTRUM_PORT, True),
-        ("tcp", "27.69.0.25", 50011, False),
+        ("tcp", os.environ.get("LAZ_NODE_HOST", "127.0.0.1"), 50011, False),
     ]
     for kind, host, port, use_tls in targets:
         try:

@@ -13,7 +13,7 @@
 # The node is only ever read. What the public site says differently from it (name, canonical
 # URL, colours, config.js keys, theme cache-busting) is applied to the copy by postprocess.py.
 #
-#   ./build.sh http://27.69.0.25:3006
+#   ./build.sh http://<node>:3006
 set -euo pipefail
 ORIGIN="${1:?usage: build.sh <running mempool web origin>}"
 IMAGE="mempool/frontend:v3.3.1@sha256:0a162e7e0d26a01e9686ddf69c96c4beae5fe10b0daa1020f3d392e033c058f1"

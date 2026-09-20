@@ -17,9 +17,11 @@ set -euo pipefail
 SITE="${1:?usage: deploy.sh pool|mempool [branch]}"
 BRANCH="${2:-main}"
 HERE="$(cd "$(dirname "$0")" && pwd)"
-NODE="${LAZARUS_NODE:-27.69.0.25}"
+NODE="${LAZARUS_NODE:?set LAZARUS_NODE to the host running server.py (use an ssh -L forward for the hub)}"
 WRANGLER="${WRANGLER:-$HOME/.local/bin/wrangler}"
-export CLOUDFLARE_ACCOUNT_ID="8bbeda42a48e2f4394521b0f941dc6bb"
+# account id from ~/.config/cloudflare/env (CLOUDFLARE_ACCOUNT_ID=...)
+export CLOUDFLARE_ACCOUNT_ID="${CLOUDFLARE_ACCOUNT_ID:-$(grep -E "^CLOUDFLARE_ACCOUNT_ID=" "$HOME/.config/cloudflare/env" 2>/dev/null | cut -d= -f2)}"
+: "${CLOUDFLARE_ACCOUNT_ID:?CLOUDFLARE_ACCOUNT_ID not set}"
 unset CF_API_TOKEN CLOUDFLARE_API_TOKEN
 
 case "$SITE" in

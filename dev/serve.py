@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Local preview of the pool site.
 
-    python3 dev/serve.py --tables /path/to/tables.json [--port 8899] [--node http://27.69.0.25:8888]
+    python3 dev/serve.py --tables /path/to/tables.json [--port 8899] [--node http://127.0.0.1:8888]
 
 Runs the real pool/server.py handler read-only, so pages are rendered exactly as production
 renders them and /static/* comes from this tree. /api/history is answered locally from a copy of
@@ -15,7 +15,7 @@ from pathlib import Path
 ap = argparse.ArgumentParser()
 ap.add_argument("--tables", required=True)
 ap.add_argument("--port", type=int, default=8899)
-ap.add_argument("--node", default="http://27.69.0.25:8888")
+ap.add_argument("--node", default="http://127.0.0.1:8888")
 ap.add_argument("--no-history", action="store_true", help="forward /api/history too, to see the site against a node that lacks it")
 a = ap.parse_args()
 

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Email mrmoore27@pm.me when Lazarus finds a block, with coinbase payouts."""
 from __future__ import annotations
+import os
 
 import json
 import subprocess
@@ -8,7 +9,7 @@ import time
 import urllib.request
 from pathlib import Path
 
-POOL = "http://27.69.0.25:8888"
+POOL = os.environ.get("POOL_URL", "http://127.0.0.1:8888")
 TO = "mrmoore27@pm.me"
 FROM_ADDR = "pool@awokenlazarus.xyz"
 STATE = Path(__file__).resolve().parent / "notify-state.json"

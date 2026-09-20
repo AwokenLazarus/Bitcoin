@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Compare a Pages deployment of the pool site with the origin, route by route.
-Usage: verify-pool.py <origin> <candidate>   e.g. http://27.69.0.25:8888 https://lazarus-pool.pages.dev"""
+Usage: verify-pool.py <origin> <candidate>   e.g. http://<node>:8888 https://lazarus-pool.pages.dev"""
 import hashlib, json, re, sys, urllib.request, urllib.error
 sys.path.insert(0, str(__import__("pathlib").Path(__file__).parent / "pool-site"))
 from build import server_constants

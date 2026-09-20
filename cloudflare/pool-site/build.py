@@ -5,7 +5,7 @@ server.py renders every crawlable page from static/index.html plus per-path SEO 
 that depends on live pool data, so it can be captured once per deploy. Everything live stays
 behind /api/*, which _worker.js proxies to the node.
 
-    python3 build.py --origin http://27.69.0.25:8888      # snapshot what is live
+    python3 build.py --origin http://<node>:8888      # snapshot what is live
     python3 build.py --origin http://127.0.0.1:8899       # or a local server.py from this tree
 
 Pages serves `foo.html` at `/foo` and `dir/index.html` at `/dir/`, which is how the canonical
@@ -49,7 +49,7 @@ def page_file(out, lang, path):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--origin", required=True, help="running server.py to snapshot, e.g. http://27.69.0.25:8888")
+    ap.add_argument("--origin", required=True, help="running server.py to snapshot, e.g. http://<node>:8888")
     ap.add_argument("--out", default=str(HERE / "dist"))
     ap.add_argument("--static-from", choices=("origin", "repo"), default="origin",
                     help="take /static/* from the origin (exactly what is live) or from pool/static in this tree")
