@@ -16,6 +16,7 @@
 //! {"action": "hold", "entries": [["bc1q…", 499226], …]}   set these balances aside
 //! {"action": "paid", "txid": "…", "blockhash": "…"}       the payment confirmed: off the books
 //! {"action": "release"}                                   abandoned: they are carry again
+//! {"action": "credit", "entries": [["bc1q…", -1445436], …], "note": "…"}  move carry by hand
 //! ```
 //!
 //! `hold` takes an entry only if the identity is stale right now and holds exactly the sats
@@ -59,6 +60,14 @@ enum Request {
         blockhash: Option<String>,
     },
     Release,
+    /// Move carry by hand: a block the pool paid but no Prime saw, or any other correction
+    /// the operator has worked out. Each entry is a signed delta in sats; a debit saturates
+    /// at zero, and the answer says what actually moved.
+    Credit {
+        entries: Vec<(String, i64)>,
+        #[serde(default)]
+        note: String,
+    },
 }
 
 pub fn dir(shared: &Shared) -> PathBuf {
@@ -134,9 +143,14 @@ fn read_request(id: &str, path: &Path) -> Result<Request, String> {
     }
     let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
     let req: Request = serde_json::from_slice(&bytes).map_err(|e| format!("not a request: {e}"))?;
-    if let Request::Hold { entries } = &req {
-        if entries.is_empty() || entries.len() > MAX_ENTRIES {
-            return Err(format!("a hold names 1..={MAX_ENTRIES} entries"));
+    let n = match &req {
+        Request::Hold { entries } => Some(entries.len()),
+        Request::Credit { entries, .. } => Some(entries.len()),
+        _ => None,
+    };
+    if let Some(n) = n {
+        if n == 0 || n > MAX_ENTRIES {
+            return Err(format!("a hold or credit names 1..={MAX_ENTRIES} entries"));
         }
     }
     Ok(req)
@@ -182,6 +196,32 @@ async fn handle(shared: &Shared, id: &str, req: Request) -> Value {
             }
             shared.drop_coinbaser_base();
             answer
+        }
+        Request::Credit { entries, note } => {
+            let mut ledger = shared.ledger.lock().unwrap();
+            let mut moved: Vec<Value> = Vec::with_capacity(entries.len());
+            let (mut credited, mut debited) = (0u64, 0u64);
+            for (identity, delta) in &entries {
+                let before = ledger.window.carry_of(identity);
+                let after = ledger.settle_carry(std::slice::from_ref(&(identity.clone(), *delta)))
+                    .first()
+                    .map(|c| c.1)
+                    .unwrap_or(before);
+                if after > before {
+                    credited += after - before;
+                } else {
+                    debited += before - after;
+                }
+                moved.push(json!({"identity": identity, "requested": delta, "before": before, "after": after}));
+            }
+            // money moved: on disk before anyone is told it did
+            if let Err(e) = ledger.persist_window() {
+                log::error!("payout {id}: ledger persist failed: {e}");
+            }
+            drop(ledger);
+            shared.drop_coinbaser_base();
+            json!({"id": id, "ok": true, "ts": ts, "status": "credited", "note": note,
+                   "credited_sats": credited, "debited_sats": debited, "entries": moved})
         }
         Request::Release => {
             let mut ledger = shared.ledger.lock().unwrap();
@@ -297,6 +337,21 @@ fn append_log(path: &Path, v: &Value) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_credit_request_parses_and_a_hold_with_no_entries_does_not() {
+        let r: Request = serde_json::from_str(r#"{"action":"credit","entries":[["bc1qa",1000],["bc1qb",-5]],"note":"block 973233"}"#).unwrap();
+        match r {
+            Request::Credit { entries, note } => {
+                assert_eq!(entries, vec![("bc1qa".to_string(), 1000), ("bc1qb".to_string(), -5)]);
+                assert_eq!(note, "block 973233");
+            }
+            _ => panic!("not a credit"),
+        }
+        let r: Request = serde_json::from_str(r#"{"action":"credit","entries":[["bc1qa",1]]}"#).unwrap();
+        assert!(matches!(r, Request::Credit { note, .. } if note.is_empty()), "note is optional");
+        assert!(serde_json::from_str::<Request>(r#"{"action":"credit","entries":[["bc1qa",1.5]]}"#).is_err(), "whole sats only");
+    }
 
     #[test]
     fn amounts_are_read_exactly() {
