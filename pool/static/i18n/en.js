@@ -52,6 +52,13 @@ window.LZ_I18N_DICTS["en"] = {
     "liveTitle": "DATUM work is {datumPct} of the window and the public stratum is {stratumPct}, so the {pts} taken from stratum work is worth {uplift} to DATUM work.",
     "text": "The public stratum pays {fee}. {Pts} of it is credited to every DATUM miner holding work in the window, on every block the pool finds — pro rata by your DATUM work, whether or not you made that coinbase."
   },
+  "softfork": {
+    "kicker": "Network notice · Knots 29.4.2 soft fork",
+    "text": "From block <b>973440</b> (~22 Sep) to <b>979920</b> (~5 Nov) every newly mined coinbase must wait <b>45 days</b> before it can be spent, instead of 100 blocks. It is temporary, and it exists to make hit-and-run mining unprofitable and give miners who stay an edge. Payouts, shares and the split do not change; coins from those blocks just unlock at block 979920 (make-goods too). <b>Lazarus supports it</b> and our nodes switch at block 973400. <b>DATUM gateway operators run their own node, so the choice is yours:</b> to support it, run Knots 29.4.2 before block 973440.",
+    "pr": "The proposal (Knots #419)",
+    "dl": "Knots 29.4.2 downloads",
+    "dismiss": "Dismiss notice"
+  },
   "hero": {
     "eyebrow": "Bitcoin (XBT / BTCB2) · BLAKE2b · DATUM · TIDES · ",
     "title": "Mine Bitcoin (XBT).<br><em>Get paid in the block itself.</em><br>Earn extra for Decentralizing the network.",

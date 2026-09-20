@@ -52,6 +52,13 @@ window.LZ_I18N_DICTS["zh-CN"] = {
     "liveTitle": "DATUM 工作占窗口 {datumPct}，公共 stratum 占 {stratumPct}，因此从 stratum 工作里拿出的 {pts}，对 DATUM 工作相当于 {uplift}。",
     "text": "公共 stratum 手续费为 {fee}。其中 {Pts} 会在矿池找到的每一个区块上，按 DATUM 工作比例记给窗口里每一位持有 DATUM 工作的矿工——不论该 coinbase 是否由你打出。"
   },
+  "softfork": {
+    "kicker": "网络公告 · Knots 29.4.2 软分叉",
+    "text": "从区块 <b>973440</b>（约 9 月 22 日）到 <b>979920</b>（约 11 月 5 日），每个新挖出的 coinbase 需等待 <b>45 天</b> 才能花费，而不是 100 个区块。这是临时措施，目的是让打了就跑的挖矿无利可图，让留下来的矿工占优。支付、份额和分账都不变；这些区块的币只是要到区块 979920 才解锁（补付也一样）。<b>Lazarus 支持它</b>，我们的节点将在区块 973400 切换。<b>DATUM 网关运营者运行自己的节点，选择权在你：</b>若要支持，请在区块 973440 之前运行 Knots 29.4.2。",
+    "pr": "提案（Knots #419）",
+    "dl": "Knots 29.4.2 下载",
+    "dismiss": "关闭公告"
+  },
   "hero": {
     "eyebrow": "比特币（XBT / BTCB2）· BLAKE2b · DATUM · TIDES · ",
     "title": "挖比特币（XBT）。<br><em>在区块里直接拿到钱。</em><br>为去中心化网络出力，还能多赚。",
