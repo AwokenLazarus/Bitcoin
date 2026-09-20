@@ -1,56 +1,47 @@
-# Bitcoin (BLAKE2b)
+# Bitcoin (BLAKE2b) — Lazarus Pool
 
-Code and configs for a BLAKE2b Knots + DATUM mining pool, Electrum indexer, explorer hooks, and a GPU miner.
+Code for [Lazarus Pool](https://pool.awokenlazarus.xyz) on the BLAKE2b fork of Bitcoin (Knots, header v2, forked from SHA-256d at height 961640): the DATUM Prime, the stratum/DATUM gateway, the pool website and explorer front ends, the Electrum and node hooks, and a GPU miner. Copy the **design**; hosts, keys, firewall rules and operating details are deliberately not in this repo (see [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the general shape).
 
-This is the working tree from a homelab Umbrel node after the SHA-256d → BLAKE2b fork (height 961640 on this chain). Copy the **design**, not host paths or keys.
+Since 2026-09-20 the pool runs on a dedicated bare-metal hub with two Knots nodes (one serves templates, one serves Electrum, the explorer and the hot wallet). Before that it ran on a homelab Umbrel node; the Umbrel-era files under `node/`, `scripts/` and `systemd/` are kept as reference.
 
 ## Layout
 
 | Path | What |
 |------|------|
-| `pool/` | Public pool dashboard (reads `primed` stats: window, coinbase preview, gateways, blocks), Electrum cutover, block-notify mail |
-| `pool/config.example.json` | Copy to `config.json` and fill in |
-| `node/` | Live Umbrel Knots path (prefix install script, `blake2b.conf`, app `bitcoin.conf`, Knots + mempool pre-start hooks) |
-| `node/umbrel/` | App `bitcoin.conf`, compose bind snippet, `hooks/pre-start`, mempool hook + Lazarus theme for the mempool explorer |
-| `node/pools/` | Mining-pool list merge + block re-attribution for the mempool explorer (Kilombino, mempool.guide, Lazarus) |
-| `scripts/` | Umbrel helpers: DATUM/electrs/pool persist, mempool header widen, status |
-| `systemd/` | User units, ensure timer, pools-sync timer |
+| `prime/` | **The DATUM Prime we run** (`primed`, Rust, MIT): pool side of the DATUM protocol, TIDES window and coinbase split, share verification against the node's chain, block booking (deferred earnings, DATUM rebate, stale balances), operator requests as files (`hold`, `paid`, `release`, `credit`) |
+| `lazarus/gateway/` | `lazarus-gateway`: DATUM gateway that also serves stratum (ASIC and GPU profiles, solo mode, the overflow relay that hands hashrate above the pool's self-cap to partner pools). The rest of `lazarus/` is the retired first Prime and the protocol crates (AGPL-3.0, see Credits) |
+| `pool/` | Pool website backend: `server.py` (stdlib Python, one writer + read-only replicas over SQLite) and the static site; `config.example.json` |
+| `cloudflare/` | The public sites as Cloudflare Pages projects: `pool-site/` and `mempool-site/` (static snapshot + a worker that proxies `/api/*` to the hub through an Access-guarded tunnel), `deploy.sh`, verify scripts |
+| `docs/` | [`ARCHITECTURE.md`](docs/ARCHITECTURE.md), the operator [playbook](docs/blake2b-mining-pool-playbook.md), the [DATUM rebate plan](docs/datum-rebate-plan.md), the [solo plan](docs/solo-mining-plan.md), the unsplit-coinbase advisory |
+| `node/` | Knots install script, `blake2b.conf`, explorer pool-list merge and Lazarus theme, Umbrel-era app config and hooks |
+| `scripts/`, `systemd/` | Umbrel-era helpers and user units (reference only) |
 | `miner/` | OpenCL BLAKE2b GPU miner |
 | `patches/` | DATUM PROP / coinbaser wiring notes |
-| `docs/blake2b-mining-pool-playbook.md` | Operator playbook (no personal secrets) |
-| `prime/` | **The DATUM Prime we run** (`primed`, Rust, MIT): accepts split-only gateways (`lazarus-gateway*` or UA containing `lazarus-split`), verifies BLAKE2b shares, dictates the TIDES coinbase split |
-| `lazarus/` | Earlier Prime, stratum gateway, and protocol crates. Derived from Ratum (AGPL-3.0) — see Credits; superseded by `prime/` |
+| `laz-agent/` | Tools for an operator agent (node, Electrum and pool lookups) |
 
+## How mining works here
 
-## Knots on Umbrel (live node)
+DATUM, as OCEAN designed it: the miner runs their own Knots and a DATUM gateway, the gateway builds every block template from the miner's node, and Prime only tracks shares and dictates the coinbase split. Remote gateways point at `stratum.awokenlazarus.xyz:28915` with the pool's public key (`primed pubkey`). Any gateway that speaks the protocol is accepted: the house `lazarus-gateway`, [FlyTheElephant1's BLAKE2b fork](https://github.com/FlyTheElephant1/datum_gateway), iohzrd's and Ratum's. Prime answers every coinbaser request with the current TIDES split, verifies each share by rebuilding the BLAKE2b header, and only accepts a coinbase that pays the split it issued; work a gateway submits on a pool-only or unsplit coinbase is credited safely rather than refused (`docs/blake2b-unsplit-coinbase-advisory.md`).
 
-See [`node/README.md`](node/README.md). Short version:
+Miners without a gateway use the pool's public stratum (`:23334` ASIC, `:3333` GPU), served by the house gateway, itself a DATUM client of the same Prime. Solo ports (`:23335`, `:3334`) pay the finder alone.
 
-1. `PREFIX=~/blake2b/prefix ./node/install-knots.sh` (downloads and verifies the official tarball).
-2. Install `node/blake2b.conf` + `node/umbrel/bitcoin.conf` in the Knots app datadir.
-3. Install `node/umbrel/hooks/pre-start` so the prefix `bitcoind` is bind-mounted again after an app update.
-4. App stays on RPC **9332** / P2P **9333**. Do not commit `umbrel-bitcoin.conf`.
+Fees: DATUM work 0%; public stratum 15%, of which 7.5 points is credited to DATUM miners pro rata as carry (see the rebate plan); the pool keeps the other 7.5 points. Solo 0%. A found block pays the TIDES window in the coinbase; what a coinbase cannot place (below the payout floor, over the size budget) becomes carry and rides on later coinbases out of the pool's remainder. A miner who leaves with a small balance is paid by the coinbase after a stale period, or by hand through Prime's `hold`/`paid` requests. Coinbase tag is `Lazarus`; a gateway may add its own secondary tag, which is how the site learns operator names.
 
-## Quick start (pool UI)
+## The website
+
+`pool/server.py` is a thin view over `primed`'s `stats.json` plus Knots RPC and the gateway client API: *If a block is found right now* (the exact coinbase Prime hands to every gateway, as a ring and a table with each output's fee path), Connect, address lookup, miners, gateways, blocks and payouts. Endpoints: `/api/pool`, `/api/coinbaser`, `/api/gateways`, `/api/miners`, `/api/miner/<address>`, `/api/payouts`, `/api/blocks`. It runs as one writer (scrapes and records) and read-only replicas (`POOL_UI_NO_WRITE=1`) that serve traffic.
+
+The public site is a Cloudflare Pages project built from a running backend: `cloudflare/deploy.sh pool` snapshots the HTML, deploys, and verifies the deployed site against the origin before it returns; the Pages worker proxies `/api/*` to the hub's replicas through a Cloudflare Tunnel behind Access (service token only), with short edge caching. The explorer (`mempool.awokenlazarus.xyz`, a mempool.space fork with the Lazarus theme) uses the same pattern with `/ws` passed through. Both wordmarks lead with the Chi Rho (`pool/static/chi-rho.svg`), which is also the pool's icon in the explorer.
 
 ```bash
-cd pool
-cp config.example.json config.json
-# edit cookie_file, datum_auth_file, stratum_host, explorer_url
+# local development
+cd pool && cp config.example.json config.json   # cookie_file, stratum_host, explorer_url, datum_prime_stats
 python3 server.py
 ```
 
-DATUM path (OCEAN model): the user runs Knots + a DATUM gateway and points the gateway at Prime on port 28915. Prime only tracks shares and sets the coinbase split; the user's node builds the template. Public stratum on 23334 is optional and uses our gateway (itself a DATUM client of the same Prime).
+## Building and running Prime
 
-The dashboard is a thin view over `primed`'s `stats.json` (`datum_prime_stats` in `config.json`) plus Knots RPC and the stratum gateway's client API. It leads with *If a block is found right now* — the exact coinbase Prime hands to every gateway (reward → miners → pool, then that split as a ring and as a table, every output with its fee path), then Connect (own DATUM gateway 0% plus the DATUM bonus / public stratum 15%, 7.5 points of which is credited to DATUM miners — see `docs/datum-rebate-plan.md`), address lookup, miners (hashing now, then recently seen), connected gateways, blocks and payouts. The nav and footer link the [Lazarus Mempool](https://mempool.awokenlazarus.xyz) explorer and the public Electrum endpoint; the mempool side carries the same palette, type and links (see `node/README.md`). Both wordmarks lead with the Chi Rho (labarum) — `pool/static/chi-rho.svg`, a filled letterform cut from Newsreader (the wordmark serif) in the proportions of classical labarum art, masked from `--chi-rho` in `pool.css` so it takes `--brass` and scales with the wordmark. The same mark is the pool's icon in the explorer, so a Lazarus block shows the Chi Rho instead of the stock pickaxe. `chi-rho-crest.svg` wreathes that mark in laurel with Alpha and Omega for the 180px touch icons, where there is room to read it; nav, favicons and the explorer's pool badge keep the bare mark. Endpoints: `/api/pool` (status, TIDES window, `prime` block with uptime, totals, connected gateways, block records), `/api/coinbaser` (the exact split Prime dictates for the next block, pool output last), `/api/gateways`, `/api/miners`, `/api/miner/<address>`, `/api/payouts` (found blocks with each coinbase output, kind and status), `/api/blocks`.
-
-The ring in that section is the whole coinbase: a slice per payout address, plus the pool's own, labelled by the last four characters of the address. Addresses on the DATUM path are marked as running their own gateway, and where we know the operator's name we use it. Nothing in the DATUM handshake carries one — the hello is keys, a user agent and a nonce count — so it is learned from blocks instead: a gateway writes its own *secondary* coinbase tag next to the pool's (`<primary> 0x0F <secondary> 0x00` in the first push after the BIP34 height), `primed` records **which gateway found each block**, and that gateway's identity is its payout address. Reading the tag off the block's outputs instead would name the wrong miner, since the first output is simply the window's largest payee. `server.py` keeps what it learns in `gateway_tags`, keyed by the gateway's signing-key prefix so it survives reconnects, and writes a row even when a block carried no tag so gateways that never set one are not re-fetched. Our own gateway is skipped: its identity is only whichever stratum address it last reported.
-
-The Prime we run is [`prime/`](prime/) (`primed`; see its [README](prime/README.md)). Remote operators run a **split-only** DATUM gateway — house `lazarus-gateway`, or [FlyTheElephant1](https://github.com/FlyTheElephant1/datum_gateway) with [`lazarus/patches/datum-gateway-split-only.patch`](lazarus/patches/datum-gateway-split-only.patch) so the hello UA contains `lazarus-split` — and point it at `stratum.awokenlazarus.xyz:28915` with our pubkey (`primed pubkey`). Stock Convoy / OCEAN / unpatched FlyTheElephant empty-first and size-class jobs cannot put a full TIDES split in the coinbase; with `require-split-gateway = true` Prime refuses those hellos. Their node still builds the template; Prime answers every coinbaser request with the current TIDES split, verifies each share by rebuilding the BLAKE2b header, and rejects any coinbase that pays outside the split it issued. The pool UI scrapes Prime stats on localhost `:28916` and Knots RPC via cookie. DATUM work is 0%; public stratum is 15%, of which 7.5 points is credited to DATUM miners. The pool keeps the other 7.5 points. Dedicated solo is 7.5% and is outside the rebate. A found block pays the rest of the TIDES window in the coinbase. Coinbase tag is `Lazarus`.
-
-Deploying the UI on the host: `rsync pool/server.py pool/static/` into `~/blake2b/lazarus-pool/`. Static files are read per request, so they are live at once; `scripts/ensure-blake2b-services.sh` (the umbrel `ensure-blake2b.timer`, every 3 min, or run it by hand) notices a `server.py` newer than the running instances, stops them and relaunches `:8888` (writer) and `:8889`/`:8890` (read-only mirrors, `POOL_UI_NO_WRITE=1`) as `umbrel` — no sudo needed. If the script runs from a root Umbrel hook it still launches them as `umbrel` via `runuser`.
-
-Install: `scripts/build-primed.sh` builds and installs `prefix/bin/primed`; `scripts/start-lazarus-prime.sh` runs it against the existing `lazarus-prime.toml` (every old key still loads, and the old `lazarus-prime.key` is read as-is so the pool pubkey did not change). `primed` has run the pool since 2026-09-03, cut over live with the previous window imported (`primed import-ledger`). Public stratum for miners without a gateway is still [`lazarus/gateway`](lazarus/gateway) (ASIC `:23334`), which connects to Prime like any other gateway; its two non-stock habits (whole coinbase in `coinb1`, proportional rescaling of the split) are documented and accepted in `prime/README.md`.
+`cd prime && cargo build --release` gives `primed`; `primed -c prime.toml check`, `pubkey`, `window`, `import-ledger <ledger.json>` (rows may carry a `source`, 1 stratum / 2 DATUM), `run`. The gateway is `cargo build --release -p lazarus-gateway` in `lazarus/`. `primed` has run the pool since 2026-09-03, cut over live with the previous window imported. Operator actions while it runs are files in `<data-dir>/payouts/` (see `prime/primed/src/payouts.rs`).
 
 ## Share validation invariants
 
