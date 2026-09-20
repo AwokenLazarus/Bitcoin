@@ -835,13 +835,14 @@ def makegood_status(height, blockhash, tip, jobs=None, settlements=None):
 
     owed      primed has booked the debt; the fee wallet has not signed a payment yet
               (it normally does within a minute of the block).
-    queued    signed and waiting: a coinbase output cannot be spent before height + 100.
+    queued    signed and waiting: a coinbase output cannot be spent before it matures (100
+              confirmations; blocks 973440..979919 wait for height 979920, Knots #419).
     broadcast sent to the network, not yet in a block.
     paid      confirmed on chain.
     failed    the node refused the transaction; needs an operator."""
     jobs = makegood_jobs() if jobs is None else jobs
     settlements = owed_settlements() if settlements is None else settlements
-    payable_at = int(height) + MATURITY_CONFS
+    payable_at = mature_height(height)
     out = {
         "payable_at": payable_at,
         "blocks_to_payable": max(0, payable_at - int(tip)) if tip else MATURITY_CONFS,
@@ -2479,12 +2480,25 @@ def coinbase_splits(blockhash):
 
 
 MATURITY_CONFS = 100
+# Knots #419 (long coinbase maturity, temporary soft fork): a coinbase created at height
+# LONG_MATURITY_START or later cannot be spent before height LONG_MATURITY_RELEASE, where the
+# rule lapses back to 100 confirmations. So: pre-window blocks mature at height + 100; window
+# blocks mature at max(release, height + 100).
+LONG_MATURITY_START = int(CONF.get("long_maturity_start", 973440))
+LONG_MATURITY_RELEASE = int(CONF.get("long_maturity_release", 979920))
+
+
+def mature_height(height):
+    height = int(height)
+    if height >= LONG_MATURITY_START:
+        return max(LONG_MATURITY_RELEASE, height + MATURITY_CONFS)
+    return height + MATURITY_CONFS
 
 
 def payout_status_for_height(height, tip):
     if not height or not tip:
         return "paid"
-    if int(tip) < int(height) + MATURITY_CONFS:
+    if int(tip) < mature_height(height):
         return "immature"
     return "paid"
 
@@ -2573,7 +2587,7 @@ def mature_rounds():
     tip = rpc("getblockcount") or 0
     rows = db("SELECT id, height FROM rounds WHERE status='immature'")
     for r in rows or []:
-        if r["height"] and int(tip) >= int(r["height"]) + 100:
+        if r["height"] and int(tip) >= mature_height(r["height"]):
             db("UPDATE rounds SET status='payable' WHERE id=?", (r["id"],), write=True)
             # Coinbase payout: already in that block. After 100 confs it is paid, not a balance we owe.
             db(
@@ -3979,7 +3993,7 @@ def miner_payload(address):
                 # Coinbase outputs spend after 100 confirmations; the block itself is one.
                 "confirmations": confs,
                 # Spendable once the chain reaches height + 100 (status flips to paid then).
-                "blocks_to_mature": max(0, int(fb["height"]) + MATURITY_CONFS - int(tip)) if tip and fb["height"] else MATURITY_CONFS,
+                "blocks_to_mature": max(0, mature_height(fb["height"]) - int(tip)) if tip and fb["height"] else MATURITY_CONFS,
             }
         )
         if st == "immature":
