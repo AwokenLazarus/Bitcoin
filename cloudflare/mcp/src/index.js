@@ -28,8 +28,26 @@ const CORS = {
   "Access-Control-Allow-Headers": "Content-Type, Accept, Authorization, Mcp-Session-Id, Mcp-Protocol-Version",
   "Access-Control-Max-Age": "86400",
 };
+// Sent on every response. The API is public JSON, so CORS stays open; these stop a browser from
+// sniffing, framing or caching it as something else.
+const SECURITY = {
+  "X-Content-Type-Options": "nosniff",
+  "X-Frame-Options": "DENY",
+  "Referrer-Policy": "no-referrer",
+  "Strict-Transport-Security": "max-age=31536000; includeSubDomains",
+};
 const json = (obj, status = 200, extra = {}) =>
-  new Response(JSON.stringify(obj), { status, headers: { "Content-Type": "application/json", "Cache-Control": "no-store", ...CORS, ...extra } });
+  new Response(JSON.stringify(obj), { status, headers: { "Content-Type": "application/json", "Cache-Control": "no-store", ...CORS, ...SECURITY, ...extra } });
+
+// Rate-limit key for a client. One IPv6 subscriber holds a whole /64, so the limit is per /64:
+// otherwise a single host walks through 2^64 addresses and never meets its own counter.
+function clientKey(ip) {
+  if (!ip || !ip.includes(":")) return ip || "unknown";
+  const [head, tail = ""] = ip.split("::");
+  const h = head.split(":").filter(Boolean), t = tail.split(":").filter(Boolean);
+  const full = [...h, ...Array(Math.max(0, 8 - h.length - t.length)).fill("0"), ...t];
+  return full.slice(0, 4).map((x) => x.replace(/^0+(?=.)/, "").toLowerCase()).join(":") + "::/64";
+}
 const rpcResult = (id, result) => ({ jsonrpc: "2.0", id, result });
 const rpcError = (id, code, message) => ({ jsonrpc: "2.0", id: id ?? null, error: { code, message } });
 const toolText = (obj, isError = false) => ({ content: [{ type: "text", text: typeof obj === "string" ? obj : JSON.stringify(obj) }], isError });
@@ -109,10 +127,10 @@ it cannot move coins, change settings or see anything private. Nothing you ask i
 export default {
   async fetch(request, env, execCtx) {
     const url = new URL(request.url);
-    if (request.method === "OPTIONS") return new Response(null, { status: 204, headers: CORS });
+    if (request.method === "OPTIONS") return new Response(null, { status: 204, headers: { ...CORS, ...SECURITY } });
     if (url.pathname === "/" || url.pathname === "") {
       const items = TOOLS.map((t) => `<li><code>${t.name}</code> ${t.title}</li>`).join("");
-      return new Response(LANDING.replace("__TOOLS__", items), { headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "public, max-age=300" } });
+      return new Response(LANDING.replace("__TOOLS__", items), { headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "public, max-age=300", "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'", ...SECURITY } });
     }
     if (url.pathname !== "/mcp") return json({ error: "not found", endpoint: "/mcp" }, 404);
     if (request.method === "GET" || request.method === "DELETE") {
@@ -128,13 +146,13 @@ export default {
     } catch (e) {
       return json(rpcError(null, -32700, "Parse error"), 400);
     }
-    const ctx = { env, execCtx, ip: request.headers.get("CF-Connecting-IP") || "unknown", origin: url.origin };
+    const ctx = { env, execCtx, ip: clientKey(request.headers.get("CF-Connecting-IP")), origin: url.origin };
     if (Array.isArray(body)) {
       if (!body.length || body.length > 10) return json(rpcError(null, -32600, "Batch must hold 1 to 10 messages"), 400);
       const out = (await Promise.all(body.map((m) => handleRpc(m, ctx)))).filter(Boolean);
-      return out.length ? json(out) : new Response(null, { status: 202, headers: CORS });
+      return out.length ? json(out) : new Response(null, { status: 202, headers: { ...CORS, ...SECURITY } });
     }
     const out = await handleRpc(body, ctx);
-    return out ? json(out) : new Response(null, { status: 202, headers: CORS });
+    return out ? json(out) : new Response(null, { status: 202, headers: { ...CORS, ...SECURITY } });
   },
 };
