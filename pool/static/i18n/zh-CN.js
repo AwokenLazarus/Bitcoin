@@ -2,7 +2,7 @@ window.LZ_I18N_DICTS = window.LZ_I18N_DICTS || {};
 window.LZ_I18N_DICTS["zh-CN"] = {
   "meta": {
     "title": "Lazarus Pool — 用 Siacoin BLAKE2b 矿机挖比特币（XBT / BTCB2）的矿池",
-    "description": "用任何能挖 Siacoin 的 BLAKE2b ASIC 挖比特币（XBT / BTCB2）——金贝 SC、iBeLink BM-S3、蚂蚁 A3。本矿池是这条 BIP-110 比特币分叉主网上第一家用 TIDES 拆分 coinbase 支付的矿池，也是第一家用自有 stratum 算力补贴 DATUM 矿工的矿池。自建 DATUM 0%，公共 stratum 15%（stratum+tcp://stratum.awokenlazarus.xyz:23334）。",
+    "description": "用任何能挖 Siacoin 的 BLAKE2b ASIC 挖比特币（XBT / BTCB2）——金贝 SC、iBeLink BM-S3、蚂蚁 A3。本矿池是这条 BIP-110 比特币分叉主网上第一家用 TIDES 拆分 coinbase 支付的矿池，也是第一家用自有 stratum 算力补贴 DATUM 矿工的矿池。自建 DATUM 0%，公共 stratum 15%（stratum+tcp://stratum.lazarus-xbt.xyz:23334）。",
     "minerTitle": "矿工 — Lazarus Pool",
     "minerDescription": "Lazarus Pool 上某个地址的实时算力、矿机、TIDES 窗口份额以及每一笔 coinbase 支付。",
     "minerTitleAddr": "{short} — Lazarus Pool"
@@ -124,7 +124,7 @@ window.LZ_I18N_DICTS["zh-CN"] = {
     "pillarsAria": "Lazarus 的不同之处",
     "p1": "<b>在区块里直接支付。</b>没有矿池余额，不用提现。找到区块时，其 coinbase 直接付给你的地址。<a href=\"#payout\">查看下一次支付</a>。",
     "p2a": "<b>自带网关，保留 100%——再多一点。</b>运行 Bitcoin Knots 和原版 DATUM 网关：由你的节点组块，矿池只定分配。公共 stratum 为 ",
-    "p3": "<b>端到端可验证。</b>每一份 share 都会重建并哈希；找到的每个区块都在 <a href=\"https://mempool.awokenlazarus.xyz/mining/pool/lazarus\" target=\"_blank\" rel=\"noreferrer\">Lazarus Mempool</a>。源码在 <a href=\"https://github.com/AwokenLazarus/Bitcoin\" target=\"_blank\" rel=\"noreferrer\">GitHub</a>。",
+    "p3": "<b>端到端可验证。</b>每一份 share 都会重建并哈希；找到的每个区块都在 <a href=\"https://mempool.lazarus-xbt.xyz/mining/pool/lazarus\" target=\"_blank\" rel=\"noreferrer\">Lazarus Mempool</a>。源码在 <a href=\"https://github.com/AwokenLazarus/Bitcoin\" target=\"_blank\" rel=\"noreferrer\">GitHub</a>。",
     "pillarRebate": "，其中 {pts} 会在每个区块记给 DATUM 矿工",
     "hashrate": "算力",
     "miners": "矿工",
@@ -654,7 +654,7 @@ window.LZ_I18N_DICTS["zh-CN"] = {
   "blocks": {
     "eyebrow": "区块与支付",
     "title": "Lazarus 找到的，然后是本链其余区块。",
-    "lede": "在<strong>所找到区块的 coinbase</strong> 里支付，按 TIDES 窗口内已接受工作分配，扣除每位矿工的手续费。打开一个区块可看到每一笔输出。Coinbase 输出在 100 个确认后可花费。每个区块也在 <a href=\"https://mempool.awokenlazarus.xyz/mining/pool/lazarus\" target=\"_blank\" rel=\"noreferrer\">Lazarus Mempool</a>。",
+    "lede": "在<strong>所找到区块的 coinbase</strong> 里支付，按 TIDES 窗口内已接受工作分配，扣除每位矿工的手续费。打开一个区块可看到每一笔输出。Coinbase 输出在 100 个确认后可花费。每个区块也在 <a href=\"https://mempool.lazarus-xbt.xyz/mining/pool/lazarus\" target=\"_blank\" rel=\"noreferrer\">Lazarus Mempool</a>。",
     "found": "Lazarus 找到的",
     "recent": "本链最近",
     "thHeight": "高度",

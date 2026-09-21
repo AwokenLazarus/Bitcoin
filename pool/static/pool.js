@@ -666,7 +666,7 @@
     $("stratum").textContent = p.stratum;
 
     const d = p.datum || {};
-    const host = d.pool_host || "stratum.awokenlazarus.xyz";
+    const host = d.pool_host || "stratum.lazarus-xbt.xyz";
     const port = d.pool_port || 28915;
     const pubkey = d.pool_pubkey || pr.pubkey || "";
     const gw = $("gateway-config");

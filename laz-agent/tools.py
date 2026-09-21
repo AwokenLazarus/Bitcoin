@@ -9,8 +9,8 @@ import urllib.error
 import urllib.request
 from typing import Any
 
-POOL = "https://pool.awokenlazarus.xyz"
-MEMPOOL = "https://mempool.awokenlazarus.xyz"
+POOL = "https://pool.lazarus-xbt.xyz"
+MEMPOOL = "https://mempool.lazarus-xbt.xyz"
 ELECTRUM_HOST = os.environ.get("LAZ_ELECTRUM_HOST", "127.0.0.1")
 ELECTRUM_PORT = 50002
 ELECTRUM_NAME = "electrum.awokenlazarus.xyz"
@@ -208,7 +208,7 @@ def pool_status(_args: dict) -> str:
                 "workers_online": doc.get("workers_online"),
                 "fees": doc.get("fees") or {"datum_percent": 0.5, "stratum_percent": 2.0},
                 "stratum_asic": doc.get("stratum_asic") or doc.get("stratum"),
-                "stratum_prime": "stratum+tcp://stratum.awokenlazarus.xyz:28915",
+                "stratum_prime": "stratum+tcp://datum.lazarus-xbt.xyz:28915",
                 "connect": "BLAKE2b miners only (Innosilicon S11 / header-v2). Not SHA-256d ASICs.",
             }
         )

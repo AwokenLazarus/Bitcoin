@@ -2,7 +2,7 @@ window.LZ_I18N_DICTS = window.LZ_I18N_DICTS || {};
 window.LZ_I18N_DICTS["en"] = {
   "meta": {
     "title": "Lazarus Pool — BLAKE2b Bitcoin (XBT / BTCB2) mining pool for Siacoin ASICs",
-    "description": "Mine Bitcoin (XBT / BTCB2) with any Siacoin BLAKE2b ASIC — Goldshell SC, iBeLink BM-S3, Antminer A3. The first pool to pay TIDES as a split coinbase on this BIP-110 Bitcoin fork's mainnet, and the first to subsidize DATUM miners with its own stratum hashers. 0% via DATUM, 15% public stratum (stratum+tcp://stratum.awokenlazarus.xyz:23334).",
+    "description": "Mine Bitcoin (XBT / BTCB2) with any Siacoin BLAKE2b ASIC — Goldshell SC, iBeLink BM-S3, Antminer A3. The first pool to pay TIDES as a split coinbase on this BIP-110 Bitcoin fork's mainnet, and the first to subsidize DATUM miners with its own stratum hashers. 0% via DATUM, 15% public stratum (stratum+tcp://stratum.lazarus-xbt.xyz:23334).",
     "minerTitle": "Miner — Lazarus Pool",
     "minerDescription": "Live hashrate, workers, TIDES window share and every coinbase payout for one address on Lazarus Pool.",
     "minerTitleAddr": "{short} — Lazarus Pool"
@@ -124,7 +124,7 @@ window.LZ_I18N_DICTS["en"] = {
     "pillarsAria": "What makes Lazarus different",
     "p1": "<b>Paid in the block itself.</b> No pool balance, no withdrawals. When a block is found, its coinbase pays your address directly. <a href=\"#payout\">See the next payout</a>.",
     "p2a": "<b>Bring your own gateway, keep 100% — and then some.</b> Run Bitcoin Knots and a stock DATUM gateway: your node builds the block template, the pool only sets the split. Public stratum is ",
-    "p3": "<b>Verifiable end to end.</b> Every share is rebuilt and hashed; every block found is on the <a href=\"https://mempool.awokenlazarus.xyz/mining/pool/lazarus\" target=\"_blank\" rel=\"noreferrer\">Lazarus Mempool</a>. Source on <a href=\"https://github.com/AwokenLazarus/Bitcoin\" target=\"_blank\" rel=\"noreferrer\">GitHub</a>.",
+    "p3": "<b>Verifiable end to end.</b> Every share is rebuilt and hashed; every block found is on the <a href=\"https://mempool.lazarus-xbt.xyz/mining/pool/lazarus\" target=\"_blank\" rel=\"noreferrer\">Lazarus Mempool</a>. Source on <a href=\"https://github.com/AwokenLazarus/Bitcoin\" target=\"_blank\" rel=\"noreferrer\">GitHub</a>.",
     "pillarRebate": ", and {pts} of that is credited to DATUM miners on every block",
     "hashrate": "Hashrate",
     "miners": "Miners",
@@ -654,7 +654,7 @@ window.LZ_I18N_DICTS["en"] = {
   "blocks": {
     "eyebrow": "Blocks & payouts",
     "title": "Found by Lazarus, then the rest of the chain.",
-    "lede": "Paid <strong>in the found block’s coinbase</strong>, split by accepted work in the TIDES window, less each miner’s fee. Open a block to see every output. Coinbase outputs are spendable after 100 confirmations. Every block is also on the <a href=\"https://mempool.awokenlazarus.xyz/mining/pool/lazarus\" target=\"_blank\" rel=\"noreferrer\">Lazarus Mempool</a>.",
+    "lede": "Paid <strong>in the found block’s coinbase</strong>, split by accepted work in the TIDES window, less each miner’s fee. Open a block to see every output. Coinbase outputs are spendable after 100 confirmations. Every block is also on the <a href=\"https://mempool.lazarus-xbt.xyz/mining/pool/lazarus\" target=\"_blank\" rel=\"noreferrer\">Lazarus Mempool</a>.",
     "found": "Found by Lazarus",
     "recent": "Recent on this chain",
     "thHeight": "Height",

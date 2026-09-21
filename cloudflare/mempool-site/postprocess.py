@@ -10,7 +10,7 @@ Usage: postprocess.py <dist dir>"""
 import hashlib, re, shutil, sys
 from pathlib import Path
 
-SITE = "https://mempool.awokenlazarus.xyz"
+SITE = "https://mempool.lazarus-xbt.xyz"
 NAME = "Lazarus Mempool"
 TITLE = "Lazarus Mempool - BLAKE2b BTC Explorer"
 DESCRIPTION = "Block explorer and mempool visualiser for BLAKE2b BTC, run by Lazarus Pool."

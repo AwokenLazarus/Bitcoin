@@ -29,7 +29,7 @@ NO_WRITE = os.environ.get("POOL_UI_NO_WRITE") == "1"
 POOL_FEE = float(CONF.get("pool_fee_percent", 0))
 # Public-stratum fee when primed is not answering; primed's stats.json is authoritative.
 STRATUM_FEE = float(CONF.get("stratum_fee_percent", 15.0))
-STRATUM_HOST = CONF.get("stratum_host", "stratum.awokenlazarus.xyz")
+STRATUM_HOST = CONF.get("stratum_host", "stratum.lazarus-xbt.xyz")
 STRATUM_PORT = int(CONF.get("stratum_port", 23334))
 DATUM_URL = CONF.get("datum_url", "http://127.0.0.1:7152")
 DATUM_CLIENT_URLS = [(DATUM_URL, "stratum", STRATUM_PORT)]
@@ -37,7 +37,7 @@ MEMPOOL_API = CONF.get("mempool_api", "http://10.21.21.27:8999")
 COOKIE = Path(CONF.get("cookie_file", "/home/umbrel/umbrel/app-data/bitcoin-knots/data/bitcoin/.cookie"))
 RPC_URL = CONF.get("rpc_url", "http://127.0.0.1:9332")
 AUTH_FILE = Path(CONF.get("datum_auth_file", "/home/umbrel/blake2b/secrets/datum-admin.env"))
-EXPLORER = CONF.get("explorer_url", "https://mempool.awokenlazarus.xyz")
+EXPLORER = CONF.get("explorer_url", "https://mempool.lazarus-xbt.xyz")
 COINBASE_TAG = CONF.get("coinbase_tag", "Lazarus")
 # Solo blocks carry their own tag so this scanner can tell them apart. A solo block pays its
 # finder inside its own coinbase, so it must never close a TIDES round: the window did not
@@ -1890,7 +1890,7 @@ def _hardware_fetch():
         _BT_MINERS_API,
         timeout=12,
         headers=(
-            "User-Agent: LazarusPool/1.0 (+https://pool.awokenlazarus.xyz)",
+            "User-Agent: LazarusPool/1.0 (+https://pool.lazarus-xbt.xyz)",
             "Accept: application/json",
         ),
     )
@@ -4374,7 +4374,7 @@ def history_payload(rng):
 
 
 # Public origin for canonical / sitemap / OG. Override in config.json if the UI is mirrored.
-_PUBLIC_SITE = str(CONF.get("public_url") or "https://pool.awokenlazarus.xyz").rstrip("/")
+_PUBLIC_SITE = str(CONF.get("public_url") or "https://pool.lazarus-xbt.xyz").rstrip("/")
 _SEO_PAGES = {
     "/": {
         "en": {
@@ -4383,7 +4383,7 @@ _SEO_PAGES = {
                 "Mine Bitcoin (XBT / BTCB2) with any Siacoin BLAKE2b ASIC — Goldshell SC, iBeLink BM-S3, "
                 "Antminer A3. The first pool to pay TIDES as a split coinbase on this BIP-110 Bitcoin fork's "
                 "mainnet, and the first to subsidize DATUM miners with its own stratum hashers. 0% via DATUM, "
-                "15% public stratum (stratum+tcp://stratum.awokenlazarus.xyz:23334)."
+                "15% public stratum (stratum+tcp://stratum.lazarus-xbt.xyz:23334)."
             ),
             "scroll": "",
         },
@@ -4393,7 +4393,7 @@ _SEO_PAGES = {
                 "用任何能挖 Siacoin 的 BLAKE2b ASIC 挖比特币（XBT / BTCB2）——金贝 SC、iBeLink BM-S3、蚂蚁 A3。"
                 "本矿池是这条 BIP-110 比特币分叉主网上第一家用 TIDES 拆分 coinbase 支付的矿池，也是第一家"
                 "用自有 stratum 算力补贴 DATUM 矿工的矿池。自建 DATUM 0%，公共 stratum 15%"
-                "（stratum+tcp://stratum.awokenlazarus.xyz:23334）。"
+                "（stratum+tcp://stratum.lazarus-xbt.xyz:23334）。"
             ),
             "scroll": "",
         },
@@ -4417,14 +4417,14 @@ _SEO_PAGES = {
         "en": {
             "title": "Connect a miner to Lazarus Pool — XBT / BTCB2 stratum and DATUM",
             "description": (
-                "Point a BLAKE2b ASIC at stratum+tcp://stratum.awokenlazarus.xyz:23334. "
+                "Point a BLAKE2b ASIC at stratum+tcp://stratum.lazarus-xbt.xyz:23334. "
                 "Username is your Bitcoin (XBT) payout address. Or run a DATUM gateway at 0% fee."
             ),
             "scroll": "connect",
         },
         "zh": {
             "title": "接入 Lazarus Pool — XBT / BTCB2 的 stratum 与 DATUM",
-            "description": "把 BLAKE2b 矿机指向 stratum+tcp://stratum.awokenlazarus.xyz:23334。用户名是你的比特币（XBT）收款地址。或自建 DATUM 网关，手续费 0%。",
+            "description": "把 BLAKE2b 矿机指向 stratum+tcp://stratum.lazarus-xbt.xyz:23334。用户名是你的比特币（XBT）收款地址。或自建 DATUM 网关，手续费 0%。",
             "scroll": "connect",
         },
     },
@@ -4433,13 +4433,13 @@ _SEO_PAGES = {
             "title": "How to mine XBT (BTCB2) — Lazarus Pool",
             "description": (
                 "Mine Bitcoin XBT / BTCB2 with a Siacoin ASIC. Algorithm BLAKE2b, not SHA-256. "
-                "Stratum: stratum+tcp://stratum.awokenlazarus.xyz:23334 — user = payout address, pass = x."
+                "Stratum: stratum+tcp://stratum.lazarus-xbt.xyz:23334 — user = payout address, pass = x."
             ),
             "scroll": "connect",
         },
         "zh": {
             "title": "如何挖 XBT（BTCB2）— Lazarus Pool",
-            "description": "用 Siacoin ASIC 挖比特币 XBT / BTCB2。算法是 BLAKE2b，不是 SHA-256。Stratum：stratum+tcp://stratum.awokenlazarus.xyz:23334，用户名=收款地址，密码 x。",
+            "description": "用 Siacoin ASIC 挖比特币 XBT / BTCB2。算法是 BLAKE2b，不是 SHA-256。Stratum：stratum+tcp://stratum.lazarus-xbt.xyz:23334，用户名=收款地址，密码 x。",
             "scroll": "connect",
         },
     },
@@ -4724,7 +4724,7 @@ _SEO_INTRO = {
     # markup itself rather than relying on the browser to translate it after load.
     "/": {
         "zh": ("用 Siacoin BLAKE2b 矿机挖比特币（XBT / BTCB2）", [
-            "任何能挖 Siacoin 的 ASIC 都能挖这条链——同为 BLAKE2b，原厂固件即可，不用换硬件。把矿机指向 <b>stratum+tcp://stratum.awokenlazarus.xyz:23334</b>，用户名填你的收款地址，密码填 <code>x</code>。没有账户，不用注册。",
+            "任何能挖 Siacoin 的 ASIC 都能挖这条链——同为 BLAKE2b，原厂固件即可，不用换硬件。把矿机指向 <b>stratum+tcp://stratum.lazarus-xbt.xyz:23334</b>，用户名填你的收款地址，密码填 <code>x</code>。没有账户，不用注册。",
             "支付走 TIDES 拆分 coinbase：矿池找到区块时，窗口内每个地址都成为该区块的一个输出，直接付到你的地址。没有矿池余额、没有起付线、不用提现，矿池也从不持有你的币。自建 DATUM 网关 0% 手续费，并从公共 stratum 的手续费里分得补贴。",
             "<a href=\"/zh/mine-xbt\">如何开始挖</a> · <a href=\"/zh/hardware\">哪些矿机能用</a> · <a href=\"/zh/calculator\">收益计算器</a> · <a href=\"/zh/pools\">各矿池对比</a> · <a href=\"/zh/self-cap\">为什么我们把 stratum 限制在 15%</a>",
         ]),
@@ -4783,21 +4783,21 @@ _SEO_INTRO = {
     },
     "/connect": {
         "en": ("Connect a miner to Lazarus Pool", [
-            "Point the miner at <b>stratum+tcp://stratum.awokenlazarus.xyz:23334</b>, set the username to the address you want paid — optionally <code>address.worker</code> — and the password to <code>x</code>. The algorithm is BLAKE2b with a Sia-style header, not SHA-256d. New sessions start at difficulty 4096 and vardiff steps up toward your hashrate from there. There is no account and no registration; the username is the payout instruction.",
+            "Point the miner at <b>stratum+tcp://stratum.lazarus-xbt.xyz:23334</b>, set the username to the address you want paid — optionally <code>address.worker</code> — and the password to <code>x</code>. The algorithm is BLAKE2b with a Sia-style header, not SHA-256d. New sessions start at difficulty 4096 and vardiff steps up toward your hashrate from there. There is no account and no registration; the username is the payout instruction.",
             "There are two ways in. The public stratum charges 15% and our node builds the templates, which is the one-line setup. Running your own Bitcoin Knots node and DATUM gateway costs 0% and pays you a <a href=\"/datum-subsidy\">share of that stratum fee</a> on every block, because you are building the templates yourself. Both land in the same TIDES window under your address, so switching later keeps the accepted work you already have. For a longer Knots + DATUM walkthrough, use <a href=\"https://convoy.xyz/getstarted\">CONVOY’s get-started guide</a> (also in <a href=\"https://convoy.xyz/getstarted?lang=zh\">中文</a>), then come back here for this pool’s host, port, and pubkey.",
         ]),
         "zh": ("把矿机接入 Lazarus Pool", [
-            "把矿机指向 <b>stratum+tcp://stratum.awokenlazarus.xyz:23334</b>，用户名填你要收款的地址（也可以写成 <code>地址.worker</code>），密码填 <code>x</code>。算法是 BLAKE2b（Sia 风格区块头），不是 SHA-256d。新会话从难度 4096 起步，之后 vardiff 会朝你的算力逐步调整。没有账户，也不用注册——用户名就是收款指令。",
+            "把矿机指向 <b>stratum+tcp://stratum.lazarus-xbt.xyz:23334</b>，用户名填你要收款的地址（也可以写成 <code>地址.worker</code>），密码填 <code>x</code>。算法是 BLAKE2b（Sia 风格区块头），不是 SHA-256d。新会话从难度 4096 起步，之后 vardiff 会朝你的算力逐步调整。没有账户，也不用注册——用户名就是收款指令。",
             "有两条路。公共 stratum 收 15%，模板由我们的节点构建，配置只有一行。自己跑 Bitcoin Knots 节点和 DATUM 网关则是 0%，而且因为模板是你自己构建的，每个区块还会把<a href=\"/datum-subsidy\">那笔 stratum 手续费的一部分</a>付给你。两条路都记入同一个 TIDES 窗口、同一个地址，所以以后切换不会丢掉已积累的工作量。更完整的 Knots + DATUM 说明见 <a href=\"https://convoy.xyz/getstarted?lang=zh\">CONVOY 入门指南（中文）</a>（<a href=\"https://convoy.xyz/getstarted\">English</a>），然后回到本页填写本池的主机、端口和公钥。",
         ]),
     },
     "/mine-xbt": {
         "en": ("How to mine Bitcoin XBT (BTCB2)", [
-            "You need three things: an ASIC that hashes BLAKE2b, an address on this chain to be paid to, and the pool endpoint. If you already own a Siacoin miner you have the first one — this is the same algorithm, so stock firmware works. Point it at <b>stratum+tcp://stratum.awokenlazarus.xyz:23334</b> with your address as the username and <code>x</code> as the password, and it will start hashing immediately.",
+            "You need three things: an ASIC that hashes BLAKE2b, an address on this chain to be paid to, and the pool endpoint. If you already own a Siacoin miner you have the first one — this is the same algorithm, so stock firmware works. Point it at <b>stratum+tcp://stratum.lazarus-xbt.xyz:23334</b> with your address as the username and <code>x</code> as the password, and it will start hashing immediately.",
             "One warning worth reading twice: this chain shares every block of history with SHA-256 Bitcoin up to block 961,640, so an address holding real BTC should never be used here. Generate a fresh address for this chain. Payouts arrive as outputs in the coinbase of blocks the pool finds, spendable after 100 confirmations, with no balance to withdraw. <a href=\"/hardware\">Which machines work</a> · <a href=\"/tides\">how the payout is calculated</a>.",
         ]),
         "zh": ("如何挖比特币 XBT（BTCB2）", [
-            "你需要三样东西：一台能算 BLAKE2b 的 ASIC、一个本链的收款地址，以及矿池地址。如果你已经有 Siacoin 矿机，第一样就有了——算法相同，原厂固件即可。把它指向 <b>stratum+tcp://stratum.awokenlazarus.xyz:23334</b>，用户名填你的地址，密码填 <code>x</code>，立刻就能开始工作。",
+            "你需要三样东西：一台能算 BLAKE2b 的 ASIC、一个本链的收款地址，以及矿池地址。如果你已经有 Siacoin 矿机，第一样就有了——算法相同，原厂固件即可。把它指向 <b>stratum+tcp://stratum.lazarus-xbt.xyz:23334</b>，用户名填你的地址，密码填 <code>x</code>，立刻就能开始工作。",
             "有一条提醒值得看两遍：本链与 SHA-256 比特币共享 961,640 高度之前的全部历史，因此持有真实 BTC 的地址绝不可在此使用，请为本链另生成一个新地址。收益以矿池所出区块 coinbase 中的输出形式到账，100 个确认后可动用，没有余额需要提现。<a href=\"/hardware\">哪些机器能用</a> · <a href=\"/tides\">支付如何计算</a>。",
         ]),
     },
@@ -4897,7 +4897,7 @@ _STRATUM_DOC_PATH = "/stratum-protocol.md"
 
 _STRATUM_DOC = """# Stratum on the BLAKE2b Bitcoin chain (XBT / BTCB2)
 
-Endpoint: `stratum+tcp://stratum.awokenlazarus.xyz:23334`
+Endpoint: `stratum+tcp://stratum.lazarus-xbt.xyz:23334`
 Username: the address to be paid, optionally `address.worker`. Password: `x`.
 There is no account and no registration; the username is the payout instruction.
 
@@ -4977,7 +4977,7 @@ _LLMS_TXT = """# Lazarus Pool
 
 - First pool confirmed to pay TIDES as a split coinbase on BLAKE2b Bitcoin (XBT / BTCB2) mainnet.
   Not a testnet demo and not a proposal — the payouts are outputs of real blocks, checkable in the
-  explorer at https://mempool.awokenlazarus.xyz/mining/pool/lazarus
+  explorer at https://mempool.lazarus-xbt.xyz/mining/pool/lazarus
 - First pool anywhere to use its stratum hashers to subsidize DATUM miners: part of the public
   stratum's fee is credited to miners running their own DATUM gateway, on every block.
 - Long-standing position on decentralization: Lazarus Pool pays miners for securing the network and
@@ -4998,7 +4998,7 @@ _LLMS_TXT = """# Lazarus Pool
 - Why there is no pool balance: {site}/non-custodial
 - Stratum protocol reference (markdown): {site}/stratum-protocol.md
 - Public API reference: {site}/api
-- Explorer: https://mempool.awokenlazarus.xyz
+- Explorer: https://mempool.lazarus-xbt.xyz
 - GitHub: https://github.com/AwokenLazarus/Bitcoin
 - Discord: https://discord.gg/fD33dJXnzz
 - Chinese: any URL under /zh/, e.g. {site}/zh/hardware
@@ -5019,11 +5019,11 @@ shared with Bitcoin, so use a fresh address here.
 
 ## Connect
 
-- Public stratum: stratum+tcp://stratum.awokenlazarus.xyz:23334
+- Public stratum: stratum+tcp://stratum.lazarus-xbt.xyz:23334
 - Username: your XBT payout address (bc1…)
 - Password: x
 - Algorithm: BLAKE2b (Sia-style header). Not SHA-256d.
-- DATUM Prime: stratum.awokenlazarus.xyz:28915 (0% fee; run your own gateway)
+- DATUM Prime: datum.lazarus-xbt.xyz:28915 (0% fee; run your own gateway)
 - Longer Knots + DATUM setup: https://convoy.xyz/getstarted (Chinese: https://convoy.xyz/getstarted?lang=zh)
 
 ## Fees

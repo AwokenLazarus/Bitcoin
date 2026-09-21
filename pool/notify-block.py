@@ -14,7 +14,7 @@ TO = "mrmoore27@pm.me"
 FROM_ADDR = "pool@awokenlazarus.xyz"
 STATE = Path(__file__).resolve().parent / "notify-state.json"
 PROTONCTL = Path("/home/mike/proton-mail/protonctl.py")
-EXPLORER = "https://mempool.awokenlazarus.xyz"
+EXPLORER = "https://mempool.lazarus-xbt.xyz"
 INTERVAL = 15
 
 

@@ -4,7 +4,7 @@
 
   var endpoint =
     window.LAZ_CHAT_URL ||
-    "https://pool.awokenlazarus.xyz/api/laz/chat";
+    "https://pool.lazarus-xbt.xyz/api/laz/chat";
   var source = window.LAZ_CHAT_SOURCE || "web";
 
   function el(tag, attrs, kids) {

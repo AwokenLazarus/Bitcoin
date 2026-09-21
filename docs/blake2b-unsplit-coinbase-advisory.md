@@ -44,7 +44,7 @@ next work update, so the window of exposure is that whole gap, not an instant.
 ## What it cost us
 
 Lazarus Pool block
-[968440](https://mempool.awokenlazarus.xyz/block/000000000000000ed7b3219894f06bbbdeb0d699b3217ad9016be5be902db69d)
+[968440](https://mempool.lazarus-xbt.xyz/block/000000000000000ed7b3219894f06bbbdeb0d699b3217ad9016be5be902db69d)
 was found on one of these jobs — 266 transactions, 0.00144 BTC of fees, and a coinbase with a
 single output to the pool. The job was built when the tip moved and was mined for nine minutes
 before it hit. The pool recorded 3.0656 BTC owed back to the miners in that window.

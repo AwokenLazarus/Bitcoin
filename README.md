@@ -1,6 +1,6 @@
 # Bitcoin (BLAKE2b) — Lazarus Pool
 
-Code for [Lazarus Pool](https://pool.awokenlazarus.xyz) on the BLAKE2b fork of Bitcoin (Knots, header v2, forked from SHA-256d at height 961640): the DATUM Prime, the stratum/DATUM gateway, the pool website and explorer front ends, the Electrum and node hooks, and a GPU miner. Copy the **design**; hosts, keys, firewall rules and operating details are deliberately not in this repo (see [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the general shape).
+Code for [Lazarus Pool](https://pool.lazarus-xbt.xyz) on the BLAKE2b fork of Bitcoin (Knots, header v2, forked from SHA-256d at height 961640): the DATUM Prime, the stratum/DATUM gateway, the pool website and explorer front ends, the Electrum and node hooks, and a GPU miner. Copy the **design**; hosts, keys, firewall rules and operating details are deliberately not in this repo (see [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the general shape).
 
 Since 2026-09-20 the pool runs on a dedicated bare-metal hub with two Knots nodes (one serves templates, one serves Electrum, the explorer and the hot wallet). Before that it ran on a homelab Umbrel node; the Umbrel-era files under `node/`, `scripts/` and `systemd/` are kept as reference.
 
@@ -21,7 +21,7 @@ Since 2026-09-20 the pool runs on a dedicated bare-metal hub with two Knots node
 
 ## How mining works here
 
-DATUM, as OCEAN designed it: the miner runs their own Knots and a DATUM gateway, the gateway builds every block template from the miner's node, and Prime only tracks shares and dictates the coinbase split. Remote gateways point at `stratum.awokenlazarus.xyz:28915` with the pool's public key (`primed pubkey`). Any gateway that speaks the protocol is accepted: the house `lazarus-gateway`, [FlyTheElephant1's BLAKE2b fork](https://github.com/FlyTheElephant1/datum_gateway), iohzrd's and Ratum's. Prime answers every coinbaser request with the current TIDES split, verifies each share by rebuilding the BLAKE2b header, and only accepts a coinbase that pays the split it issued; work a gateway submits on a pool-only or unsplit coinbase is credited safely rather than refused (`docs/blake2b-unsplit-coinbase-advisory.md`).
+DATUM, as OCEAN designed it: the miner runs their own Knots and a DATUM gateway, the gateway builds every block template from the miner's node, and Prime only tracks shares and dictates the coinbase split. Remote gateways point at `datum.lazarus-xbt.xyz:28915` with the pool's public key (`primed pubkey`). Any gateway that speaks the protocol is accepted: the house `lazarus-gateway`, [FlyTheElephant1's BLAKE2b fork](https://github.com/FlyTheElephant1/datum_gateway), iohzrd's and Ratum's. Prime answers every coinbaser request with the current TIDES split, verifies each share by rebuilding the BLAKE2b header, and only accepts a coinbase that pays the split it issued; work a gateway submits on a pool-only or unsplit coinbase is credited safely rather than refused (`docs/blake2b-unsplit-coinbase-advisory.md`).
 
 Miners without a gateway use the pool's public stratum (`:23334` ASIC, `:3333` GPU), served by the house gateway, itself a DATUM client of the same Prime. Solo ports (`:23335`, `:3334`) pay the finder alone.
 
@@ -31,7 +31,7 @@ Fees: DATUM work 0%; public stratum 15%, of which 7.5 points is credited to DATU
 
 `pool/server.py` is a thin view over `primed`'s `stats.json` plus Knots RPC and the gateway client API: *If a block is found right now* (the exact coinbase Prime hands to every gateway, as a ring and a table with each output's fee path), Connect, address lookup, miners, gateways, blocks and payouts. Endpoints: `/api/pool`, `/api/coinbaser`, `/api/gateways`, `/api/miners`, `/api/miner/<address>`, `/api/payouts`, `/api/blocks`. It runs as one writer (scrapes and records) and read-only replicas (`POOL_UI_NO_WRITE=1`) that serve traffic.
 
-The public site is a Cloudflare Pages project built from a running backend: `cloudflare/deploy.sh pool` snapshots the HTML, deploys, and verifies the deployed site against the origin before it returns; the Pages worker proxies `/api/*` to the hub's replicas through a Cloudflare Tunnel behind Access (service token only), with short edge caching. The explorer (`mempool.awokenlazarus.xyz`, a mempool.space fork with the Lazarus theme) uses the same pattern with `/ws` passed through. Both wordmarks lead with the Chi Rho (`pool/static/chi-rho.svg`), which is also the pool's icon in the explorer.
+The public site is a Cloudflare Pages project built from a running backend: `cloudflare/deploy.sh pool` snapshots the HTML, deploys, and verifies the deployed site against the origin before it returns; the Pages worker proxies `/api/*` to the hub's replicas through a Cloudflare Tunnel behind Access (service token only), with short edge caching. The explorer (`mempool.lazarus-xbt.xyz`, a mempool.space fork with the Lazarus theme) uses the same pattern with `/ws` passed through. Both wordmarks lead with the Chi Rho (`pool/static/chi-rho.svg`), which is also the pool's icon in the explorer.
 
 ```bash
 # local development

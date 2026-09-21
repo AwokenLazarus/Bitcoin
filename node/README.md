@@ -81,7 +81,7 @@ the nginx config needs an app restart.
 * `theme.js` adds the **Lazarus Pool** nav item, a footer column (pool links + the Electrum endpoint) and a
   full-width dashboard card, *This chain, end to end*: the public Electrum server
   (`electrum.awokenlazarus.xyz:50002`, SSL, header v2 / protocol 1.8) with a copy button, and live pool
-  stats pulled from `pool.awokenlazarus.xyz/api/pool` with links into the pool. All of it is re-inserted on
+  stats pulled from `pool.lazarus-xbt.xyz/api/pool` with links into the pool. All of it is re-inserted on
   route changes via a `MutationObserver`. It also recolours everything the CSS cannot reach: the fee colour ramp used by the
   mempool blocks, the fee bar and the Goggles WebGL treemap (swapped in place inside webpack's module
   registry before the app boots), the categorical series palette (pool pie), and every colour written to
@@ -257,7 +257,7 @@ least, so on a phone -- where the pie fills the box and something must be covere
 you are pointing at. Hovering gives its blocks, its
 share of the pool and of all blocks, and an estimated hashrate taken from the same figure as the pools
 table (so a pool's bands add up to its row; the short windows only, as upstream). Bands of the pool's
-own slice add a live line from `pool.awokenlazarus.xyz/api/gateways` -- work share now, shares this
+own slice add a live line from `pool.lazarus-xbt.xyz/api/gateways` -- work share now, shares this
 session, how many gateways carry that tag -- which is enrichment only and never changes a band's size.
 
 Getting this into other explorers needs two things upstream: the template-creator patch above, and then

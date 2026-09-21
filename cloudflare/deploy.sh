@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Build one of the Pages sites from the running node and deploy it.
 #
-#   ./deploy.sh pool      [preview-branch]     # -> lazarus-pool.pages.dev    / pool.awokenlazarus.xyz
-#   ./deploy.sh mempool   [preview-branch]     # -> lazarus-mempool.pages.dev / mempool.awokenlazarus.xyz
+#   ./deploy.sh pool      [preview-branch]     # -> lazarus-pool.pages.dev    / pool.lazarus-xbt.xyz
+#   ./deploy.sh mempool   [preview-branch]     # -> lazarus-mempool.pages.dev / mempool.lazarus-xbt.xyz
 #
 # With no branch the deploy goes to production ("main"). Give a branch name to get a preview at
 # <branch>.<project>.pages.dev without touching the live site. Every deploy is verified against

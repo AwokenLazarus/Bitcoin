@@ -4,7 +4,7 @@
     {
       "_comment": "Blocks found by a miner on the solo ports. Tag only, never the payout address: the pool's address is in a solo coinbase too, as the fee output, and matching on it would take pooled blocks as well. Ranked ahead of Lazarus because 'Lazarus/solo' contains 'Lazarus'.",
       "name": "Lazarus Solo",
-      "link": "https://pool.awokenlazarus.xyz/#solo",
+      "link": "https://pool.lazarus-xbt.xyz/#solo",
       "addresses": [],
       "tags": [
         "Lazarus/solo"
@@ -14,7 +14,7 @@
     },
     {
       "name": "Lazarus",
-      "link": "https://pool.awokenlazarus.xyz",
+      "link": "https://pool.lazarus-xbt.xyz",
       "addresses": [
         "bc1qmzl8n5xctw0k93wxvuy7cjmrfpneu9l50dxumm",
         "bc1qt5praystcdle0nq04e3h02yjszha82uzhww85x6972lcy40k4eyqz9jfaq"

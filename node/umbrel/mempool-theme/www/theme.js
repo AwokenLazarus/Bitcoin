@@ -218,7 +218,7 @@
 
 (function () {
   'use strict';
-  var POOL = 'https://pool.awokenlazarus.xyz';
+  var POOL = 'https://pool.lazarus-xbt.xyz';
   var REPO = 'https://github.com/AwokenLazarus/Bitcoin';
   var DISCORD = 'https://discord.gg/fD33dJXnzz';
   var NEOXA = 'https://neoxa.exchange/register?ref=NEXB9423E49';

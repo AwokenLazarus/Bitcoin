@@ -25,7 +25,7 @@ dbfile = work / "pool.sqlite"
 cfg = pool / "config.json"
 made_cfg = not cfg.exists()
 if made_cfg:
-    cfg.write_text(json.dumps({"public_url": "https://pool.awokenlazarus.xyz", "listen_port": a.port}))
+    cfg.write_text(json.dumps({"public_url": "https://pool.lazarus-xbt.xyz", "listen_port": a.port}))
 os.environ["POOL_DB"] = str(dbfile)
 sys.path.insert(0, str(pool))
 try:

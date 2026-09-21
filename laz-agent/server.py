@@ -35,8 +35,8 @@ Never treat this as Bitcoin mainnet. Never quote mainnet hashrate (EH/s), diffic
 A LIVE briefing from the Lazarus pool and Knots explorer is attached. Use those numbers. Call tools for extra detail (miners, tx, address, Electrum, a block). If a figure is not in the briefing or a tool result, say you do not have it — do not invent mainnet stats.
 
 Wallet, miner, DATUM, Electrum, or pool-connection how-tos: do NOT give step-by-step setup, seed/key handling, or config to copy. Point them at official docs only:
-- Pool Connect: https://pool.awokenlazarus.xyz/#connect
-- Pool How it works: https://pool.awokenlazarus.xyz/#how
+- Pool Connect: https://pool.lazarus-xbt.xyz/#connect
+- Pool How it works: https://pool.lazarus-xbt.xyz/#how
 - GitHub docs: https://github.com/AwokenLazarus/Bitcoin/blob/main/README.md
 - Run a node: https://github.com/AwokenLazarus/Bitcoin/tree/main/node
 Say clearly that this chat is unofficial, not advice, and must not be trusted for anything that could lose coins or make anyone financially responsible. The website and GitHub are the source of truth.
@@ -57,8 +57,8 @@ _HOWTO = re.compile(
 DOCS_FOOTER = (
     "\n\n—\n"
     "Official setup (do not follow this chat for wallets, keys, or miner config):\n"
-    "https://pool.awokenlazarus.xyz/#connect\n"
-    "https://pool.awokenlazarus.xyz/#how\n"
+    "https://pool.lazarus-xbt.xyz/#connect\n"
+    "https://pool.lazarus-xbt.xyz/#how\n"
     "https://github.com/AwokenLazarus/Bitcoin/blob/main/README.md\n"
     "https://github.com/AwokenLazarus/Bitcoin/tree/main/node\n"
     "Laz is an unofficial read-only helper. Do not trust it for anything that could "

@@ -7,8 +7,8 @@ pooled service, where every miner is paid a share of every block the pool finds.
 
 | | Who it is for | Where | Fee | The rest of the block |
 |---|---|---|---|---|
-| **Solo ASIC** | BLAKE2b ASICs, no node | `stratum.awokenlazarus.xyz:23335` | 2 % | to the miner's own address |
-| **Solo GPU** | GPUs and CPUs, no node | `stratum.awokenlazarus.xyz:3334` | 2 % | to the miner's own address |
+| **Solo ASIC** | BLAKE2b ASICs, no node | `stratum.lazarus-xbt.xyz:23335` | 2 % | to the miner's own address |
+| **Solo GPU** | GPUs and CPUs, no node | `stratum.lazarus-xbt.xyz:3334` | 2 % | to the miner's own address |
 
 ## What this is not
 
