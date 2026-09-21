@@ -13,7 +13,7 @@ POOL = "https://pool.lazarus-xbt.xyz"
 MEMPOOL = "https://mempool.lazarus-xbt.xyz"
 ELECTRUM_HOST = os.environ.get("LAZ_ELECTRUM_HOST", "127.0.0.1")
 ELECTRUM_PORT = 50002
-ELECTRUM_NAME = "electrum.awokenlazarus.xyz"
+ELECTRUM_NAME = "electrum.lazarus-xbt.xyz"
 
 # Stamped on every tool payload so the model cannot treat this as SHA-256d mainnet.
 CHAIN = {

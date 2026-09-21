@@ -223,7 +223,7 @@
   var DISCORD = 'https://discord.gg/fD33dJXnzz';
   var NEOXA = 'https://neoxa.exchange/register?ref=NEXB9423E49';
   var POOL_SLUG = 'lazarus';
-  var ELECTRUM = 'electrum.awokenlazarus.xyz:50002';
+  var ELECTRUM = 'electrum.lazarus-xbt.xyz:50002';
   var RETROPEX = 'https://github.com/Retropex/mempool';
   var MEMPOOL_UPSTREAM = 'https://github.com/mempool/mempool';
   var FORK_HEIGHT = 961640;
