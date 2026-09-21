@@ -99,11 +99,22 @@ pub async fn refresh_ahead(shared: &Shared) {
     *last = Some(Instant::now());
 }
 
+/// Network difficulty from a `getblockchaininfo` reply, in the classic unit (1.0 = the
+/// difficulty-1 target). Knots 29.4.2 renamed the field to `difficulty_blake2b` and scaled it by
+/// 2^32; reading the raw value would size the TIDES window four billion times too large, and
+/// reading only the old name yields 0, which freezes the window at its last target.
+fn node_difficulty(info: &serde_json::Value) -> f64 {
+    if let Some(d) = info.get("difficulty").and_then(|v| v.as_f64()) {
+        return d;
+    }
+    info.get("difficulty_blake2b").and_then(|v| v.as_f64()).map_or(0.0, |d| d / 4_294_967_296.0)
+}
+
 async fn refresh_locked(shared: &Shared) -> Result<(u32, f64), RpcError> {
     let info = shared.rpc.getblockchaininfo().await?;
     let height = info.get("blocks").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
     let hash = info.get("bestblockhash").and_then(|v| v.as_str()).unwrap_or("").to_string();
-    let difficulty = info.get("difficulty").and_then(|v| v.as_f64()).unwrap_or(0.0);
+    let difficulty = node_difficulty(&info);
     let current = shared.tip_snapshot().filter(|t| t.hash == hash);
     let changed = current.is_none();
     let (mut parent_le, mut bits, mut next_bits) =
@@ -375,5 +386,28 @@ mod tests {
         ] {
             assert!(!says_invalid(not_proof), "{not_proof}");
         }
+    }
+}
+
+#[cfg(test)]
+mod difficulty_tests {
+    use super::node_difficulty;
+    use serde_json::json;
+
+    #[test]
+    fn reads_the_classic_field() {
+        assert_eq!(node_difficulty(&json!({"difficulty": 3417285556.41})), 3417285556.41);
+    }
+
+    #[test]
+    fn rescales_the_blake2b_field() {
+        let d = node_difficulty(&json!({"difficulty_blake2b": 1.467712970588856e19}));
+        assert!((d - 3417285556.4133635).abs() < 1.0, "{d}");
+    }
+
+    #[test]
+    fn prefers_the_classic_field_and_defaults_to_zero() {
+        assert_eq!(node_difficulty(&json!({"difficulty": 5.0, "difficulty_blake2b": 1e19})), 5.0);
+        assert_eq!(node_difficulty(&json!({"blocks": 1})), 0.0);
     }
 }

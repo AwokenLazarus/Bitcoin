@@ -3044,7 +3044,7 @@ def node_info():
     bi = rpc("getblockchaininfo") or {}
     doc = {
         "height": mi.get("blocks") or bi.get("blocks"),
-        "difficulty": mi.get("difficulty"),
+        "difficulty": node_difficulty(mi) if node_difficulty(mi) is not None else node_difficulty(bi),
         "networkhashps": mi.get("networkhashps"),
         "chain": bi.get("chain"),
     }
@@ -3105,6 +3105,18 @@ def hashes_per_block(difficulty):
     return d * POW2_32 if d > 0 else 0.0
 
 
+def node_difficulty(doc):
+    """Difficulty from a node RPC reply, in the classic unit. Knots 29.4.2 renamed the field to
+    `difficulty_blake2b` and scaled it by 2**32, and dropped the `getdifficulty` call."""
+    if not isinstance(doc, dict):
+        return None
+    if doc.get("difficulty") is not None:
+        return float(doc["difficulty"])
+    if doc.get("difficulty_blake2b") is not None:
+        return float(doc["difficulty_blake2b"]) / 4294967296.0
+    return None
+
+
 def _epoch_header(height):
     """(time, difficulty) of the block at `height`, or None when the node cannot answer."""
     hit = _epoch_cache["by_height"].get(height)
@@ -3114,9 +3126,9 @@ def _epoch_header(height):
     if not h:
         return None
     bh = rpc("getblockheader", [h])
-    if not bh or bh.get("difficulty") is None:
+    if not bh or node_difficulty(bh) is None:
         return None
-    out = (int(bh.get("time") or 0), float(bh["difficulty"]))
+    out = (int(bh.get("time") or 0), node_difficulty(bh))
     _epoch_cache["by_height"][height] = out
     return out
 
