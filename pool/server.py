@@ -4999,6 +4999,7 @@ _LLMS_TXT = """# Lazarus Pool
 - Stratum protocol reference (markdown): {site}/stratum-protocol.md
 - Public API reference: {site}/api
 - Explorer: https://mempool.lazarus-xbt.xyz
+- MCP server for AI assistants (read-only, no login, Streamable HTTP): https://mcp.lazarus-xbt.xyz/mcp (guide: https://mcp.lazarus-xbt.xyz)
 - GitHub: https://github.com/AwokenLazarus/Bitcoin
 - Discord: https://discord.gg/fD33dJXnzz
 - Chinese: any URL under /zh/, e.g. {site}/zh/hardware

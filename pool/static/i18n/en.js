@@ -37,6 +37,8 @@ window.LZ_I18N_DICTS["en"] = {
     "exchange": "Exchange",
     "exchangeTitle": "Sign up on Neoxa Exchange to trade Bitcoin (BTCB2)",
     "github": "GitHub",
+    "mcp": "AI assistant",
+    "mcpTitle": "Connect Claude, ChatGPT or any AI assistant to the pool (MCP server)",
     "workers": "Workers",
     "pool": "Pool",
     "lookUpAnother": "Look up another",
@@ -473,6 +475,7 @@ window.LZ_I18N_DICTS["en"] = {
     "note": "Live difficulty and price, base subsidy with no transaction fees, through your own DATUM gateway with the subsidy included. Electricity is not in the number."
   },
   "dash": {
+    "mcp": "Prefer to ask? Connect Claude, ChatGPT or any AI assistant to <a href=\"https://mcp.lazarus-xbt.xyz\" target=\"_blank\" rel=\"noreferrer\">the pool’s MCP server</a> and ask about this address, your DATUM gateway or your payouts in plain language. Read-only, no login.",
     "eyebrow": "Your stats",
     "title": "Look up any address.",
     "lede": "Hashrate, window share, next-block payout and every coinbase that has paid you. Each address also has its own page at <span class=\"mono\">/miner/&lt;address&gt;</span>.",
@@ -726,6 +729,7 @@ window.LZ_I18N_DICTS["en"] = {
     "s4t": "DATUM work is paid the bonus"
   },
   "footer": {
+    "mcp": "MCP server for AI assistants",
     "blurb": "Bitcoin mining, paid in the coinbase. <i class=\"serif\">Proverbs 11:1</i> — a just weight is his delight.",
     "pool": "Pool",
     "fees": "Fees",

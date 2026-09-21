@@ -222,6 +222,7 @@
   var REPO = 'https://github.com/AwokenLazarus/Bitcoin';
   var DISCORD = 'https://discord.gg/fD33dJXnzz';
   var NEOXA = 'https://neoxa.exchange/register?ref=NEXB9423E49';
+  var MCP = 'https://mcp.lazarus-xbt.xyz';
   var POOL_SLUG = 'lazarus';
   var ELECTRUM = 'electrum.lazarus-xbt.xyz:50002';
   var RETROPEX = 'https://github.com/Retropex/mempool';
@@ -752,6 +753,7 @@
     }
     navOut(ul, 'lz-discord-item', DISCORD, 'Discord', 'Lazarus Discord');
     navOut(ul, 'lz-neoxa-item', NEOXA, 'Exchange', 'Sign up on Neoxa Exchange to trade BLAKE2b BTC (BTCB2)');
+    navOut(ul, 'lz-mcp-item', MCP, 'AI assistant', 'Connect Claude, ChatGPT or any AI assistant to this chain and the pool (MCP server)');
   }
 
   function footer() {
@@ -764,6 +766,7 @@
       [POOL + '/#payout', 'What the next block pays'],
       ['/mining/pool/' + POOL_SLUG, 'Blocks found by the pool'],
       [POOL + '/#connect', 'Connect a miner or DATUM gateway'],
+      [MCP, 'Ask your AI assistant (MCP server)'],
       [DISCORD, 'Discord'],
       [NEOXA, 'Exchange'],
       [REPO, 'Lazarus source'],

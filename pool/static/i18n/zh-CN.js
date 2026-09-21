@@ -37,6 +37,8 @@ window.LZ_I18N_DICTS["zh-CN"] = {
     "exchange": "交易所",
     "exchangeTitle": "在 Neoxa Exchange 注册交易比特币（BTCB2）",
     "github": "GitHub",
+    "mcp": "AI 助手",
+    "mcpTitle": "把 Claude、ChatGPT 等 AI 助手接入矿池（MCP 服务器）",
     "workers": "矿机",
     "pool": "矿池",
     "lookUpAnother": "查询其他地址",
@@ -473,6 +475,7 @@ window.LZ_I18N_DICTS["zh-CN"] = {
     "note": "按实时难度与价格、基础奖励（不含交易费）、走你自己的 DATUM 网关并计入补贴计算。电费不在其中。"
   },
   "dash": {
+    "mcp": "想直接问？把 Claude、ChatGPT 等 AI 助手接入<a href=\"https://mcp.lazarus-xbt.xyz\" target=\"_blank\" rel=\"noreferrer\">矿池的 MCP 服务器</a>，用中文询问这个地址、你的 DATUM 网关或收款情况。只读，无需登录。",
     "eyebrow": "你的数据",
     "title": "查询任意地址。",
     "lede": "算力、窗口份额、下一块支付，以及付给你的每一笔 coinbase。每个地址还有独立页面：<span class=\"mono\">/miner/&lt;地址&gt;</span>。",
@@ -726,6 +729,7 @@ window.LZ_I18N_DICTS["zh-CN"] = {
     "s4t": "DATUM 工作领取奖励"
   },
   "footer": {
+    "mcp": "供 AI 助手使用的 MCP 服务器",
     "blurb": "比特币挖矿，在 coinbase 里支付。<i class=\"serif\">箴言 11:1</i> — 公平的秤为他所喜悦。",
     "pool": "矿池",
     "fees": "费率",

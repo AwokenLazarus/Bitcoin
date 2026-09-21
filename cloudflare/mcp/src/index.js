@@ -108,21 +108,82 @@ async function handleRpc(msg, ctx) {
   }
 }
 
-const LANDING = `<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Lazarus Pool MCP</title>
-<style>body{background:#16130f;color:#ece6d8;font:16px/1.6 system-ui,sans-serif;max-width:44rem;margin:3rem auto;padding:0 1.2rem}
-h1{font:500 2rem Georgia,serif}code,pre{background:#0f0d0a;border:1px solid #38322a;border-radius:8px;padding:.15em .4em;color:#dbb565}
-pre{padding:1rem;overflow:auto}a{color:#dbb565}li{margin:.3rem 0}</style>
-<h1>Lazarus Pool MCP</h1>
-<p>A read-only <a href="https://modelcontextprotocol.io">Model Context Protocol</a> server for miners on
-<a href="https://pool.lazarus-xbt.xyz">Lazarus Pool</a>. Point an AI assistant at it and ask about your machines, your DATUM gateway,
-your payouts, the coinbase being built right now, blocks, transactions and addresses on the BLAKE2b Bitcoin chain.</p>
-<p>Endpoint (Streamable HTTP, no sign-in): <code>https://mcp.lazarus-xbt.xyz/mcp</code></p>
+const LANDING = `<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Lazarus Pool MCP: ask your AI assistant about your mining</title>
+<meta name="description" content="Connect Claude, ChatGPT, Cursor or any MCP client to Lazarus Pool. Ask about your hashrate, DATUM gateway, payouts and the BLAKE2b Bitcoin chain. Read-only, no login.">
+<link rel="canonical" href="https://mcp.lazarus-xbt.xyz/">
+<style>body{background:#16130f;color:#ece6d8;font:16px/1.6 system-ui,sans-serif;max-width:46rem;margin:3rem auto;padding:0 1.2rem}
+h1{font:500 2rem Georgia,serif;margin-bottom:.3rem}h2{font:500 1.3rem Georgia,serif;margin:2.2rem 0 .6rem;color:#dbb565}h3{font-size:1rem;margin:1.2rem 0 .3rem}
+code,pre{background:#0f0d0a;border:1px solid #38322a;border-radius:8px;padding:.15em .4em;color:#dbb565;font-size:.92em}
+pre{padding:1rem;overflow:auto;white-space:pre-wrap;word-break:break-word}a{color:#dbb565}li{margin:.3rem 0}
+.lede{color:#b9b1a0;margin-top:0}.ask li{list-style:"“ ";padding-left:.2rem}.muted{color:#b9b1a0;font-size:.93em}
+nav a{margin-right:1rem}hr{border:0;border-top:1px solid #38322a;margin:2.4rem 0}</style>
+<nav><a href="https://pool.lazarus-xbt.xyz">← Lazarus Pool</a><a href="https://mempool.lazarus-xbt.xyz">Explorer</a><a href="#zh">中文</a></nav>
+<h1>Ask your AI assistant about your mining</h1>
+<p class="lede">Lazarus Pool runs a <a href="https://modelcontextprotocol.io">Model Context Protocol</a> (MCP) server. Connect Claude, ChatGPT, Cursor or any
+MCP-capable assistant and ask about your machines, your DATUM gateway, your payouts, the coinbase being built right now, or anything on the
+BLAKE2b Bitcoin chain (XBT / BTCB2), in plain language and in your own language.</p>
+<p>Endpoint: <code>https://mcp.lazarus-xbt.xyz/mcp</code> &nbsp; Streamable HTTP · read-only · no sign-in · free</p>
+
+<h2>1. Connect it</h2>
+<h3>Claude (web or desktop)</h3>
+<p>Settings → Connectors → Add custom connector → paste <code>https://mcp.lazarus-xbt.xyz/mcp</code> → Add. Then turn it on in a chat.</p>
+<h3>Claude Code</h3>
 <pre>claude mcp add --transport http lazarus-pool https://mcp.lazarus-xbt.xyz/mcp</pre>
-<p>Clients that only speak stdio: <code>npx mcp-remote https://mcp.lazarus-xbt.xyz/mcp</code></p>
-<p>Tools:</p><ul>__TOOLS__</ul>
-<p>Limits: 30 tool calls a minute per client, 8 a minute for per-address lookups. It can read only what the public site shows;
-it cannot move coins, change settings or see anything private. Nothing you ask is stored.</p>`;
+<h3>ChatGPT</h3>
+<p>Settings → Connectors → add a custom connector with the endpoint above (your plan may need developer mode switched on first).</p>
+<h3>Cursor</h3>
+<pre>// ~/.cursor/mcp.json
+{ "mcpServers": { "lazarus-pool": { "url": "https://mcp.lazarus-xbt.xyz/mcp" } } }</pre>
+<h3>Anything that only speaks stdio</h3>
+<pre>npx mcp-remote https://mcp.lazarus-xbt.xyz/mcp</pre>
+
+<h2>2. Ask it things</h2>
+<p>Give it your payout address once and talk normally. Some that work well:</p>
+<ul class="ask">
+<li>Give me a morning briefing for bc1q… : is everything online, what did I earn, what is still locked?”</li>
+<li>Is my DATUM gateway healthy? Any rejects, and what was the last reject reason?”</li>
+<li>What would the next block pay me, and where is my line in the coinbase?”</li>
+<li>Which blocks paid me this week, and when can I spend each one?”</li>
+<li>What did block 973,329 pay out, and who found it?”</li>
+<li>How do I point a Goldshell at the pool? And how do I set up my own DATUM gateway instead?”</li>
+<li>Who is finding blocks on this chain this week, and when is the next difficulty change?”</li>
+<li>Look up this transaction / this address.”</li>
+</ul>
+
+<h2>3. What it can see</h2>
+<ul>__TOOLS__</ul>
+<p class="muted">Behind your own DATUM gateway the pool sees the gateway, not each machine, so per-machine temperatures and local rejects live on your gateway's own dashboard.</p>
+
+<h2>Limits and privacy</h2>
+<ul>
+<li><b>Read-only.</b> It reads exactly what the public pool site and explorer already show. It cannot move coins, change a setting or see anything private.</li>
+<li><b>No account, no keys.</b> The only thing you give it is a payout address, which is public on chain anyway.</li>
+<li><b>Nothing you ask is stored</b> by this server. Your assistant's own provider has its own policy.</li>
+<li><b>Rate limits:</b> 30 tool calls a minute per client, 8 a minute for per-address lookups. The data only changes every few seconds.</li>
+<li>Worker names and gateway tags are text typed by miners. Your assistant is told to treat them as labels, never as instructions.</li>
+</ul>
+
+<h2>If it does not work</h2>
+<ul>
+<li>The URL must end in <code>/mcp</code>. Opening it in a browser shows an error on purpose: it only answers MCP clients.</li>
+<li>“Rate limit reached”: wait a minute, or ask fewer per-address questions at once.</li>
+<li>An address it has “never seen” has not submitted work to Lazarus. Check the address in your miner or gateway config.</li>
+<li>Questions and tool requests: <a href="https://discord.gg/fD33dJXnzz">Discord</a>.</li>
+</ul>
+
+<hr>
+<h2 id="zh">中文简介</h2>
+<p>Lazarus 矿池提供一个 MCP 服务器。把 Claude、ChatGPT、Cursor 等 AI 助手接上去，就可以用中文直接问：我的算力、我的 DATUM 网关、我的收款、下一块会付我多少，以及这条 BLAKE2b 比特币链（XBT / BTCB2）上的区块、交易和地址。</p>
+<p>地址：<code>https://mcp.lazarus-xbt.xyz/mcp</code>（只读，无需登录，免费）</p>
+<ul>
+<li>Claude：设置 → Connectors → 添加自定义连接器 → 粘贴上面的地址。</li>
+<li>Claude Code：<code>claude mcp add --transport http lazarus-pool https://mcp.lazarus-xbt.xyz/mcp</code></li>
+<li>只支持 stdio 的客户端：<code>npx mcp-remote https://mcp.lazarus-xbt.xyz/mcp</code></li>
+</ul>
+<p>可以这样问：“给我 bc1q… 的每日简报”、“我的 DATUM 网关正常吗？最近一次拒绝的原因是什么？”、“下一块会付我多少？”、“这周哪些区块付过我，什么时候可以花？”</p>
+<p class="muted">只读：它只能看到矿池网站和浏览器已经公开的数据，不能转币，不能改设置。限速：每分钟 30 次调用，按地址查询每分钟 8 次。</p>
+</html>`;
 
 export default {
   async fetch(request, env, execCtx) {
