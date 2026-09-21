@@ -1,0 +1,23 @@
+# Public, read-only MCP server for Lazarus Pool miners: https://mcp.lazarus-xbt.xyz/mcp
+# It reads only the public site APIs (pool + explorer), so it holds no credentials and can see
+# nothing a browser cannot. Deploy: `wrangler deploy` from this directory (wrangler login).
+name = "lazarus-mcp"
+main = "src/index.js"
+compatibility_date = "2026-09-01"
+# The Cloudflare account comes from CLOUDFLARE_ACCOUNT_ID (the operator's env file), not the repo.
+workers_dev = true
+routes = [{ pattern = "mcp.lazarus-xbt.xyz", custom_domain = true }]
+
+[vars]
+POOL_API = "https://pool.lazarus-xbt.xyz"
+MEMPOOL_API = "https://mempool.lazarus-xbt.xyz"
+
+# Rate limits are counted in a Durable Object (src/limiter.js), one instance per client IP plus
+# one for the shared upstream budget. The numbers live in RULES there.
+[[durable_objects.bindings]]
+name = "LIMITER"
+class_name = "Limiter"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["Limiter"]
