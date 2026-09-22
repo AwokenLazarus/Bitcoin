@@ -25,6 +25,8 @@ button { font: inherit; color: inherit; }
 #stage canvas { display: block; }
 .label2d { font: 600 12px/1 var(--lcars); letter-spacing: .08em; text-transform: uppercase; color: var(--ink); text-shadow: 0 0 6px #000, 0 0 2px #000; pointer-events: none; white-space: nowrap; padding: 2px 6px; border-left: 3px solid var(--lcars-gold); background: rgba(5, 6, 13, .45); }
 .label2d.empire { border-left-color: var(--empire); color: #ffd0d0; }
+/* The Empire marks a stratum endpoint, so the red dot names that, not a pool. */
+.dot.stratum { background: #c9d6e6; box-shadow: 0 0 8px rgba(201,214,230,.6); }
 .label2d.planet { font-size: 10px; border-left-color: var(--lcars-blue); opacity: .9; }
 
 /* ---------- HUD top ---------- */
@@ -170,7 +172,3 @@ button { font: inherit; color: inherit; }
 /* ---------- jump to lightspeed ---------- */
 .warp-fx { position: fixed; inset: 0; z-index: 4; pointer-events: none; background: repeating-conic-gradient(from 0deg at 50% 50%, rgba(200, 230, 255, 0) 0deg 2.2deg, rgba(200, 230, 255, .55) 2.4deg 2.6deg, rgba(200, 230, 255, 0) 2.8deg 6deg); -webkit-mask-image: radial-gradient(circle at 50% 50%, transparent 0 12%, #000 55%); mask-image: radial-gradient(circle at 50% 50%, transparent 0 12%, #000 55%); animation: warp .85s ease-out forwards; }
 @keyframes warp { 0% { opacity: 0; transform: scale(.4); } 25% { opacity: .9; } 100% { opacity: 0; transform: scale(2.4); } }
-
-/* back to the hub: the map is one page of the site, not an island */
-.hud-home { display: inline-block; margin-bottom: .15rem; font: 600 .62rem/1 var(--lcars-font, inherit); letter-spacing: .18em; text-transform: uppercase; color: #ffcc66; opacity: .75; text-decoration: none; }
-.hud-home:hover { opacity: 1; }

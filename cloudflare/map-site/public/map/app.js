@@ -52,13 +52,15 @@ function kv(dl, k, v, cls) { if (v == null || v === "") return; dl.append(el("dt
 function sec(dl, title) { dl.append(el("div", "sec", title)); }
 const TYPE_LABEL = {
   datum: ["Rebel Alliance", "pays miners in the coinbase and DATUM gateways build blocks on it"],
-  stratum: ["Galactic Empire", "never seen paying miners in the coinbase, or never seen taking DATUM"],
+  stratum: ["Stratum pool", "the pool builds the template; not seen paying miners in the coinbase, or not seen taking DATUM"],
   independent: ["Outer Rim", "one operator, own node, whole blocks for themselves"],
 };
 const safeLink = (u) => (typeof u === "string" && /^https:\/\/[a-z0-9.-]+(\/[^\s"<>]*)?$/i.test(u) ? u : null);
 
 // ---------- palettes ----------
 const REBEL = [0xffcf5c, 0x6fd3ff, 0xffe9a8, 0x9ff0ff, 0xffb35c];
+// A pool that only runs a stratum still gets an ordinary star; what marks it is the outpost.
+const STRATUM_STAR = [0xc9d6e6, 0xa8c0d8, 0xe0d6c0, 0x9fb6cc, 0xd6cbb8];
 function planetColor(tag) {
   const r = rng(hash(tag));
   const hues = [0.55, 0.6, 0.08, 0.12, 0.33, 0.47, 0.75, 0.9, 0.02];
@@ -284,10 +286,10 @@ const dormant = (s) => !s.blocks7d;
 
 function placeSystems(systems) {
   const out = new Map();
-  const empire = systems.filter((s) => s.type === "stratum");
+  const stratumOnly = systems.filter((s) => s.type === "stratum");
   const rebel = systems.filter((s) => s.type === "datum");
   const rim = systems.filter((s) => s.type === "independent");
-  empire.forEach((s, i) => {
+  stratumOnly.forEach((s, i) => {
     const a = i * 2.39996 + 0.6, r = 150 + i * 34;
     out.set(s.id, new THREE.Vector3(Math.cos(a) * r, (rng(hash(s.id))() - 0.5) * 16, Math.sin(a) * r));
   });
@@ -312,8 +314,8 @@ function beacon(root, color, radius, sys) {
   root.add(b); beacons.push(b); pickables.push(b); return b;
 }
 
-// ---- ships of the Empire ----
-let SD_GEO = null, TIE_GEO = null;
+// ---- ships of the Empire: one escort, on station at a stratum endpoint ----
+let SD_GEO = null;
 function prep(g) { const n = g.index ? g.toNonIndexed() : g; n.deleteAttribute("uv"); return n; }
 function starDestroyerGeometry() {
   if (SD_GEO) return SD_GEO;
@@ -354,43 +356,23 @@ function starDestroyer(scale = 1) {
   const nav = sprite(TEX.soft, 0xff3b3b, 0.5, 0.9); nav.position.set(0, 0.05, 4.1); g.add(nav);
   g.scale.setScalar(scale); return g;
 }
-function tieGeometry() {
-  if (TIE_GEO) return TIE_GEO;
-  const parts = [];
-  const cock = new THREE.SphereGeometry(0.34, 12, 8); parts.push(prep(cock));
-  const strut = new THREE.CylinderGeometry(0.07, 0.07, 1.3, 6); strut.rotateZ(Math.PI / 2); parts.push(prep(strut));
-  for (const x of [-0.68, 0.68]) { const w = new THREE.CylinderGeometry(0.72, 0.72, 0.05, 6); w.rotateZ(Math.PI / 2); w.translate(x, 0, 0); parts.push(prep(w)); }
-  TIE_GEO = mergeGeometries(parts); return TIE_GEO;
-}
-const TIE_MAT = new THREE.MeshPhongMaterial({ color: 0x5b606a, emissive: 0x080a0e, shininess: 40, flatShading: true });
-function tieSwarm(root, R, seed) {
-  const r = rng(seed), n = lowPower ? 6 : 12;
-  for (let k = 0; k < n; k++) {
-    const pivot = new THREE.Object3D(); pivot.rotation.set((r() - 0.5) * 1.4, r() * Math.PI * 2, (r() - 0.5) * 1.0); root.add(pivot);
-    const tie = new THREE.Mesh(tieGeometry(), TIE_MAT); const sc = 0.45 + R * 0.025; tie.scale.setScalar(sc);
-    const orbit = R * (1.35 + r() * 0.9); tie.position.set(orbit, 0, 0); pivot.add(tie);
-    const sp = ((1.8 + r() * 1.4) / Math.sqrt(orbit)) * MOTION;
-    animated.push((dt, t) => { pivot.rotateY(sp * dt); tie.rotation.z = Math.sin(t * 2 + k) * 0.4; });
-  }
-}
-function patrol(root, R, count, seed) {
-  const r = rng(seed);
-  for (let k = 0; k < count; k++) {
-    const pivot = new THREE.Object3D(); pivot.rotation.set((r() - 0.5) * 0.7, r() * Math.PI * 2, (r() - 0.5) * 0.5); root.add(pivot);
-    const sd = starDestroyer(0.55 + R * 0.05); const orbit = R * (2.3 + k * 0.6); sd.position.set(orbit, 0, 0); pivot.add(sd);
-    const dir = r() < 0.5 ? 1 : -1; sd.rotation.y = dir > 0 ? Math.PI : 0;
-    const sp = (0.32 / Math.sqrt(orbit)) * dir * MOTION;
-    animated.push((dt, t) => { pivot.rotateY(sp * dt); sd.position.y = Math.sin(t * 0.5 + k) * 0.6; });
-  }
-}
-
-// ---- a DATUM pool's own public stratum: an Imperial outpost inside a rebel system ----
+// ---- a pool's own public stratum: the one Imperial object on the map ----
+// Every pool that runs a stratum has one, whether or not it also takes DATUM. It is the
+// endpoint that is Imperial, never the system around it.
 function outpost(root, rec, p, orbit, starWorld, rr) {
   const pivot = new THREE.Object3D(); pivot.rotation.set((rr() - 0.5) * 0.2, rr() * Math.PI * 2, 0); root.add(pivot);
-  const pr = 1.2 + 4.5 * Math.sqrt(clamp((p.blocks7d / Math.max(1, rec.data.blocks7d)) * (rec.data.share7d || 0) / MAX_SHARE, 0, 1));
+  const houseShare = rec.data.type === "stratum" ? 1 : p.blocks7d / Math.max(1, rec.data.blocks7d);
+  const pr = 1.2 + 4.5 * Math.sqrt(clamp(houseShare * (rec.data.share7d || 0) / MAX_SHARE, 0, 1));
   const used = p.blocks7d > 0 || (p.liveStratum && p.liveStratum.hashrate > 0);
-  const mat = planetMaterial(new THREE.Color(used ? 0xb3261e : 0x5a2a2a), starWorld, 0.77, 1);
-  const mesh = new THREE.Mesh(new THREE.SphereGeometry(pr, 28, 18), mat); mesh.position.x = orbit; pivot.add(mesh);
+  // The Death Star surface belongs to the endpoint, not to the pool that runs it.
+  const mat = new THREE.MeshPhongMaterial({
+    map: deathStarTexture(hash(rec.data.id)),
+    color: new THREE.Color(used ? 0xff8a7a : 0x8a6a66),
+    emissive: used ? 0x2a0000 : 0x120000,
+    shininess: 14,
+  });
+  const mesh = new THREE.Mesh(new THREE.SphereGeometry(pr, 40, 26), mat); mesh.position.x = orbit; pivot.add(mesh);
+  animated.push((dt) => { mesh.rotation.y += 0.06 * dt * MOTION; });
   mesh.add(sprite(TEX.glow, 0xff2020, pr * 6, used ? 0.55 : 0.2));
   const ring = new THREE.Mesh(new THREE.RingGeometry(pr * 1.6, pr * 1.68, 64), new THREE.MeshBasicMaterial({ color: 0xff3030, transparent: true, opacity: used ? 0.6 : 0.2, side: THREE.DoubleSide, blending: THREE.AdditiveBlending, depthWrite: false }));
   ring.rotation.x = Math.PI / 2; mesh.add(ring);
@@ -406,17 +388,21 @@ function outpost(root, rec, p, orbit, starWorld, rr) {
   return pr;
 }
 
-function buildRebel(s, pos, i) {
-  const root = new THREE.Group(); root.position.copy(pos); typeGroups.datum.add(root);
+// A pool is a star with worlds around it, whatever it runs. The Empire lives on the stratum
+// endpoint alone (see `outpost`): a pool that only runs a stratum is not an evil empire, it is a
+// system whose single world happens to be one.
+function buildSystem(s, pos, i) {
+  const stratumOnly = s.type === "stratum";
+  const root = new THREE.Group(); root.position.copy(pos); typeGroups[s.type].add(root);
   const rr = rng(hash(s.id)), starR = sizeFor(s.share7d) * 0.85, sleepy = dormant(s);
-  const color = new THREE.Color(s.name === "Lazarus" ? 0xffcf5c : REBEL[i % REBEL.length]);
+  const color = new THREE.Color(s.name === "Lazarus" ? 0xffcf5c : stratumOnly ? STRATUM_STAR[i % STRATUM_STAR.length] : REBEL[i % REBEL.length]);
   if (sleepy) color.multiplyScalar(0.55);
   const star = new THREE.Mesh(new THREE.SphereGeometry(starR, 32, 16), new THREE.MeshBasicMaterial({ color: color.clone().multiplyScalar(1.6) }));
   root.add(star);
   const halo = sprite(TEX.glow, color, starR * 9, sleepy ? 0.4 : 0.85), corona = sprite(TEX.soft, color, starR * 16, sleepy ? 0.1 : 0.25);
   root.add(halo, corona);
   animated.push((dt, t) => { corona.scale.setScalar(starR * (15 + Math.sin(t * 0.8 + i) * 1.6)); });
-  const rec = { data: s, root, pos, star, planets: [], starR, extent: starR * 3, type: "datum" };
+  const rec = { data: s, root, pos, star, planets: [], starR, extent: starR * 3, type: s.type };
   const starWorld = pos.clone();
   const planets = s.planets.slice().sort((a, b) => (b.blocks - a.blocks) || ((b.live ? 1 : 0) - (a.live ? 1 : 0)));
   let k = 0;
@@ -458,39 +444,6 @@ function buildRebel(s, pos, i) {
   return rec;
 }
 
-function buildEmpire(s, pos, i) {
-  const root = new THREE.Group(); root.position.copy(pos); typeGroups.stratum.add(root);
-  const R = sizeFor(s.share7d) * 0.95, rr = rng(hash(s.id)), sleepy = dormant(s);
-  const ds = new THREE.Mesh(new THREE.SphereGeometry(R, 56, 36), new THREE.MeshPhongMaterial({ map: deathStarTexture(hash(s.id)), emissive: 0x220000, shininess: 12 }));
-  ds.rotation.z = 0.25; root.add(ds);
-  const glow = sprite(TEX.glow, 0xff2020, R * 8, sleepy ? 0.25 : 0.55), corona = sprite(TEX.soft, 0xff1a1a, R * 14, sleepy ? 0.08 : 0.2);
-  root.add(glow, corona);
-  const neb = sprite(TEX.nebula, 0xb00010, R * 30, 0.1); neb.position.y = -2; root.add(neb);
-  const scan = new THREE.Mesh(new THREE.RingGeometry(R * 1.7, R * 1.78, 96), new THREE.MeshBasicMaterial({ color: 0xff3030, transparent: true, opacity: 0.5, side: THREE.DoubleSide, blending: THREE.AdditiveBlending, depthWrite: false }));
-  scan.rotation.x = Math.PI / 2; root.add(scan);
-  animated.push((dt, t) => {
-    ds.rotation.y += 0.05 * dt * MOTION;
-    const q = (t * 0.18 + i * 0.3) % 1; scan.scale.setScalar(1 + q * 2.4); scan.material.opacity = (sleepy ? 0.2 : 0.5) * (1 - q);
-    corona.scale.setScalar(R * (13 + Math.sin(t * 0.7 + i) * 1.2));
-  });
-  patrol(root, R, clamp(Math.round(1 + Math.sqrt(s.share7d || 0) * 0.9), 1, 6), hash(s.id) + 7);
-  if (!sleepy) tieSwarm(root, R, hash(s.id) + 11);
-  const rec = { data: s, root, pos, star: ds, planets: [], starR: R, extent: R * 4.5, type: "stratum", ds };
-  s.planets.filter((p) => !p.house).slice(0, 12).forEach((p, k) => {
-    const pivot = new THREE.Object3D(); pivot.rotation.set((rr() - 0.5) * 0.3, rr() * Math.PI * 2, 0); root.add(pivot);
-    const pr = 0.6 + Math.log10(p.blocks + 1);
-    const mesh = new THREE.Mesh(new THREE.SphereGeometry(pr, 16, 12), planetMaterial(new THREE.Color(0x8a2a2a), pos.clone(), (hash(p.tag) % 1000) / 1000));
-    const orbit = R * 3.4 + k * 2.2; mesh.position.x = orbit; pivot.add(mesh);
-    const sp = (0.7 / Math.sqrt(orbit)) * MOTION; animated.push((dt) => pivot.rotateY(sp * dt));
-    mesh.userData = { kind: "planet", sys: s.id, tag: p.tag }; pickables.push(mesh); rec.planets.push({ tag: p.tag, mesh, radius: pr });
-    rec.extent = Math.max(rec.extent, orbit + pr);
-  });
-  const hit = new THREE.Mesh(new THREE.SphereGeometry(R * 1.6, 12, 8), new THREE.MeshBasicMaterial({ visible: false }));
-  hit.userData = { kind: "system", sys: s.id }; root.add(hit); pickables.push(hit);
-  const label = makeLabel(s.name, "empire"); label.position.set(0, R * 2 + 5, 0); root.add(label); labelled.push(label);
-  beacon(root, 0xff2a2a, R / 0.95, s.id);
-  return rec;
-}
 
 let rimPoints = null, rimIndex = [];
 function buildRim(systems, positions) {
@@ -519,31 +472,20 @@ function buildRim(systems, positions) {
   });
 }
 
-function empireHaze(positions, systems) {
-  const r = rng(99);
-  for (const s of systems.filter((x) => x.type === "stratum")) {
-    const p = positions.get(s.id);
-    for (let k = 0; k < 3; k++) {
-      const h = sprite(TEX.nebula, k ? 0x8a0010 : 0xff1830, 180 + r() * 260, 0.07 + r() * 0.05);
-      h.position.set(p.x + (r() - 0.5) * 120, p.y - 6, p.z + (r() - 0.5) * 120); typeGroups.stratum.add(h);
-    }
-  }
-}
 function buildAll(data) {
   MAX_SHARE = Math.max(1, ...data.systems.filter((x) => x.type !== "independent").map((x) => x.share7d || 0));
   const positions = placeSystems(data.systems);
-  empireHaze(positions, data.systems);
   let ri = 0, ei = 0;
   for (const s of data.systems) {
-    if (s.type === "datum") systemsById.set(s.id, buildRebel(s, positions.get(s.id), ri++));
-    else if (s.type === "stratum") systemsById.set(s.id, buildEmpire(s, positions.get(s.id), ei++));
+    if (s.type === "datum") systemsById.set(s.id, buildSystem(s, positions.get(s.id), ri++));
+    else if (s.type === "stratum") systemsById.set(s.id, buildSystem(s, positions.get(s.id), ei++));
   }
   buildRim(data.systems.filter((s) => s.type === "independent"), positions);
 }
 
 // ---------- effects ----------
-const FX_COLOR = { datum: 0xffd27a, stratum: 0xff3a3a, independent: 0x8fffc8 };
-function blockFlash(sysId, tag) {
+const FX_COLOR = { datum: 0xffd27a, stratum: 0xcfe0f0, independent: 0x8fffc8 };
+function blockFlash(sysId, tag, viaStratum) {
   const rec = systemsById.get(sysId);
   if (!rec) return;
   const at = new THREE.Vector3();
@@ -561,10 +503,13 @@ function blockFlash(sysId, tag) {
     ring.scale.setScalar(4 + t * 160); ring.material.opacity = 0.9 * Math.max(0, 1 - t);
     const c = clamp(t * 1.3, 0, 1); courier.position.copy(curve.getPoint(ease(c))); courier.material.opacity = c >= 1 ? Math.max(0, 1 - (t - 0.77) * 4) : 1;
   }, done() { scene.remove(flash, ring, courier); flash.material.dispose(); ring.geometry.dispose(); ring.material.dispose(); courier.material.dispose(); } });
-  if (rec.type === "stratum" && rec.ds) superlaser(rec);
+  // The superlaser belongs to the outpost, not the system: it fires only for a block the pool
+  // built itself, on the stratum endpoint that built it.
+  const post = viaStratum && rec.planets.find((p) => p.outpost);
+  if (post) superlaser(post.mesh);
 }
-function superlaser(rec) {
-  const from = new THREE.Vector3(); rec.ds.getWorldPosition(from);
+function superlaser(ds) {
+  const from = new THREE.Vector3(); ds.getWorldPosition(from);
   const dir = new THREE.Vector3(Math.random() - 0.5, (Math.random() - 0.5) * 0.3, Math.random() - 0.5).normalize();
   const to = from.clone().addScaledVector(dir, 600);
   const g = new THREE.BufferGeometry().setFromPoints([from, to]);
@@ -645,11 +590,11 @@ function policyRows(dl, pol, title = "Template policy") {
 }
 function fillPlanet(box, s, p) {
   const outpostPlanet = p.house && s.type === "datum";
-  box.className = "tip " + (s.type === "stratum" || outpostPlanet ? "empire" : s.type === "independent" ? "rim" : "");
+  box.className = "tip " + (outpostPlanet ? "empire" : s.type === "independent" ? "rim" : "");
   box.replaceChildren();
-  box.append(el("div", "t-kind", s.type === "independent" ? "Independent world" : outpostPlanet ? "Imperial outpost · public stratum" : p.house ? "Imperial core" : p.blocks ? "DATUM gateway" : "DATUM gateway · forming"));
+  box.append(el("div", "t-kind", s.type === "independent" ? "Independent world" : outpostPlanet ? "Imperial outpost · public stratum" : p.house ? "Imperial outpost · public stratum" : p.blocks ? "DATUM gateway" : "DATUM gateway · forming"));
   box.append(el("div", "t-name", p.tag));
-  box.append(el("div", "t-sub", outpostPlanet ? `Inside the rebel ${s.name} system. Miners here hash on the pool's own template, not their own.` : `${s.name} system · ${TYPE_LABEL[s.type][0]}`));
+  box.append(el("div", "t-sub", outpostPlanet ? `Inside the rebel ${s.name} system. Miners here hash on the pool's template, not their own; payouts can still be TIDES.` : `${s.name} system · ${TYPE_LABEL[s.type][0]}`));
   const dl = el("dl", "kv");
   if (p.liveStratum) { sec(dl, "Live · stratum endpoint"); kv(dl, "Hashrate", fmtHash(p.liveStratum.hashrate)); kv(dl, "Miners", n(p.liveStratum.miners)); sec(dl, "Blocks"); }
   if (outpostPlanet && !p.blocks7d && !(p.liveStratum && p.liveStratum.hashrate)) kv(dl, "Status", "no blocks through it this week");
@@ -670,9 +615,9 @@ function fillPlanet(box, s, p) {
   box.append(dl);
 }
 function fillSystem(box, s) {
-  box.className = "tip " + (s.type === "stratum" ? "empire" : s.type === "independent" ? "rim" : "");
+  box.className = "tip " + (s.type === "independent" ? "rim" : "");
   box.replaceChildren();
-  box.append(el("div", "t-kind", s.type === "stratum" ? "Imperial stronghold" : s.type === "datum" ? "Star system" : "Independent world"));
+  box.append(el("div", "t-kind", s.type === "datum" || s.type === "stratum" ? "Star system" : "Independent world"));
   box.append(el("div", "t-name", s.name));
   box.append(el("div", "t-sub", `${TYPE_LABEL[s.type][0]} · ${TYPE_LABEL[s.type][1]}`));
   const dl = el("dl", "kv");
@@ -692,7 +637,7 @@ function factionRows(dl, s) {
   kv(dl, "Pays miners", f.paysMinersEver ? "yes: in the coinbase (TIDES split or straight to the finder)" : "not seen: blocks pay the pool's own wallet", f.paysMinersEver ? "live-on" : "live-off");
   kv(dl, "Takes DATUM", f.datumEver ? "yes: miners' gateways build blocks here" : "not seen", f.datumEver ? "live-on" : "live-off");
   kv(dl, f.window === "7d" ? "Last 7 days" : "All blocks", `${f.datumPct}% built by DATUM gateways · ${f.coinbasePaidPct}% paid to miners in the coinbase`);
-  if (s.type === "datum" && f.poolBuiltPct > 0) kv(dl, "Imperial outpost", `${f.poolBuiltPct}% of blocks come from the pool's own templates`);
+  if (f.poolBuiltPct > 0) kv(dl, "Imperial outpost", `${f.poolBuiltPct}% of blocks come from the pool's own templates — the stratum endpoint in this system`);
   if (f.operatorNote) kv(dl, "Verdict", f.operatorNote, "live-off");
 }
 let tipTarget = null;
@@ -718,8 +663,8 @@ function showTip(obj, x, y) {
 function showPanel(rec, tag) {
   const s = rec.data, panel = $("panel");
   panel.hidden = false;
-  panel.className = "panel " + (s.type === "stratum" ? "empire" : s.type === "independent" ? "rim" : "");
-  $("panel-kind").textContent = s.type === "stratum" ? "Imperial stronghold" : s.type === "datum" ? "Star system" : "Independent world";
+  panel.className = "panel " + (s.type === "independent" ? "rim" : "");
+  $("panel-kind").textContent = s.type === "independent" ? "Independent world" : "Star system";
   $("panel-name").textContent = s.name;
   $("panel-sub").textContent = `${TYPE_LABEL[s.type][0]}: ${TYPE_LABEL[s.type][1]}`;
   const dl = $("panel-stats"); dl.replaceChildren();
@@ -732,7 +677,7 @@ function showPanel(rec, tag) {
   policyRows(dl, s.policy);
   const list = $("panel-planets"); list.replaceChildren();
   const planets = s.type === "independent" ? [] : s.planets;
-  $("panel-planets-h").textContent = s.type === "stratum" ? `Worlds under Imperial rule (${planets.length})` : `Gateways (${planets.length})`;
+  $("panel-planets-h").textContent = s.type === "stratum" ? `Worlds in this system (${planets.length})` : `Gateways (${planets.length})`;
   $("panel-planets-h").hidden = !planets.length;
   for (const p of planets.slice(0, 250)) {
     const li = el("li"); li.tabIndex = 0;
@@ -756,7 +701,8 @@ addEventListener("keydown", (e) => { if (e.key === "Escape") { if (focused) unfo
 function renderChart(filter = "") {
   const ol = $("systems"); ol.replaceChildren();
   const q = filter.trim().toLowerCase();
-  const color = (s) => (s.type === "stratum" ? "#ff2a2a" : s.type === "independent" ? "#7fe0b0" : "#ffcf5c");
+  // Imperial red names a stratum endpoint, not a pool, so the list uses the system's star.
+  const color = (s) => (s.type === "stratum" ? "#c9d6e6" : s.type === "independent" ? "#7fe0b0" : "#ffcf5c");
   const add = (s, label, count, tag) => {
     const li = el("li"); li.tabIndex = 0; if (tag) li.classList.add("hit");
     const d = el("i", "d"); d.style.background = color(s); li.append(d);
@@ -779,7 +725,7 @@ function renderChart(filter = "") {
   }
   const byType = (t) => DATA.systems.filter((s) => s.type === t).sort((a, b) => b.blocks7d - a.blocks7d || b.blocks - a.blocks);
   sep(`Rebel Alliance · ${DATA.counts.datum}`); byType("datum").forEach((s) => add(s, s.name, `${s.share7d}%`));
-  sep(`Galactic Empire · ${DATA.counts.stratum}`); byType("stratum").forEach((s) => add(s, s.name, `${s.share7d}%`));
+  sep(`Stratum pools · ${DATA.counts.stratum}`); byType("stratum").forEach((s) => add(s, s.name, `${s.share7d}%`));
   const rim = byType("independent");
   sep(`Outer Rim · ${DATA.counts.independent}`); rim.slice(0, 60).forEach((s) => add(s, s.name, s.blocks7d ? `${s.share7d}%` : `${n(s.blocks)} blk`));
   if (rim.length > 60) ol.append(el("li", "sub", `…and ${rim.length - 60} more. Search to find one.`));
@@ -811,7 +757,9 @@ function renderRelay() {
   const box = $("relay"); box.replaceChildren();
   const make = () => DATA.recent.slice(0, 24).map((b) => {
     const s = el("span"); if (freshHeights.has(b.height)) s.className = "fresh";
-    const cls = b.systemType === "stratum" || b.viaStratum ? "e" : b.systemType === "independent" ? "o" : "r";
+    // Red is the Empire's, so it marks a block that came through a stratum endpoint. A pool
+    // that only runs a stratum will usually show red for that reason, block by block.
+    const cls = b.viaStratum ? "e" : b.systemType === "independent" ? "o" : "r";
     s.append(el("b", null, `#${n(b.height)}`), " forged by ", el("span", cls, b.planet ? `${b.planet} · ${b.system}` : b.system), ` · ${ago(b.ts)}`);
     return s;
   });
@@ -868,7 +816,7 @@ function introFlight() {
   camera.position.set(0, 2600, 5200); controls.target.set(0, 0, 0);
   flyTo(new THREE.Vector3(0, 0, 0), 1750, 4.2);
   // the latest real blocks light up as we arrive
-  DATA.recent.slice(0, 3).reverse().forEach((b, k) => setTimeout(() => blockFlash(sysIdFor(b), b.planet), 3600 + k * 2200));
+  DATA.recent.slice(0, 3).reverse().forEach((b, k) => setTimeout(() => blockFlash(sysIdFor(b), b.planet, b.viaStratum), 3600 + k * 2200));
 }
 const sysIdFor = (b) => { const s = DATA.systems.find((x) => x.name === b.system && (b.systemType ? x.type === b.systemType : true)); return s ? s.id : null; };
 
@@ -885,7 +833,7 @@ async function poll() {
     const lastSeen = DATA.tip ? DATA.tip.height : 0;
     const fresh = d.recent.filter((b) => b.height > lastSeen).sort((a, b) => a.height - b.height);
     DATA = d;
-    fresh.forEach((b, k) => { freshHeights.add(b.height); setTimeout(() => blockFlash(sysIdFor(b), b.planet), k * 1600); });
+    fresh.forEach((b, k) => { freshHeights.add(b.height); setTimeout(() => blockFlash(sysIdFor(b), b.planet, b.viaStratum), k * 1600); });
     renderHud(); renderRelay();
     if ($("search").value === "") renderChart();
   } catch { /* keep the last picture */ }

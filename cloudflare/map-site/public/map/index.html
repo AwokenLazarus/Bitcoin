@@ -14,7 +14,7 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Antonio:wght@400;600;700&family=Orbitron:wght@500;700;900&family=Share+Tech+Mono&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="./style.css?v=3">
+<link rel="stylesheet" href="./style.css?v=2">
 <script type="importmap">
 { "imports": {
     "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js",
@@ -33,7 +33,7 @@
     <p class="crawl-ep">EPISODE XBT</p>
     <h1 class="crawl-title">THE BLAKE2B AWAKENS</h1>
     <p>It is a period of civil war. On the thirtieth day of August the chain broke from SHA-256 and was reforged in BLAKE2b.</p>
-    <p>In the Core Worlds, the pools of the GALACTIC EMPIRE build their miners' templates and keep the rewards in their own vaults. Their hashers mine blind, never seeing the blocks they forge.</p>
+    <p>Wherever a pool runs a public stratum, the GALACTIC EMPIRE plants an outpost: one armoured red world that builds every template itself. Its hashers may still be paid fairly, share for share, but the block is the outpost's: what goes in it was never theirs to choose.</p>
     <p>Across the spiral arms, the REBELLION runs DATUM and pays every miner in the coinbase itself: each gateway a free world that builds its own template and answers only to its own node.</p>
     <p>Beyond them, in the OUTER RIM, lone miners run their own nodes and claim whole blocks for themselves....</p>
     <p>Every system is a pool. Every planet is a gateway. Every flash of light, a block.</p>
@@ -48,7 +48,6 @@
 <header class="hud-top">
   <div class="lcars-elbow"></div>
   <div class="hud-title">
-    <a class="hud-home" href="/">‹ Lazarus hub</a>
     <h1>XBT GALAXY</h1>
     <p>Stellar cartography · BLAKE2b Bitcoin network</p>
   </div>
@@ -63,7 +62,7 @@
 <!-- Legend / filters -->
 <aside class="legend" aria-label="Legend">
   <button type="button" class="leg on" data-type="datum"><i class="dot rebel"></i><span><b>Rebel Alliance</b><em>Pays miners in the coinbase, takes DATUM</em></span></button>
-  <button type="button" class="leg on" data-type="stratum"><i class="dot empire"></i><span><b>Galactic Empire</b><em>Holds rewards, or no DATUM</em></span></button>
+  <button type="button" class="leg on" data-type="stratum"><i class="dot stratum"></i><span><b>Stratum pools</b><em>Pool builds the template · red world = stratum endpoint</em></span></button>
   <button type="button" class="leg on" data-type="independent"><i class="dot rim"></i><span><b>Outer Rim</b><em>Solo miners on their own node</em></span></button>
 </aside>
 
