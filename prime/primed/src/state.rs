@@ -506,7 +506,15 @@ impl Shared {
 
     /// The live refusal for this gateway, if any. Expired entries are dropped as they are read.
     pub fn quarantined(&self, key_hex: &str) -> Option<Quarantine> {
-        if self.cfg.blocked_gateways.iter().any(|k| k.eq_ignore_ascii_case(key_hex)) {
+        // Matched as a prefix from 16 hex digits (the 8 bytes the logs and stats.json show as
+        // `gateway=`), because that is the only form an operator ever sees. Unlike
+        // `house-gateways` a wrong guess here costs a gateway its connection, not the pool its
+        // money, and the operator picked the entry.
+        let blocked = self.cfg.blocked_gateways.iter().any(|k| {
+            let k = k.trim();
+            k.len() >= 16 && key_hex.len() >= k.len() && key_hex[..k.len()].eq_ignore_ascii_case(k)
+        });
+        if blocked {
             return Some(Quarantine {
                 until: u64::MAX,
                 reason: "listed in blocked-gateways".into(),
@@ -830,5 +838,35 @@ mod tests {
         assert!(c.admit(house, 16, 8).is_ok());
         assert!(c.admit(house, 16, 8).is_ok());
         assert_eq!(c.admit(house, 16, 8), Err("connection limit reached"));
+    }
+}
+
+#[cfg(test)]
+mod quarantine_tests {
+    /// The prefix rule `quarantined()` applies to `blocked-gateways`, on its own so it can be
+    /// checked without building a whole Shared.
+    fn blocked_by(entries: &[&str], key_hex: &str) -> bool {
+        entries.iter().any(|k| {
+            let k = k.trim();
+            k.len() >= 16 && key_hex.len() >= k.len() && key_hex[..k.len()].eq_ignore_ascii_case(k)
+        })
+    }
+
+    const KEY: &str = "1dbd27517242d90d3c4a5b6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f8091a2";
+
+    #[test]
+    fn the_sixteen_hex_an_operator_can_see_is_enough() {
+        assert!(blocked_by(&["1dbd27517242d90d"], KEY));
+        assert!(blocked_by(&["1DBD27517242D90D"], KEY), "case must not matter");
+        assert!(blocked_by(&[" 1dbd27517242d90d "], KEY), "a pasted line may carry spaces");
+        assert!(blocked_by(&[KEY], KEY), "the whole key still works");
+    }
+
+    #[test]
+    fn short_or_wrong_entries_block_nobody() {
+        assert!(!blocked_by(&["1dbd2751"], KEY), "8 hex is too little to name a gateway");
+        assert!(!blocked_by(&[""], KEY));
+        assert!(!blocked_by(&["157afbbef61a6cf4"], KEY), "a different gateway keeps mining");
+        assert!(!blocked_by(&[], KEY));
     }
 }
