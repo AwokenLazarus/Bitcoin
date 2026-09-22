@@ -1552,14 +1552,28 @@ def _cache_store(key, val):
     return val
 
 
+# A stale copy may stand in while a background thread rebuilds it, but only this many TTLs old.
+# Past that the request rebuilds it itself. Without the bound, a refresh that could not start (all
+# _BG_REFRESH slots busy) or never finished left the old copy going out indefinitely: on
+# 2026-09-22 the public 6h chart was served 2.4 hours old while the samples were current.
+_STALE_TTLS = 5
+_STALE_FLOOR_S = 20
+
+
 def cached(key, ttl, fn):
-    """Fresh hit, else last good payload while one thread refreshes."""
+    """Fresh hit, else a recent-enough stale payload while one thread refreshes, else rebuild.
+
+    If the rebuild raises, the last good payload is returned rather than an error: an old answer
+    is better than none, and the failure is logged so a stuck builder is visible.
+    """
     now = time.time()
     with _resp_cache_lock:
         hit = _resp_cache.get(key)
         if hit and now - hit[0] < ttl:
             return hit[1]
-        stale = hit[1] if hit else None
+        age = (now - hit[0]) if hit else None
+        stale = hit[1] if hit and age < max(ttl * _STALE_TTLS, _STALE_FLOOR_S) else None
+        last_good = hit[1] if hit else None
         refreshing = key in _cache_refreshing
     if stale is not None:
         if not refreshing:
@@ -1591,7 +1605,13 @@ def cached(key, ttl, fn):
             hit = _resp_cache.get(key)
             if hit and now - hit[0] < ttl:
                 return hit[1]
-        return _cache_store(key, fn())
+        try:
+            return _cache_store(key, fn())
+        except Exception as e:
+            if last_good is None:
+                raise
+            print("cache", key, "rebuild failed, serving copy aged %.0fs:" % age, e, flush=True)
+            return last_good
 
 
 # BLAKE2b BTC (ticker BTCB2) USD: volume-weighted average of the two live listings.
