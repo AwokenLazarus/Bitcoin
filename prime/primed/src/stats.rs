@@ -276,6 +276,13 @@ pub fn build(shared: &Shared) -> Value {
             "solo_full_shares": t.solo_full_shares.load(Ordering::Relaxed),
             "solo_full_work": t.solo_full_work.load(Ordering::Relaxed),
             "remainder_to_gateway_sats": t.remainder_to_gateway_sats.load(Ordering::Relaxed),
+            // Work that could never have been a block, refused rather than credited
+            // (`validity.rs`): on a parent our node rejected or never saw, or from a gateway
+            // whose template our node found invalid.
+            "dead_parent_shares": t.dead_parent_shares.load(Ordering::Relaxed),
+            "faulted_shares": t.faulted_shares.load(Ordering::Relaxed),
+            "template_checks": t.template_checks.load(Ordering::Relaxed),
+            "template_checks_failed": t.template_checks_failed.load(Ordering::Relaxed),
             "block_candidates": found_total,
             "blocks_submitted": t.blocks_submitted.load(Ordering::Relaxed),
             "connections": t.connections.load(Ordering::Relaxed),
@@ -288,6 +295,7 @@ pub fn build(shared: &Shared) -> Value {
         "gateways": clients.len(),
         "connections_open": shared.connections.lock().unwrap().total(),
         "owed": owed,
+        "template_faults": shared.faults.all().into_iter().map(|(k, f)| serde_json::json!({"gateway": &k[..16.min(k.len())], "fault": f})).collect::<Vec<_>>(),
         "blocks": blocks,
     })
 }

@@ -13,6 +13,7 @@ mod session;
 mod solo;
 mod state;
 mod stats;
+mod validity;
 
 use std::path::PathBuf;
 use std::sync::atomic::AtomicU64;
@@ -281,6 +282,8 @@ fn run(cfg: Config) -> i32 {
         next_client_id: AtomicU64::new(1),
         coinbaser_base: Mutex::new(None),
         gateway_payouts: Mutex::new(Shared::load_gateway_payouts(&cfg.data_dir)),
+        parents: Default::default(),
+        faults: Default::default(),
         cfg,
     });
     log::info!("pool pubkey {}", shared.pool.public_hex());
@@ -397,7 +400,8 @@ fn backfill_last_seen(ledger: &mut tides::Ledger, blocks: &[tides::BlockRecord])
     }
     let mut found: std::collections::HashMap<&str, u64> = std::collections::HashMap::new();
     for b in blocks.iter().filter(|b| !b.kind.starts_with("orphan")) {
-        let named = b.split.iter().map(|s| s.0.as_str()).chain(b.carry_delta.iter().filter(|d| d.1 > 0).map(|d| d.0.as_str()));
+        let named =
+            b.split.iter().map(|s| s.0.as_str()).chain(b.carry_delta.iter().filter(|d| d.1 > 0).map(|d| d.0.as_str()));
         for id in named.filter(|id| unknown.contains(*id)) {
             let e = found.entry(id).or_insert(0);
             *e = (*e).max(b.ts);

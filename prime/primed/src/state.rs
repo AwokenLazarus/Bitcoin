@@ -184,6 +184,12 @@ pub struct ClientInfo {
     /// Accepted shares on a full job paying only the gateway. Not in the window.
     pub solo_full_shares: u64,
     pub solo_full_work: u64,
+    /// Shares refused because the block they build on is one our node rejected or never saw.
+    pub dead_parent_shares: u64,
+    /// Shares refused because this gateway's template was found invalid (`template_fault`).
+    pub faulted_shares: u64,
+    /// Why this gateway's work is not being credited, while that lasts.
+    pub template_fault: Option<String>,
 }
 
 #[derive(Default)]
@@ -227,6 +233,13 @@ pub struct Totals {
     pub solo_full_work: AtomicU64,
     /// Sats a split coinbase sent to the gateway script instead of the pool remainder.
     pub remainder_to_gateway_sats: AtomicU64,
+    /// Shares refused because they build on a block our node rejected or never saw.
+    pub dead_parent_shares: AtomicU64,
+    /// Shares refused because their gateway's template was found invalid.
+    pub faulted_shares: AtomicU64,
+    /// Gateway templates checked with our node (`getblocktemplate` proposal), and how many failed.
+    pub template_checks: AtomicU64,
+    pub template_checks_failed: AtomicU64,
 }
 
 impl Totals {
@@ -425,6 +438,10 @@ pub struct Shared {
     /// Last known payout script per gateway signing key (64 hex chars). Survives reconnect
     /// so the first empty job of a returning gateway already pays them.
     pub gateway_payouts: Mutex<HashMap<String, GatewayPayout>>,
+    /// Parents gateways build on that are not our tip, as our node judges them.
+    pub parents: crate::validity::ParentBook,
+    /// Gateways whose templates our node found invalid; their shares earn nothing until one passes.
+    pub faults: crate::validity::Faults,
 }
 
 /// What Prime last learned as a gateway's own payout, persisted in `gateway-scripts.json`.
