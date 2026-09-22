@@ -51,8 +51,8 @@ const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls)
 function kv(dl, k, v, cls) { if (v == null || v === "") return; dl.append(el("dt", null, k)); dl.append(el("dd", cls || null, String(v))); }
 function sec(dl, title) { dl.append(el("div", "sec", title)); }
 const TYPE_LABEL = {
-  datum: ["Rebel Alliance", "pays miners in the coinbase (TIDES) and most of its blocks are built by miners' own DATUM gateways"],
-  stratum: ["Galactic Empire", "75% or more of its blocks are pool-built templates or pay the pool's own wallet"],
+  datum: ["Rebel Alliance", "pays miners in the coinbase and DATUM gateways build blocks on it"],
+  stratum: ["Galactic Empire", "never seen paying miners in the coinbase, or never seen taking DATUM"],
   independent: ["Outer Rim", "one operator, own node, whole blocks for themselves"],
 };
 const safeLink = (u) => (typeof u === "string" && /^https:\/\/[a-z0-9.-]+(\/[^\s"<>]*)?$/i.test(u) ? u : null);
@@ -159,6 +159,30 @@ const pointsFS = `
     float a = smoothstep(0.5, 0.0, r); a *= a;
     gl_FragColor = vec4(vColor * vTw, a * vTw);
   }`;
+// Outer Rim worlds: a lit disc with a ring, kept between 6 and 26 px so they read at any distance.
+const rimVS = `
+  attribute float size; attribute vec3 color; attribute float phase;
+  uniform float uTime; uniform float uScale; varying vec3 vColor; varying float vPulse;
+  void main() {
+    vColor = color; vPulse = 0.75 + 0.25 * sin(uTime * 1.3 + phase * 6.2831);
+    vec4 mv = modelViewMatrix * vec4(position, 1.0);
+    gl_PointSize = clamp(size * uScale * (700.0 / -mv.z), 6.0 * uScale, 26.0 * uScale);
+    gl_Position = projectionMatrix * mv;
+  }`;
+const rimFS = `
+  varying vec3 vColor; varying float vPulse;
+  void main() {
+    vec2 d = gl_PointCoord - 0.5; float r = length(d);
+    if (r > 0.5) discard;
+    float core = smoothstep(0.2, 0.0, r);
+    float ring = smoothstep(0.05, 0.0, abs(r - 0.36)) * 0.8;
+    float halo = smoothstep(0.5, 0.2, r) * 0.25;
+    float a = (core + ring + halo) * vPulse;
+    gl_FragColor = vec4(mix(vColor, vec3(1.0), core * 0.5) * a, a);
+  }`;
+function rimMaterial() {
+  return new THREE.ShaderMaterial({ uniforms: { uTime: { value: 0 }, uScale: { value: renderer.getPixelRatio() } }, vertexShader: rimVS, fragmentShader: rimFS, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending });
+}
 function pointsMaterial(scale = 1) {
   return new THREE.ShaderMaterial({ uniforms: { uTime: { value: 0 }, uScale: { value: scale * renderer.getPixelRatio() } }, vertexShader: pointsVS, fragmentShader: pointsFS, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending });
 }
@@ -473,15 +497,15 @@ function buildRim(systems, positions) {
   const N = systems.length, pos = new Float32Array(N * 3), col = new Float32Array(N * 3), size = new Float32Array(N), ph = new Float32Array(N);
   systems.forEach((s, i) => {
     const p = positions.get(s.id); pos.set([p.x, p.y, p.z], i * 3);
-    const c = planetColor(s.name).lerp(new THREE.Color(0x7fe0b0), 0.35); col.set([c.r, c.g, c.b], i * 3);
-    size[i] = 14 + 16 * Math.log10(s.blocks + 1); ph[i] = (hash(s.id) % 1000) / 1000;
+    const c = planetColor(s.name).lerp(new THREE.Color(0x7fe0b0), 0.6); col.set([c.r, c.g, c.b], i * 3);
+    size[i] = 5 + 7 * Math.log10(s.blocks + 1); ph[i] = (hash(s.id) % 1000) / 1000;
     const rec = { data: s, root: null, pos: p, star: null, planets: [], starR: 2, extent: 12, type: "independent", rimIndex: i };
     systemsById.set(s.id, rec);
   });
   const g = new THREE.BufferGeometry();
   g.setAttribute("position", new THREE.BufferAttribute(pos, 3)); g.setAttribute("color", new THREE.BufferAttribute(col, 3));
   g.setAttribute("size", new THREE.BufferAttribute(size, 1)); g.setAttribute("phase", new THREE.BufferAttribute(ph, 1));
-  const m = pointsMaterial(1.3); timeMats.push(m);
+  const m = rimMaterial(); timeMats.push(m);
   rimPoints = new THREE.Points(g, m); rimPoints.userData = { kind: "rim" };
   typeGroups.independent.add(rimPoints);
   rimIndex = systems.map((s) => s.id);
@@ -652,10 +676,12 @@ function fillSystem(box, s) {
 function factionRows(dl, s) {
   const f = s.faction;
   if (!f) return;
-  sec(dl, `Allegiance test · ${f.window === "7d" ? "last 7 days" : "all blocks"} · ${n(f.blocks)} blocks`);
-  kv(dl, "DATUM + TIDES", `${f.datumTidesPct}% built by miners' gateways and paid in the coinbase`, f.datumTidesPct > 25 ? "live-on" : "live-off");
-  kv(dl, "Paid in coinbase", `${f.coinbasePaidPct}% ${f.coinbasePaidPct < 50 ? "(mostly to the pool's own wallet)" : ""}`);
-  kv(dl, "Verdict", f.datumTidesPct > 25 ? "Rebel: above the 25% line" : "Imperial: 75%+ pool-built or custodial");
+  sec(dl, "Allegiance test");
+  kv(dl, "Pays miners", f.paysMinersEver ? "yes: in the coinbase (TIDES split or straight to the finder)" : "not seen: blocks pay the pool's own wallet", f.paysMinersEver ? "live-on" : "live-off");
+  kv(dl, "Takes DATUM", f.datumEver ? "yes: miners' gateways build blocks here" : "not seen", f.datumEver ? "live-on" : "live-off");
+  kv(dl, f.window === "7d" ? "Last 7 days" : "All blocks", `${f.datumPct}% built by DATUM gateways · ${f.coinbasePaidPct}% paid to miners in the coinbase`);
+  if (s.type === "datum" && f.poolBuiltPct > 0) kv(dl, "Imperial outpost", `${f.poolBuiltPct}% of blocks come from the pool's own templates`);
+  if (f.operatorNote) kv(dl, "Verdict", f.operatorNote, "live-off");
 }
 let tipTarget = null;
 function showTip(obj, x, y) {

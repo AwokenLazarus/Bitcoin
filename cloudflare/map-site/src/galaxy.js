@@ -14,16 +14,23 @@
 
 export const FORK_HEIGHT = 961640;
 // Tags that software writes when the operator does not: they name no one.
-const GENERIC_PRIMARY = new Set(["", "solo", "datum gateway", "datum", "gateway", "datum on umbrel", "knots", "8-30 nypost deride and conquer", "unknown"]);
+// "RATUM" is the default tag of the RATUM gateway/node software: miners running it with default
+// settings, not a pool (Mike, 2026-09-22).
+const GENERIC_PRIMARY = new Set(["", "solo", "datum gateway", "datum", "gateway", "datum on umbrel", "knots", "8-30 nypost deride and conquer", "unknown", "ratum"]);
 const DEFAULT_SECONDARY = new Set(["", "datum user", "8-30 nypost deride and conquer", "unknown", "(no tag)"]);
 const isDefaultTag = (t) => DEFAULT_SECONDARY.has(String(t || "").trim().toLowerCase());
-// Faction rule (Mike, 2026-09-22). A Rebel pool must (1) pay miners in the coinbase (TIDES,
-// non-custodial) and (2) be mostly DATUM-driven. A block counts for the Rebellion when a DATUM
-// gateway built it (it carries an operator's gateway tag) AND its coinbase pays more than two
-// outputs. If 75% or more of a pool's blocks do not, it is Imperial, whatever else it offers.
-// Blocks stand in for hashrate: the last 7 days, or every block since the fork for a pool that
-// found fewer than 10 this week.
-export const REBEL_MIN_SHARE = 0.25;
+// Allegiance (Mike, 2026-09-22): capability, not share. A pool is Rebel when the chain shows it
+//   (1) paying miners in the coinbase: a TIDES split (more than two outputs), or the whole block
+//       to a miner's own address rather than to the pool's recurring wallet, and
+//   (2) taking DATUM: blocks built by gateways carrying an operator's tag (defaults included).
+// It is Imperial when it never does one of them. The share of its blocks the pool built itself
+// is its Imperial outpost, sized by that share. A wallet is "recurring" when it is paid by at
+// least a fifth of the pool's few-output coinbases (and three of them): that is the pool's own.
+const MIN_EVIDENCE = 1;
+// Where the operator's knowledge overrides the chain, it says so on the map. Keep this short.
+export const OPERATOR_VERDICT = {
+  AlphaPool: { type: "stratum", note: "Lazarus operator's verdict: known bad actor. Its small DATUM-AP product passes the chain test; 95% of its blocks pay the pool's own wallet." },
+};
 const WINDOW_MIN_BLOCKS = 10;
 
 // Tag variants of one pool, folded to one name. Order matters: first match wins.
@@ -38,7 +45,7 @@ const POOL_ALIASES = [
   [/^lazarus/i, "Lazarus"],
   [/^convoy/i, "CONVOY"],
   [/^riptide|^tides$|^tides\.maveth/i, "RIPTIDE"],
-  [/^ratum|iohzrd/i, "RATUM"],
+  [/iohzrd/i, "RATUM Prime"],
   [/^mining-dutch/i, "Mining-Dutch"],
   [/^pow\.re$/i, "Pow.re"],
   [/^ocean(\.xyz)?$/i, "OCEAN"],
@@ -52,7 +59,7 @@ export const POOL_LINKS = {
   B2Pool: "https://b2pool.io",
   PyBLOCK: "https://pyblock.xyz",
   "Pow.re": "https://pow.re",
-  RATUM: "https://pool.iohzrd.tech",
+  "RATUM Prime": "https://pool.iohzrd.tech",
   "Mining-Dutch": "https://www.mining-dutch.nl/",
   AlphaPool: "https://knots.alphapool.tech",
   xbtpool: "https://xbtpool.io",
@@ -129,6 +136,7 @@ export function blockRecord(b) {
     h: b.height, id: b.id, t: b.timestamp, n: b.tx_count, w: b.weight,
     l: t.layout === "datum" ? 1 : 0, p: t.primary, s: t.secondary, x: explorerPool,
     o: Array.isArray(e.coinbaseAddresses) ? e.coinbaseAddresses.length : (e.coinbaseAddress ? 1 : 0),
+    ad: Array.isArray(e.coinbaseAddresses) && e.coinbaseAddresses.length <= 3 ? e.coinbaseAddresses.slice(0, 3) : (e.coinbaseAddress && !e.coinbaseAddresses ? [e.coinbaseAddress] : undefined),
     f: e.totalFees || 0, r: e.reward || 0, mf: e.medianFee ?? null, lf: fr.length ? fr[0] : null,
     mr: e.matchRate ?? null,
   };
@@ -169,7 +177,15 @@ export function buildGalaxy(records, { now = Math.floor(Date.now() / 1000), laza
 
   // Pass 1: group by pool candidate (the primary tag, or the explorer's name for non-DATUM blocks).
   const byPool = new Map();
-  const soloKey = (r) => (r.l && !isDefaultTag(r.s) ? r.s : r.p || (readable(r.x) ? r.x : "") || "Unnamed");
+  // An operator under a software default tag is named by their gateway tag if they set one, else
+  // by the address the block paid: many miners share "RATUM" or "Knots", not their payout address.
+  const short = (ad) => (ad.length > 16 ? ad.slice(0, 8) + "…" + ad.slice(-6) : ad);
+  const soloKey = (r) => {
+    if (r.l && !isDefaultTag(r.s)) return r.s;
+    const base = r.p || (readable(r.x) ? r.x : "") || "Solo";
+    const payee = r.ad && r.ad.length ? r.ad[r.ad.length > 1 ? 1 : 0] : null;
+    return GENERIC_PRIMARY.has(base.toLowerCase()) && payee ? `${base} · ${short(payee)}` : base;
+  };
   for (const r of recs) {
     const generic = r.l ? GENERIC_PRIMARY.has(r.p.toLowerCase()) : GENERIC_PRIMARY.has(String(r.p || (readable(r.x) ? r.x : "") || "").toLowerCase());
     const name = generic ? null : poolName(r.l ? r.p : r.p || (readable(r.x) ? r.x : "Unknown"));
@@ -192,17 +208,24 @@ export function buildGalaxy(records, { now = Math.floor(Date.now() / 1000), laza
       third.push(r);
       if (!isDefaultTag(t)) named.add(t);
     }
+    const few = g.rows.filter((r) => r.o <= 3 && r.ad && r.ad.length);
+    const seenBy = new Map();
+    for (const r of few) for (const ad of new Set(r.ad)) seenBy.set(ad, (seenBy.get(ad) || 0) + 1);
+    const recurring = new Set([...seenBy].filter(([, c]) => c >= 3 && c >= few.length / 5).map(([a]) => a));
+    const paysMiners = (r) => r.o > 3 || (r.ad && r.ad.some((a) => !recurring.has(a)));
+    const isDatum = (r) => planetOf(g.name, r) != null;
+    const paidAll = g.rows.filter(paysMiners).length, datumAll = g.rows.filter(isDatum).length;
     const recent = g.rows.filter((r) => r.t >= weekAgo);
     const win = recent.length >= WINDOW_MIN_BLOCKS ? recent : g.rows;
-    const rebelBlocks = win.filter((r) => r.o > 2 && planetOf(g.name, r) != null).length;
-    const paidBlocks = win.filter((r) => r.o > 2).length;
+    const pct = (f) => Math.round((1000 * win.filter(f).length) / win.length) / 10;
     const faction = { window: win === recent ? "7d" : "all", blocks: win.length,
-      datumTidesPct: Math.round((1000 * rebelBlocks) / win.length) / 10, coinbasePaidPct: Math.round((1000 * paidBlocks) / win.length) / 10 };
+      coinbasePaidPct: pct(paysMiners), datumPct: pct(isDatum), poolBuiltPct: pct((r) => !isDatum(r)),
+      paysMinersEver: paidAll >= MIN_EVIDENCE, datumEver: datumAll >= MIN_EVIDENCE };
     let type;
     if (g.generic) type = "independent";
-    else if (!POOL_LINKS[g.name] && medOut <= 2 && named.size >= 3) type = "cluster";   // software default: many solo miners
-    else if (!POOL_LINKS[g.name] && medOut <= 2) type = "independent";                  // one operator, own node
-    else type = rebelBlocks > REBEL_MIN_SHARE * win.length ? "datum" : "stratum";
+    else if (!POOL_LINKS[g.name] && medOut <= 3) type = named.size >= 3 ? "cluster" : "independent"; // not a known pool and no split: an operator's own node (or a software default shared by many)
+    else type = faction.paysMinersEver && faction.datumEver ? "datum" : "stratum";      // a pool: the capability test
+    if (!g.generic && OPERATOR_VERDICT[g.name]) { type = OPERATOR_VERDICT[g.name].type; faction.operatorNote = OPERATOR_VERDICT[g.name].note; }
     g.faction = faction;
     if (type === "cluster") {
       // Each operator under a software default primary is their own world.
