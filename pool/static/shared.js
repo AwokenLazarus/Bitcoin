@@ -366,7 +366,7 @@
   // One renderer for the "Your stats" card on the front page and the /miner/<addr> page.
   // `ctx` carries what differs between the two: fee schedule, USD price, the block
   // interval (for maturity ETAs) and whether this is the full page.
-  const EXPLORER = "https://mempool.awokenlazarus.xyz";
+  const EXPLORER = "https://mempool.lazarus-xbt.xyz";
   // `name` is a gateway's own coinbase tag: whatever a stranger's gateway chose to call itself,
   // attached to whichever payout address its shares named. It goes into innerHTML, so it is
   // escaped here, once, for every caller (t() interpolates its params as they are).

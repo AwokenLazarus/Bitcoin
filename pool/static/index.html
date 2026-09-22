@@ -4,27 +4,27 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title data-i18n="meta.title">Lazarus Pool — BLAKE2b Bitcoin (XBT / BTCB2) mining pool for Siacoin ASICs</title>
-<meta name="description" data-i18n="meta.description" content="Mine Bitcoin (XBT / BTCB2) with any Siacoin BLAKE2b ASIC — Goldshell SC, iBeLink BM-S3, Antminer A3. The first pool to pay TIDES as a split coinbase on this BIP-110 Bitcoin fork's mainnet, and the first to subsidize DATUM miners with its own stratum hashers. 0% via DATUM, 15% public stratum (stratum+tcp://stratum.awokenlazarus.xyz:23334).">
+<meta name="description" data-i18n="meta.description" content="Mine Bitcoin (XBT / BTCB2) with any Siacoin BLAKE2b ASIC — Goldshell SC, iBeLink BM-S3, Antminer A3. The first pool to pay TIDES as a split coinbase on this BIP-110 Bitcoin fork's mainnet, and the first to subsidize DATUM miners with its own stratum hashers. 0% via DATUM, 15% public stratum (stratum+tcp://stratum.lazarus-xbt.xyz:23334).">
 <meta name="theme-color" content="#16130f">
-<link rel="canonical" href="https://pool.awokenlazarus.xyz/">
-<link rel="alternate" hreflang="en" href="https://pool.awokenlazarus.xyz/?lang=en">
-<link rel="alternate" hreflang="zh-CN" href="https://pool.awokenlazarus.xyz/?lang=zh-CN">
-<link rel="alternate" hreflang="x-default" href="https://pool.awokenlazarus.xyz/">
+<link rel="canonical" href="https://pool.lazarus-xbt.xyz/">
+<link rel="alternate" hreflang="en" href="https://pool.lazarus-xbt.xyz/?lang=en">
+<link rel="alternate" hreflang="zh-CN" href="https://pool.lazarus-xbt.xyz/?lang=zh-CN">
+<link rel="alternate" hreflang="x-default" href="https://pool.lazarus-xbt.xyz/">
 <meta property="og:type" content="website">
 <meta property="og:site_name" content="Lazarus Pool">
 <meta property="og:title" content="Lazarus Pool — BLAKE2b Bitcoin (XBT / BTCB2) mining pool for Siacoin ASICs">
 <meta property="og:description" content="Any ASIC that can mine Siacoin can mine Bitcoin XBT. First pool to pay TIDES as a split coinbase on BLAKE2b Bitcoin mainnet, and first to subsidize DATUM miners with its own stratum hashers.">
-<meta property="og:url" content="https://pool.awokenlazarus.xyz/">
-<meta property="og:image" content="https://pool.awokenlazarus.xyz/static/chi-rho-crest-icon.svg">
+<meta property="og:url" content="https://pool.lazarus-xbt.xyz/">
+<meta property="og:image" content="https://pool.lazarus-xbt.xyz/static/chi-rho-crest-icon.svg">
 <meta name="twitter:card" content="summary">
 <meta name="twitter:title" content="Lazarus Pool — BLAKE2b Bitcoin (XBT / BTCB2) mining pool for Siacoin ASICs">
-<meta name="twitter:description" content="BLAKE2b Bitcoin (XBT / BTCB2) mining pool — the BIP-110 fork. Siacoin ASICs welcome. TIDES + DATUM subsidy. stratum+tcp://stratum.awokenlazarus.xyz:23334">
+<meta name="twitter:description" content="BLAKE2b Bitcoin (XBT / BTCB2) mining pool — the BIP-110 fork. Siacoin ASICs welcome. TIDES + DATUM subsidy. stratum+tcp://stratum.lazarus-xbt.xyz:23334">
 <script type="application/ld+json">
 {"@context":"https://schema.org","@graph":[
-  {"@type":"WebSite","name":"Lazarus Pool","url":"https://pool.awokenlazarus.xyz/","description":"Mining pool for Bitcoin (XBT / BTCB2) on BLAKE2b. Any Siacoin ASIC works.","inLanguage":["en","zh-CN"]},
+  {"@type":"WebSite","name":"Lazarus Pool","url":"https://pool.lazarus-xbt.xyz/","description":"Mining pool for Bitcoin (XBT / BTCB2) on BLAKE2b. Any Siacoin ASIC works.","inLanguage":["en","zh-CN"]},
   {"@type":"FAQPage","mainEntity":[
     {"@type":"Question","name":"Can I mine Bitcoin XBT (BTCB2) with a Siacoin ASIC?","acceptedAnswer":{"@type":"Answer","text":"Yes. Bitcoin XBT / BTCB2 uses BLAKE2b, the same algorithm Siacoin ASICs were built for. Goldshell SC-series, iBeLink BM-S3 / BM-S3+, Antminer A3 and other BLAKE2b-Sia boxes work on stock firmware. SHA-256 Bitcoin miners (S19, S21, Whatsminer) cannot mine this chain."}},
-    {"@type":"Question","name":"How do I connect a miner to Lazarus Pool?","acceptedAnswer":{"@type":"Answer","text":"Point the miner at stratum+tcp://stratum.awokenlazarus.xyz:23334. Username is your payout address (bc1…). Password is x. Algorithm is BLAKE2b, not SHA-256d."}},
+    {"@type":"Question","name":"How do I connect a miner to Lazarus Pool?","acceptedAnswer":{"@type":"Answer","text":"Point the miner at stratum+tcp://stratum.lazarus-xbt.xyz:23334. Username is your payout address (bc1…). Password is x. Algorithm is BLAKE2b, not SHA-256d."}},
     {"@type":"Question","name":"What are Lazarus Pool fees?","acceptedAnswer":{"@type":"Answer","text":"0% if you run your own DATUM gateway (plus a bonus from the public-stratum fee). 15% on the public stratum, seven and a half points of which is credited to DATUM miners. Dedicated solo is 7.5%."}},
     {"@type":"Question","name":"Is XBT the same as SHA-256 Bitcoin?","acceptedAnswer":{"@type":"Answer","text":"No. This is the BLAKE2b Bitcoin chain (also called BTCB2 / XBT on this network). It keeps Bitcoin’s monetary rules but not SHA-256d proof-of-work. Coins live on this chain and trade as BTCB2 on Neoxa and NonKYC."}},
     {"@type":"Question","name":"What is BIP-110, and is it the same as the BLAKE2b change?","acceptedAnswer":{"@type":"Answer","text":"They are two separate events. BIP-110 is a proposal to restrict non-financial data in transactions; it needed 55% of hashrate, peaked near 2.6%, and its nodes began rejecting blocks that did not signal at height 961,632 on 8 August 2026 — that split the chain, and this chain is the BIP-110 branch. The proof-of-work change came later: on 30 August 2026 this branch moved from SHA-256d to BLAKE2b with a Sia-style header, with block 961,639 the last SHA-256d block and 961,640 the first BLAKE2b one. People use BIP-110 as the name for the chain, but BLAKE2b is what decides your hardware."}},
@@ -56,17 +56,17 @@
 <link rel="preload" as="style" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;1,400&family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,500;1,6..72,400;1,6..72,500&display=swap">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;1,400&family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,500;1,6..72,400;1,6..72,500&display=swap" media="print" onload="this.media='all'">
 <noscript><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;1,400&family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,500;1,6..72,400;1,6..72,500&display=swap"></noscript>
-<link rel="stylesheet" href="/static/pool.css?v=sf419">
-<link rel="stylesheet" href="/static/app.css?v=app3">
+<link rel="stylesheet" href="/static/pool.css?v=mcp1">
+<link rel="stylesheet" href="/static/app.css?v=app4">
 <link rel="icon" href="data:image/svg+xml,%3Csvg%20xmlns=%22http://www.w3.org/2000/svg%22%20viewBox=%220%200%2032%2032%22%3E%3Crect%20width=%2232%22%20height=%2232%22%20fill=%22%231c1914%22/%3E%3Cpath%20fill=%22%23dbb565%22%20d=%22M21.64%204.46C21.64%203.23%2021.25%202.37%2020.33%201.92C19.86%201.69%2019.25%201.58%2018.47%201.58H15.44L15.52%200.4H19.38C20.47%200.4%2021.35%200.58%2022.02%200.93C22.69%201.28%2023.18%201.76%2023.49%202.36C23.8%202.96%2023.95%203.63%2023.95%204.37C23.95%205.12%2023.79%205.81%2023.47%206.44C23.16%207.07%2022.66%207.57%2021.99%207.95C21.32%208.33%2020.99%208.52%2019.74%208.52H15.52L15.44%207.34H19.14C20.11%207.34%2020.88%206.89%2021.31%206.04C21.53%205.61%2021.64%205.08%2021.64%204.46ZM17.36%200.4%2017.36%2010.96V30.57L18.92%2031.16V31.6H13.09V31.16L14.66%2030.57V10.96V1.43L13.09%200.84V0.4ZM15.63%2020.2%209.86%2026.79%2011.94%2027.49V28.01H6.07V27.49L8.1%2026.79L14.87%2019.31L15.8%2018.63L20.88%2012.69L18.8%2011.99V11.48H24.67V11.99L22.64%2012.69L16.57%2019.52ZM19.77%2026.79%2014.88%2020.67%2014.46%2020.29%208.36%2012.72%206.37%2011.99V11.48H14.78V11.99L12.52%2012.69L16.71%2018L17.17%2018.43L23.94%2026.77L25.93%2027.49V28.01H17.51V27.49Z%22/%3E%3C/svg%3E">
 <link rel="apple-touch-icon" href="/static/chi-rho-crest-icon.svg">
 </head>
 <body>
 <noscript>
-  <p>Lazarus Pool is a mining pool for Bitcoin (XBT / BTCB2), the <a href="/bip110">BIP-110 Bitcoin fork</a> that mines with BLAKE2b instead of SHA-256d. Any ASIC that can mine Siacoin can mine it. Public stratum: <code>stratum+tcp://stratum.awokenlazarus.xyz:23334</code> (username = your payout address, password <code>x</code>). Fees: 0% with your own DATUM gateway plus the <a href="/datum-subsidy">DATUM subsidy</a>, 15% on the public stratum, 7.5% solo. <a href="/tides">TIDES</a> pays every miner inside the coinbase of each block found, so the pool never holds your coins.</p>
+  <p>Lazarus Pool is a mining pool for Bitcoin (XBT / BTCB2), the <a href="/bip110">BIP-110 Bitcoin fork</a> that mines with BLAKE2b instead of SHA-256d. Any ASIC that can mine Siacoin can mine it. Public stratum: <code>stratum+tcp://stratum.lazarus-xbt.xyz:23334</code> (username = your payout address, password <code>x</code>). Fees: 0% with your own DATUM gateway plus the <a href="/datum-subsidy">DATUM subsidy</a>, 15% on the public stratum, 7.5% solo. <a href="/tides">TIDES</a> pays every miner inside the coinbase of each block found, so the pool never holds your coins.</p>
   <p>Lazarus Pool is the first pool confirmed to pay TIDES as a split coinbase on BLAKE2b Bitcoin mainnet, and the first pool anywhere to use its stratum hashers to subsidize DATUM miners — paying miners for securing and decentralizing the network instead of charging them for it.</p>
   <p>Nothing is ever held for you: payouts are <a href="/non-custodial">outputs of the block itself</a>, with no balance and no withdrawal. Once its stratum passes 15% of network hashrate the pool <a href="/self-cap">relays new miners to another pool</a> rather than keep growing. <a href="/pools">How the pools on this chain compare</a>.</p>
-  <p>See <a href="/hardware">Siacoin BLAKE2b ASICs</a> and their estimated earnings, work out <a href="/calculator">what your hashrate earns per day</a>, check whether <a href="/profitability">mining XBT is profitable</a> right now, or read <a href="/mine-xbt">how to point a miner here</a>. Longer DATUM gateway setup: <a href="https://convoy.xyz/getstarted">CONVOY get started</a> / <a href="https://convoy.xyz/getstarted?lang=zh">中文</a>. Developers: <a href="/stratum-protocol.md">the stratum protocol on this chain</a> and the <a href="/api">public API</a>. Block explorer: <a href="https://mempool.awokenlazarus.xyz">mempool.awokenlazarus.xyz</a>. 中文：<a href="/zh/">简体中文版</a>.</p>
+  <p>See <a href="/hardware">Siacoin BLAKE2b ASICs</a> and their estimated earnings, work out <a href="/calculator">what your hashrate earns per day</a>, check whether <a href="/profitability">mining XBT is profitable</a> right now, or read <a href="/mine-xbt">how to point a miner here</a>. Longer DATUM gateway setup: <a href="https://convoy.xyz/getstarted">CONVOY get started</a> / <a href="https://convoy.xyz/getstarted?lang=zh">中文</a>. Developers: <a href="/stratum-protocol.md">the stratum protocol on this chain</a> and the <a href="/api">public API</a>. Block explorer: <a href="https://mempool.lazarus-xbt.xyz">mempool.lazarus-xbt.xyz</a>. 中文：<a href="/zh/">简体中文版</a>.</p>
 </noscript>
 <a class="skip" href="#status" data-i18n="skip">Skip to pool status</a>
 
@@ -84,9 +84,10 @@
       <a href="#dashboard" id="nav-payouts" hidden data-i18n="nav.payouts">Payouts</a>
       <a href="#solo" id="nav-solo" hidden data-i18n="nav.solo">Solo</a>
       <span class="nav-out">
-        <a href="https://mempool.awokenlazarus.xyz" target="_blank" rel="noreferrer" data-i18n-title="nav.explorerTitle" title="Lazarus Mempool — block explorer for this chain"><span data-i18n="nav.explorer">Explorer</span><span class="ext" aria-hidden="true"></span></a>
+        <a href="https://mempool.lazarus-xbt.xyz" target="_blank" rel="noreferrer" data-i18n-title="nav.explorerTitle" title="Lazarus Mempool — block explorer for this chain"><span data-i18n="nav.explorer">Explorer</span><span class="ext" aria-hidden="true"></span></a>
         <a href="https://discord.gg/fD33dJXnzz" target="_blank" rel="noreferrer"><span data-i18n="nav.discord">Discord</span><span class="ext" aria-hidden="true"></span></a>
         <a href="https://neoxa.exchange/register?ref=NEXB9423E49" target="_blank" rel="noreferrer" data-i18n-title="nav.exchangeTitle" title="Sign up on Neoxa Exchange to trade Bitcoin (BTCB2)"><span data-i18n="nav.exchange">Exchange</span><span class="ext" aria-hidden="true"></span></a>
+        <a href="https://mcp.lazarus-xbt.xyz" target="_blank" rel="noreferrer" data-i18n-title="nav.mcpTitle" title="Connect Claude, ChatGPT or any AI assistant to the pool (MCP server)"><span data-i18n="nav.mcp">AI assistant</span><span class="ext" aria-hidden="true"></span></a>
         <a href="https://github.com/AwokenLazarus/Bitcoin" target="_blank" rel="noreferrer"><span data-i18n="nav.github">GitHub</span><span class="ext" aria-hidden="true"></span></a>
       </span>
     </nav>
@@ -226,7 +227,7 @@
       <ul class="pillars" data-i18n-aria="status.pillarsAria" aria-label="What makes Lazarus different">
         <li data-i18n-html="status.p1"><b>Paid in the block itself.</b> No pool balance, no withdrawals. When a block is found, its coinbase pays your address directly. <a href="#payout">See the next payout</a>.</li>
         <li><span data-i18n-html="status.p2a"><b>Bring your own gateway, keep 100% — and then some.</b> Run Bitcoin Knots and a stock DATUM gateway: your node builds the block template, the pool only sets the split. Public stratum is </span><span id="pillar-stratum-fee">15%</span><span id="pillar-rebate">, and seven and a half points of that is credited to DATUM miners on every block</span>. <a href="#connect" data-i18n="nav.connect">Connect</a>.</li>
-        <li data-i18n-html="status.p3"><b>Verifiable end to end.</b> Every share is rebuilt and hashed; every block found is on the <a href="https://mempool.awokenlazarus.xyz/mining/pool/lazarus" target="_blank" rel="noreferrer">Lazarus Mempool</a>. Source on <a href="https://github.com/AwokenLazarus/Bitcoin" target="_blank" rel="noreferrer">GitHub</a>.</li>
+        <li data-i18n-html="status.p3"><b>Verifiable end to end.</b> Every share is rebuilt and hashed; every block found is on the <a href="https://mempool.lazarus-xbt.xyz/mining/pool/lazarus" target="_blank" rel="noreferrer">Lazarus Mempool</a>. Source on <a href="https://github.com/AwokenLazarus/Bitcoin" target="_blank" rel="noreferrer">GitHub</a>.</li>
       </ul>
     </div>
   </section>
@@ -443,7 +444,7 @@
           <p class="note callout rebate-callout" id="datum-bonus-explain"><strong data-i18n="connect.bonusTitle">The DATUM bonus.</strong> <span id="datum-bonus-explain-text">The public stratum pays a 15% fee. Seven and a half points of it is not kept by the pool: on every block found it is credited to every DATUM miner holding work in the window, pro rata by DATUM work. It lands on your balance whether or not your address made that block’s coinbase, and is paid with your next output once it clears the minimum. Small gateways get their exact share; nobody is skipped.</span></p>
           <dl class="facts tight">
             <dt data-i18n="connect.dtHost">Host</dt>
-            <dd class="copyable"><span class="mono" id="datum-host">stratum.awokenlazarus.xyz</span><button type="button" class="copy-btn" data-copy-from="datum-host" data-i18n-aria="connect.copyHost" aria-label="Copy DATUM host" title="Copy" data-i18n-title="copy"></button></dd>
+            <dd class="copyable"><span class="mono" id="datum-host">datum.lazarus-xbt.xyz</span><button type="button" class="copy-btn" data-copy-from="datum-host" data-i18n-aria="connect.copyHost" aria-label="Copy DATUM host" title="Copy" data-i18n-title="copy"></button></dd>
             <dt data-i18n="connect.dtPort">Port</dt>
             <dd class="copyable"><span class="mono" id="datum-port">28915</span><button type="button" class="copy-btn" data-copy-from="datum-port" data-i18n-aria="connect.copyPort" aria-label="Copy DATUM port" title="Copy" data-i18n-title="copy"></button></dd>
             <dt data-i18n="connect.dtPubkey">Pubkey</dt>
@@ -550,6 +551,7 @@
         <p class="eyebrow" data-i18n="dash.eyebrow">Your stats</p>
         <h2 id="dashboard-title" data-i18n="dash.title">Look up any address.</h2>
         <p class="section-lede" data-i18n-html="dash.lede">Hashrate, window share, next-block payout and every coinbase that has paid you. Each address also has its own page at <span class="mono">/miner/&lt;address&gt;</span>.</p>
+        <p class="note" data-i18n-html="dash.mcp">Prefer to ask? Connect Claude, ChatGPT or any AI assistant to <a href="https://mcp.lazarus-xbt.xyz" target="_blank" rel="noreferrer">the pool’s MCP server</a> and ask about this address, your DATUM gateway or your payouts in plain language. Read-only, no login.</p>
       </header>
       <div class="field-row">
         <label class="sr-only" for="lookup" data-i18n="dash.label">Bitcoin address</label>
@@ -625,7 +627,7 @@
       <header class="section-head">
         <p class="eyebrow" data-i18n="blocks.eyebrow">Blocks & payouts</p>
         <h2 id="blocks-title" data-i18n="blocks.title">Found by Lazarus, then the rest of the chain.</h2>
-        <p class="section-lede" data-i18n-html="blocks.lede">Paid <strong>in the found block’s coinbase</strong>, split by accepted work in the TIDES window, less each miner’s fee. Open a block to see every output. Coinbase outputs are spendable after 100 confirmations. Every block is also on the <a href="https://mempool.awokenlazarus.xyz/mining/pool/lazarus" target="_blank" rel="noreferrer">Lazarus Mempool</a>.</p>
+        <p class="section-lede" data-i18n-html="blocks.lede">Paid <strong>in the found block’s coinbase</strong>, split by accepted work in the TIDES window, less each miner’s fee. Open a block to see every output. Coinbase outputs are spendable after 100 confirmations. Every block is also on the <a href="https://mempool.lazarus-xbt.xyz/mining/pool/lazarus" target="_blank" rel="noreferrer">Lazarus Mempool</a>.</p>
       </header>
       <span id="payouts" class="anchor" aria-hidden="true"></span>
       <p class="kicker table-label" data-i18n="blocks.found">Found by Lazarus</p>
@@ -870,15 +872,16 @@
     </div>
     <div class="footer-col">
       <p class="category" data-i18n="footer.explorer">Explorer</p>
-      <a href="https://mempool.awokenlazarus.xyz" target="_blank" rel="noreferrer" data-i18n="footer.mempool">Lazarus Mempool</a>
-      <a href="https://mempool.awokenlazarus.xyz/mining/pool/lazarus" target="_blank" rel="noreferrer" data-i18n="footer.found">Blocks found by Lazarus</a>
-      <a href="https://mempool.awokenlazarus.xyz/mining" target="_blank" rel="noreferrer" data-i18n="footer.mining">Mining on this chain</a>
-      <a href="https://mempool.awokenlazarus.xyz/mempool-block/0" target="_blank" rel="noreferrer" data-i18n="footer.nextTx">Next block’s transactions</a>
+      <a href="https://mempool.lazarus-xbt.xyz" target="_blank" rel="noreferrer" data-i18n="footer.mempool">Lazarus Mempool</a>
+      <a href="https://mempool.lazarus-xbt.xyz/mining/pool/lazarus" target="_blank" rel="noreferrer" data-i18n="footer.found">Blocks found by Lazarus</a>
+      <a href="https://mempool.lazarus-xbt.xyz/mining" target="_blank" rel="noreferrer" data-i18n="footer.mining">Mining on this chain</a>
+      <a href="https://mempool.lazarus-xbt.xyz/mempool-block/0" target="_blank" rel="noreferrer" data-i18n="footer.nextTx">Next block’s transactions</a>
     </div>
     <div class="footer-col">
       <p class="category" data-i18n="footer.wallets">Wallets & nodes</p>
-      <span class="copyable footer-endpoint"><span class="mono" id="electrum-endpoint">electrum.awokenlazarus.xyz:50002</span><button type="button" class="copy-btn" data-copy-from="electrum-endpoint" data-i18n-aria="connect.copyElectrum" aria-label="Copy Electrum server" title="Copy" data-i18n-title="copy"></button></span>
+      <span class="copyable footer-endpoint"><span class="mono" id="electrum-endpoint">electrum.lazarus-xbt.xyz:50002</span><button type="button" class="copy-btn" data-copy-from="electrum-endpoint" data-i18n-aria="connect.copyElectrum" aria-label="Copy Electrum server" title="Copy" data-i18n-title="copy"></button></span>
       <span class="note faint" data-i18n="footer.electrum">Electrum server (SSL). For wallets that understand this chain’s 164-byte BLAKE2b headers (Electrum protocol 1.8).</span>
+      <a href="https://mcp.lazarus-xbt.xyz" target="_blank" rel="noreferrer" data-i18n="footer.mcp">MCP server for AI assistants</a>
       <a href="https://github.com/AwokenLazarus/Bitcoin/tree/main/node" target="_blank" rel="noreferrer" data-i18n="footer.knots">Run a Bitcoin Knots node for this chain</a>
       <a href="https://github.com/iohzrd/datum_gateway" target="_blank" rel="noreferrer" data-i18n="footer.gw">DATUM gateway (iohzrd)</a>
       <a href="https://convoy.xyz/getstarted" target="_blank" rel="noreferrer" data-i18n="footer.convoyGuide">DATUM gateway setup (CONVOY)</a>
@@ -906,13 +909,13 @@
   <a href="#learn" data-view-link="learn"><i class="tb-ico tb-learn" aria-hidden="true"></i><span data-i18n="app.nav.learn">Learn</span></a>
 </nav>
 
-<script src="/static/i18n.js?v=sf419"></script>
-<script src="/static/i18n/en.js?v=sf419"></script>
-<script src="/static/i18n/zh-CN.js?v=sf419"></script>
+<script src="/static/i18n.js?v=mcp1"></script>
+<script src="/static/i18n/en.js?v=mcp1"></script>
+<script src="/static/i18n/zh-CN.js?v=mcp1"></script>
 <script>LZ_I18N.boot();</script>
-<script src="/static/shared.js?v=sf419"></script>
-<script src="/static/app.js?v=app3"></script>
-<script src="/static/pool.js?v=sf419"></script>
-<script src="/static/chart.js?v=app3"></script>
+<script src="/static/shared.js?v=mcp1"></script>
+<script src="/static/app.js?v=app4"></script>
+<script src="/static/pool.js?v=mcp1"></script>
+<script src="/static/chart.js?v=app4"></script>
 </body>
 </html>

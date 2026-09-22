@@ -2,7 +2,7 @@ window.LZ_I18N_DICTS = window.LZ_I18N_DICTS || {};
 window.LZ_I18N_DICTS["zh-CN"] = {
   "meta": {
     "title": "Lazarus Pool — 用 Siacoin BLAKE2b 矿机挖比特币（XBT / BTCB2）的矿池",
-    "description": "用任何能挖 Siacoin 的 BLAKE2b ASIC 挖比特币（XBT / BTCB2）——金贝 SC、iBeLink BM-S3、蚂蚁 A3。本矿池是这条 BIP-110 比特币分叉主网上第一家用 TIDES 拆分 coinbase 支付的矿池，也是第一家用自有 stratum 算力补贴 DATUM 矿工的矿池。自建 DATUM 0%，公共 stratum 15%（stratum+tcp://stratum.awokenlazarus.xyz:23334）。",
+    "description": "用任何能挖 Siacoin 的 BLAKE2b ASIC 挖比特币（XBT / BTCB2）——金贝 SC、iBeLink BM-S3、蚂蚁 A3。本矿池是这条 BIP-110 比特币分叉主网上第一家用 TIDES 拆分 coinbase 支付的矿池，也是第一家用自有 stratum 算力补贴 DATUM 矿工的矿池。自建 DATUM 0%，公共 stratum 15%（stratum+tcp://stratum.lazarus-xbt.xyz:23334）。",
     "minerTitle": "矿工 — Lazarus Pool",
     "minerDescription": "Lazarus Pool 上某个地址的实时算力、矿机、TIDES 窗口份额以及每一笔 coinbase 支付。",
     "minerTitleAddr": "{short} — Lazarus Pool"
@@ -37,6 +37,8 @@ window.LZ_I18N_DICTS["zh-CN"] = {
     "exchange": "交易所",
     "exchangeTitle": "在 Neoxa Exchange 注册交易比特币（BTCB2）",
     "github": "GitHub",
+    "mcp": "AI 助手",
+    "mcpTitle": "把 Claude、ChatGPT 等 AI 助手接入矿池（MCP 服务器）",
     "workers": "矿机",
     "pool": "矿池",
     "lookUpAnother": "查询其他地址",
@@ -124,7 +126,7 @@ window.LZ_I18N_DICTS["zh-CN"] = {
     "pillarsAria": "Lazarus 的不同之处",
     "p1": "<b>在区块里直接支付。</b>没有矿池余额，不用提现。找到区块时，其 coinbase 直接付给你的地址。<a href=\"#payout\">查看下一次支付</a>。",
     "p2a": "<b>自带网关，保留 100%——再多一点。</b>运行 Bitcoin Knots 和原版 DATUM 网关：由你的节点组块，矿池只定分配。公共 stratum 为 ",
-    "p3": "<b>端到端可验证。</b>每一份 share 都会重建并哈希；找到的每个区块都在 <a href=\"https://mempool.awokenlazarus.xyz/mining/pool/lazarus\" target=\"_blank\" rel=\"noreferrer\">Lazarus Mempool</a>。源码在 <a href=\"https://github.com/AwokenLazarus/Bitcoin\" target=\"_blank\" rel=\"noreferrer\">GitHub</a>。",
+    "p3": "<b>端到端可验证。</b>每一份 share 都会重建并哈希；找到的每个区块都在 <a href=\"https://mempool.lazarus-xbt.xyz/mining/pool/lazarus\" target=\"_blank\" rel=\"noreferrer\">Lazarus Mempool</a>。源码在 <a href=\"https://github.com/AwokenLazarus/Bitcoin\" target=\"_blank\" rel=\"noreferrer\">GitHub</a>。",
     "pillarRebate": "，其中 {pts} 会在每个区块记给 DATUM 矿工",
     "hashrate": "算力",
     "miners": "矿工",
@@ -473,6 +475,7 @@ window.LZ_I18N_DICTS["zh-CN"] = {
     "note": "按实时难度与价格、基础奖励（不含交易费）、走你自己的 DATUM 网关并计入补贴计算。电费不在其中。"
   },
   "dash": {
+    "mcp": "想直接问？把 Claude、ChatGPT 等 AI 助手接入<a href=\"https://mcp.lazarus-xbt.xyz\" target=\"_blank\" rel=\"noreferrer\">矿池的 MCP 服务器</a>，用中文询问这个地址、你的 DATUM 网关或收款情况。只读，无需登录。",
     "eyebrow": "你的数据",
     "title": "查询任意地址。",
     "lede": "算力、窗口份额、下一块支付，以及付给你的每一笔 coinbase。每个地址还有独立页面：<span class=\"mono\">/miner/&lt;地址&gt;</span>。",
@@ -654,7 +657,7 @@ window.LZ_I18N_DICTS["zh-CN"] = {
   "blocks": {
     "eyebrow": "区块与支付",
     "title": "Lazarus 找到的，然后是本链其余区块。",
-    "lede": "在<strong>所找到区块的 coinbase</strong> 里支付，按 TIDES 窗口内已接受工作分配，扣除每位矿工的手续费。打开一个区块可看到每一笔输出。Coinbase 输出在 100 个确认后可花费。每个区块也在 <a href=\"https://mempool.awokenlazarus.xyz/mining/pool/lazarus\" target=\"_blank\" rel=\"noreferrer\">Lazarus Mempool</a>。",
+    "lede": "在<strong>所找到区块的 coinbase</strong> 里支付，按 TIDES 窗口内已接受工作分配，扣除每位矿工的手续费。打开一个区块可看到每一笔输出。Coinbase 输出在 100 个确认后可花费。每个区块也在 <a href=\"https://mempool.lazarus-xbt.xyz/mining/pool/lazarus\" target=\"_blank\" rel=\"noreferrer\">Lazarus Mempool</a>。",
     "found": "Lazarus 找到的",
     "recent": "本链最近",
     "thHeight": "高度",
@@ -726,6 +729,7 @@ window.LZ_I18N_DICTS["zh-CN"] = {
     "s4t": "DATUM 工作领取奖励"
   },
   "footer": {
+    "mcp": "供 AI 助手使用的 MCP 服务器",
     "blurb": "比特币挖矿，在 coinbase 里支付。<i class=\"serif\">箴言 11:1</i> — 公平的秤为他所喜悦。",
     "pool": "矿池",
     "fees": "费率",
