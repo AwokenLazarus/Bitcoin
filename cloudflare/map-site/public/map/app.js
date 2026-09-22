@@ -509,11 +509,12 @@ function buildRim(systems, positions) {
   rimPoints = new THREE.Points(g, m); rimPoints.userData = { kind: "rim" };
   typeGroups.independent.add(rimPoints);
   rimIndex = systems.map((s) => s.id);
-  // the biggest independents get a small lit world so they read as planets up close
-  systems.slice(0, 60).forEach((s) => {
+  // every independent is also a small lit world, so there is a planet to arrive at up close
+  const unit = new THREE.SphereGeometry(1, 16, 12);
+  systems.forEach((s) => {
     const p = positions.get(s.id), pr = 0.8 + 1.1 * Math.log10(s.blocks + 1);
-    const mesh = new THREE.Mesh(new THREE.SphereGeometry(pr, 16, 12), planetMaterial(planetColor(s.name), new THREE.Vector3(0, 0, 0), (hash(s.id) % 1000) / 1000));
-    mesh.position.copy(p); mesh.userData = { kind: "system", sys: s.id }; typeGroups.independent.add(mesh); pickables.push(mesh);
+    const mesh = new THREE.Mesh(unit, planetMaterial(planetColor(s.name), new THREE.Vector3(0, 0, 0), (hash(s.id) % 1000) / 1000));
+    mesh.scale.setScalar(pr); mesh.position.copy(p); mesh.userData = { kind: "system", sys: s.id }; typeGroups.independent.add(mesh); pickables.push(mesh);
     systemsById.get(s.id).planets.push({ tag: s.name, mesh, radius: pr });
   });
 }
@@ -547,7 +548,7 @@ function blockFlash(sysId, tag) {
   if (!rec) return;
   const at = new THREE.Vector3();
   const planet = tag && rec.planets.find((p) => p.tag === tag);
-  if (planet) planet.mesh.getWorldPosition(at); else at.copy(rec.pos);
+  liveTarget(sysId, planet ? tag : null, at);
   const color = FX_COLOR[rec.type] || 0xffffff;
   const flash = sprite(TEX.glow, color, 10, 1); flash.position.copy(at); scene.add(flash);
   const ring = new THREE.Mesh(new THREE.RingGeometry(0.9, 1, 96), new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.9, side: THREE.DoubleSide, blending: THREE.AdditiveBlending, depthWrite: false }));
@@ -583,22 +584,33 @@ function warp() {
 
 // ---------- camera flight ----------
 let flight = null, focused = null;
-function flyTo(target, distance, dur = 1.8) {
+// Where a system or planet is this frame. The Outer Rim turns slowly around the core and planets
+// orbit, so a position taken at load time goes stale.
+function liveTarget(id, tag, out = new THREE.Vector3()) {
+  const rec = systemsById.get(id);
+  if (!rec) return null;
+  const planet = tag && rec.planets.find((p) => p.tag === tag);
+  if (planet) return planet.mesh.getWorldPosition(out);
+  if (rec.type === "independent") { typeGroups.independent.updateMatrixWorld(); return out.copy(rec.pos).applyMatrix4(typeGroups.independent.matrixWorld); }
+  return out.copy(rec.pos);
+}
+function flyTo(target, distance, dur = 1.8, track = null) {
   const fromPos = camera.position.clone(), fromTarget = controls.target.clone();
   const dir = camera.position.clone().sub(controls.target).normalize();
   if (Math.abs(dir.y) > 0.92) dir.set(0.3, 0.6, 0.74).normalize();
   const toPos = target.clone().addScaledVector(dir.lerp(new THREE.Vector3(0, 0.45, 1).normalize(), 0.35).normalize(), distance);
-  flight = { t: 0, dur: FAST ? 0.05 : dur / Math.max(MOTION, 0.5), fromPos, fromTarget, toPos, toTarget: target.clone() };
+  flight = { t: 0, dur: FAST ? 0.05 : dur / Math.max(MOTION, 0.5), fromPos, fromTarget, toPos, toTarget: target.clone(), track };
   if (fromPos.distanceTo(toPos) > 400 && !reduced) warp();
 }
 function focusSystem(id, tag) {
   const rec = systemsById.get(id);
   if (!rec) return;
-  focused = { id, tag: tag || null };
-  let target = rec.pos.clone(), dist = rec.extent * 2.6 + 30;
   const planet = tag && rec.planets.find((p) => p.tag === tag);
-  if (planet) { planet.mesh.getWorldPosition(target); dist = Math.max(10, planet.radius * 14); }
-  flyTo(target, dist);
+  // follow anything that moves: a planet on its orbit, or an Outer Rim world drifting round the core
+  focused = { id, tag: planet ? tag : null, follow: !!planet || rec.type === "independent" };
+  const target = liveTarget(id, focused.tag);
+  const dist = planet ? Math.max(10, planet.radius * 14) : rec.type === "independent" ? 45 : rec.extent * 2.6 + 30;
+  flyTo(target, dist, 1.8, focused.follow ? () => liveTarget(id, focused.tag) : null);
   showPanel(rec, tag);
   setPlanetLabels(rec);
 }
@@ -896,14 +908,15 @@ function tick() {
   }
   if (t > nextComet && !reduced) { shootingStar(); nextComet = t + 5 + Math.random() * 9; }
   if (flight) {
+    if (flight.track) { const now = flight.track(); if (now) { const moved = now.clone().sub(flight.toTarget); flight.toTarget.add(moved); flight.toPos.add(moved); } }
     flight.t += dt / flight.dur; const k = ease(clamp(flight.t, 0, 1));
     camera.position.lerpVectors(flight.fromPos, flight.toPos, k);
     controls.target.lerpVectors(flight.fromTarget, flight.toTarget, k);
     if (flight.t >= 1) flight = null;
-  } else if (focused) {
-    // keep a focused planet in the middle as it orbits
-    const rec = systemsById.get(focused.id), pl = focused.tag && rec && rec.planets.find((p) => p.tag === focused.tag);
-    if (pl) { const w = new THREE.Vector3(); pl.mesh.getWorldPosition(w); const d = w.sub(controls.target); controls.target.add(d); camera.position.add(d); }
+  } else if (focused && focused.follow) {
+    // keep a moving target in the middle; the camera keeps whatever angle and zoom the user gives it
+    const w = liveTarget(focused.id, focused.tag);
+    if (w) { const d = w.sub(controls.target); controls.target.add(d); camera.position.add(d); }
   }
   controls.update();
   // labels fade with distance so the far galaxy stays clean
