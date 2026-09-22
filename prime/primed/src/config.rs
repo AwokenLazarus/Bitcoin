@@ -141,11 +141,22 @@ pub struct Config {
     /// Most sessions from one remote address. A gateway is one connection; a farm is a few.
     #[serde(default = "d_max_connections_per_ip")]
     pub max_connections_per_ip: u32,
-    /// How long a gateway is refused after its own node hands Prime a block the chain rejects
-    /// (see `node::says_outdated_node`). The gateway builds its own template, so a consensus
-    /// rule its node does not know is a block the whole window loses. 0 turns this off.
-    #[serde(default = "d_quarantine_hours")]
-    pub quarantine_hours: u64,
+    /// How long a gateway is refused the first time its own node hands Prime a block the chain
+    /// rejects (see `node::says_outdated_node`). The gateway builds its own template, so a
+    /// consensus rule its node does not know is a block the whole window loses. Short on
+    /// purpose: Prime cannot see a node's version, so the way back in is to upgrade and
+    /// reconnect, and an operator who did that should not be kept waiting. 0 turns this off.
+    #[serde(default = "d_quarantine_minutes")]
+    pub quarantine_minutes: u64,
+    /// The refusal doubles with each further rejected block and stops growing here. A gateway
+    /// that was upgraded never reaches the second strike; one that was not is refused for
+    /// longer and longer without ever being banned outright.
+    #[serde(default = "d_quarantine_max_hours")]
+    pub quarantine_max_hours: u64,
+    /// Strikes are forgotten after this long without another rejected block, so an operator who
+    /// upgrades months later starts clean.
+    #[serde(default = "d_quarantine_forget_hours")]
+    pub quarantine_forget_hours: u64,
     /// Gateway identity keys refused outright, whatever they submit. The 16-hex `gateway=`
     /// from the logs is enough; a longer prefix or the whole key also works.
     #[serde(default)]
@@ -232,8 +243,16 @@ fn d_max_connections_per_ip() -> u32 {
     8
 }
 
-fn d_quarantine_hours() -> u64 {
+fn d_quarantine_minutes() -> u64 {
+    60
+}
+
+fn d_quarantine_max_hours() -> u64 {
     24
+}
+
+fn d_quarantine_forget_hours() -> u64 {
+    168
 }
 fn d_session_coinbase_budget() -> usize {
     4 << 20

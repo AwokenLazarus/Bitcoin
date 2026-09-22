@@ -394,12 +394,17 @@ impl Connections {
     }
 }
 
-/// Why a gateway is being refused, and until when (unix seconds).
+/// Why a gateway is being refused, until when (unix seconds), and how many rejected blocks it
+/// has now cost the window. The entry outlives the refusal: an expired one is what lets the
+/// gateway back in while still remembering that it was here before.
 #[derive(Clone, Debug)]
 pub struct Quarantine {
     pub until: u64,
     pub reason: String,
     pub height: u32,
+    pub strikes: u32,
+    /// When the last rejected block arrived, for forgetting old strikes.
+    pub last: u64,
 }
 
 pub struct Shared {
@@ -519,31 +524,52 @@ impl Shared {
                 until: u64::MAX,
                 reason: "listed in blocked-gateways".into(),
                 height: 0,
+                strikes: 0,
+                last: now(),
             });
         }
-        let mut q = self.quarantine.lock().unwrap_or_else(|e| e.into_inner());
-        match q.get(key_hex) {
-            Some(entry) if entry.until > now() => Some(entry.clone()),
-            Some(_) => {
-                q.remove(key_hex);
-                None
-            }
-            None => None,
-        }
+        let key = key_hex.to_ascii_lowercase();
+        let q = self.quarantine.lock().unwrap_or_else(|e| e.into_inner());
+        // An expired entry is left where it is: the gateway is admitted again (it may well have
+        // upgraded in the meantime, which is the only way back in that Prime can offer), and
+        // what it leaves behind is the strike count for the next one.
+        q.get(&key).filter(|entry| entry.until > now()).cloned()
     }
 
-    /// Refuse this gateway for `quarantine_hours`. Returns false when the feature is off.
-    pub fn quarantine_gateway(&self, key_hex: &str, height: u32, reason: &str) -> bool {
-        let hours = self.cfg.quarantine_hours;
-        if hours == 0 {
-            return false;
+    /// Refuse this gateway: `quarantine_minutes` doubled per strike, capped at
+    /// `quarantine_max_hours`. Returns the seconds it is refused for, or None when the feature
+    /// is off.
+    pub fn quarantine_gateway(&self, key_hex: &str, height: u32, reason: &str) -> Option<u64> {
+        let first = self.cfg.quarantine_minutes.checked_mul(60)?;
+        if first == 0 {
+            return None;
         }
-        let entry = Quarantine { until: now() + hours * 3600, reason: reason.to_string(), height };
-        self.quarantine
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .insert(key_hex.to_ascii_lowercase(), entry);
-        true
+        let cap = self.cfg.quarantine_max_hours.saturating_mul(3600).max(first);
+        let forget = self.cfg.quarantine_forget_hours.saturating_mul(3600);
+        let ts = now();
+        let key = key_hex.to_ascii_lowercase();
+        let mut q = self.quarantine.lock().unwrap_or_else(|e| e.into_inner());
+        q.retain(|_, e| ts.saturating_sub(e.last) < forget.max(3600));
+        let strikes = q
+            .get(&key)
+            .filter(|e| ts.saturating_sub(e.last) < forget.max(3600))
+            .map_or(1, |e| e.strikes.saturating_add(1));
+        let span = first.saturating_mul(1u64 << (strikes - 1).min(20)).min(cap);
+        q.insert(
+            key,
+            Quarantine { until: ts + span, reason: reason.to_string(), height, strikes, last: ts },
+        );
+        Some(span)
+    }
+
+    /// Every gateway currently refused, for stats.json.
+    pub fn quarantine_list(&self) -> Vec<(String, Quarantine)> {
+        let ts = now();
+        let q = self.quarantine.lock().unwrap_or_else(|e| e.into_inner());
+        let mut out: Vec<(String, Quarantine)> =
+            q.iter().filter(|(_, e)| e.until > ts).map(|(k, e)| (k.clone(), e.clone())).collect();
+        out.sort_by_key(|(k, _)| k.clone());
+        out
     }
 
     pub fn lookup_gateway_script(&self, key_hex: &str) -> Option<Vec<u8>> {
@@ -868,5 +894,39 @@ mod quarantine_tests {
         assert!(!blocked_by(&[""], KEY));
         assert!(!blocked_by(&["157afbbef61a6cf4"], KEY), "a different gateway keeps mining");
         assert!(!blocked_by(&[], KEY));
+    }
+}
+
+#[cfg(test)]
+mod quarantine_backoff_tests {
+    /// The doubling `quarantine_gateway` applies, separated from Shared so it can be checked
+    /// on its own: first_secs doubled per strike, capped.
+    fn span(first_secs: u64, cap_secs: u64, strikes: u32) -> u64 {
+        first_secs.saturating_mul(1u64 << (strikes - 1).min(20)).min(cap_secs.max(first_secs))
+    }
+
+    #[test]
+    fn an_upgraded_gateway_is_back_within_the_hour() {
+        // One rejected block, the operator upgrades: 60 minutes and it reconnects normally.
+        assert_eq!(span(3600, 86400, 1), 3600);
+    }
+
+    #[test]
+    fn a_gateway_that_was_not_upgraded_is_refused_for_longer_each_time() {
+        assert_eq!(span(3600, 86400, 2), 7200);
+        assert_eq!(span(3600, 86400, 3), 14400);
+        assert_eq!(span(3600, 86400, 5), 57600);
+    }
+
+    #[test]
+    fn the_refusal_stops_growing_at_the_cap_and_never_becomes_a_ban() {
+        assert_eq!(span(3600, 86400, 6), 86400);
+        assert_eq!(span(3600, 86400, 40), 86400, "no overflow, no permanent ban");
+        assert!(span(3600, 86400, 40) < u64::MAX);
+    }
+
+    #[test]
+    fn a_cap_below_the_first_refusal_does_not_shorten_it() {
+        assert_eq!(span(3600, 600, 1), 3600);
     }
 }

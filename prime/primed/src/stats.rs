@@ -216,6 +216,17 @@ pub fn build(shared: &Shared) -> Value {
             "advertise": shared.cfg.advertise_address,
             "datum": { "host": host, "port": port, "pubkey": shared.pool.public_hex() },
         },
+        // Gateways currently refused because their own node built a block the chain rejected.
+        // Published so an operator can see why its gateway cannot connect, and when that lifts.
+        "refused_gateways": shared.quarantine_list().iter().map(|(key, q)| json!({
+            "gateway": &key[..key.len().min(16)],
+            "reason": q.reason,
+            "block": q.height,
+            "strikes": q.strikes,
+            "until_ts": q.until,
+            "minutes_left": q.until.saturating_sub(ts) / 60,
+            "fix": "upgrade Bitcoin Knots to 29.4.2 or later and reconnect",
+        })).collect::<Vec<_>>(),
         "node": tip.as_ref().map(|t| json!({
             "height": t.height, "tip": t.hash, "difficulty": t.difficulty, "tip_age_s": ts.saturating_sub(t.seen_ts),
         })).unwrap_or(Value::Null),
