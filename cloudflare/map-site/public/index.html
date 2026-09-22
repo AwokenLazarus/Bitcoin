@@ -4,12 +4,12 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Lazarus · Bitcoin on BLAKE2b (XBT)</title>
-<meta name="description" content="The hub for Bitcoin BLAKE2b (XBT): what the chain is, how to mine it, the pools and software running on it, and live network figures.">
+<meta name="description" content="A hub for Bitcoin BLAKE2b (XBT): what the chain is, how to mine it with DATUM, the pools and software running on it, and live network figures.">
 <link rel="canonical" href="https://lazarus-xbt.xyz/">
 <meta property="og:type" content="website">
 <meta property="og:site_name" content="Lazarus · Bitcoin BLAKE2b">
 <meta property="og:title" content="Lazarus · Bitcoin on BLAKE2b (XBT)">
-<meta property="og:description" content="The hub for Bitcoin BLAKE2b (XBT): what the chain is, how to mine it, the pools and software running on it, and live network figures.">
+<meta property="og:description" content="A hub for Bitcoin BLAKE2b (XBT): what the chain is, how to mine it with DATUM, the pools and software running on it, and live network figures.">
 <meta property="og:url" content="https://lazarus-xbt.xyz/">
 <meta name="twitter:card" content="summary">
 <meta name="theme-color" content="#1a1712">
@@ -38,7 +38,7 @@
   <div>
   <p class="kicker">Bitcoin · BLAKE2b proof of work · XBT</p>
   <h1>The same ledger.<br>A <em>different</em> proof of work.</h1>
-  <p class="lede">On 30 August 2026, at block 961,640, Bitcoin's history was carried onto a new proof of work: BLAKE2b. The coins, the addresses and every block before that height are unchanged. What changed is who can mine, and how the rewards are paid. This is the hub for the people building on it.</p>
+  <p class="lede">On 30 August 2026, at block 961,640, Bitcoin's history was carried onto a new proof of work: BLAKE2b. The coins, the addresses and every block before that height are unchanged. What changed is who can mine, and how the rewards are paid. This is a hub for the people building on it.</p>
   <div class="btn-row">
     <a class="btn" href="/start/">Start mining</a>
     <a class="btn ghost" href="/learn/">What is XBT?</a>
@@ -98,7 +98,7 @@
     <div class="grid three">
       <a class="card" href="https://pool.lazarus-xbt.xyz" rel="noopener" data-reveal>
         <h3>Lazarus Pool <span class="tag">Mining</span></h3>
-        <p>TIDES payouts in the coinbase, no accounts and no custody. Free through your own DATUM gateway, or point any miner at the public stratum.</p>
+        <p>TIDES payouts in the coinbase, no accounts and no custody. Mined through your own DATUM gateway, with no pool fee.</p>
         <span class="more">pool.lazarus-xbt.xyz →</span>
       </a>
       <a class="card" href="https://mempool.lazarus-xbt.xyz" rel="noopener" data-reveal>
@@ -133,28 +133,29 @@
 <section class="section wrap" id="mine">
   <div class="section-head" data-reveal>
     <p class="kicker">Start mining</p>
-    <h2>Three ways in</h2>
-    <p class="lede">All three pay to your address in the block's own coinbase. The difference is who builds the block and what it costs.</p>
+    <h2>Mining here means DATUM</h2>
+    <p class="lede">Your node builds the block; the pool only issues the coinbase split and checks your shares. It costs nothing, and it is the path this pool is carrying forward.</p>
   </div>
   <div class="grid three">
     <article class="card" data-reveal>
       <h3>Your own DATUM gateway <span class="tag">No fee</span></h3>
-      <p>Your node picks the transactions; Lazarus only issues the payout split and checks your shares. You keep your full share and collect a cut of the public stratum's fee.</p>
+      <p>Your node picks the transactions, your gateway hands work to your miners, and every block pays your address in its own coinbase. Nobody can make you mine a block you did not build.</p>
       <div class="endpoint"><code>datum.lazarus-xbt.xyz:28915</code><button class="btn small ghost" type="button" data-copy="datum.lazarus-xbt.xyz:28915">Copy</button></div>
       <a class="more" href="/start/#datum">Set one up →</a>
     </article>
     <article class="card" data-reveal>
-      <h3>Public stratum <span class="tag">Simplest</span></h3>
-      <p>Point any BLAKE2b miner at one URL and you are mining. Our node builds the template, and the fee (<span data-fee-stratum>15%</span> of your window share) pays for it.</p>
-      <div class="endpoint"><code>stratum+tcp://stratum.lazarus-xbt.xyz:23334</code><button class="btn small ghost" type="button" data-copy="stratum+tcp://stratum.lazarus-xbt.xyz:23334">Copy</button></div>
-      <a class="more" href="/start/#stratum">Point a miner →</a>
-    </article>
-    <article class="card" data-reveal>
-      <h3>Solo <span class="tag">Whole block</span></h3>
-      <p>Keep the entire block — subsidy and every fee in it — when you find one. No shared window, no smoothing: long odds, whole reward.</p>
-      <div class="endpoint"><code>stratum+tcp://stratum.lazarus-xbt.xyz:23335</code><button class="btn small ghost" type="button" data-copy="stratum+tcp://stratum.lazarus-xbt.xyz:23335">Copy</button></div>
+      <h3>Solo, through your gateway <span class="tag">Whole block</span></h3>
+      <p>Run your gateway in solo mode and keep the entire block — subsidy and every fee in it — when you find one. Same software, no shared window, long odds.</p>
       <a class="more" href="/start/#solo">Mine solo →</a>
     </article>
+    <article class="card" data-reveal>
+      <h3>On the public stratum? <span class="tag">Ending</span></h3>
+      <p>The hosted stratum is being retired: work sent through it will not continue to be supported or paid. Move to your own gateway now — your accepted work follows your address, so nothing is lost in the switch.</p>
+      <a class="more" href="/start/#stratum">How to move →</a>
+    </article>
+  </div>
+  <div class="callout warn" data-reveal>
+    <p><strong>Why the change.</strong> A block is only honest work if the miner built it. Nodes are also deciding to invalidate coinbase payouts to addresses that hash through a pool's stratum rather than their own node — and that would apply on every pool, not just this one. Running your own gateway settles it.</p>
   </div>
 </section>
 
@@ -232,6 +233,7 @@
       <details class="faq"><summary>What can I mine it with?</summary><div class="answer"><p>Anything that can hash BLAKE2b: purpose-built ASICs, GPUs, even a CPU for testing. SHA-256 bitcoin miners cannot. See <a href="/start/">Start mining</a> for the three ways to connect.</p></div></details>
       <details class="faq"><summary>How do payouts work on Lazarus?</summary><div class="answer"><p>Every block Lazarus finds pays miners directly in that block's coinbase, split by accepted work in the TIDES window. There is no balance held for you, no withdrawal button, and nothing owed if the pool disappeared tonight.</p></div></details>
       <details class="faq"><summary>Why does my payout take so long to spend?</summary><div class="answer"><p>Coinbase outputs always mature before they can be spent. Until block 979,920 that wait is 6,481 confirmations rather than 101, because of the long coinbase maturity soft fork. The coins are yours the moment the block confirms; they are only locked from spending.</p></div></details>
+      <details class="faq"><summary>I am on the public stratum today. What should I do?</summary><div class="answer"><p>Set up your own DATUM gateway and point your miners at it. Your accepted work is tied to your address, not to how you connect, so your place in the payout window carries over. The <a href="/start/#stratum">migration steps</a> take about an evening, most of it waiting for a node to sync.</p></div></details>
       <details class="faq"><summary>Where do I ask for help?</summary><div class="answer"><p>The <a href="https://discord.gg/fD33dJXnzz" rel="noopener">Discord</a> is the fastest way to reach miners and the people running the pool. Announcements go out on <a href="https://x.com/Awoken_Lazarus" rel="noopener">X</a>.</p></div></details>
     </div>
     <div class="btn-row"><a class="btn ghost" href="/faq/">All questions</a></div>
@@ -242,7 +244,7 @@
   <div class="wrap footer-grid">
     <div>
       <a class="wordmark" href="/"><svg class="chi" viewBox="0 0 20.36 32" aria-hidden="true"><path d="M15.96 4.16C15.96 2.91 15.56 2.02 14.61 1.56C14.14 1.33 13.51 1.21 12.71 1.21H9.61L9.69 0H13.65C14.77 0 15.67 0.18 16.36 0.55C17.04 0.91 17.54 1.4 17.86 2.01C18.17 2.63 18.33 3.32 18.33 4.07C18.33 4.84 18.17 5.55 17.84 6.2C17.52 6.84 17.01 7.36 16.32 7.75C15.63 8.13 15.3 8.33 14.01 8.33H9.69L9.61 7.12H13.4C14.39 7.12 15.19 6.66 15.63 5.78C15.85 5.35 15.96 4.81 15.96 4.16ZM11.57 0 11.57 10.83V30.94L13.18 31.55V32H7.2V31.55L8.8 30.94V10.83V1.06L7.2 0.45V0ZM9.8 20.31 3.89 27.07 6.01 27.79V28.32H0V27.79L2.08 27.07L9.02 19.39L9.97 18.7L15.18 12.61L13.05 11.89V11.36H19.07V11.89L16.99 12.61L10.77 19.61ZM14.05 27.07 9.04 20.79 8.6 20.39 2.34 12.63 0.3 11.89V11.36H8.93V11.89L6.61 12.61L10.91 18.05L11.38 18.5L18.32 27.04L20.36 27.79V28.32H11.73V27.79Z"/></svg>Lazarus <em>XBT</em></a>
-      <p class="note" style="margin-top:.8rem;max-width:22rem">The informational hub for Bitcoin on BLAKE2b proof of work: the chain, the pools, the software and the people building on it.</p>
+      <p class="note" style="margin-top:.8rem;max-width:22rem">A hub for Bitcoin on BLAKE2b proof of work: the chain, the pools, the software and the people building on it.</p>
       <p class="note faint"><i>Proverbs 11:1</i> — a just weight is his delight.</p>
     </div>
     <div class="footer-col">
@@ -257,7 +259,7 @@
       <p class="category">Mine</p>
       <a href="/start/">Start mining</a>
       <a href="/start/#datum">Run a DATUM gateway</a>
-      <a href="/start/#stratum">Public stratum</a>
+      <a href="/start/#stratum">Leaving the stratum</a>
       <a href="/start/#solo">Solo mining</a>
       <a href="https://pool.lazarus-xbt.xyz" rel="noopener">Lazarus Pool</a>
     </div>
