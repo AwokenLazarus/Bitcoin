@@ -29,6 +29,12 @@ const API_TTL = [
   [/^\/api\/v1\/(mining\/|historical-price$|statistics\/)/, 60],
   [/^\/api\/v1\/(blocks(\/\d+)?$|prices$|fees\/|difficulty-adjustment$|backend-info$)/, 10],
   [/^\/api\/(v1\/)?block\/[0-9a-f]{64}\/(header|summary|txids)$/, 300],
+  // Address answers come from electrs, which serves one request at a time and rebuilds an address
+  // by fetching every block it appears in: a miner with a long payout history costs seconds, and
+  // everyone else waits behind it. The page's websocket carries new transactions live, so a
+  // summary a few seconds old costs nothing. Older pages of history do not change.
+  [/^\/api\/address\/[A-Za-z0-9]{20,100}\/txs\/chain\/[0-9a-f]{64}$/, 300],
+  [/^\/api\/address\/[A-Za-z0-9]{20,100}(\/utxo|\/txs|\/txs\/chain)?$/, 30],
 ];
 
 // No Content-Security-Policy on purpose: the Angular app uses inline styles and scripts, the
