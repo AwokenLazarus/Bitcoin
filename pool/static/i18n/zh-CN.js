@@ -2,7 +2,7 @@ window.LZ_I18N_DICTS = window.LZ_I18N_DICTS || {};
 window.LZ_I18N_DICTS["zh-CN"] = {
   "meta": {
     "title": "Lazarus Pool — 用 Siacoin BLAKE2b 矿机挖比特币（XBT / BTCB2）的矿池",
-    "description": "用任何能挖 Siacoin 的 BLAKE2b ASIC 挖比特币（XBT / BTCB2）——金贝 SC、iBeLink BM-S3、蚂蚁 A3。本矿池是这条 BIP-110 比特币分叉主网上第一家用 TIDES 拆分 coinbase 支付的矿池，也是第一家用自有 stratum 算力补贴 DATUM 矿工的矿池。自建 DATUM 0%，公共 stratum 15%（stratum+tcp://stratum.lazarus-xbt.xyz:23334）。",
+    "description": "用任何能挖 Siacoin 的 BLAKE2b ASIC 挖比特币（XBT / BTCB2）——金贝 SC、iBeLink BM-S3、蚂蚁 A3。本矿池是这条 BIP-110 比特币分叉主网上第一家用 TIDES 拆分 coinbase 支付的矿池，也是第一家用自有 stratum 算力补贴 DATUM 矿工的矿池。自建 DATUM 0%，公共 stratum 自区块 973750 起 25%（stratum+tcp://stratum.lazarus-xbt.xyz:23334）。",
     "minerTitle": "矿工 — Lazarus Pool",
     "minerDescription": "Lazarus Pool 上某个地址的实时算力、矿机、TIDES 窗口份额以及每一笔 coinbase 支付。",
     "minerTitleAddr": "{short} — Lazarus Pool"
@@ -53,6 +53,13 @@ window.LZ_I18N_DICTS["zh-CN"] = {
     "live": "此刻 {uplift}",
     "liveTitle": "DATUM 工作占窗口 {datumPct}，公共 stratum 占 {stratumPct}，因此从 stratum 工作里拿出的 {pts}，对 DATUM 工作相当于 {uplift}。",
     "text": "公共 stratum 手续费为 {fee}。其中 {Pts} 会在矿池找到的每一个区块上，按 DATUM 工作比例记给窗口里每一位持有 DATUM 工作的矿工——不论该 coinbase 是否由你打出。"
+  },
+  "stratumnotice": {
+    "kicker": "紧急 · stratum 矿工：请尽快改用自己的 DATUM 网关",
+    "text": "Bitcoin Knots 已宣布一项规则：<b>凡是通过矿池 stratum（SV1）而不是自己节点出算力的地址，其 coinbase 收款将被判为无效</b>。<b>换到别的矿池也改变不了结果</b>：在任何矿池，付给 SV1 出算力地址的款项都会被判无效，所以换到费率更低的矿池既省不了更高的费用，也多赚不到钱：在那里用 stratum 出算力依然拿不到付款。唯一的出路是用自己的 Bitcoin Knots 节点和 DATUM 网关自己组块，<b>越快越好</b>。为加快迁移，自区块 <b>973,750</b>（约 9 月 23 日 05:00 UTC）起，公共 stratum 费率由 15% 提高到 <b>25%</b>：每个区块其中 <b>12.5 个点</b>记给 DATUM 矿工，12.5 个点归矿池。自建网关费率为 0%，切换时已被接受的工作量会随你一起保留。",
+    "setup": "搭建 DATUM 网关",
+    "plan": "Knots 计划（长 coinbase 成熟期，三部分之一）",
+    "dismiss": "关闭公告"
   },
   "softfork": {
     "kicker": "网络公告 · Knots 29.4.2 软分叉",

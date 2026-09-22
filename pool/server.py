@@ -4395,7 +4395,7 @@ _SEO_PAGES = {
                 "Mine Bitcoin (XBT / BTCB2) with any Siacoin BLAKE2b ASIC — Goldshell SC, iBeLink BM-S3, "
                 "Antminer A3. The first pool to pay TIDES as a split coinbase on this BIP-110 Bitcoin fork's "
                 "mainnet, and the first to subsidize DATUM miners with its own stratum hashers. 0% via DATUM, "
-                "15% public stratum (stratum+tcp://stratum.lazarus-xbt.xyz:23334)."
+                "25% public stratum from block 973,750 (stratum+tcp://stratum.lazarus-xbt.xyz:23334)."
             ),
             "scroll": "",
         },
@@ -4404,7 +4404,7 @@ _SEO_PAGES = {
             "description": (
                 "用任何能挖 Siacoin 的 BLAKE2b ASIC 挖比特币（XBT / BTCB2）——金贝 SC、iBeLink BM-S3、蚂蚁 A3。"
                 "本矿池是这条 BIP-110 比特币分叉主网上第一家用 TIDES 拆分 coinbase 支付的矿池，也是第一家"
-                "用自有 stratum 算力补贴 DATUM 矿工的矿池。自建 DATUM 0%，公共 stratum 15%"
+                "用自有 stratum 算力补贴 DATUM 矿工的矿池。自建 DATUM 0%，公共 stratum 自区块 973750 起 25%"
                 "（stratum+tcp://stratum.lazarus-xbt.xyz:23334）。"
             ),
             "scroll": "",
@@ -4671,7 +4671,7 @@ _POOL_TABLE_EN = """<div class="seo-table"><table>
         <caption>BLAKE2b Bitcoin (XBT / BTCB2) pools, as each publishes its own terms, 18 September 2026</caption>
         <thead><tr><th scope="col">Pool</th><th scope="col">Fee</th><th scope="col">Reward scheme</th><th scope="col">Who holds your coins</th><th scope="col">The block's transaction fees</th><th scope="col">Limit on its own share</th></tr></thead>
         <tbody>
-        <tr><th scope="row">Lazarus Pool</th><td>0% own DATUM gateway · 15% public stratum, 7.5 of those points paid back to DATUM miners</td><td>TIDES, 8&times; difficulty</td><td>Nobody. The block's coinbase pays your address</td><td>Scale every miner's payout up</td><td>Stratum held to 15%, enforced by relaying new miners elsewhere</td></tr>
+        <tr><th scope="row">Lazarus Pool</th><td>0% own DATUM gateway · 25% public stratum from block 973,750 (15% before), 12.5 of those points paid back to DATUM miners</td><td>TIDES, 8&times; difficulty</td><td>Nobody. The block's coinbase pays your address</td><td>Scale every miner's payout up</td><td>Stratum held to 15%, enforced by relaying new miners elsewhere</td></tr>
         <tr><th scope="row">Riptide</th><td>0% own DATUM · 1% stratum (variable; currently 1%, half the skim to live DATUM miners)</td><td>TIDES</td><td>Coinbase</td><td>Not published separately</td><td>None published</td></tr>
         <tr><th scope="row">CONVOY</th><td>1% DATUM · 2% failover stratum</td><td>TIDES</td><td>Generation transaction when it fits; otherwise a balance until 0.01048576 BTC</td><td>Included in the TIDES split</td><td>None published</td></tr>
         <tr><th scope="row">B2Pool</th><td>0% own DATUM · 1% TIDES stratum</td><td>TIDES, 4&times; difficulty</td><td>Coinbase where it fits, otherwise the pool until your balance passes 10,000 sat</td><td>Stay with the pool (only the subsidy is shared)</td><td>None published</td></tr>
@@ -4685,7 +4685,7 @@ _POOL_TABLE_ZH = """<div class="seo-table"><table>
         <caption>BLAKE2b 比特币（XBT / BTCB2）矿池对比，均按各家自行公布的口径，2026 年 9 月 18 日</caption>
         <thead><tr><th scope="col">矿池</th><th scope="col">手续费</th><th scope="col">奖励方式</th><th scope="col">谁替你拿着币</th><th scope="col">区块里的交易费</th><th scope="col">自身占比上限</th></tr></thead>
         <tbody>
-        <tr><th scope="row">Lazarus Pool</th><td>自建 DATUM 网关 0% · 公共 stratum 15%，其中 7.5 个点返还给 DATUM 矿工</td><td>TIDES，难度 8 倍</td><td>没有人。由区块的 coinbase 直接付到你的地址</td><td>等比例抬高每位矿工的收益</td><td>stratum 上限 15%，超过即把新矿工中继到别家</td></tr>
+        <tr><th scope="row">Lazarus Pool</th><td>自建 DATUM 网关 0% · 公共 stratum 自区块 973750 起 25%（此前 15%），其中 12.5 个点返还给 DATUM 矿工</td><td>TIDES，难度 8 倍</td><td>没有人。由区块的 coinbase 直接付到你的地址</td><td>等比例抬高每位矿工的收益</td><td>stratum 上限 15%，超过即把新矿工中继到别家</td></tr>
         <tr><th scope="row">Riptide</th><td>自建 DATUM 0% · stratum 1%（可变，目前 1%，抽成一半给在线 DATUM 矿工）</td><td>TIDES</td><td>coinbase</td><td>未单独公布</td><td>未公布</td></tr>
         <tr><th scope="row">CONVOY</th><td>DATUM 1% · 故障转移 stratum 2%</td><td>TIDES</td><td>能进 coinbase 就进，否则代持至 0.01048576 BTC</td><td>计入 TIDES 分配</td><td>未公布</td></tr>
         <tr><th scope="row">B2Pool</th><td>自建 DATUM 0% · TIDES stratum 1%</td><td>TIDES，难度 4 倍</td><td>能进 coinbase 就进，否则由矿池代持至余额超过 10,000 sat</td><td>留给矿池（只分享区块补贴）</td><td>未公布</td></tr>
@@ -4766,11 +4766,11 @@ _SEO_INTRO = {
     "/datum-subsidy": {
         "en": ("The DATUM subsidy: getting paid to decentralize", [
             "Running your own DATUM gateway against your own Bitcoin Knots node means you build the block template and choose the transactions in it. The pool only supplies the coinbase split and verifies your shares. That work costs you nothing in fees here — DATUM miners pay 0% — and it moves template construction out of the pool's hands, which is the part of mining centralization that actually matters.",
-            "Lazarus Pool is the first pool anywhere to fund a subsidy for that from its own stratum hashers. The public stratum charges 15%, and 7.5 of those points are not kept: on every block found they are credited pro rata to every DATUM miner holding work in the window, whether or not that miner's template produced the block. Decentralizing the network pays better than using the pool's own stratum, which is the incentive the right way round. <a href=\"/connect\">Gateway setup and the config to copy.</a>",
+            "Lazarus Pool is the first pool anywhere to fund a subsidy for that from its own stratum hashers. The public stratum charges 25% from block 973,750 (15% before), and 12.5 of those points are not kept: on every block found they are credited pro rata to every DATUM miner holding work in the window, whether or not that miner's template produced the block. Decentralizing the network pays better than using the pool's own stratum, which is the incentive the right way round. <a href=\"/connect\">Gateway setup and the config to copy.</a>",
         ]),
         "zh": ("DATUM 补贴：为去中心化拿钱", [
             "用自己的 Bitcoin Knots 节点跑自己的 DATUM 网关，意味着区块模板由你构建、交易由你挑选，矿池只提供 coinbase 拆分并校验你的份额。在这里这件事不收你一分手续费——DATUM 矿工 0%——而且它把模板构建权从矿池手里移走，那才是挖矿中心化真正要紧的一环。",
-            "Lazarus Pool 是全网第一家用自有 stratum 算力为此出资补贴的矿池。公共 stratum 收 15%，其中 7.5 个点并不留下：每找到一个区块，就按比例记给窗口内每一位 DATUM 矿工，无论那个区块是不是由他的模板产出。让网络去中心化比用矿池的 stratum 更赚钱——激励方向本该如此。<a href=\"/connect\">网关配置与可直接复制的 config。</a>",
+            "Lazarus Pool 是全网第一家用自有 stratum 算力为此出资补贴的矿池。公共 stratum 自区块 973750 起收 25%（此前 15%），其中 12.5 个点并不留下：每找到一个区块，就按比例记给窗口内每一位 DATUM 矿工，无论那个区块是不是由他的模板产出。让网络去中心化比用矿池的 stratum 更赚钱——激励方向本该如此。<a href=\"/connect\">网关配置与可直接复制的 config。</a>",
         ]),
     },
     "/profitability": {
@@ -4796,11 +4796,11 @@ _SEO_INTRO = {
     "/connect": {
         "en": ("Connect a miner to Lazarus Pool", [
             "Point the miner at <b>stratum+tcp://stratum.lazarus-xbt.xyz:23334</b>, set the username to the address you want paid — optionally <code>address.worker</code> — and the password to <code>x</code>. The algorithm is BLAKE2b with a Sia-style header, not SHA-256d. New sessions start at difficulty 4096 and vardiff steps up toward your hashrate from there. There is no account and no registration; the username is the payout instruction.",
-            "There are two ways in. The public stratum charges 15% and our node builds the templates, which is the one-line setup. Running your own Bitcoin Knots node and DATUM gateway costs 0% and pays you a <a href=\"/datum-subsidy\">share of that stratum fee</a> on every block, because you are building the templates yourself. Both land in the same TIDES window under your address, so switching later keeps the accepted work you already have. For a longer Knots + DATUM walkthrough, use <a href=\"https://convoy.xyz/getstarted\">CONVOY’s get-started guide</a> (also in <a href=\"https://convoy.xyz/getstarted?lang=zh\">中文</a>), then come back here for this pool’s host, port, and pubkey.",
+            "There are two ways in. The public stratum charges 25% from block 973,750 and our node builds the templates, which is the one-line setup, but Bitcoin Knots has announced a rule to invalidate payouts to addresses that hash through any pool's stratum, so it is a stopgap. Running your own Bitcoin Knots node and DATUM gateway costs 0% and pays you a <a href=\"/datum-subsidy\">share of that stratum fee</a> on every block, because you are building the templates yourself. Both land in the same TIDES window under your address, so switching later keeps the accepted work you already have. For a longer Knots + DATUM walkthrough, use <a href=\"https://convoy.xyz/getstarted\">CONVOY’s get-started guide</a> (also in <a href=\"https://convoy.xyz/getstarted?lang=zh\">中文</a>), then come back here for this pool’s host, port, and pubkey.",
         ]),
         "zh": ("把矿机接入 Lazarus Pool", [
             "把矿机指向 <b>stratum+tcp://stratum.lazarus-xbt.xyz:23334</b>，用户名填你要收款的地址（也可以写成 <code>地址.worker</code>），密码填 <code>x</code>。算法是 BLAKE2b（Sia 风格区块头），不是 SHA-256d。新会话从难度 4096 起步，之后 vardiff 会朝你的算力逐步调整。没有账户，也不用注册——用户名就是收款指令。",
-            "有两条路。公共 stratum 收 15%，模板由我们的节点构建，配置只有一行。自己跑 Bitcoin Knots 节点和 DATUM 网关则是 0%，而且因为模板是你自己构建的，每个区块还会把<a href=\"/datum-subsidy\">那笔 stratum 手续费的一部分</a>付给你。两条路都记入同一个 TIDES 窗口、同一个地址，所以以后切换不会丢掉已积累的工作量。更完整的 Knots + DATUM 说明见 <a href=\"https://convoy.xyz/getstarted?lang=zh\">CONVOY 入门指南（中文）</a>（<a href=\"https://convoy.xyz/getstarted\">English</a>），然后回到本页填写本池的主机、端口和公钥。",
+            "有两条路。公共 stratum 自区块 973750 起收 25%，模板由我们的节点构建，配置只有一行，但 Bitcoin Knots 已宣布将判定通过任何矿池 stratum 出算力的地址所获付款无效，所以它只是权宜之计。自己跑 Bitcoin Knots 节点和 DATUM 网关则是 0%，而且因为模板是你自己构建的，每个区块还会把<a href=\"/datum-subsidy\">那笔 stratum 手续费的一部分</a>付给你。两条路都记入同一个 TIDES 窗口、同一个地址，所以以后切换不会丢掉已积累的工作量。更完整的 Knots + DATUM 说明见 <a href=\"https://convoy.xyz/getstarted?lang=zh\">CONVOY 入门指南（中文）</a>（<a href=\"https://convoy.xyz/getstarted\">English</a>），然后回到本页填写本池的主机、端口和公钥。",
         ]),
     },
     "/mine-xbt": {
@@ -4827,13 +4827,13 @@ _SEO_INTRO = {
         "en": ("Which XBT (BTCB2) pool should you point hashrate at?", [
             "The fee is the number everyone compares first and the least interesting of the four things that actually differ between pools on this chain. The others: whether the pool ever holds your coins, whether the transaction fees in a found block reach the miners or stay with the operator, and whether the pool does anything at all to limit its own share of the network.",
             _POOL_TABLE_EN,
-            "Read that honestly and our public stratum is the expensive one. If you have no intention of running a node, 1% elsewhere beats 15% here and we would rather say so than pretend otherwise. What that 15% buys is the other column: 7.5 of those points are handed back to DATUM miners on every block found, which is why the path we actually recommend costs 0% and gets paid a bonus on top of a full window share.",
+            "Read that honestly and our public stratum is the expensive one: 25% from block 973,750. That is deliberate. Bitcoin Knots has announced a rule to invalidate coinbase payouts to addresses that hash through a pool's stratum, on every pool, so a cheaper pool is not a way out: a stratum hasher there will not be paid either. What the fee buys is the other column: 12.5 of those points are handed back to DATUM miners on every block found, which is why the path we actually recommend, your own node and gateway, is 0% and earns the subsidy on top of a full window share.",
             "The rest of the table is where nothing else on this chain matches. Transaction fees in a block scale every payout up here instead of staying with the pool. Nothing is ever held — the block itself pays your address, so there is no balance, threshold or withdrawal. And once its stratum passes 15% of network hashrate this pool <a href=\"/self-cap\">turns new miners away</a> and hands them to someone else. The five pools we relay to are grouped in the table with Lazarus; figures are as each pool published them on 18 September 2026 — check their sites before you commit a fleet.",
         ]),
         "zh": ("XBT（BTCB2）该挖哪个矿池？", [
             "手续费是所有人第一个拿来比的数字，也是本链各矿池之间真正有差别的四件事里最不重要的一件。另外三件是：矿池会不会替你保管币、所出区块里的交易费是分给矿工还是留给运营者，以及这家矿池有没有采取任何措施限制自己在全网中的占比。",
             _POOL_TABLE_ZH,
-            "如实来看，我们的公共 stratum 是贵的那一个。如果你完全不打算自己跑节点，别家 1% 就是比这里 15% 划算，我们宁愿直说，也不想装作不是。这 15% 换来的是隔壁那一列：其中 7.5 个点在每次出块时都会返还给 DATUM 矿工——这也正是我们真正推荐的那条路为什么是 0%，而且在拿到完整窗口份额之外还额外拿补贴。",
+            "如实来看，我们的公共 stratum 是贵的那一个：自区块 973750 起 25%。这是有意为之。Bitcoin Knots 已宣布一项规则：在任何矿池，通过矿池 stratum 出算力的地址所获 coinbase 付款都将被判无效，所以换一家更便宜的矿池并不是出路，在那里用 stratum 出算力同样拿不到付款。这笔费用换来的是隔壁那一列：其中 12.5 个点在每次出块时都会返还给 DATUM 矿工——这也正是我们真正推荐的那条路（自己的节点和网关）为什么是 0%，而且在拿到完整窗口份额之外还额外拿补贴。",
             "表格剩下的部分，本链目前没有别家能对上。这里区块中的交易费会等比例抬高每一笔支付，而不是留在矿池。任何时候都不代持——由区块本身付到你的地址，因此没有余额、没有起付线、不用提现。而且一旦自家 stratum 超过全网 15% 的算力，本矿池会<a href=\"/self-cap\">把新矿工拒之门外</a>并转交给别家。我们转发到的五家矿池和 Lazarus 列在同一张表里；表中数字为各矿池 2026 年 9 月 18 日自行公布的口径，投入整批机器前请先到各家网站核对。",
         ]),
     },
@@ -5011,6 +5011,7 @@ _LLMS_TXT = """# Lazarus Pool
 - Stratum protocol reference (markdown): {site}/stratum-protocol.md
 - Public API reference: {site}/api
 - Explorer: https://mempool.lazarus-xbt.xyz
+- Fee change: from block 973,750 (about 05:00 UTC, 23 Sep 2026) the public stratum fee is 25%, 12.5 points credited to DATUM miners. Bitcoin Knots has announced a rule to invalidate coinbase payouts to addresses that hash through any pool's stratum (SV1); moving to another pool does not avoid it. Run your own DATUM gateway.
 - MCP server for AI assistants (read-only, no login, Streamable HTTP): https://mcp.lazarus-xbt.xyz/mcp (guide: https://mcp.lazarus-xbt.xyz)
 - GitHub: https://github.com/AwokenLazarus/Bitcoin
 - Discord: https://discord.gg/fD33dJXnzz
@@ -5083,7 +5084,7 @@ block, and whether a pool limits its own share. As each pool published its own t
 2026:
 
 - Lazarus Pool: 0% with your own DATUM gateway, 15% on the public stratum with 7.5 of those points
-  paid back to DATUM miners. TIDES, window of 8x difficulty. No custody at all — the block's
+  paid back to DATUM miners (25% and 12.5 from block 973,750). TIDES, window of 8x difficulty. No custody at all — the block's
   coinbase pays your address, so there is no balance, threshold or withdrawal. The block's
   transaction fees scale every miner's payout up. Stratum self-capped at 15%.
 - Riptide (overflow): 0% own DATUM, 1% stratum (variable; currently 1%, half the skim to live DATUM

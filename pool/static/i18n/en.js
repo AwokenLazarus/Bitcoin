@@ -2,7 +2,7 @@ window.LZ_I18N_DICTS = window.LZ_I18N_DICTS || {};
 window.LZ_I18N_DICTS["en"] = {
   "meta": {
     "title": "Lazarus Pool — BLAKE2b Bitcoin (XBT / BTCB2) mining pool for Siacoin ASICs",
-    "description": "Mine Bitcoin (XBT / BTCB2) with any Siacoin BLAKE2b ASIC — Goldshell SC, iBeLink BM-S3, Antminer A3. The first pool to pay TIDES as a split coinbase on this BIP-110 Bitcoin fork's mainnet, and the first to subsidize DATUM miners with its own stratum hashers. 0% via DATUM, 15% public stratum (stratum+tcp://stratum.lazarus-xbt.xyz:23334).",
+    "description": "Mine Bitcoin (XBT / BTCB2) with any Siacoin BLAKE2b ASIC — Goldshell SC, iBeLink BM-S3, Antminer A3. The first pool to pay TIDES as a split coinbase on this BIP-110 Bitcoin fork's mainnet, and the first to subsidize DATUM miners with its own stratum hashers. 0% via DATUM, 25% public stratum from block 973,750 (stratum+tcp://stratum.lazarus-xbt.xyz:23334).",
     "minerTitle": "Miner — Lazarus Pool",
     "minerDescription": "Live hashrate, workers, TIDES window share and every coinbase payout for one address on Lazarus Pool.",
     "minerTitleAddr": "{short} — Lazarus Pool"
@@ -53,6 +53,13 @@ window.LZ_I18N_DICTS["en"] = {
     "live": "{uplift} right now",
     "liveTitle": "DATUM work is {datumPct} of the window and the public stratum is {stratumPct}, so the {pts} taken from stratum work is worth {uplift} to DATUM work.",
     "text": "The public stratum pays {fee}. {Pts} of it is credited to every DATUM miner holding work in the window, on every block the pool finds — pro rata by your DATUM work, whether or not you made that coinbase."
+  },
+  "stratumnotice": {
+    "kicker": "Urgent · stratum miners: move to your own DATUM gateway",
+    "text": "Bitcoin Knots has announced a rule to <b>invalidate coinbase payouts to addresses that hash through a pool's stratum (SV1)</b> instead of their own node. <b>Moving to another pool will not change the outcome</b>: payouts to SV1 hashing addresses will be invalidated on every pool, so leaving for a cheaper pool will not save you the higher fee or earn you more. A stratum hasher there will still not be paid. The only way out is to build your own templates with your own Bitcoin Knots node and DATUM gateway, <b>as soon as possible</b>. To speed the move, from block <b>973,750</b> (about 05:00 UTC, 23 Sep) the public stratum fee rises from 15% to <b>25%</b>: <b>12.5 points</b> are credited to DATUM miners on every block and 12.5 go to the pool. On your own gateway the fee is 0%, and your accepted work comes with you when you switch.",
+    "setup": "Set up a DATUM gateway",
+    "plan": "The Knots plan (long coinbase maturity, part 1 of 3)",
+    "dismiss": "Dismiss notice"
   },
   "softfork": {
     "kicker": "Network notice · Knots 29.4.2 soft fork",
