@@ -1,4 +1,10 @@
-# lazarus-xbt.xyz/map — XBT Galaxy
+# lazarus-xbt.xyz — the Lazarus hub (and the XBT Galaxy map)
+
+The apex serves the ecosystem hub: `/` (home), `/start/`, `/learn/`, `/ecosystem/`, `/faq/`, plus
+`/api/stats` (live figures for those pages, from the pool API, the explorer and the galaxy model).
+Pages are plain HTML in `public/` with one stylesheet and one script in `public/assets/`.
+
+## The map
 
 An interactive galaxy of every mining pool and DATUM gateway on the Bitcoin BLAKE2b (XBT) network.
 Pools are solar systems, DATUM gateways are planets, every flash is a block.
@@ -18,7 +24,9 @@ aliases, software default tags, pool types) and says why each exists.
 |---|---|
 | `src/galaxy.js` | coinbase tag parser and galaxy builder, shared by the Worker and the scripts |
 | `src/worker.js` | serves `/map/` (static assets) and `/map/data.json` (KV); a cron every 5 minutes adds new blocks from the explorer API and rebuilds the galaxy |
-| `public/map/` | the page: three.js scene, LCARS interface, opening crawl |
+| `public/map/` | the map page: three.js scene, LCARS interface, opening crawl |
+| `public/index.html`, `public/{start,learn,ecosystem,faq}/` | the hub's pages |
+| `public/assets/hub.css`, `public/assets/hub.js` | the hub's styles and its live figures |
 | `scripts/backfill.mjs` | one-off: fetch every block since the fork into `data/blocks.json` |
 
 KV namespace `lazarus-map-galaxy` holds two keys: `blocks` (compact record of every block since

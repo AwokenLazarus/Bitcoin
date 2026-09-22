@@ -1,0 +1,194 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Ecosystem · Bitcoin BLAKE2b (XBT)</title>
+<meta name="description" content="Pools mining Bitcoin BLAKE2b, the open-source software behind them, public endpoints for wallets and explorers, and where the community talks.">
+<link rel="canonical" href="https://lazarus-xbt.xyz/ecosystem/">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="Lazarus · Bitcoin BLAKE2b">
+<meta property="og:title" content="Ecosystem · Bitcoin BLAKE2b (XBT)">
+<meta property="og:description" content="Pools mining Bitcoin BLAKE2b, the open-source software behind them, public endpoints for wallets and explorers, and where the community talks.">
+<meta property="og:url" content="https://lazarus-xbt.xyz/ecosystem/">
+<meta name="twitter:card" content="summary">
+<meta name="theme-color" content="#1a1712">
+<link rel="icon" href="data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A//www.w3.org/2000/svg%22%20viewBox%3D%220%200%2020.36%2032%22%3E%3Crect%20width%3D%2220.36%22%20height%3D%2232%22%20fill%3D%22none%22/%3E%3Cpath%20fill%3D%22%23e8b85f%22%20d%3D%22M15.96%204.16C15.96%202.91%2015.56%202.02%2014.61%201.56C14.14%201.33%2013.51%201.21%2012.71%201.21H9.61L9.69%200H13.65C14.77%200%2015.67%200.18%2016.36%200.55C17.04%200.91%2017.54%201.4%2017.86%202.01C18.17%202.63%2018.33%203.32%2018.33%204.07C18.33%204.84%2018.17%205.55%2017.84%206.2C17.52%206.84%2017.01%207.36%2016.32%207.75C15.63%208.13%2015.3%208.33%2014.01%208.33H9.69L9.61%207.12H13.4C14.39%207.12%2015.19%206.66%2015.63%205.78C15.85%205.35%2015.96%204.81%2015.96%204.16ZM11.57%200%2011.57%2010.83V30.94L13.18%2031.55V32H7.2V31.55L8.8%2030.94V10.83V1.06L7.2%200.45V0ZM9.8%2020.31%203.89%2027.07%206.01%2027.79V28.32H0V27.79L2.08%2027.07L9.02%2019.39L9.97%2018.7L15.18%2012.61L13.05%2011.89V11.36H19.07V11.89L16.99%2012.61L10.77%2019.61ZM14.05%2027.07%209.04%2020.79%208.6%2020.39%202.34%2012.63%200.3%2011.89V11.36H8.93V11.89L6.61%2012.61L10.91%2018.05L11.38%2018.5L18.32%2027.04L20.36%2027.79V28.32H11.73V27.79Z%22/%3E%3C/svg%3E">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&family=Newsreader:ital,wght@0,400;0,500;1,400&display=swap">
+<link rel="stylesheet" href="/assets/hub.css?v=1">
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+<header class="site-header">
+  <div class="topbar wrap">
+    <a class="wordmark" href="/"><svg class="chi" viewBox="0 0 20.36 32" aria-hidden="true"><path d="M15.96 4.16C15.96 2.91 15.56 2.02 14.61 1.56C14.14 1.33 13.51 1.21 12.71 1.21H9.61L9.69 0H13.65C14.77 0 15.67 0.18 16.36 0.55C17.04 0.91 17.54 1.4 17.86 2.01C18.17 2.63 18.33 3.32 18.33 4.07C18.33 4.84 18.17 5.55 17.84 6.2C17.52 6.84 17.01 7.36 16.32 7.75C15.63 8.13 15.3 8.33 14.01 8.33H9.69L9.61 7.12H13.4C14.39 7.12 15.19 6.66 15.63 5.78C15.85 5.35 15.96 4.81 15.96 4.16ZM11.57 0 11.57 10.83V30.94L13.18 31.55V32H7.2V31.55L8.8 30.94V10.83V1.06L7.2 0.45V0ZM9.8 20.31 3.89 27.07 6.01 27.79V28.32H0V27.79L2.08 27.07L9.02 19.39L9.97 18.7L15.18 12.61L13.05 11.89V11.36H19.07V11.89L16.99 12.61L10.77 19.61ZM14.05 27.07 9.04 20.79 8.6 20.39 2.34 12.63 0.3 11.89V11.36H8.93V11.89L6.61 12.61L10.91 18.05L11.38 18.5L18.32 27.04L20.36 27.79V28.32H11.73V27.79Z"/></svg>Lazarus <em>XBT</em></a>
+    <button class="nav-toggle" type="button" aria-expanded="false" aria-controls="site-nav">Menu</button>
+    <nav class="site-nav" id="site-nav" aria-label="Main">
+      <a href="/start/">Start mining</a><a href="/learn/">The chain</a><a href="/ecosystem/" aria-current="page">Ecosystem</a><a href="/map/">Galaxy map</a><a href="/faq/">FAQ</a>
+      <a class="btn small" href="https://pool.lazarus-xbt.xyz" rel="noopener">Lazarus Pool</a>
+    </nav>
+  </div>
+</header>
+<main id="main">
+
+<section class="hero wrap">
+  <p class="kicker">Ecosystem</p>
+  <h1>Pools, software and services</h1>
+  <p class="lede">What exists on Bitcoin BLAKE2b today: the pools mining it, the software you can run, and the public services anyone can use. Listing is not endorsement — the pool table is read from the chain, and the rest is here because it is open and in use.</p>
+</section>
+
+<section class="section wrap" id="pools">
+  <div class="section-head" data-reveal>
+    <p class="kicker">Live from the chain</p>
+    <h2>Pool directory</h2>
+    <p class="lede">Every pool that found a block in the last seven days, identified by the tags its coinbase carries. "DATUM" means its blocks show miner-built templates; "stratum only" means the pool builds every template itself.</p>
+  </div>
+  <div class="table-wrap" data-reveal>
+    <table>
+      <thead><tr><th>Pool</th><th>Type</th><th class="num">Share (7d)</th><th class="num">Blocks (7d)</th><th class="num">Est. hashrate</th><th class="num">Gateways</th></tr></thead>
+      <tbody id="pool-rows"><tr><td colspan="6" class="note faint">Loading the live directory… it is also on the <a href="/map/">galaxy map</a>.</td></tr></tbody>
+    </table>
+  </div>
+  <p class="note faint" id="pool-asof" style="margin-top:.8rem"></p>
+  <p class="note" style="margin-top:1rem">Want the whole picture, including solo miners and every gateway? The <a href="/map/">galaxy map</a> draws all of it, block by block.</p>
+</section>
+
+<section class="section inset" id="software">
+  <div class="wrap">
+    <div class="section-head" data-reveal>
+      <p class="kicker">Run it yourself</p>
+      <h2>Software</h2>
+      <p class="lede">Everything below is open source and runs on ordinary hardware.</p>
+    </div>
+    <div class="grid three">
+      <article class="card" data-reveal>
+        <h3>Bitcoin Knots (BLAKE2b) <span class="tag">Node</span></h3>
+        <p>The node this network runs. Version 29.4.2 or later enforces the current rules, including long coinbase maturity. Install script and reference config in our repository.</p>
+        <a class="more" href="https://github.com/AwokenLazarus/Bitcoin/tree/main/node" rel="noopener">Node setup →</a>
+      </article>
+      <article class="card" data-reveal>
+        <h3>DATUM gateway <span class="tag">Mining</span></h3>
+        <p>Runs beside your node, builds your templates and talks to a pool's Prime. Several forks support this chain: CONVOY, iohzrd and FlyTheElephant, plus our own Rust <code>lazarus-gateway</code>.</p>
+        <a class="more" href="https://github.com/CONVOYMining/datum_gateway" rel="noopener">CONVOY gateway →</a>
+      </article>
+      <article class="card" data-reveal>
+        <h3>Lazarus Prime <span class="tag">Pool server</span></h3>
+        <p>The pool side of DATUM, in Rust: verifies shares, issues the coinbase split, keeps the TIDES window and pays every miner inside the block that earned it.</p>
+        <a class="more" href="https://github.com/AwokenLazarus/Bitcoin/tree/main/prime" rel="noopener">Read the source →</a>
+      </article>
+      <article class="card" data-reveal>
+        <h3>Explorer <span class="tag">Chain</span></h3>
+        <p>A mempool-style explorer built for this chain's headers, with a public REST API and websocket for live blocks and transactions.</p>
+        <a class="more" href="https://mempool.lazarus-xbt.xyz/api" rel="noopener">API docs →</a>
+      </article>
+      <article class="card" data-reveal>
+        <h3 id="electrum">Electrum server <span class="tag">Wallets</span></h3>
+        <p>Public endpoint for wallets that speak Electrum protocol 1.8 and understand 164-byte headers.</p>
+        <div class="endpoint"><code>electrum.lazarus-xbt.xyz:50002:s</code><button class="btn small ghost" type="button" data-copy="electrum.lazarus-xbt.xyz:50002:s">Copy</button></div>
+      </article>
+      <article class="card" data-reveal>
+        <h3>MCP server <span class="tag">AI</span></h3>
+        <p>Live pool and chain data for AI assistants that speak the Model Context Protocol. Point Claude or ChatGPT at it and ask about blocks, miners or payouts in plain language.</p>
+        <a class="more" href="https://mcp.lazarus-xbt.xyz" rel="noopener">mcp.lazarus-xbt.xyz →</a>
+      </article>
+    </div>
+  </div>
+</section>
+
+<section class="section wrap" id="services">
+  <div class="section-head" data-reveal>
+    <p class="kicker">Public endpoints</p>
+    <h2>Services</h2>
+  </div>
+  <div class="table-wrap" data-reveal>
+    <table>
+      <thead><tr><th>Service</th><th>Endpoint</th><th>Notes</th></tr></thead>
+      <tbody>
+        <tr><td>Pool (DATUM Prime)</td><td><code>datum.lazarus-xbt.xyz:28915</code></td><td>For gateway operators. No fee.</td></tr>
+        <tr><td>Public stratum</td><td><code>stratum.lazarus-xbt.xyz:23334</code></td><td>Username is your payout address.</td></tr>
+        <tr><td>Solo stratum</td><td><code>stratum.lazarus-xbt.xyz:23335</code></td><td>Whole block to the finder.</td></tr>
+        <tr><td>Electrum</td><td><code>electrum.lazarus-xbt.xyz:50002:s</code></td><td>SSL, protocol 1.8.</td></tr>
+        <tr><td>Explorer</td><td><code>mempool.lazarus-xbt.xyz</code></td><td>REST API and websocket.</td></tr>
+        <tr><td>MCP</td><td><code>mcp.lazarus-xbt.xyz/mcp</code></td><td>For AI assistants.</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="note faint" style="margin-top:.8rem">Older <code>awokenlazarus.xyz</code> addresses continue to work; the names above are the ones to use from here on.</p>
+</section>
+
+<section class="section inset" id="community">
+  <div class="wrap">
+    <div class="section-head" data-reveal>
+      <p class="kicker">People</p>
+      <h2>Community</h2>
+    </div>
+    <div class="grid three">
+      <a class="card" href="https://discord.gg/fD33dJXnzz" rel="noopener" data-reveal>
+        <h3>Discord</h3>
+        <p>Where miners, gateway operators and the people running the pool actually talk. Best place for help with a rig that will not behave.</p>
+        <span class="more">Join →</span>
+      </a>
+      <a class="card" href="https://x.com/Awoken_Lazarus" rel="noopener" data-reveal>
+        <h3>X</h3>
+        <p>Announcements: releases, network events, soft fork news and pool changes.</p>
+        <span class="more">@Awoken_Lazarus →</span>
+      </a>
+      <a class="card" href="https://github.com/AwokenLazarus/Bitcoin" rel="noopener" data-reveal>
+        <h3>GitHub</h3>
+        <p>Node builds, Prime, the gateway and these sites. Issues and pull requests welcome.</p>
+        <span class="more">AwokenLazarus/Bitcoin →</span>
+      </a>
+    </div>
+    <div class="callout" data-reveal style="margin-top:2rem">
+      <p><strong>Trading XBT.</strong> Third-party markets exist for this chain's coin; none are run by or affiliated with Lazarus, and listing one here is not a recommendation. Check the ticker carefully before sending anything, and treat every exchange as a place you do not keep coins.</p>
+    </div>
+  </div>
+</section>
+</main>
+<footer class="site-footer">
+  <div class="wrap footer-grid">
+    <div>
+      <a class="wordmark" href="/"><svg class="chi" viewBox="0 0 20.36 32" aria-hidden="true"><path d="M15.96 4.16C15.96 2.91 15.56 2.02 14.61 1.56C14.14 1.33 13.51 1.21 12.71 1.21H9.61L9.69 0H13.65C14.77 0 15.67 0.18 16.36 0.55C17.04 0.91 17.54 1.4 17.86 2.01C18.17 2.63 18.33 3.32 18.33 4.07C18.33 4.84 18.17 5.55 17.84 6.2C17.52 6.84 17.01 7.36 16.32 7.75C15.63 8.13 15.3 8.33 14.01 8.33H9.69L9.61 7.12H13.4C14.39 7.12 15.19 6.66 15.63 5.78C15.85 5.35 15.96 4.81 15.96 4.16ZM11.57 0 11.57 10.83V30.94L13.18 31.55V32H7.2V31.55L8.8 30.94V10.83V1.06L7.2 0.45V0ZM9.8 20.31 3.89 27.07 6.01 27.79V28.32H0V27.79L2.08 27.07L9.02 19.39L9.97 18.7L15.18 12.61L13.05 11.89V11.36H19.07V11.89L16.99 12.61L10.77 19.61ZM14.05 27.07 9.04 20.79 8.6 20.39 2.34 12.63 0.3 11.89V11.36H8.93V11.89L6.61 12.61L10.91 18.05L11.38 18.5L18.32 27.04L20.36 27.79V28.32H11.73V27.79Z"/></svg>Lazarus <em>XBT</em></a>
+      <p class="note" style="margin-top:.8rem;max-width:22rem">The informational hub for Bitcoin on BLAKE2b proof of work: the chain, the pools, the software and the people building on it.</p>
+      <p class="note faint"><i>Proverbs 11:1</i> — a just weight is his delight.</p>
+    </div>
+    <div class="footer-col">
+      <p class="category">Network</p>
+      <a href="/learn/">What XBT is</a>
+      <a href="/learn/#softfork">Soft fork status</a>
+      <a href="https://mempool.lazarus-xbt.xyz" rel="noopener">Block explorer</a>
+      <a href="/map/">Galaxy map</a>
+      <a href="/ecosystem/#pools">Pool directory</a>
+    </div>
+    <div class="footer-col">
+      <p class="category">Mine</p>
+      <a href="/start/">Start mining</a>
+      <a href="/start/#datum">Run a DATUM gateway</a>
+      <a href="/start/#stratum">Public stratum</a>
+      <a href="/start/#solo">Solo mining</a>
+      <a href="https://pool.lazarus-xbt.xyz" rel="noopener">Lazarus Pool</a>
+    </div>
+    <div class="footer-col">
+      <p class="category">Build</p>
+      <a href="https://github.com/AwokenLazarus/Bitcoin" rel="noopener">Source on GitHub</a>
+      <a href="/ecosystem/#software">Software</a>
+      <a href="https://mcp.lazarus-xbt.xyz" rel="noopener">MCP server</a>
+      <a href="https://mempool.lazarus-xbt.xyz/api" rel="noopener">Explorer API</a>
+    </div>
+    <div class="footer-col">
+      <p class="category">Community</p>
+      <a href="https://discord.gg/fD33dJXnzz" rel="noopener">Discord</a>
+      <a href="https://x.com/Awoken_Lazarus" rel="noopener">X</a>
+      <a href="/faq/">FAQ</a>
+    </div>
+  </div>
+  <div class="wrap footer-bottom">
+    <span>Lazarus · Bitcoin BLAKE2b (XBT). Public data, no accounts, no custody.</span>
+    <span class="live">live</span>
+  </div>
+</footer>
+<script src="/assets/hub.js?v=1" defer></script>
+</body>
+</html>

@@ -1,0 +1,138 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>What XBT is · Bitcoin on BLAKE2b</title>
+<meta name="description" content="Bitcoin BLAKE2b (XBT) explained: the fork at block 961,640, why addresses must not be reused, how DATUM mining and TIDES payouts work, and the long coinbase maturity soft fork.">
+<link rel="canonical" href="https://lazarus-xbt.xyz/learn/">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="Lazarus · Bitcoin BLAKE2b">
+<meta property="og:title" content="What XBT is · Bitcoin on BLAKE2b">
+<meta property="og:description" content="Bitcoin BLAKE2b (XBT) explained: the fork at block 961,640, why addresses must not be reused, how DATUM mining and TIDES payouts work, and the long coinbase maturity soft fork.">
+<meta property="og:url" content="https://lazarus-xbt.xyz/learn/">
+<meta name="twitter:card" content="summary">
+<meta name="theme-color" content="#1a1712">
+<link rel="icon" href="data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A//www.w3.org/2000/svg%22%20viewBox%3D%220%200%2020.36%2032%22%3E%3Crect%20width%3D%2220.36%22%20height%3D%2232%22%20fill%3D%22none%22/%3E%3Cpath%20fill%3D%22%23e8b85f%22%20d%3D%22M15.96%204.16C15.96%202.91%2015.56%202.02%2014.61%201.56C14.14%201.33%2013.51%201.21%2012.71%201.21H9.61L9.69%200H13.65C14.77%200%2015.67%200.18%2016.36%200.55C17.04%200.91%2017.54%201.4%2017.86%202.01C18.17%202.63%2018.33%203.32%2018.33%204.07C18.33%204.84%2018.17%205.55%2017.84%206.2C17.52%206.84%2017.01%207.36%2016.32%207.75C15.63%208.13%2015.3%208.33%2014.01%208.33H9.69L9.61%207.12H13.4C14.39%207.12%2015.19%206.66%2015.63%205.78C15.85%205.35%2015.96%204.81%2015.96%204.16ZM11.57%200%2011.57%2010.83V30.94L13.18%2031.55V32H7.2V31.55L8.8%2030.94V10.83V1.06L7.2%200.45V0ZM9.8%2020.31%203.89%2027.07%206.01%2027.79V28.32H0V27.79L2.08%2027.07L9.02%2019.39L9.97%2018.7L15.18%2012.61L13.05%2011.89V11.36H19.07V11.89L16.99%2012.61L10.77%2019.61ZM14.05%2027.07%209.04%2020.79%208.6%2020.39%202.34%2012.63%200.3%2011.89V11.36H8.93V11.89L6.61%2012.61L10.91%2018.05L11.38%2018.5L18.32%2027.04L20.36%2027.79V28.32H11.73V27.79Z%22/%3E%3C/svg%3E">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&family=Newsreader:ital,wght@0,400;0,500;1,400&display=swap">
+<link rel="stylesheet" href="/assets/hub.css?v=1">
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+<header class="site-header">
+  <div class="topbar wrap">
+    <a class="wordmark" href="/"><svg class="chi" viewBox="0 0 20.36 32" aria-hidden="true"><path d="M15.96 4.16C15.96 2.91 15.56 2.02 14.61 1.56C14.14 1.33 13.51 1.21 12.71 1.21H9.61L9.69 0H13.65C14.77 0 15.67 0.18 16.36 0.55C17.04 0.91 17.54 1.4 17.86 2.01C18.17 2.63 18.33 3.32 18.33 4.07C18.33 4.84 18.17 5.55 17.84 6.2C17.52 6.84 17.01 7.36 16.32 7.75C15.63 8.13 15.3 8.33 14.01 8.33H9.69L9.61 7.12H13.4C14.39 7.12 15.19 6.66 15.63 5.78C15.85 5.35 15.96 4.81 15.96 4.16ZM11.57 0 11.57 10.83V30.94L13.18 31.55V32H7.2V31.55L8.8 30.94V10.83V1.06L7.2 0.45V0ZM9.8 20.31 3.89 27.07 6.01 27.79V28.32H0V27.79L2.08 27.07L9.02 19.39L9.97 18.7L15.18 12.61L13.05 11.89V11.36H19.07V11.89L16.99 12.61L10.77 19.61ZM14.05 27.07 9.04 20.79 8.6 20.39 2.34 12.63 0.3 11.89V11.36H8.93V11.89L6.61 12.61L10.91 18.05L11.38 18.5L18.32 27.04L20.36 27.79V28.32H11.73V27.79Z"/></svg>Lazarus <em>XBT</em></a>
+    <button class="nav-toggle" type="button" aria-expanded="false" aria-controls="site-nav">Menu</button>
+    <nav class="site-nav" id="site-nav" aria-label="Main">
+      <a href="/start/">Start mining</a><a href="/learn/" aria-current="page">The chain</a><a href="/ecosystem/">Ecosystem</a><a href="/map/">Galaxy map</a><a href="/faq/">FAQ</a>
+      <a class="btn small" href="https://pool.lazarus-xbt.xyz" rel="noopener">Lazarus Pool</a>
+    </nav>
+  </div>
+</header>
+<main id="main">
+
+<section class="hero wrap">
+  <p class="kicker">The chain</p>
+  <h1>What XBT is</h1>
+  <p class="lede">Bitcoin's ledger, continued from block 961,640 under BLAKE2b proof of work. Same coins, same rules, different mining. This page explains what carried over, what changed, and what that means if you hold or mine it.</p>
+</section>
+
+<section class="section wrap">
+  <div class="prose" data-reveal>
+    <h2 id="fork">The fork</h2>
+    <p>On 30 August 2026, at block 961,640, this chain stopped hashing with SHA-256 and started hashing with BLAKE2b-256. Blocks from that height carry a 164-byte header instead of Bitcoin's 80-byte one, which is why SHA-256 mining hardware cannot work here and why software has to be built for it.</p>
+    <p>Everything below that height is Bitcoin's: the same blocks, the same transactions, the same balances at the same addresses. Above it the two chains go their own way. Coins mined here are quoted as <strong>XBT</strong> to keep the two apart in writing and on exchanges.</p>
+    <p>What did not change: 21 million coins, the halving schedule, a 3.125 XBT subsidy at this height, ten-minute target spacing, retargeting every 2016 blocks, and the script rules your wallet already understands.</p>
+
+    <h2 id="addresses">Addresses: the one real trap</h2>
+    <div class="callout warn">
+      <p><strong>Never use an address that holds real BTC.</strong> Because history is shared to block 961,640, a key that controlled coins on Bitcoin controls the matching coins here. Mining or receiving XBT to it publishes activity tied to your bitcoin address, and confuses every wallet that tries to read both chains. Make a wallet you use only for XBT.</p>
+    </div>
+    <p>This cuts both ways: if you held bitcoin before the fork, the same balance exists here, at the same address, and only your key can move it. Moving it means exposing that key to this chain's software, so treat it as you would any other claim of forked coins and decide carefully.</p>
+
+    <h2 id="mining">How mining works here</h2>
+    <p>Most of this network's hashrate runs <strong>DATUM</strong>: the miner's own node builds the block template, and the pool only issues the coinbase split and verifies shares. It puts transaction selection back with miners rather than with a handful of pool operators, which was much of the point of changing the proof of work in the first place.</p>
+    <p>Pools that still build every template themselves, and hold rewards in their own wallet, are the exception here rather than the rule. The <a href="/map/">galaxy map</a> reads every block's coinbase and shows which pools do which, straight from the chain.</p>
+
+    <h3>TIDES, in one paragraph</h3>
+    <p>Lazarus pays with TIDES: a rolling window of accepted work, currently eight network-blocks' worth. When a block is found, everyone with work in that window is paid in that block's own coinbase, in proportion to their share of it. There is no pool balance, no withdrawal, and nothing owed to anyone if the pool vanished overnight. A new miner's share starts near zero and rises as their work enters the window.</p>
+
+    <h2 id="softfork">The long coinbase maturity soft fork</h2>
+    <p>From block <strong>973,440</strong> until block <strong>979,920</strong> (about 5 November 2026), Bitcoin Knots 29.4.2 requires newly mined coins to wait <strong>6,480 blocks</strong> before they can be spent, instead of the usual 100. It is temporary, and its purpose is to make hit-and-run mining — arriving for a difficulty dip, dumping the reward, leaving — unprofitable, while miners who stay are unaffected.</p>
+    <dl>
+      <dt>If you mine</dt><dd>Your payouts arrive in the coinbase exactly as before and are yours on chain immediately. They simply cannot be spent until they reach 6,481 confirmations. Your pool page shows the countdown per block.</dd>
+      <dt>If you run a node</dt><dd>Upgrade to 29.4.2 or later. An older node accepts blocks the network rejects, follows dead chains, and if it builds your templates, everything it mines is wasted.</dd>
+      <dt>After block 979,920</dt><dd>The rule lapses and maturity returns to 100 blocks. Coins mined inside the window unlock as they reach 6,481 confirmations.</dd>
+    </dl>
+    <p class="note">Two further steps have been discussed publicly by the Knots authors: longer maturity still, and withholding rewards for blocks produced by pool stratum rather than by a miner's own node. Neither is in force. <a href="https://github.com/bitcoinknots/bitcoin/pull/419" rel="noopener">Read the proposal</a>.</p>
+
+    <h2 id="wallets">Holding XBT</h2>
+    <p>Two practical options today:</p>
+    <dl>
+      <dt>An Electrum wallet, pointed at a server for this chain</dt>
+      <dd>Fast, no sync, no disk. Use our public server at <code>electrum.lazarus-xbt.xyz:50002:s</code> (SSL, protocol 1.8) with a wallet made fresh for XBT.</dd>
+      <dt>Your own node</dt>
+      <dd>Bitcoin Knots 29.4.2 built for BLAKE2b, with its own wallet. Slower to set up, answerable to nobody. See <a href="/start/#node">node setup</a>.</dd>
+    </dl>
+
+    <h2 id="glossary">Glossary</h2>
+    <dl>
+      <dt>BLAKE2b</dt><dd>The hash function this chain's proof of work uses instead of SHA-256.</dd>
+      <dt>Coinbase</dt><dd>The first transaction in a block, which creates the reward. Pools here pay miners inside it, so a payout and a block are the same event.</dd>
+      <dt>DATUM</dt><dd>A protocol where the miner's node builds the block template and the pool only sets the payout split.</dd>
+      <dt>Gateway</dt><dd>The DATUM software a miner runs beside their node; their own miners connect to it.</dd>
+      <dt>Prime</dt><dd>The pool-side server a gateway talks to. Lazarus runs one at <code>datum.lazarus-xbt.xyz:28915</code>.</dd>
+      <dt>TIDES</dt><dd>The payout scheme: a rolling window of accepted work, paid in each block's coinbase.</dd>
+      <dt>Window share</dt><dd>Your fraction of the work in the current window — what the next block would pay you, which is not the same as your hashrate.</dd>
+      <dt>Maturity</dt><dd>How long a coinbase output must wait before it can be spent: normally 100 blocks, currently 6,480 under the soft fork.</dd>
+    </dl>
+  </div>
+</section>
+</main>
+<footer class="site-footer">
+  <div class="wrap footer-grid">
+    <div>
+      <a class="wordmark" href="/"><svg class="chi" viewBox="0 0 20.36 32" aria-hidden="true"><path d="M15.96 4.16C15.96 2.91 15.56 2.02 14.61 1.56C14.14 1.33 13.51 1.21 12.71 1.21H9.61L9.69 0H13.65C14.77 0 15.67 0.18 16.36 0.55C17.04 0.91 17.54 1.4 17.86 2.01C18.17 2.63 18.33 3.32 18.33 4.07C18.33 4.84 18.17 5.55 17.84 6.2C17.52 6.84 17.01 7.36 16.32 7.75C15.63 8.13 15.3 8.33 14.01 8.33H9.69L9.61 7.12H13.4C14.39 7.12 15.19 6.66 15.63 5.78C15.85 5.35 15.96 4.81 15.96 4.16ZM11.57 0 11.57 10.83V30.94L13.18 31.55V32H7.2V31.55L8.8 30.94V10.83V1.06L7.2 0.45V0ZM9.8 20.31 3.89 27.07 6.01 27.79V28.32H0V27.79L2.08 27.07L9.02 19.39L9.97 18.7L15.18 12.61L13.05 11.89V11.36H19.07V11.89L16.99 12.61L10.77 19.61ZM14.05 27.07 9.04 20.79 8.6 20.39 2.34 12.63 0.3 11.89V11.36H8.93V11.89L6.61 12.61L10.91 18.05L11.38 18.5L18.32 27.04L20.36 27.79V28.32H11.73V27.79Z"/></svg>Lazarus <em>XBT</em></a>
+      <p class="note" style="margin-top:.8rem;max-width:22rem">The informational hub for Bitcoin on BLAKE2b proof of work: the chain, the pools, the software and the people building on it.</p>
+      <p class="note faint"><i>Proverbs 11:1</i> — a just weight is his delight.</p>
+    </div>
+    <div class="footer-col">
+      <p class="category">Network</p>
+      <a href="/learn/">What XBT is</a>
+      <a href="/learn/#softfork">Soft fork status</a>
+      <a href="https://mempool.lazarus-xbt.xyz" rel="noopener">Block explorer</a>
+      <a href="/map/">Galaxy map</a>
+      <a href="/ecosystem/#pools">Pool directory</a>
+    </div>
+    <div class="footer-col">
+      <p class="category">Mine</p>
+      <a href="/start/">Start mining</a>
+      <a href="/start/#datum">Run a DATUM gateway</a>
+      <a href="/start/#stratum">Public stratum</a>
+      <a href="/start/#solo">Solo mining</a>
+      <a href="https://pool.lazarus-xbt.xyz" rel="noopener">Lazarus Pool</a>
+    </div>
+    <div class="footer-col">
+      <p class="category">Build</p>
+      <a href="https://github.com/AwokenLazarus/Bitcoin" rel="noopener">Source on GitHub</a>
+      <a href="/ecosystem/#software">Software</a>
+      <a href="https://mcp.lazarus-xbt.xyz" rel="noopener">MCP server</a>
+      <a href="https://mempool.lazarus-xbt.xyz/api" rel="noopener">Explorer API</a>
+    </div>
+    <div class="footer-col">
+      <p class="category">Community</p>
+      <a href="https://discord.gg/fD33dJXnzz" rel="noopener">Discord</a>
+      <a href="https://x.com/Awoken_Lazarus" rel="noopener">X</a>
+      <a href="/faq/">FAQ</a>
+    </div>
+  </div>
+  <div class="wrap footer-bottom">
+    <span>Lazarus · Bitcoin BLAKE2b (XBT). Public data, no accounts, no custody.</span>
+    <span class="live">live</span>
+  </div>
+</footer>
+<script src="/assets/hub.js?v=1" defer></script>
+</body>
+</html>
