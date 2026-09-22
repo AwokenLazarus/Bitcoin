@@ -448,6 +448,15 @@ pub async fn run(shared: Arc<Shared>, mut stream: TcpStream, remote: SocketAddr)
 
     let gateway_hex = hex::encode(&hello.identity_sign_pk[..8]);
     let gateway_key = hex::encode(hello.identity_sign_pk);
+    if let Some(q) = shared.quarantined(&gateway_key) {
+        // Its own node handed us a block the chain refused, so its next one would go the same
+        // way and the whole window would pay for it. Nothing it sends is counted meanwhile.
+        log::warn!(
+            "[{id}] {remote} gateway={gateway_hex} refused: {} (block {}); until unix {}",
+            q.reason, q.height, q.until
+        );
+        return Err(SessionError::Bad("gateway refused: its node built a block this chain rejected; upgrade Bitcoin Knots and reconnect"));
+    }
     let known_script = shared.lookup_gateway_script(&gateway_key);
     let fee_path = if house_stratum(&shared.cfg, remote, &gateway_key) { "stratum" } else { "datum" };
     log::info!(
@@ -1848,6 +1857,10 @@ impl Session {
             log::info!("[{id}] submitblock {hash_hex} ({} bytes): {outcome}", block.len());
             shared.totals.add(&shared.totals.blocks_submitted, 1);
             let invalid = node::says_invalid(&outcome);
+            // Two verdicts on one submit: the template fault (which also stops crediting shares
+            // from this gateway until a later template passes) and, when the reason says its node
+            // is behind a consensus rule, the quarantine that keeps it off until it upgrades.
+            let outdated = node::says_outdated_node(&outcome);
             if !house {
                 if validity::template_fault(&outcome) {
                     mark_faulted(&shared, id, &gw, &key, &outcome, share_height, "found block");
@@ -1855,7 +1868,22 @@ impl Session {
                     clear_fault(&shared, id, &gw, &key, share_height, "found a block our node accepted");
                 }
             }
-            let height = shared.update_block(&hash_hex, |r| r.submit = outcome).map(|r| r.height);
+            let height = shared.update_block(&hash_hex, |r| r.submit = outcome.clone()).map(|r| r.height);
+            if outdated && !house {
+                let at = height.unwrap_or(0);
+                if shared.quarantine_gateway(&key, at, &outcome) {
+                    log::error!(
+                        "[{id}] gateway={gw} built block {at} that the chain rejected ({outcome}); \
+                         refusing its work for {}h — its Bitcoin Knots is behind a consensus rule",
+                        shared.cfg.quarantine_hours
+                    );
+                } else {
+                    log::error!(
+                        "[{id}] gateway={gw} built block {at} that the chain rejected ({outcome}); \
+                         quarantine is off, so its work is still accepted"
+                    );
+                }
+            }
             if let (true, Some(height)) = (invalid, height) {
                 // The node has looked at the block and said no. There is nothing to wait for:
                 // what it took off the books goes back now, not six blocks from now.
