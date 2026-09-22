@@ -45,6 +45,12 @@ struct GwCfg {
     /// solo configs keep the old 4× climb without naming a new key.
     #[serde(default)]
     vardiff_step: Option<u64>,
+    /// Seconds between shares vardiff aims for, per connection. Unset is 4, the pooled
+    /// default. A solo endpoint can ask for fewer, larger shares (8 or 15): shares do not
+    /// pay on solo, they only measure hashrate, so fewer of them loses nothing but detail.
+    /// The retarget clock and the hashrate window stretch with it (see `Pace`).
+    #[serde(default)]
+    vardiff_target_secs: Option<f64>,
     rpc: String,
     rpc_cookie: PathBuf,
     prime_host: String,
@@ -265,9 +271,11 @@ struct Miner {
     jobs: VecDeque<Arc<Job>>,
     /// Canonical payout identity (`user` up to the first `.`, bech32 folded to lowercase).
     ident: String,
+    /// The endpoint's vardiff timing, fixed for the session's life.
+    pace: Pace,
 }
 /// A fresh session record at the start difficulty.
-fn new_miner(host: String, vstart: u64) -> Miner {
+fn new_miner(host: String, vstart: u64, pace: Pace) -> Miner {
     let now = Instant::now();
     Miner {
         since: now,
@@ -275,6 +283,7 @@ fn new_miner(host: String, vstart: u64) -> Miner {
         vdiff_prev: vstart, vdiff_prev_until: now, last_retarget: now, retarget_acc_n: 0,
         recent: VecDeque::new(), job_diffs: VecDeque::new(), seen: HashSet::new(), seen_order: VecDeque::new(),
         tokens: SUBMIT_BURST, tokens_at: now, flood: 0, low_n: 0, low_at: now, jobs: VecDeque::new(), ident: String::new(),
+        pace,
     }
 }
 /// Solo jobs remembered per session. Templates are republished every `JOB_REFRESH`, so
@@ -318,20 +327,49 @@ fn take_token(m: &mut Miner) -> bool {
         false
     }
 }
-const HR_WINDOW: Duration = Duration::from_secs(60);
-/// Aim for roughly one share per miner every few seconds. Left at difficulty 1 a single
-/// 1 TH/s rig submits over 200 shares a second, which no pool can account for and which
-/// buys nothing: the same hashrate is measured just as well from far fewer shares.
-const VARDIFF_TARGET_SECS: f64 = 4.0;
-const VARDIFF_INTERVAL: Duration = Duration::from_secs(20);
+/// Vardiff timing. `Pace::DEFAULT` is the long-standing pooled behaviour (a share every 4 s,
+/// retarget every 20 s, hashrate over the last 60 s); a longer target stretches the retarget
+/// clock and the window with it, so each estimate still rests on about 15 shares.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Pace {
+    /// Seconds between shares vardiff aims for.
+    target_secs: f64,
+    /// Up steps wait this long; see `retarget_kind`.
+    interval: Duration,
+    /// Hashrate is never estimated over less than this. A 50ms burst of eight shares at
+    /// the start difficulty is not 200 TH/s.
+    dt_min: f64,
+    /// Shares older than this drop out of the hashrate estimate.
+    hr_window: Duration,
+}
+impl Pace {
+    const DEFAULT: Pace = Pace {
+        target_secs: 4.0,
+        interval: Duration::from_secs(20),
+        dt_min: 4.0,
+        hr_window: Duration::from_secs(60),
+    };
+    /// Accepted range for `vardiff_target_secs`.
+    const TARGET_RANGE: std::ops::RangeInclusive<f64> = 1.0..=120.0;
+    fn from_target(t: Option<f64>) -> Pace {
+        let Some(t) = t.filter(|t| t.is_finite()) else { return Pace::DEFAULT };
+        let t = t.clamp(*Self::TARGET_RANGE.start(), *Self::TARGET_RANGE.end());
+        Pace {
+            target_secs: t,
+            interval: Duration::from_secs_f64((5.0 * t).max(20.0)),
+            dt_min: t,
+            hr_window: Duration::from_secs_f64((15.0 * t).max(60.0)),
+        }
+    }
+}
+// Aim for roughly one share per miner every few seconds (`Pace`). Left at difficulty 1 a
+// single 1 TH/s rig submits over 200 shares a second, which no pool can account for and
+// which buys nothing: the same hashrate is measured just as well from far fewer shares.
 /// Enough shares since the last retarget to allow a *down* step before the
-/// 20s clock. Up steps wait for `VARDIFF_INTERVAL` so an eight-share burst at
+/// retarget clock. Up steps wait for `Pace::interval` so an eight-share burst at
 /// the start difficulty cannot 2×/4× a 9 TH/s box to 16384.
 const VARDIFF_QUICK_SHARES: u64 = 8;
 const VARDIFF_GRACE: Duration = Duration::from_secs(30);
-/// Estimate hashrate over at least the target share interval. A 50ms burst of
-/// eight shares at the start difficulty is not 200 TH/s.
-const VARDIFF_DT_MIN: f64 = VARDIFF_TARGET_SECS;
 /// Default multiply/divide when the config omits `vardiff_step` (solo).
 const VARDIFF_STEP_DEFAULT: u64 = 4;
 /// Job difficulties remembered per session. Matches the gateway job history, so any job a
@@ -353,10 +391,13 @@ fn pow2_clamp(n: u64, floor: u64, cap: u64) -> u64 {
     (1u64 << pot).clamp(floor, cap)
 }
 fn vardiff_ideal(hs: f64) -> u64 {
+    vardiff_ideal_at(hs, Pace::DEFAULT.target_secs)
+}
+fn vardiff_ideal_at(hs: f64, target_secs: f64) -> u64 {
     if !hs.is_finite() || hs <= 0.0 {
         return 1;
     }
-    let ideal = hs * VARDIFF_TARGET_SECS / 4_294_967_296.0;
+    let ideal = hs * target_secs / 4_294_967_296.0;
     // Floor, not round: a ~12–15 TH/s box sits on the 8192/16384 boundary and
     // rounding up is what parked people at 16384 (too high for that class).
     let pot = ideal.max(1.0).log2().floor().clamp(0.0, 40.0) as u32;
@@ -381,7 +422,7 @@ fn step_vardiff(current: u64, ideal: u64, floor: u64, cap: u64, step: u64) -> u6
 }
 fn miner_hs_window(m: &Miner, dt_floor: f64) -> f64 {
     let now = Instant::now();
-    let cutoff = now.checked_sub(HR_WINDOW).unwrap_or(now);
+    let cutoff = now.checked_sub(m.pace.hr_window).unwrap_or(now);
     let mut work = 0u64;
     let mut first: Option<Instant> = None;
     for (ts, w) in &m.recent {
@@ -397,16 +438,19 @@ fn miner_hs(m: &Miner) -> f64 {
     miner_hs_window(m, 5.0)
 }
 fn miner_hs_vardiff(m: &Miner) -> f64 {
-    miner_hs_window(m, VARDIFF_DT_MIN)
+    miner_hs_window(m, m.pace.dt_min)
 }
-/// `Some(allow_up)` when it is time to look at vardiff. A sub-4s burst may only
-/// step down (eight shares in 50ms is not 200 TH/s). After `VARDIFF_DT_MIN` the
-/// hashrate estimate is real, so a PH-class miner can climb before the 20s clock.
+/// `Some(allow_up)` when it is time to look at vardiff. A burst shorter than
+/// `Pace::dt_min` may only step down (eight shares in 50ms is not 200 TH/s). After it the
+/// hashrate estimate is real, so a PH-class miner can climb before the retarget clock.
 fn retarget_kind(elapsed: Duration, shares_since: u64) -> Option<bool> {
-    if elapsed >= VARDIFF_INTERVAL {
+    retarget_kind_at(elapsed, shares_since, &Pace::DEFAULT)
+}
+fn retarget_kind_at(elapsed: Duration, shares_since: u64, pace: &Pace) -> Option<bool> {
+    if elapsed >= pace.interval {
         Some(true)
     } else if shares_since >= VARDIFF_QUICK_SHARES
-        && elapsed >= Duration::from_secs_f64(VARDIFF_DT_MIN)
+        && elapsed >= Duration::from_secs_f64(pace.dt_min)
     {
         Some(true)
     } else if shares_since >= VARDIFF_QUICK_SHARES {
@@ -416,7 +460,7 @@ fn retarget_kind(elapsed: Duration, shares_since: u64) -> Option<bool> {
     }
 }
 fn should_retarget(m: &Miner) -> Option<bool> {
-    retarget_kind(m.last_retarget.elapsed(), m.acc_n.saturating_sub(m.retarget_acc_n))
+    retarget_kind_at(m.last_retarget.elapsed(), m.acc_n.saturating_sub(m.retarget_acc_n), &m.pace)
 }
 fn record_share(m: &mut Miner, work: u64) {
     let now = Instant::now();
@@ -424,7 +468,7 @@ fn record_share(m: &mut Miner, work: u64) {
     m.acc_n += 1;
     m.last = now;
     m.recent.push_back((now, work));
-    let cutoff = now.checked_sub(HR_WINDOW).unwrap_or(now);
+    let cutoff = now.checked_sub(m.pace.hr_window).unwrap_or(now);
     while m.recent.front().map(|(t, _)| *t < cutoff).unwrap_or(false) {
         m.recent.pop_front();
     }
@@ -1307,6 +1351,7 @@ fn handle_miner(mut sock: TcpStream, st: Arc<Shared>, ip: IpAddr) {
     let vmax = st.cfg.vardiff_max.unwrap_or(1u64 << 40).max(vmin);
     let vstart = pow2_clamp(st.cfg.vardiff_start.unwrap_or(vmin), vmin, vmax);
     let vstep = resolve_vardiff_step(st.cfg.vardiff_step);
+    let pace = Pace::from_target(st.cfg.vardiff_target_secs);
     // Every session gets its own extranonce1. Sharing one across the gateway makes
     // identical rigs walk identical (extranonce2, nonce) pairs, so they submit the same
     // shares and the dedupe keeps only whichever arrived first, quietly moving credit
@@ -1318,7 +1363,7 @@ fn handle_miner(mut sock: TcpStream, st: Arc<Shared>, ip: IpAddr) {
     let mut gated = false;
     // Grandfather bookkeeping is per accepted share but only needs to land every so often.
     let mut noted_at: Option<Instant> = None;
-    st.miners.lock().unwrap_or_else(|e| e.into_inner()).insert(id, new_miner(host, vstart));
+    st.miners.lock().unwrap_or_else(|e| e.into_inner()).insert(id, new_miner(host, vstart, pace));
     let mut line = String::new();
     loop {
         line.clear();
@@ -1362,7 +1407,7 @@ fn handle_miner(mut sock: TcpStream, st: Arc<Shared>, ip: IpAddr) {
                                 Gate::Relayed => return,
                                 Gate::Local(extra) => {
                                     pending.extend(extra);
-                                    lk(&st.miners).insert(id, new_miner(host_label.clone(), vstart));
+                                    lk(&st.miners).insert(id, new_miner(host_label.clone(), vstart, pace));
                                 }
                             }
                         }
@@ -1603,7 +1648,7 @@ fn handle_miner(mut sock: TcpStream, st: Arc<Shared>, ip: IpAddr) {
                 if let Some(m) = st.miners.lock().unwrap_or_else(|e| e.into_inner()).get_mut(&id) {
                     record_share(m, credit);
                     if let Some(allow_up) = should_retarget(m) {
-                        let want = step_vardiff(m.vdiff, vardiff_ideal(miner_hs_vardiff(m)), vmin, vmax, vstep);
+                        let want = step_vardiff(m.vdiff, vardiff_ideal_at(miner_hs_vardiff(m), m.pace.target_secs), vmin, vmax, vstep);
                         if want > m.vdiff && !allow_up {
                             // Eight shares in a couple of seconds is a burst, not a
                             // 4× hashrate. Wait for the interval before climbing.
@@ -2173,7 +2218,7 @@ fn main() {
     let prime_on = cfg.prime_port != 0;
     assert!(prime_on || mode == Mode::Solo, "pooled mode needs a Prime to get the TIDES split from");
     log::info!(
-        "lazarus-gateway profile={} mode={:?} stratum={} api={} vardiff_min={} vardiff_start={} vardiff_max={} vardiff_step={} verify={:?} prime={}",
+        "lazarus-gateway profile={} mode={:?} stratum={} api={} vardiff_min={} vardiff_start={} vardiff_max={} vardiff_step={} vardiff_target_secs={} verify={:?} prime={}",
         cfg.profile.as_deref().unwrap_or("asic"),
         mode,
         cfg.stratum_listen,
@@ -2182,6 +2227,7 @@ fn main() {
         cfg.vardiff_start.unwrap_or(cfg.vardiff_min),
         cfg.vardiff_max.unwrap_or(1u64 << 40),
         resolve_vardiff_step(cfg.vardiff_step),
+        Pace::from_target(cfg.vardiff_target_secs).target_secs,
         verify_mode(cfg.verify_shares.as_deref()),
         if prime_on { format!("{}:{}", cfg.prime_host, cfg.prime_port) } else { "off".into() }
     );
@@ -2302,7 +2348,7 @@ mod limits_tests {
         Miner { since: now, host: String::new(), user: String::new(), ua: String::new(), vdiff: 1, acc: 0, acc_n: 0, rej: 0, rej_n: 0, last: now,
             vdiff_prev: 1, vdiff_prev_until: now, last_retarget: now, retarget_acc_n: 0, job_diffs: VecDeque::new(),
             recent: VecDeque::new(), seen: HashSet::new(), seen_order: VecDeque::new(), tokens: SUBMIT_BURST, tokens_at: now, flood: 0, low_n: 0, low_at: now,
-            jobs: VecDeque::new(), ident: String::new() }
+            jobs: VecDeque::new(), ident: String::new(), pace: Pace::DEFAULT }
     }
 
     fn p2wpkh(fill: u8) -> Vec<u8> {
@@ -2844,6 +2890,37 @@ mod vardiff_tests {
         assert_eq!(vardiff_ideal(1e15), 524_288);
         assert_eq!(vardiff_ideal(1e16), 8_388_608);
         assert!(vardiff_ideal(1e15) > 131_072);
+    }
+
+    #[test]
+    fn pace_default_is_the_old_constants() {
+        let p = Pace::from_target(None);
+        assert_eq!(p, Pace::DEFAULT);
+        assert_eq!(p.target_secs, 4.0);
+        assert_eq!(p.interval, Duration::from_secs(20));
+        assert_eq!(p.hr_window, Duration::from_secs(60));
+        assert_eq!(Pace::from_target(Some(4.0)), Pace::DEFAULT);
+        assert_eq!(Pace::from_target(Some(f64::NAN)), Pace::DEFAULT);
+    }
+
+    #[test]
+    fn pace_stretches_with_the_target() {
+        let p = Pace::from_target(Some(15.0));
+        assert_eq!(p.interval, Duration::from_secs(75));
+        assert_eq!(p.hr_window, Duration::from_secs(225));
+        assert_eq!(p.dt_min, 15.0);
+        // out of range is clamped, not trusted
+        assert_eq!(Pace::from_target(Some(0.01)).target_secs, 1.0);
+        assert_eq!(Pace::from_target(Some(1e9)).target_secs, 120.0);
+        // a 15 s solo target puts ~20 TH/s at 65536 and ~10 TH/s at 32768 (floored powers of two)
+        assert_eq!(vardiff_ideal_at(20.4e12, 15.0), 65_536);
+        assert_eq!(vardiff_ideal_at(9.7e12, 15.0), 32_768);
+        assert_eq!(vardiff_ideal_at(20.4e12, 8.0), 32_768);
+        // retarget clock follows the pace: nothing to do at 20 s when the clock is 75 s
+        assert_eq!(retarget_kind_at(Duration::from_secs(20), 1, &p), None);
+        assert_eq!(retarget_kind_at(Duration::from_secs(75), 1, &p), Some(true));
+        assert_eq!(retarget_kind_at(Duration::from_secs(10), 8, &p), Some(false));
+        assert_eq!(retarget_kind_at(Duration::from_secs(15), 8, &p), Some(true));
     }
 
     #[test]
