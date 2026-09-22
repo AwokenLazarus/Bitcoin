@@ -10,6 +10,7 @@ import { RenderPass } from "three/addons/postprocessing/RenderPass.js";
 import { UnrealBloomPass } from "three/addons/postprocessing/UnrealBloomPass.js";
 import { OutputPass } from "three/addons/postprocessing/OutputPass.js";
 import { CSS2DRenderer, CSS2DObject } from "three/addons/renderers/CSS2DRenderer.js";
+import { mergeGeometries } from "three/addons/utils/BufferGeometryUtils.js";
 
 const DATA_URL = "/map/data.json";
 const POLL_MS = 60_000;
@@ -50,9 +51,9 @@ const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls)
 function kv(dl, k, v, cls) { if (v == null || v === "") return; dl.append(el("dt", null, k)); dl.append(el("dd", cls || null, String(v))); }
 function sec(dl, title) { dl.append(el("div", "sec", title)); }
 const TYPE_LABEL = {
-  datum: ["Rebel Alliance", "DATUM pool: each gateway builds its own block template"],
-  stratum: ["Galactic Empire", "Stratum only: the pool builds every template, its miners mine blind"],
-  independent: ["Outer Rim", "Independent: one operator, own node, whole blocks for themselves"],
+  datum: ["Rebel Alliance", "pays miners in the coinbase (TIDES) and most of its blocks are built by miners' own DATUM gateways"],
+  stratum: ["Galactic Empire", "75% or more of its blocks are pool-built templates or pay the pool's own wallet"],
+  independent: ["Outer Rim", "one operator, own node, whole blocks for themselves"],
 };
 const safeLink = (u) => (typeof u === "string" && /^https:\/\/[a-z0-9.-]+(\/[^\s"<>]*)?$/i.test(u) ? u : null);
 
@@ -249,7 +250,13 @@ const effects = [];                // short-lived effects
 const typeGroups = { datum: new THREE.Group(), stratum: new THREE.Group(), independent: new THREE.Group() };
 Object.values(typeGroups).forEach((g) => scene.add(g));
 
-function systemScale(blocks) { return 3.5 + 3.2 * Math.log10(blocks + 1); }
+// ---- size: close to hashrate, compressed so small pools stay visible ----
+// Radius grows with the square root of the pool's 7-day block share, so apparent area is roughly
+// proportional to hashrate, between a floor (so a small pool is still a world) and a ceiling.
+let MAX_SHARE = 1;
+const R_MIN = 3.5, R_MAX = 22;
+function sizeFor(share) { return R_MIN + (R_MAX - R_MIN) * Math.sqrt(clamp((share || 0) / MAX_SHARE, 0, 1)); }
+const dormant = (s) => !s.blocks7d;
 
 function placeSystems(systems) {
   const out = new Map();
@@ -275,48 +282,142 @@ function placeSystems(systems) {
 function makeLabel(text, cls) { const d = el("div", "label2d " + (cls || ""), text); return new CSS2DObject(d); }
 // A marker that keeps its size on screen, so systems stay findable from across the galaxy.
 const beacons = [];
-function beacon(root, color, blocks, sys) {
+function beacon(root, color, radius, sys) {
   const m = new THREE.SpriteMaterial({ map: TEX.ring, color, sizeAttenuation: false, transparent: true, opacity: 0.9, blending: THREE.AdditiveBlending, depthWrite: false });
-  const b = new THREE.Sprite(m); b.scale.setScalar(0.028 + 0.011 * Math.log10(blocks + 1)); b.userData = { kind: "system", sys };
+  const b = new THREE.Sprite(m); b.scale.setScalar(0.014 + 0.0033 * radius); b.userData = { kind: "system", sys };
   root.add(b); beacons.push(b); pickables.push(b); return b;
+}
+
+// ---- ships of the Empire ----
+let SD_GEO = null, TIE_GEO = null;
+function prep(g) { const n = g.index ? g.toNonIndexed() : g; n.deleteAttribute("uv"); return n; }
+function starDestroyerGeometry() {
+  if (SD_GEO) return SD_GEO;
+  // hull: a dagger with a raised spine, nose along +z; length about 8 units
+  const L = 4.2, R = 2.6, W = 2.3, H = 0.55, D = 0.3;
+  const tip = [0, 0, L], rl = [-W, 0, -R], rr = [W, 0, -R], top = [0, H, -R * 0.92], bot = [0, -D, -R * 0.92];
+  const tri = (a, b, c) => [...a, ...b, ...c];
+  const pos = new Float32Array([
+    ...tri(tip, top, rl), ...tri(tip, rr, top),             // upper faces
+    ...tri(tip, rl, bot), ...tri(tip, bot, rr),             // lower faces
+    ...tri(rl, top, rr), ...tri(rl, rr, bot),               // stern
+  ]);
+  const hull = new THREE.BufferGeometry(); hull.setAttribute("position", new THREE.BufferAttribute(pos, 3)); hull.computeVertexNormals();
+  const parts = [hull];
+  const box = (w, h, d, x, y, z) => { const b = new THREE.BoxGeometry(w, h, d); b.translate(x, y, z); parts.push(prep(b)); };
+  // stepped superstructure toward the stern
+  box(1.9, 0.22, 1.5, 0, H * 0.72, -1.55);
+  box(1.3, 0.24, 1.1, 0, H * 0.72 + 0.22, -1.85);
+  box(0.8, 0.26, 0.8, 0, H * 0.72 + 0.46, -2.05);
+  // command tower and bridge
+  box(0.22, 0.55, 0.3, 0, H * 0.72 + 0.84, -2.15);
+  box(1.05, 0.14, 0.34, 0, H * 0.72 + 1.15, -2.15);
+  for (const x of [-0.4, 0.4]) { const d = new THREE.SphereGeometry(0.13, 10, 6); d.translate(x, H * 0.72 + 1.36, -2.15); parts.push(prep(d)); }
+  // engine block
+  box(2.2, 0.5, 0.35, 0, 0.12, -2.5);
+  for (const x of [-0.6, 0, 0.6]) { const c = new THREE.CylinderGeometry(0.2, 0.24, 0.35, 10); c.rotateX(Math.PI / 2); c.translate(x, 0.12, -2.72); parts.push(prep(c)); }
+  // greebles along the spine
+  const r = rng(424242);
+  for (let k = 0; k < 26; k++) { const z = 3.2 - r() * 4.6, half = (W * (L - z)) / (L + R) * 0.55, x = (r() * 2 - 1) * half; box(0.12 + r() * 0.18, 0.06, 0.12 + r() * 0.25, x, H * (1 - (Math.abs(x) / W)) * ((L - z) / (L + R)) * 0.9 + 0.03, z); }
+  SD_GEO = mergeGeometries(parts.map((g) => (g.attributes.normal ? g : (g.computeVertexNormals(), g))));
+  return SD_GEO;
+}
+const SD_MAT = new THREE.MeshPhongMaterial({ color: 0x9aa0a8, emissive: 0x0d0f14, specular: 0x333333, shininess: 28, flatShading: true });
+function starDestroyer(scale = 1) {
+  const g = new THREE.Group();
+  const hull = new THREE.Mesh(starDestroyerGeometry(), SD_MAT); g.add(hull);
+  for (const x of [-0.6, 0, 0.6]) { const e = sprite(TEX.glow, 0x7fc4ff, 0.9, 0.95); e.position.set(x, 0.12, -2.95); g.add(e); }
+  const nav = sprite(TEX.soft, 0xff3b3b, 0.5, 0.9); nav.position.set(0, 0.05, 4.1); g.add(nav);
+  g.scale.setScalar(scale); return g;
+}
+function tieGeometry() {
+  if (TIE_GEO) return TIE_GEO;
+  const parts = [];
+  const cock = new THREE.SphereGeometry(0.34, 12, 8); parts.push(prep(cock));
+  const strut = new THREE.CylinderGeometry(0.07, 0.07, 1.3, 6); strut.rotateZ(Math.PI / 2); parts.push(prep(strut));
+  for (const x of [-0.68, 0.68]) { const w = new THREE.CylinderGeometry(0.72, 0.72, 0.05, 6); w.rotateZ(Math.PI / 2); w.translate(x, 0, 0); parts.push(prep(w)); }
+  TIE_GEO = mergeGeometries(parts); return TIE_GEO;
+}
+const TIE_MAT = new THREE.MeshPhongMaterial({ color: 0x5b606a, emissive: 0x080a0e, shininess: 40, flatShading: true });
+function tieSwarm(root, R, seed) {
+  const r = rng(seed), n = lowPower ? 6 : 12;
+  for (let k = 0; k < n; k++) {
+    const pivot = new THREE.Object3D(); pivot.rotation.set((r() - 0.5) * 1.4, r() * Math.PI * 2, (r() - 0.5) * 1.0); root.add(pivot);
+    const tie = new THREE.Mesh(tieGeometry(), TIE_MAT); const sc = 0.45 + R * 0.025; tie.scale.setScalar(sc);
+    const orbit = R * (1.35 + r() * 0.9); tie.position.set(orbit, 0, 0); pivot.add(tie);
+    const sp = ((1.8 + r() * 1.4) / Math.sqrt(orbit)) * MOTION;
+    animated.push((dt, t) => { pivot.rotateY(sp * dt); tie.rotation.z = Math.sin(t * 2 + k) * 0.4; });
+  }
+}
+function patrol(root, R, count, seed) {
+  const r = rng(seed);
+  for (let k = 0; k < count; k++) {
+    const pivot = new THREE.Object3D(); pivot.rotation.set((r() - 0.5) * 0.7, r() * Math.PI * 2, (r() - 0.5) * 0.5); root.add(pivot);
+    const sd = starDestroyer(0.55 + R * 0.05); const orbit = R * (2.3 + k * 0.6); sd.position.set(orbit, 0, 0); pivot.add(sd);
+    const dir = r() < 0.5 ? 1 : -1; sd.rotation.y = dir > 0 ? Math.PI : 0;
+    const sp = (0.32 / Math.sqrt(orbit)) * dir * MOTION;
+    animated.push((dt, t) => { pivot.rotateY(sp * dt); sd.position.y = Math.sin(t * 0.5 + k) * 0.6; });
+  }
+}
+
+// ---- a DATUM pool's own public stratum: an Imperial outpost inside a rebel system ----
+function outpost(root, rec, p, orbit, starWorld, rr) {
+  const pivot = new THREE.Object3D(); pivot.rotation.set((rr() - 0.5) * 0.2, rr() * Math.PI * 2, 0); root.add(pivot);
+  const pr = 1.2 + 4.5 * Math.sqrt(clamp((p.blocks7d / Math.max(1, rec.data.blocks7d)) * (rec.data.share7d || 0) / MAX_SHARE, 0, 1));
+  const used = p.blocks7d > 0 || (p.liveStratum && p.liveStratum.hashrate > 0);
+  const mat = planetMaterial(new THREE.Color(used ? 0xb3261e : 0x5a2a2a), starWorld, 0.77, 1);
+  const mesh = new THREE.Mesh(new THREE.SphereGeometry(pr, 28, 18), mat); mesh.position.x = orbit; pivot.add(mesh);
+  mesh.add(sprite(TEX.glow, 0xff2020, pr * 6, used ? 0.55 : 0.2));
+  const ring = new THREE.Mesh(new THREE.RingGeometry(pr * 1.6, pr * 1.68, 64), new THREE.MeshBasicMaterial({ color: 0xff3030, transparent: true, opacity: used ? 0.6 : 0.2, side: THREE.DoubleSide, blending: THREE.AdditiveBlending, depthWrite: false }));
+  ring.rotation.x = Math.PI / 2; mesh.add(ring);
+  if (used) {
+    const esc = new THREE.Object3D(); mesh.add(esc);
+    const sd = starDestroyer(0.18 + pr * 0.05); sd.position.set(pr * 2.4, 0, 0); sd.rotation.y = Math.PI; esc.add(sd);
+    animated.push((dt) => esc.rotateY(0.6 * dt * MOTION));
+    animated.push((dt, t) => { ring.scale.setScalar(1 + ((t * 0.35) % 1) * 0.8); ring.material.opacity = 0.6 * (1 - ((t * 0.35) % 1)); });
+  }
+  const sp = (0.9 / Math.sqrt(orbit)) * 0.7 * MOTION; animated.push((dt) => pivot.rotateY(sp * dt));
+  mesh.userData = { kind: "planet", sys: rec.data.id, tag: p.tag }; pickables.push(mesh);
+  rec.planets.push({ tag: p.tag, mesh, radius: pr, outpost: true });
+  return pr;
 }
 
 function buildRebel(s, pos, i) {
   const root = new THREE.Group(); root.position.copy(pos); typeGroups.datum.add(root);
-  const rr = rng(hash(s.id)), starR = systemScale(s.blocks) * 0.8;
+  const rr = rng(hash(s.id)), starR = sizeFor(s.share7d) * 0.85, sleepy = dormant(s);
   const color = new THREE.Color(s.name === "Lazarus" ? 0xffcf5c : REBEL[i % REBEL.length]);
+  if (sleepy) color.multiplyScalar(0.55);
   const star = new THREE.Mesh(new THREE.SphereGeometry(starR, 32, 16), new THREE.MeshBasicMaterial({ color: color.clone().multiplyScalar(1.6) }));
   root.add(star);
-  const halo = sprite(TEX.glow, color, starR * 9, 0.85), corona = sprite(TEX.soft, color, starR * 16, 0.25);
+  const halo = sprite(TEX.glow, color, starR * 9, sleepy ? 0.4 : 0.85), corona = sprite(TEX.soft, color, starR * 16, sleepy ? 0.1 : 0.25);
   root.add(halo, corona);
   animated.push((dt, t) => { corona.scale.setScalar(starR * (15 + Math.sin(t * 0.8 + i) * 1.6)); });
   const rec = { data: s, root, pos, star, planets: [], starR, extent: starR * 3, type: "datum" };
   const starWorld = pos.clone();
   const planets = s.planets.slice().sort((a, b) => (b.blocks - a.blocks) || ((b.live ? 1 : 0) - (a.live ? 1 : 0)));
-  planets.forEach((p, k) => {
-    const orbit = starR * 2.4 + 3 + 3.1 * Math.sqrt(k + 1) * (1 + (k % 3) * 0.08);
+  let k = 0;
+  const house = planets.find((p) => p.house);
+  if (house) { const o = starR * 2.6 + 6; const pr = outpost(root, rec, house, o, starWorld, rr); rec.extent = Math.max(rec.extent, o + pr); }
+  for (const p of planets) {
+    if (p.house) continue;
+    const orbit = starR * 2.6 + 12 + 3.1 * Math.sqrt(k + 1) * (1 + (k % 3) * 0.08);
     const pr = p.blocks ? 0.7 + 1.35 * Math.log10(p.blocks + 1) : 0.45;
     const pivot = new THREE.Object3D();
     pivot.rotation.set((rr() - 0.5) * 0.35, rr() * Math.PI * 2, (rr() - 0.5) * 0.2);
     root.add(pivot);
-    const c = p.house ? color.clone().lerp(new THREE.Color(0xffffff), 0.3) : planetColor(p.tag);
+    const c = planetColor(p.tag);
     const mat = planetMaterial(c, starWorld, (hash(p.tag) % 1000) / 1000, p.blocks ? 1 : 0.55);
     const mesh = new THREE.Mesh(new THREE.SphereGeometry(pr, 20, 14), mat);
     mesh.position.x = orbit; pivot.add(mesh);
-    if (p.house) {
-      const ring = new THREE.Mesh(new THREE.RingGeometry(pr * 1.5, pr * 2.3, 48), new THREE.MeshBasicMaterial({ color: c, side: THREE.DoubleSide, transparent: true, opacity: 0.55, blending: THREE.AdditiveBlending, depthWrite: false }));
-      ring.rotation.x = Math.PI / 2.3; mesh.add(ring);
-    }
     if (p.live && p.live.online) {
       mat.uniforms.uLive.value = 1;
-      const beacon = sprite(TEX.soft, 0x7dffea, pr * 4.5, 0.5); mesh.add(beacon);
-      animated.push((dt, t) => { beacon.material.opacity = 0.25 + 0.35 * (0.5 + 0.5 * Math.sin(t * 2.2 + k)); });
+      const b = sprite(TEX.soft, 0x7dffea, pr * 4.5, 0.5); mesh.add(b);
+      const kk = k; animated.push((dt, t) => { b.material.opacity = 0.25 + 0.35 * (0.5 + 0.5 * Math.sin(t * 2.2 + kk)); });
     }
     if (k < 36) {
       const pts = []; for (let a = 0; a <= 96; a++) pts.push(new THREE.Vector3(Math.cos((a / 96) * Math.PI * 2) * orbit, 0, Math.sin((a / 96) * Math.PI * 2) * orbit));
-      const line = new THREE.Line(new THREE.BufferGeometry().setFromPoints(pts), new THREE.LineBasicMaterial({ color: c, transparent: true, opacity: p.house ? 0.22 : 0.09, depthWrite: false }));
-      line.rotation.copy(pivot.rotation); line.rotation.y = 0; root.add(line);
-      line.quaternion.copy(pivot.quaternion);
+      const line = new THREE.Line(new THREE.BufferGeometry().setFromPoints(pts), new THREE.LineBasicMaterial({ color: c, transparent: true, opacity: 0.09, depthWrite: false }));
+      line.quaternion.copy(pivot.quaternion); root.add(line);
     }
     const speed = (0.9 / Math.sqrt(orbit)) * (0.6 + rr() * 0.5) * MOTION;
     animated.push((dt) => { pivot.rotateY(speed * dt); });
@@ -324,52 +425,33 @@ function buildRebel(s, pos, i) {
     pickables.push(mesh);
     rec.planets.push({ tag: p.tag, mesh, radius: pr });
     rec.extent = Math.max(rec.extent, orbit + pr);
-  });
+    k++;
+  }
   const hit = new THREE.Mesh(new THREE.SphereGeometry(Math.max(starR * 2.2, 10), 12, 8), new THREE.MeshBasicMaterial({ visible: false }));
   hit.userData = { kind: "system", sys: s.id }; root.add(hit); pickables.push(hit);
   const label = makeLabel(s.name); label.position.set(0, starR * 2 + 4, 0); root.add(label); labelled.push(label);
-  beacon(root, color, s.blocks, s.id);
+  beacon(root, color, starR / 0.85, s.id);
   return rec;
-}
-
-function starDestroyer() {
-  const shape = new THREE.Shape(); shape.moveTo(0, 3.2); shape.lineTo(1.3, -1.2); shape.lineTo(-1.3, -1.2); shape.closePath();
-  const g = new THREE.ExtrudeGeometry(shape, { depth: 0.32, bevelEnabled: false }); g.rotateX(-Math.PI / 2); g.center();
-  const hull = new THREE.Mesh(g, new THREE.MeshLambertMaterial({ color: 0xa9adb5, emissive: 0x111318 }));
-  const tower = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.45, 0.45), new THREE.MeshLambertMaterial({ color: 0x9ea2aa }));
-  tower.position.set(0, 0.35, -0.8); hull.add(tower);
-  const engine = sprite(TEX.soft, 0x7fb6ff, 1.6, 0.9); engine.position.set(0, 0, -1.35); hull.add(engine);
-  return hull;
 }
 
 function buildEmpire(s, pos, i) {
   const root = new THREE.Group(); root.position.copy(pos); typeGroups.stratum.add(root);
-  const R = systemScale(s.blocks) * 0.9, rr = rng(hash(s.id));
-  const ds = new THREE.Mesh(new THREE.SphereGeometry(R, 48, 32), new THREE.MeshLambertMaterial({ map: deathStarTexture(hash(s.id)), emissive: 0x2a0000 }));
+  const R = sizeFor(s.share7d) * 0.95, rr = rng(hash(s.id)), sleepy = dormant(s);
+  const ds = new THREE.Mesh(new THREE.SphereGeometry(R, 56, 36), new THREE.MeshPhongMaterial({ map: deathStarTexture(hash(s.id)), emissive: 0x220000, shininess: 12 }));
   ds.rotation.z = 0.25; root.add(ds);
-  const glow = sprite(TEX.glow, 0xff2020, R * 8, 0.55), corona = sprite(TEX.soft, 0xff1a1a, R * 14, 0.2);
+  const glow = sprite(TEX.glow, 0xff2020, R * 8, sleepy ? 0.25 : 0.55), corona = sprite(TEX.soft, 0xff1a1a, R * 14, sleepy ? 0.08 : 0.2);
   root.add(glow, corona);
   const neb = sprite(TEX.nebula, 0xb00010, R * 30, 0.1); neb.position.y = -2; root.add(neb);
-  // a scanning ring, the Empire's perimeter
   const scan = new THREE.Mesh(new THREE.RingGeometry(R * 1.7, R * 1.78, 96), new THREE.MeshBasicMaterial({ color: 0xff3030, transparent: true, opacity: 0.5, side: THREE.DoubleSide, blending: THREE.AdditiveBlending, depthWrite: false }));
   scan.rotation.x = Math.PI / 2; root.add(scan);
   animated.push((dt, t) => {
     ds.rotation.y += 0.05 * dt * MOTION;
-    const p = (t * 0.18 + i * 0.3) % 1; scan.scale.setScalar(1 + p * 2.4); scan.material.opacity = 0.5 * (1 - p);
+    const q = (t * 0.18 + i * 0.3) % 1; scan.scale.setScalar(1 + q * 2.4); scan.material.opacity = (sleepy ? 0.2 : 0.5) * (1 - q);
     corona.scale.setScalar(R * (13 + Math.sin(t * 0.7 + i) * 1.2));
   });
-  // Star Destroyers on patrol
-  const fleet = clamp(Math.round(1 + Math.log10(s.blocks + 1) * 1.6), 1, 6);
-  for (let k = 0; k < fleet; k++) {
-    const pivot = new THREE.Object3D(); pivot.rotation.set((rr() - 0.5) * 0.9, rr() * Math.PI * 2, (rr() - 0.5) * 0.6); root.add(pivot);
-    const sd = starDestroyer(); const sc = 0.9 + R * 0.06; sd.scale.setScalar(sc);
-    const orbit = R * (2.4 + k * 0.55); sd.position.set(orbit, 0, 0); sd.rotation.y = Math.PI; pivot.add(sd);
-    const sp = (0.35 / Math.sqrt(orbit)) * (rr() < 0.5 ? 1 : -1) * MOTION;
-    if (sp < 0) sd.rotation.y = 0;
-    animated.push((dt) => pivot.rotateY(sp * dt));
-  }
+  patrol(root, R, clamp(Math.round(1 + Math.sqrt(s.share7d || 0) * 0.9), 1, 6), hash(s.id) + 7);
+  if (!sleepy) tieSwarm(root, R, hash(s.id) + 11);
   const rec = { data: s, root, pos, star: ds, planets: [], starR: R, extent: R * 4.5, type: "stratum", ds };
-  // the rare gateway tags seen in an Imperial system: captured worlds
   s.planets.filter((p) => !p.house).slice(0, 12).forEach((p, k) => {
     const pivot = new THREE.Object3D(); pivot.rotation.set((rr() - 0.5) * 0.3, rr() * Math.PI * 2, 0); root.add(pivot);
     const pr = 0.6 + Math.log10(p.blocks + 1);
@@ -382,7 +464,7 @@ function buildEmpire(s, pos, i) {
   const hit = new THREE.Mesh(new THREE.SphereGeometry(R * 1.6, 12, 8), new THREE.MeshBasicMaterial({ visible: false }));
   hit.userData = { kind: "system", sys: s.id }; root.add(hit); pickables.push(hit);
   const label = makeLabel(s.name, "empire"); label.position.set(0, R * 2 + 5, 0); root.add(label); labelled.push(label);
-  beacon(root, 0xff2a2a, s.blocks, s.id);
+  beacon(root, 0xff2a2a, R / 0.95, s.id);
   return rec;
 }
 
@@ -423,6 +505,7 @@ function empireHaze(positions, systems) {
   }
 }
 function buildAll(data) {
+  MAX_SHARE = Math.max(1, ...data.systems.filter((x) => x.type !== "independent").map((x) => x.share7d || 0));
   const positions = placeSystems(data.systems);
   empireHaze(positions, data.systems);
   let ri = 0, ei = 0;
@@ -525,12 +608,15 @@ function policyRows(dl, pol, title = "Template policy") {
   kv(dl, "Coinbase", `${n(pol.outputs)} outputs avg ${pol.outputs > 5 ? "(paid in the coinbase)" : ""}`);
 }
 function fillPlanet(box, s, p) {
-  box.className = "tip " + (s.type === "stratum" ? "empire" : s.type === "independent" ? "rim" : "");
+  const outpostPlanet = p.house && s.type === "datum";
+  box.className = "tip " + (s.type === "stratum" || outpostPlanet ? "empire" : s.type === "independent" ? "rim" : "");
   box.replaceChildren();
-  box.append(el("div", "t-kind", s.type === "independent" ? "Independent world" : p.house ? "Capital world" : p.blocks ? "DATUM gateway" : "DATUM gateway · forming"));
+  box.append(el("div", "t-kind", s.type === "independent" ? "Independent world" : outpostPlanet ? "Imperial outpost · public stratum" : p.house ? "Imperial core" : p.blocks ? "DATUM gateway" : "DATUM gateway · forming"));
   box.append(el("div", "t-name", p.tag));
-  box.append(el("div", "t-sub", `${s.name} system · ${TYPE_LABEL[s.type][0]}`));
+  box.append(el("div", "t-sub", outpostPlanet ? `Inside the rebel ${s.name} system. Miners here hash on the pool's own template, not their own.` : `${s.name} system · ${TYPE_LABEL[s.type][0]}`));
   const dl = el("dl", "kv");
+  if (p.liveStratum) { sec(dl, "Live · stratum endpoint"); kv(dl, "Hashrate", fmtHash(p.liveStratum.hashrate)); kv(dl, "Miners", n(p.liveStratum.miners)); sec(dl, "Blocks"); }
+  if (outpostPlanet && !p.blocks7d && !(p.liveStratum && p.liveStratum.hashrate)) kv(dl, "Status", "no blocks through it this week");
   kv(dl, "Blocks hit", p.blocks ? `${n(p.blocks)} since the fork · ${n(p.blocks7d)} this week` : "none yet");
   if (p.last) kv(dl, "Last block", `${n(p.last.height)} · ${ago(p.last.ts)}`);
   if (p.estHashrate) kv(dl, "Est. hashrate", `${fmtHash(p.estHashrate)} (7-day, from blocks)`);
@@ -559,8 +645,17 @@ function fillSystem(box, s) {
   if (s.estHashrate) kv(dl, "Est. hashrate", fmtHash(s.estHashrate));
   if (s.type !== "independent") kv(dl, "Gateways", s.type === "stratum" ? (s.gateways ? `${s.gateways} tags seen (rare)` : "none: every template is the pool's") : n(s.gateways));
   kv(dl, "Last block", `${n(s.last.height)} · ${ago(s.last.ts)}`);
+  factionRows(dl, s);
   policyRows(dl, s.policy, s.type === "datum" ? "Template policy (all its blocks)" : "Template policy");
   box.append(dl);
+}
+function factionRows(dl, s) {
+  const f = s.faction;
+  if (!f) return;
+  sec(dl, `Allegiance test · ${f.window === "7d" ? "last 7 days" : "all blocks"} · ${n(f.blocks)} blocks`);
+  kv(dl, "DATUM + TIDES", `${f.datumTidesPct}% built by miners' gateways and paid in the coinbase`, f.datumTidesPct > 25 ? "live-on" : "live-off");
+  kv(dl, "Paid in coinbase", `${f.coinbasePaidPct}% ${f.coinbasePaidPct < 50 ? "(mostly to the pool's own wallet)" : ""}`);
+  kv(dl, "Verdict", f.datumTidesPct > 25 ? "Rebel: above the 25% line" : "Imperial: 75%+ pool-built or custodial");
 }
 let tipTarget = null;
 function showTip(obj, x, y) {
@@ -595,6 +690,7 @@ function showPanel(rec, tag) {
   if (s.estHashrate) kv(dl, "Est. hashrate", fmtHash(s.estHashrate));
   kv(dl, "First block", n(s.firstHeight));
   kv(dl, "Last block", `${n(s.last.height)} · ${ago(s.last.ts)}`);
+  factionRows(dl, s);
   policyRows(dl, s.policy);
   const list = $("panel-planets"); list.replaceChildren();
   const planets = s.type === "independent" ? [] : s.planets;
@@ -602,7 +698,7 @@ function showPanel(rec, tag) {
   $("panel-planets-h").hidden = !planets.length;
   for (const p of planets.slice(0, 250)) {
     const li = el("li"); li.tabIndex = 0;
-    const d = el("i", "d" + (p.live && p.live.online ? " on" : "")); d.style.background = "#" + (p.house ? new THREE.Color(0xffcf5c) : planetColor(p.tag)).getHexString();
+    const d = el("i", "d" + (p.live && p.live.online ? " on" : "")); d.style.background = "#" + (p.house ? new THREE.Color(0xff2a2a) : planetColor(p.tag)).getHexString();
     li.append(d, el("span", "n", p.tag), el("span", "c", p.blocks ? `${n(p.blocks)} blk` : p.live ? "forming" : "–"));
     if (p.tag === tag) li.style.background = "rgba(255,204,102,.14)";
     const go = () => { const r = systemsById.get(s.id); const pl = r && r.planets.find((x) => x.tag === p.tag); if (pl) focusSystem(s.id, p.tag); };
@@ -677,7 +773,7 @@ function renderRelay() {
   const box = $("relay"); box.replaceChildren();
   const make = () => DATA.recent.slice(0, 24).map((b) => {
     const s = el("span"); if (freshHeights.has(b.height)) s.className = "fresh";
-    const cls = b.systemType === "stratum" ? "e" : b.systemType === "independent" ? "o" : "r";
+    const cls = b.systemType === "stratum" || b.viaStratum ? "e" : b.systemType === "independent" ? "o" : "r";
     s.append(el("b", null, `#${n(b.height)}`), " forged by ", el("span", cls, b.planet ? `${b.planet} · ${b.system}` : b.system), ` · ${ago(b.ts)}`);
     return s;
   });
@@ -815,6 +911,7 @@ addEventListener("resize", () => {
     where(sys, tag) { const r = systemsById.get(sys); if (!r) return null; const pl = tag && r.planets.find((x) => x.tag === tag); const w = new THREE.Vector3(); (pl ? pl.mesh : r.star || r.planets[0].mesh).getWorldPosition(w); w.project(camera); return [Math.round((w.x + 1) / 2 * innerWidth), Math.round((1 - w.y) / 2 * innerHeight)]; },
     ids: () => [...systemsById.keys()],
     follow: null, // [sys, tag]: keep the pointer on it (hover test)
+    zoom(d, dy = 0) { const t = controls.target.clone(); t.y += dy; flyTo(t, d); },
   };
   $("loading").classList.add("done"); setTimeout(() => $("loading").remove(), 900);
   if (!document.getElementById("crawl")) introFlight();

@@ -38,11 +38,12 @@ export async function refresh(env) {
   }
   for (const k of [...byHeight.keys()]) if (k > tip) byHeight.delete(k); // orphaned above the new tip
   const recs = [...byHeight.values()].sort((a, b) => a.h - b.h);
-  const [gw, hr] = await Promise.all([
+  const [gw, hr, pool] = await Promise.all([
     getJSON(`${POOL}/api/gateways`).catch(() => null),
     getJSON(`${EXPLORER}/api/v1/mining/hashrate/3d`).catch(() => null),
+    getJSON(`${POOL}/api/pool?h=0`).catch(() => null),
   ]);
-  const galaxy = buildGalaxy(recs, { lazarusGateways: (gw && gw.gateways) || [], networkHashrate: hr && hr.currentHashrate ? Math.round(hr.currentHashrate) : null });
+  const galaxy = buildGalaxy(recs, { lazarusGateways: (gw && gw.gateways) || [], lazarusPool: pool, networkHashrate: hr && hr.currentHashrate ? Math.round(hr.currentHashrate) : null });
   await env.GALAXY.put("blocks", JSON.stringify(recs));
   await env.GALAXY.put("galaxy", JSON.stringify(galaxy));
   return { tip, blocks: recs.length, added: recs.length - stored.length, pages };

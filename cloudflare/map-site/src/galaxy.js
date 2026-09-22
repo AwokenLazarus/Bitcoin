@@ -17,8 +17,14 @@ export const FORK_HEIGHT = 961640;
 const GENERIC_PRIMARY = new Set(["", "solo", "datum gateway", "datum", "gateway", "datum on umbrel", "knots", "8-30 nypost deride and conquer", "unknown"]);
 const DEFAULT_SECONDARY = new Set(["", "datum user", "8-30 nypost deride and conquer", "unknown", "(no tag)"]);
 const isDefaultTag = (t) => DEFAULT_SECONDARY.has(String(t || "").trim().toLowerCase());
-// Known businesses whose blocks are pool-built whatever the tags say.
-const TYPE_OVERRIDE = { AlphaPool: "stratum", "Mining-Dutch": "stratum", "Pow.re": "stratum" };
+// Faction rule (Mike, 2026-09-22). A Rebel pool must (1) pay miners in the coinbase (TIDES,
+// non-custodial) and (2) be mostly DATUM-driven. A block counts for the Rebellion when a DATUM
+// gateway built it (it carries an operator's gateway tag) AND its coinbase pays more than two
+// outputs. If 75% or more of a pool's blocks do not, it is Imperial, whatever else it offers.
+// Blocks stand in for hashrate: the last 7 days, or every block since the fork for a pool that
+// found fewer than 10 this week.
+export const REBEL_MIN_SHARE = 0.25;
+const WINDOW_MIN_BLOCKS = 10;
 
 // Tag variants of one pool, folded to one name. Order matters: first match wins.
 const POOL_ALIASES = [
@@ -27,7 +33,7 @@ const POOL_ALIASES = [
   [/^omegapool/i, "Omega Pool"],
   [/^rabid pool/i, "Rabid Pool"],
   [/^xbtpool/i, "xbtpool"],
-  [/^bitcoin xor$|xorpool/i, "Bitcoin Xor"],
+  [/^bitcoin ?xor|xorpool/i, "Bitcoin Xor"],
   [/alphapool|^datum-ap$/i, "AlphaPool"],
   [/^lazarus/i, "Lazarus"],
   [/^convoy/i, "CONVOY"],
@@ -156,7 +162,7 @@ function policy(rows) {
  * Build the galaxy from block records (any order) plus optional live Lazarus gateway sessions.
  * `now` is seconds; blocks newer than now - 7 days count toward the weekly share.
  */
-export function buildGalaxy(records, { now = Math.floor(Date.now() / 1000), lazarusGateways = [], networkHashrate = null } = {}) {
+export function buildGalaxy(records, { now = Math.floor(Date.now() / 1000), lazarusGateways = [], lazarusPool = null, networkHashrate = null } = {}) {
   const recs = records.filter((r) => r && r.h >= FORK_HEIGHT).sort((a, b) => a.h - b.h);
   const weekAgo = now - 7 * 86400;
   const week = recs.filter((r) => r.t >= weekAgo).length || 1;
@@ -186,13 +192,18 @@ export function buildGalaxy(records, { now = Math.floor(Date.now() / 1000), laza
       third.push(r);
       if (!isDefaultTag(t)) named.add(t);
     }
+    const recent = g.rows.filter((r) => r.t >= weekAgo);
+    const win = recent.length >= WINDOW_MIN_BLOCKS ? recent : g.rows;
+    const rebelBlocks = win.filter((r) => r.o > 2 && planetOf(g.name, r) != null).length;
+    const paidBlocks = win.filter((r) => r.o > 2).length;
+    const faction = { window: win === recent ? "7d" : "all", blocks: win.length,
+      datumTidesPct: Math.round((1000 * rebelBlocks) / win.length) / 10, coinbasePaidPct: Math.round((1000 * paidBlocks) / win.length) / 10 };
     let type;
     if (g.generic) type = "independent";
-    else if (TYPE_OVERRIDE[g.name]) type = TYPE_OVERRIDE[g.name];
-    else if (POOL_LINKS[g.name]) type = named.size >= 2 || third.length >= 0.1 * g.rows.length ? "datum" : "stratum";
-    else if (medOut <= 2 && named.size >= 3) type = "cluster";            // software default: many solo miners
-    else if (medOut <= 2) type = "independent";                           // one operator, own node
-    else type = named.size >= 1 ? "datum" : "stratum";                    // a pool splitting its coinbase
+    else if (!POOL_LINKS[g.name] && medOut <= 2 && named.size >= 3) type = "cluster";   // software default: many solo miners
+    else if (!POOL_LINKS[g.name] && medOut <= 2) type = "independent";                  // one operator, own node
+    else type = rebelBlocks > REBEL_MIN_SHARE * win.length ? "datum" : "stratum";
+    g.faction = faction;
     if (type === "cluster") {
       // Each operator under a software default primary is their own world.
       for (const r of g.rows) {
@@ -206,7 +217,7 @@ export function buildGalaxy(records, { now = Math.floor(Date.now() / 1000), laza
     }
     const existing = systems.find((x) => x.key === g.key);
     if (existing) existing.rows.push(...g.rows);
-    else systems.push({ key: g.key, name: g.name, type, rows: g.rows });
+    else systems.push({ key: g.key, name: g.name, type, rows: g.rows, faction: g.faction });
   }
 
   const out = [];
@@ -237,7 +248,7 @@ export function buildGalaxy(records, { now = Math.floor(Date.now() / 1000), laza
       blocks: s.rows.length, blocks7d: blocks7, share7d: Math.round((10000 * blocks7) / week) / 100,
       estHashrate: networkHashrate ? Math.round((networkHashrate * blocks7) / week) : null,
       firstHeight: s.rows[0].h, last: { height: last.h, ts: last.t, id: last.id },
-      gateways: plist.filter((p) => !p.house).length, policy: policy(s.rows), planets: plist,
+      gateways: plist.filter((p) => !p.house).length, policy: policy(s.rows), planets: plist, faction: s.type === "independent" ? null : s.faction || null,
     });
   }
   const sysOf = new Map();
@@ -287,10 +298,20 @@ export function buildGalaxy(records, { now = Math.floor(Date.now() / 1000), laza
     }
     laz.gateways = laz.planets.filter((p) => !p.house).length;
   }
+  // Lazarus reports its public stratum live: hashrate and miners on the Imperial outpost.
+  if (laz && lazarusPool) {
+    const house = laz.planets.find((p) => p.house);
+    if (house) house.liveStratum = { hashrate: Math.round(Number(lazarusPool.stratum_hr_ghs || 0) * 1e9), miners: Number(lazarusPool.stratum_hr_miners) || 0 };
+  }
 
   out.sort((a, b) => b.blocks - a.blocks);
-  const recent = recs.slice(-40).reverse().map((r) => { const sy = sysOf.get(r.h); const t = sy && sy.type !== "independent" ? planetOf(sy.name, r) : null;
-    return { height: r.h, ts: r.t, id: r.id, system: sy ? sy.name : "?", systemType: sy ? sy.type : null, planet: t }; });
+  const recent = recs.slice(-40).reverse().map((r) => {
+    const sy = sysOf.get(r.h); let t = sy && sy.type !== "independent" ? planetOf(sy.name, r) : null;
+    // a DATUM pool's own blocks came through its public stratum: its Imperial outpost
+    const viaStratum = !!(sy && sy.type === "datum" && t == null);
+    if (viaStratum) t = `${sy.name} public stratum`;
+    return { height: r.h, ts: r.t, id: r.id, system: sy ? sy.name : "?", systemType: sy ? sy.type : null, planet: t, viaStratum };
+  });
   const tip = recs.length ? recs[recs.length - 1] : null;
   return {
     asOf: now, tip: tip && { height: tip.h, ts: tip.t, id: tip.id }, forkHeight: FORK_HEIGHT,

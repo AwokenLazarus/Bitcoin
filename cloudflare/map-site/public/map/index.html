@@ -14,7 +14,7 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Antonio:wght@400;600;700&family=Orbitron:wght@500;700;900&family=Share+Tech+Mono&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="./style.css?v=1">
+<link rel="stylesheet" href="./style.css?v=2">
 <script type="importmap">
 { "imports": {
     "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js",
@@ -33,8 +33,8 @@
     <p class="crawl-ep">EPISODE XBT</p>
     <h1 class="crawl-title">THE BLAKE2B AWAKENS</h1>
     <p>It is a period of civil war. On the thirtieth day of August the chain broke from SHA-256 and was reforged in BLAKE2b.</p>
-    <p>In the Core Worlds, the stratum pools of the GALACTIC EMPIRE still build every block template themselves. Their hashers mine blind, never seeing the blocks they forge.</p>
-    <p>Across the spiral arms, the REBELLION runs DATUM: every gateway a free world that builds its own template and answers only to its own node.</p>
+    <p>In the Core Worlds, the pools of the GALACTIC EMPIRE build their miners' templates and keep the rewards in their own vaults. Their hashers mine blind, never seeing the blocks they forge.</p>
+    <p>Across the spiral arms, the REBELLION runs DATUM and pays every miner in the coinbase itself: each gateway a free world that builds its own template and answers only to its own node.</p>
     <p>Beyond them, in the OUTER RIM, lone miners run their own nodes and claim whole blocks for themselves....</p>
     <p>Every system is a pool. Every planet is a gateway. Every flash of light, a block.</p>
   </div></div>
@@ -61,8 +61,8 @@
 
 <!-- Legend / filters -->
 <aside class="legend" aria-label="Legend">
-  <button type="button" class="leg on" data-type="datum"><i class="dot rebel"></i><span><b>Rebel Alliance</b><em>DATUM pools: miners build templates</em></span></button>
-  <button type="button" class="leg on" data-type="stratum"><i class="dot empire"></i><span><b>Galactic Empire</b><em>Stratum only: the pool builds every block</em></span></button>
+  <button type="button" class="leg on" data-type="datum"><i class="dot rebel"></i><span><b>Rebel Alliance</b><em>TIDES in the coinbase, mostly DATUM</em></span></button>
+  <button type="button" class="leg on" data-type="stratum"><i class="dot empire"></i><span><b>Galactic Empire</b><em>Custodial or 75%+ pool-built</em></span></button>
   <button type="button" class="leg on" data-type="independent"><i class="dot rim"></i><span><b>Outer Rim</b><em>Solo miners on their own node</em></span></button>
 </aside>
 
@@ -102,6 +102,6 @@
 <div id="error" class="error" hidden></div>
 
 <noscript><p class="noscript">This map needs JavaScript and WebGL. The same data is at <a href="/map/data.json">/map/data.json</a>.</p></noscript>
-<script type="module" src="./app.js?v=1"></script>
+<script type="module" src="./app.js?v=2"></script>
 </body>
 </html>
