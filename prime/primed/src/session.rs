@@ -28,6 +28,7 @@ use crate::address::{self};
 use crate::config::Config;
 use crate::node;
 use crate::state::{now, ClientInfo, JobCheck, Seen, Shared};
+use crate::validity::{self, Fault, ParentVerdict};
 
 /// `gateway_key` is the gateway's whole identity key in hex, so a configured full key is
 /// matched in full.
@@ -87,6 +88,17 @@ const OVER_RATE_COST: usize = 10;
 /// How often one session may have the node asked for its tip because its work is ahead of
 /// ours. A real gateway is ahead once per block, for a moment.
 const AHEAD_REFRESH_EVERY: Duration = Duration::from_secs(1);
+/// How often a gateway's template is checked with our node (`validity.rs`), and how often once
+/// it has been found invalid or seen building on a block our node rejects: the second is how
+/// soon a gateway that fixes its node is credited again.
+const TEMPLATE_CHECK_EVERY: Duration = Duration::from_secs(600);
+const TEMPLATE_RECHECK_EVERY: Duration = Duration::from_secs(120);
+/// The first check waits this long after connect, so a reconnect storm is not a check storm.
+const TEMPLATE_CHECK_FIRST: Duration = Duration::from_secs(30);
+/// A check whose transactions have not arrived by then is given up (not every gateway answers).
+const TEMPLATE_CHECK_TTL: Duration = Duration::from_secs(120);
+/// How often one session may repeat that its work is being refused as dead.
+const DEAD_WORK_WARN_EVERY: Duration = Duration::from_secs(60);
 
 #[derive(Debug, thiserror::Error)]
 pub enum SessionError {
@@ -275,6 +287,14 @@ struct PendingBlock {
     at: Instant,
 }
 
+/// A share kept to rebuild its job's block once the gateway sends the transactions, so our
+/// node can say whether the template is valid; see `Session::maybe_check_template`.
+struct TemplateCheck {
+    share: VerifiedShare,
+    submit: PowSubmit,
+    at: Instant,
+}
+
 struct Session {
     shared: Arc<Shared>,
     id: u64,
@@ -345,6 +365,15 @@ struct Session {
     coinbaser_send_at: Option<tokio::time::Instant>,
     /// This session's row for the clients table, until its first frame earns it a place there.
     row: Option<ClientInfo>,
+    /// The template check waiting on the gateway's transactions, by job id.
+    template_check: Option<(u8, TemplateCheck)>,
+    template_check_due: Instant,
+    /// When a template check last asked for transactions; the reply may be a full-size frame.
+    template_check_asked: Option<Instant>,
+    /// This gateway has built on a block our node rejected or never saw: its node is likely on
+    /// the old rules, so its template is checked more often.
+    suspect: bool,
+    dead_work_warned: Option<Instant>,
 }
 
 /// Which of the two gateway-side faults produced a pool-only coinbase, read off the share rather
@@ -492,6 +521,11 @@ pub async fn run(shared: Arc<Shared>, mut stream: TcpStream, remote: SocketAddr)
         },
         pending_coinbaser: None,
         coinbaser_send_at: None,
+        template_check: None,
+        template_check_due: Instant::now() + TEMPLATE_CHECK_FIRST,
+        template_check_asked: None,
+        suspect: false,
+        dead_work_warned: None,
         row: Some(row),
     };
     s.serve().await
@@ -564,7 +598,8 @@ impl Session {
                                 // full size while a found block's transactions are owed, and
                                 // for a while after: a slow reply must not cost the connection
                                 let block_about = !self.pending_blocks.is_empty()
-                                    || self.candidate_at.is_some_and(|t| t.elapsed() < BLOCK_REPLY_WINDOW);
+                                    || self.candidate_at.is_some_and(|t| t.elapsed() < BLOCK_REPLY_WINDOW)
+                                    || self.template_check_asked.is_some_and(|t| t.elapsed() < TEMPLATE_CHECK_TTL);
                                 let cap = if block_about { MAX_CMD_LEN } else { MAX_IDLE_FRAME };
                                 if h.len as usize > cap {
                                     return Err(SessionError::Bad("frame too large"));
@@ -1091,6 +1126,7 @@ impl Session {
         // taken on a gateway's word is a *block*: see `held_to_chain` below.
         let tip = self.shared.tip_snapshot();
         let held_to_chain = tip.is_some();
+        let mut chain_check = None;
         if let Some(mut tip) = tip {
             let grace = Duration::from_secs(u64::from(self.shared.cfg.stale_grace_secs));
             let mut check = tip.check_job(&prev_hash, height, nbits, grace);
@@ -1162,6 +1198,15 @@ impl Session {
             if let Some(code) = code {
                 return self.reject(&s, code).await;
             }
+            chain_check = Some(check);
+        }
+        // Taken above as possibly the winning side of a race; our node says whether that block
+        // can be one. Work on a block it rejected, or has not seen in a while, can never pay.
+        if matches!(chain_check, Some(JobCheck::OtherBranch | JobCheck::AheadByOne)) {
+            let verdict = validity::parent_verdict(&self.shared, &prev_hash).await;
+            if verdict != ParentVerdict::Take {
+                return self.refuse_dead_parent(&s, &prev_hash, height, verdict).await;
+            }
         }
 
         let issued_outputs = self.issued_for(coinbaser_id, &prev_hash, height).map(|c| c.outputs.clone());
@@ -1202,6 +1247,14 @@ impl Session {
                     v.height
                 );
                 return self.reject(&s, mining::REJECT_OTHER).await;
+            }
+        }
+
+        // A gateway whose template our node found invalid earns nothing until one passes. The
+        // pool's own gateway builds on our node, so its templates are the node's own.
+        if !self.is_house_stratum() {
+            if let Some(fault) = self.shared.faults.get(&self.gateway_key_hex()) {
+                return self.refuse_faulted(s, v, fault, chain_check, prev_hash, identity, held_to_chain).await;
             }
         }
 
@@ -1307,6 +1360,7 @@ impl Session {
             });
         }
         self.send_mining(&mining::share_receipt(status, 0, s.nonce32, s.target_pot, s.job_id), false).await?;
+        self.maybe_check_template(chain_check, &prev_hash, &s, &v).await?;
 
         if !v.target_committed {
             self.note_uncommitted_share();
@@ -1348,6 +1402,14 @@ impl Session {
     }
 
     async fn reject(&mut self, s: &PowSubmit, code: u16) -> Result<(), SessionError> {
+        self.refuse(s, code).await?;
+        self.note_reject()
+    }
+
+    /// Answer a share with a reject that is about the work, not the message: counted like any
+    /// reject but not against the flood limit. A gateway on a dead chain sends nothing else until
+    /// its node moves, and hanging up on it would only stop us noticing when it does.
+    async fn refuse(&mut self, s: &PowSubmit, code: u16) -> Result<(), SessionError> {
         let name = mining::reject_name(code);
         log::debug!("[{}] reject job={} user={:?} pot={}: {name}", self.id, s.job_id, s.username, s.target_pot);
         self.shared.totals.add(&self.shared.totals.rejected, 1);
@@ -1355,9 +1417,136 @@ impl Session {
             c.rejected += 1;
             c.last_reject = Some(name);
         });
-        self.send_mining(&mining::share_receipt(mining::REJECTED, code, s.nonce32, s.target_pot, s.job_id), false)
-            .await?;
-        self.note_reject()
+        self.send_mining(&mining::share_receipt(mining::REJECTED, code, s.nonce32, s.target_pot, s.job_id), false).await
+    }
+
+    async fn refuse_dead_parent(
+        &mut self,
+        s: &PowSubmit,
+        prev: &[u8; 32],
+        height: u32,
+        verdict: ParentVerdict,
+    ) -> Result<(), SessionError> {
+        // Its node follows a chain ours rejects: check its template as soon as it is back on ours.
+        if !self.suspect {
+            self.suspect = true;
+            self.template_check_due = Instant::now();
+        }
+        self.shared.totals.add(&self.shared.totals.dead_parent_shares, 1);
+        self.shared.client_update(self.id, |c| c.dead_parent_shares += 1);
+        if self.dead_work_warned.is_none_or(|t| t.elapsed() > DEAD_WORK_WARN_EVERY) {
+            self.dead_work_warned = Some(Instant::now());
+            let mut be = *prev;
+            be.reverse();
+            log::warn!(
+                "[{}] {} {} is working at height {height} on {}: {}. Nothing built on it can be a block, so its shares are refused, not credited. Its node has most likely not upgraded to the long coinbase maturity rules (Bitcoin Knots 29.4.2, from block 973,440).",
+                self.id,
+                self.gateway_hex,
+                self.hello.user_agent,
+                hex::encode(be),
+                verdict.why(),
+            );
+        }
+        self.refuse(s, mining::REJECT_STALE_BLOCK).await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn refuse_faulted(
+        &mut self,
+        s: PowSubmit,
+        v: VerifiedShare,
+        fault: Fault,
+        chain_check: Option<JobCheck>,
+        prev_hash: [u8; 32],
+        identity: String,
+        held_to_chain: bool,
+    ) -> Result<(), SessionError> {
+        self.shared.totals.add(&self.shared.totals.faulted_shares, 1);
+        let label = format!("{} at {}", fault.reason, fault.height);
+        self.shared.client_update(self.id, |c| {
+            c.faulted_shares += 1;
+            c.template_fault = Some(label);
+        });
+        if self.dead_work_warned.is_none_or(|t| t.elapsed() > DEAD_WORK_WARN_EVERY) {
+            self.dead_work_warned = Some(Instant::now());
+            log::warn!(
+                "[{}] {} {}: refusing its shares, not crediting them: our node found its template invalid at height {} ({}, from a {}). They are credited again once a template of its passes (checked every {}s).",
+                self.id,
+                self.gateway_hex,
+                self.hello.user_agent,
+                fault.height,
+                fault.reason,
+                fault.found_by,
+                TEMPLATE_RECHECK_EVERY.as_secs(),
+            );
+        }
+        self.refuse(&s, mining::REJECT_OTHER).await?;
+        self.maybe_check_template(chain_check, &prev_hash, &s, &v).await?;
+        // The fault may be stale (the gateway fixed its node since): a block it finds is still
+        // a block, and if our node takes it, it pays the window like any other.
+        if v.is_block_candidate && held_to_chain {
+            self.on_block_candidate(s, v, identity).await?;
+        }
+        Ok(())
+    }
+
+    /// Ask the gateway for this job's transactions, now and then, so our node can check the
+    /// template the work is on (`check_template`). Only for a job with transactions, built on
+    /// our node's tip: a proposal on any other parent is inconclusive, and one without
+    /// transactions proves nothing about the gateway's mempool.
+    async fn maybe_check_template(
+        &mut self,
+        chain_check: Option<JobCheck>,
+        prev_hash: &[u8; 32],
+        s: &PowSubmit,
+        v: &VerifiedShare,
+    ) -> Result<(), SessionError> {
+        if self.is_house_stratum() || chain_check != Some(JobCheck::Current) || v.commitment.txcount <= 1 {
+            return Ok(());
+        }
+        let now = Instant::now();
+        if now < self.template_check_due
+            || self.template_check.as_ref().is_some_and(|(_, c)| c.at.elapsed() < TEMPLATE_CHECK_TTL)
+            || self.pending_blocks.contains_key(&s.job_id)
+            || self.shared.tip_snapshot().and_then(|t| t.hash_le).as_ref() != Some(prev_hash)
+        {
+            return Ok(());
+        }
+        let faulted = self.shared.faults.get(&self.gateway_key_hex()).is_some();
+        self.template_check_due =
+            now + if faulted || self.suspect { TEMPLATE_RECHECK_EVERY } else { TEMPLATE_CHECK_EVERY };
+        self.template_check = Some((s.job_id, TemplateCheck { share: v.clone(), submit: s.clone(), at: now }));
+        self.template_check_asked = Some(now);
+        self.send_mining(&mining::request_full_block(s.job_id), false).await
+    }
+
+    /// Have our node validate the block this share's job would make (`getblocktemplate` in
+    /// proposal mode: every consensus check but the proof of work). A template that fails for
+    /// its transactions faults the gateway; one that passes clears it.
+    fn check_template(&self, c: TemplateCheck, txns: &[Vec<u8>]) {
+        let block = verify::assemble_block(&c.share, &c.submit, txns);
+        let hex_block = hex::encode(&block);
+        let shared = self.shared.clone();
+        let (id, gw, key, height) = (self.id, self.gateway_hex.clone(), self.gateway_key_hex(), c.share.height);
+        tokio::spawn(async move {
+            shared.totals.add(&shared.totals.template_checks, 1);
+            let verdict = shared
+                .rpc
+                .call("getblocktemplate", serde_json::json!([{ "mode": "proposal", "data": hex_block }]))
+                .await;
+            match verdict {
+                Ok(serde_json::Value::Null) => {
+                    log::debug!("[{id}] {gw}: template at height {height} passes");
+                    clear_fault(&shared, id, &gw, &key, height, "passes our node's checks");
+                }
+                Ok(serde_json::Value::String(reason)) if validity::template_fault(&reason) => {
+                    shared.totals.add(&shared.totals.template_checks_failed, 1);
+                    mark_faulted(&shared, id, &gw, &key, &reason, height, "template check");
+                }
+                Ok(other) => log::debug!("[{id}] {gw}: template check at height {height} inconclusive: {other}"),
+                Err(e) => log::debug!("[{id}] {gw}: template check at height {height} could not run: {e}"),
+            }
+        });
     }
 
     /// Note an accepted share whose coinbase paid only the pool script.
@@ -1483,9 +1672,11 @@ impl Session {
         let live = if issued.is_none() && matches!(v.coinbase_kind, CoinbaseKind::PoolOnly) {
             let ledger = self.shared.ledger.lock().unwrap();
             let net = self.shared.network;
-            Some(ledger.window.split(v.coinbase_value, &self.shared.split_params, now() as u32, |i| {
-                address::to_script(i, net)
-            }))
+            Some(
+                ledger
+                    .window
+                    .split(v.coinbase_value, &self.shared.split_params, now() as u32, |i| address::to_script(i, net)),
+            )
         } else {
             None
         };
@@ -1575,20 +1766,40 @@ impl Session {
 
     async fn on_validation(&mut self, v: JobValidationReply) -> Result<(), SessionError> {
         let job = v.job();
-        let Some(pending) = self.pending_blocks.remove(&job) else {
+        let pending = self.pending_blocks.remove(&job);
+        let check = match self.template_check.take() {
+            Some((j, c)) if j == job => Some(c),
+            other => {
+                self.template_check = other;
+                None
+            }
+        };
+        if pending.is_none() && check.is_none() {
             log::debug!("[{}] unsolicited validation reply for job {job}", self.id);
             return Ok(());
-        };
+        }
         let (status, txns) = match v {
             JobValidationReply::FullBlock { status, txns, .. } => (status, txns),
             JobValidationReply::Transactions { status, txns, .. } => (status, txns),
             JobValidationReply::ShortIds { .. } => {
-                self.pending_blocks.insert(job, pending);
+                if let Some(p) = pending {
+                    self.pending_blocks.insert(job, p);
+                }
+                if let Some(c) = check {
+                    self.template_check = Some((job, c));
+                }
                 return Ok(());
             }
         };
         if status != ValidationStatus::Ok {
-            for p in &pending {
+            if check.is_some() {
+                log::debug!(
+                    "[{}] {} could not send job {job}'s transactions for a template check: {status:?}",
+                    self.id,
+                    self.gateway_hex
+                );
+            }
+            for p in pending.iter().flatten() {
                 log::warn!(
                     "[{}] gateway could not supply transactions for block {}: {:?}",
                     self.id,
@@ -1600,8 +1811,11 @@ impl Session {
             return Ok(());
         }
         // one transaction set per job; every candidate solved on this job assembles from it
-        for p in pending {
+        for p in pending.into_iter().flatten() {
             self.submit_candidate(p, &txns);
+        }
+        if let Some(c) = check {
+            self.check_template(c, &txns);
         }
         Ok(())
     }
@@ -1622,6 +1836,8 @@ impl Session {
         let shared = self.shared.clone();
         let hash_hex = pending.hash_hex;
         let id = self.id;
+        let (gw, key, house) = (self.gateway_hex.clone(), self.gateway_key_hex(), self.is_house_stratum());
+        let share_height = pending.share.height;
         tokio::spawn(async move {
             let outcome = match shared.rpc.submitblock(&hex_block).await {
                 Ok(serde_json::Value::Null) => "accepted".to_string(),
@@ -1632,6 +1848,13 @@ impl Session {
             log::info!("[{id}] submitblock {hash_hex} ({} bytes): {outcome}", block.len());
             shared.totals.add(&shared.totals.blocks_submitted, 1);
             let invalid = node::says_invalid(&outcome);
+            if !house {
+                if validity::template_fault(&outcome) {
+                    mark_faulted(&shared, id, &gw, &key, &outcome, share_height, "found block");
+                } else if outcome == "accepted" {
+                    clear_fault(&shared, id, &gw, &key, share_height, "found a block our node accepted");
+                }
+            }
             let height = shared.update_block(&hash_hex, |r| r.submit = outcome).map(|r| r.height);
             if let (true, Some(height)) = (invalid, height) {
                 // The node has looked at the block and said no. There is nothing to wait for:
@@ -1640,6 +1863,28 @@ impl Session {
             }
         });
     }
+}
+
+/// Stop crediting a gateway whose template our node found invalid; see `validity::Faults`.
+fn mark_faulted(shared: &Shared, id: u64, gw: &str, key: &str, reason: &str, height: u32, found_by: &'static str) {
+    if shared.faults.set(key, reason, height, found_by) {
+        log::warn!(
+            "[{id}] {gw}: our node finds its template invalid at height {height} ({reason}, from a {found_by}). Its node builds blocks the network rejects, most likely because it has not upgraded to the long coinbase maturity rules (Bitcoin Knots 29.4.2, from block 973,440). Its shares are refused, not credited, until a template of its passes."
+        );
+    }
+    let label = format!("{reason} at {height}");
+    shared.client_update(id, |c| c.template_fault = Some(label));
+}
+
+fn clear_fault(shared: &Shared, id: u64, gw: &str, key: &str, height: u32, why: &str) {
+    if let Some(f) = shared.faults.clear(key) {
+        log::info!(
+            "[{id}] {gw}: its template at height {height} {why}; crediting its work again (refused since height {} for {})",
+            f.height,
+            f.reason
+        );
+    }
+    shared.client_update(id, |c| c.template_fault = None);
 }
 
 fn scale(sats: u64, value: u64, issued_value: u64) -> u64 {
