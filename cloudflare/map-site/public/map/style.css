@@ -170,3 +170,7 @@ button { font: inherit; color: inherit; }
 /* ---------- jump to lightspeed ---------- */
 .warp-fx { position: fixed; inset: 0; z-index: 4; pointer-events: none; background: repeating-conic-gradient(from 0deg at 50% 50%, rgba(200, 230, 255, 0) 0deg 2.2deg, rgba(200, 230, 255, .55) 2.4deg 2.6deg, rgba(200, 230, 255, 0) 2.8deg 6deg); -webkit-mask-image: radial-gradient(circle at 50% 50%, transparent 0 12%, #000 55%); mask-image: radial-gradient(circle at 50% 50%, transparent 0 12%, #000 55%); animation: warp .85s ease-out forwards; }
 @keyframes warp { 0% { opacity: 0; transform: scale(.4); } 25% { opacity: .9; } 100% { opacity: 0; transform: scale(2.4); } }
+
+/* back to the hub: the map is one page of the site, not an island */
+.hud-home { display: inline-block; margin-bottom: .15rem; font: 600 .62rem/1 var(--lcars-font, inherit); letter-spacing: .18em; text-transform: uppercase; color: #ffcc66; opacity: .75; text-decoration: none; }
+.hud-home:hover { opacity: 1; }
