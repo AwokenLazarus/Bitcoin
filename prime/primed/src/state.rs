@@ -394,6 +394,14 @@ impl Connections {
     }
 }
 
+/// Why a gateway is being refused, and until when (unix seconds).
+#[derive(Clone, Debug)]
+pub struct Quarantine {
+    pub until: u64,
+    pub reason: String,
+    pub height: u32,
+}
+
 pub struct Shared {
     pub cfg: Config,
     pub pool: Identity,
@@ -404,6 +412,10 @@ pub struct Shared {
     pub blocks: Mutex<Vec<BlockRecord>>,
     pub block_log: BlockLog,
     pub clients: Mutex<HashMap<u64, ClientInfo>>,
+    /// Gateway identity key (full hex) -> when its refusal lapses, and why. Kept in memory:
+    /// a Prime restart gives a gateway another chance, which is the right way round — the
+    /// operator may have upgraded in between, and one lost block buys the next 24 hours.
+    pub quarantine: Mutex<HashMap<String, Quarantine>>,
     pub seen: Mutex<SeenShares>,
     pub connections: Mutex<Connections>,
     pub tip_tx: watch::Sender<Option<Tip>>,
@@ -490,6 +502,40 @@ impl Shared {
 
     pub fn gateway_scripts_path(&self) -> std::path::PathBuf {
         self.cfg.data_dir.join("gateway-scripts.json")
+    }
+
+    /// The live refusal for this gateway, if any. Expired entries are dropped as they are read.
+    pub fn quarantined(&self, key_hex: &str) -> Option<Quarantine> {
+        if self.cfg.blocked_gateways.iter().any(|k| k.eq_ignore_ascii_case(key_hex)) {
+            return Some(Quarantine {
+                until: u64::MAX,
+                reason: "listed in blocked-gateways".into(),
+                height: 0,
+            });
+        }
+        let mut q = self.quarantine.lock().unwrap_or_else(|e| e.into_inner());
+        match q.get(key_hex) {
+            Some(entry) if entry.until > now() => Some(entry.clone()),
+            Some(_) => {
+                q.remove(key_hex);
+                None
+            }
+            None => None,
+        }
+    }
+
+    /// Refuse this gateway for `quarantine_hours`. Returns false when the feature is off.
+    pub fn quarantine_gateway(&self, key_hex: &str, height: u32, reason: &str) -> bool {
+        let hours = self.cfg.quarantine_hours;
+        if hours == 0 {
+            return false;
+        }
+        let entry = Quarantine { until: now() + hours * 3600, reason: reason.to_string(), height };
+        self.quarantine
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(key_hex.to_ascii_lowercase(), entry);
+        true
     }
 
     pub fn lookup_gateway_script(&self, key_hex: &str) -> Option<Vec<u8>> {

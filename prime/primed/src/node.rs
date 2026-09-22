@@ -275,6 +275,20 @@ fn settle_confirmed(shared: &Shared, hash: &str) {
 /// header was fine. Treating those as an orphan would hand back carry that a real block paid
 /// out. `duplicate` and `inconclusive` mean the node already has it, and `rejected: ...` is a
 /// failure to ask. Anything not listed here waits for `confirm_blocks`, as it always did.
+/// Whether a `submitblock` verdict means the gateway's node built a template its own chain
+/// would not accept — an outdated node, not a race or a Prime assembly slip.
+///
+/// Kept to rules a current node could not have broken by accident. `bad-txns-premature-spend-of-
+/// coinbase` is the Knots #419 long coinbase maturity: a node that knows the rule will not put
+/// such a spend in a template, so seeing one says the gateway is behind. The block is lost to
+/// everyone in the window, not only to the gateway that found it, which is why the gateway is
+/// then refused rather than warned.
+pub fn says_outdated_node(outcome: &str) -> bool {
+    // The node answers with the reject reason alone, but a build that appends its detail
+    // ("…, tried to spend coinbase at depth 102") must read the same.
+    outcome.trim().starts_with("bad-txns-premature-spend-of-coinbase")
+}
+
 pub fn says_invalid(outcome: &str) -> bool {
     matches!(
         outcome,
@@ -374,6 +388,39 @@ mod tests {
             "pending",
         ] {
             assert!(!says_invalid(not_proof), "{not_proof}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod outdated_tests {
+    use super::says_outdated_node;
+
+    #[test]
+    fn premature_coinbase_spend_indicts_the_gateways_node() {
+        // Knots #419: only a node that does not know the rule builds this.
+        assert!(says_outdated_node("bad-txns-premature-spend-of-coinbase"));
+        assert!(says_outdated_node("bad-txns-premature-spend-of-coinbase, tried to spend coinbase at depth 102"));
+        assert!(says_outdated_node("  bad-txns-premature-spend-of-coinbase  "));
+    }
+
+    #[test]
+    fn races_and_prime_side_slips_do_not() {
+        // A tip that moved, a list Prime assembled, or a failure to ask: none of these say the
+        // gateway's node is behind, and refusing an honest gateway is the worse mistake.
+        for o in [
+            "accepted",
+            "duplicate",
+            "inconclusive",
+            "prev-blk-not-found",
+            "bad-prevblk",
+            "bad-txnmrklroot",
+            "bad-txns-inputs-missingorspent",
+            "high-hash",
+            "rejected: connection refused",
+            "",
+        ] {
+            assert!(!says_outdated_node(o), "{o:?} must not quarantine a gateway");
         }
     }
 }

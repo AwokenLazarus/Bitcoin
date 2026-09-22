@@ -141,6 +141,15 @@ pub struct Config {
     /// Most sessions from one remote address. A gateway is one connection; a farm is a few.
     #[serde(default = "d_max_connections_per_ip")]
     pub max_connections_per_ip: u32,
+    /// How long a gateway is refused after its own node hands Prime a block the chain rejects
+    /// (see `node::says_outdated_node`). The gateway builds its own template, so a consensus
+    /// rule its node does not know is a block the whole window loses. 0 turns this off.
+    #[serde(default = "d_quarantine_hours")]
+    pub quarantine_hours: u64,
+    /// Gateway identity keys refused outright, whatever they submit. Full hex keys, as logged
+    /// at `hello gateway=`; a prefix is not enough, for the reason `house-gateways` gives.
+    #[serde(default)]
+    pub blocked_gateways: Vec<String>,
     /// Coinbase section bytes one session may have Prime hold across all of its job slots.
     /// A stock gateway's eight slots of seven ~16 KiB coinbase classes is under 1 MiB; the
     /// sixteen live slots Prime keeps at eight 20 000-byte sections each is 2.5 MiB.
@@ -221,6 +230,10 @@ fn d_max_connections() -> u32 {
 }
 fn d_max_connections_per_ip() -> u32 {
     8
+}
+
+fn d_quarantine_hours() -> u64 {
+    24
 }
 fn d_session_coinbase_budget() -> usize {
     4 << 20

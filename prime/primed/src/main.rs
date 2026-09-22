@@ -268,6 +268,7 @@ fn run(cfg: Config) -> i32 {
         blocks: Mutex::new(blocks),
         block_log,
         clients: Mutex::new(Default::default()),
+        quarantine: Default::default(),
         seen: Mutex::new(Default::default()),
         connections: Mutex::new(Default::default()),
         tip_tx,
