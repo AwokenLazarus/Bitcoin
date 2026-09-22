@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>XBT Galaxy · Stellar cartography of the BLAKE2b Bitcoin network</title>
+<meta name="description" content="An interactive galaxy of every mining pool and DATUM gateway on the Bitcoin BLAKE2b (XBT) network. Pools are solar systems, DATUM gateways are planets, every flash is a block.">
+<link rel="canonical" href="https://lazarus-xbt.xyz/map/">
+<meta property="og:title" content="XBT Galaxy">
+<meta property="og:description" content="Every pool a solar system. Every DATUM gateway a planet. Every flash a block.">
+<meta property="og:url" content="https://lazarus-xbt.xyz/map/">
+<meta name="theme-color" content="#05060d">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Ccircle cx='32' cy='32' r='10' fill='%23ffcc66'/%3E%3Cellipse cx='32' cy='32' rx='28' ry='9' fill='none' stroke='%23ff9966' stroke-width='3'/%3E%3C/svg%3E">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Antonio:wght@400;600;700&family=Orbitron:wght@500;700;900&family=Share+Tech+Mono&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="./style.css?v=1">
+<script type="importmap">
+{ "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/"
+} }
+</script>
+</head>
+<body>
+<div id="stage" aria-hidden="true"></div>
+
+<!-- Opening crawl -->
+<section id="crawl" class="crawl" aria-label="Introduction">
+  <div class="crawl-sky"></div>
+  <p class="crawl-pre">A long time ago, at block 961,640, in a mempool far, far away....</p>
+  <div class="crawl-view"><div class="crawl-text">
+    <p class="crawl-ep">EPISODE XBT</p>
+    <h1 class="crawl-title">THE BLAKE2B AWAKENS</h1>
+    <p>It is a period of civil war. On the thirtieth day of August the chain broke from SHA-256 and was reforged in BLAKE2b.</p>
+    <p>In the Core Worlds, the stratum pools of the GALACTIC EMPIRE still build every block template themselves. Their hashers mine blind, never seeing the blocks they forge.</p>
+    <p>Across the spiral arms, the REBELLION runs DATUM: every gateway a free world that builds its own template and answers only to its own node.</p>
+    <p>Beyond them, in the OUTER RIM, lone miners run their own nodes and claim whole blocks for themselves....</p>
+    <p>Every system is a pool. Every planet is a gateway. Every flash of light, a block.</p>
+  </div></div>
+  <div class="crawl-actions">
+    <button type="button" id="engage" class="lcars-btn big">Engage</button>
+    <button type="button" id="skip" class="lcars-btn ghost">Skip</button>
+  </div>
+</section>
+
+<!-- LCARS header -->
+<header class="hud-top">
+  <div class="lcars-elbow"></div>
+  <div class="hud-title">
+    <h1>XBT GALAXY</h1>
+    <p>Stellar cartography · BLAKE2b Bitcoin network</p>
+  </div>
+  <div class="hud-stats">
+    <div><span class="k">Stardate</span><span class="v" id="stardate">…</span></div>
+    <div><span class="k">Network</span><span class="v" id="nethash">…</span></div>
+    <div><span class="k">Systems</span><span class="v" id="syscount">…</span></div>
+    <div><span class="k">Gateways</span><span class="v" id="gwcount">…</span></div>
+  </div>
+</header>
+
+<!-- Legend / filters -->
+<aside class="legend" aria-label="Legend">
+  <button type="button" class="leg on" data-type="datum"><i class="dot rebel"></i><span><b>Rebel Alliance</b><em>DATUM pools: miners build templates</em></span></button>
+  <button type="button" class="leg on" data-type="stratum"><i class="dot empire"></i><span><b>Galactic Empire</b><em>Stratum only: the pool builds every block</em></span></button>
+  <button type="button" class="leg on" data-type="independent"><i class="dot rim"></i><span><b>Outer Rim</b><em>Solo miners on their own node</em></span></button>
+</aside>
+
+<!-- Star chart -->
+<nav class="chart" id="chart" aria-label="Star chart">
+  <div class="chart-head">
+    <button type="button" id="chart-toggle" class="lcars-tab" aria-expanded="true">Star chart</button>
+  </div>
+  <div class="chart-body">
+    <label class="sr" for="search">Find a pool or gateway</label>
+    <input id="search" type="search" placeholder="Scan for a pool or gateway…" autocomplete="off" spellcheck="false">
+    <ol id="systems" class="sys-list"></ol>
+  </div>
+</nav>
+
+<!-- Hover readout -->
+<div id="tip" class="tip" role="status" hidden></div>
+
+<!-- Pinned system panel -->
+<section id="panel" class="panel" hidden aria-live="polite">
+  <div class="panel-bar"><span id="panel-kind">System</span><button type="button" id="panel-close" class="x" aria-label="Back to the galaxy">Back to galaxy</button></div>
+  <h2 id="panel-name"></h2>
+  <p id="panel-sub" class="panel-sub"></p>
+  <dl id="panel-stats" class="kv"></dl>
+  <h3 id="panel-planets-h">Gateways</h3>
+  <ol id="panel-planets" class="planet-list"></ol>
+  <p class="panel-foot" id="panel-link"></p>
+</section>
+
+<!-- Subspace relay: recent blocks -->
+<footer class="relay" aria-label="Recent blocks">
+  <span class="relay-k">Subspace relay</span>
+  <div class="relay-track"><div id="relay" class="relay-items"></div></div>
+</footer>
+
+<div id="loading" class="loading"><div class="warp-core"></div><p>Calibrating long-range sensors…</p></div>
+<div id="error" class="error" hidden></div>
+
+<noscript><p class="noscript">This map needs JavaScript and WebGL. The same data is at <a href="/map/data.json">/map/data.json</a>.</p></noscript>
+<script type="module" src="./app.js?v=1"></script>
+</body>
+</html>

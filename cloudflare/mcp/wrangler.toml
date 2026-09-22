@@ -1,10 +1,10 @@
 # Public, read-only MCP server for Lazarus Pool miners: https://mcp.lazarus-xbt.xyz/mcp
 # It reads only the public site APIs (pool + explorer), so it holds no credentials and can see
-# nothing a browser cannot. Deploy: `wrangler deploy` from this directory (wrangler login).
+# nothing a browser cannot. Deploy: `wrangler deploy` from this directory (wrangler login;
+# CLOUDFLARE_ACCOUNT_ID from ~/.config/cloudflare/env).
 name = "lazarus-mcp"
 main = "src/index.js"
 compatibility_date = "2026-09-01"
-account_id = "8bbeda42a48e2f4394521b0f941dc6bb"
 # One front door: the custom domain. No workers.dev address and no preview URLs, so nothing
 # reaches this Worker around the zone's own rules.
 workers_dev = false

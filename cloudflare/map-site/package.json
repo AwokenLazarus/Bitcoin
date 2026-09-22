@@ -1,0 +1,7 @@
+{
+  "name": "lazarus-map",
+  "private": true,
+  "type": "module",
+  "description": "lazarus-xbt.xyz/map: interactive galaxy of pools and DATUM gateways on the XBT network",
+  "scripts": { "backfill": "node scripts/backfill.mjs", "deploy": "wrangler deploy" }
+}

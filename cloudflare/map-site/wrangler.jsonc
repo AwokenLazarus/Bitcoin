@@ -1,0 +1,13 @@
+{
+  // lazarus-xbt.xyz/map: galaxy map of the XBT (BLAKE2b Bitcoin) network. Public data only.
+  "name": "lazarus-map",
+  "main": "src/worker.js",
+  "compatibility_date": "2026-09-01",
+  "workers_dev": false,
+  "preview_urls": false,
+  "routes": [{ "pattern": "lazarus-xbt.xyz", "custom_domain": true }],
+  "assets": { "directory": "./public", "binding": "ASSETS", "not_found_handling": "none", "run_worker_first": false },
+  "kv_namespaces": [{ "binding": "GALAXY", "id": "8242de880afd41f79e03b586eb16e227" }],
+  "triggers": { "crons": ["*/5 * * * *"] },
+  "observability": { "enabled": true, "head_sampling_rate": 0.1 }
+}
