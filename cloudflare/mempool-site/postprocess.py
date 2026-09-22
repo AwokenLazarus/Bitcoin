@@ -76,6 +76,35 @@ def manifest(text):
     return text
 
 
+MINING_UNITS_STOCK = "getMiningUnits(){let P=18;"
+MINING_UNITS_PH = "getMiningUnits(){let P=15;"
+
+
+def mining_units(js):
+    """Stock v3.3.1 hard-codes EH/s (10^18) for pool hashrates: the pool pie tooltip, the pools
+    table and the dashboard. This network is ~35 PH/s, so it read 0.03 EH/s. Use PH/s (10^15)."""
+    return js.replace(MINING_UNITS_STOCK, MINING_UNITS_PH)
+
+
+BUNDLE_TAG = ".ph1"
+
+
+def rename_patched_bundle(main_js):
+    """The patched bundle keeps its content hash in the name, and it is served `immutable` for 30
+    days, so a browser that already has it would never ask again. Give it a new name and point
+    that locale's index.html at it. Bump BUNDLE_TAG whenever the bundle patch changes."""
+    if main_js.name.endswith(BUNDLE_TAG + ".js"):
+        return False
+    new = main_js.with_name(main_js.name[: -len(".js")] + BUNDLE_TAG + ".js")
+    index = main_js.parent / "index.html"
+    html = index.read_text(encoding="utf-8")
+    if html.count(main_js.name) != 1:
+        raise SystemExit(f"{index}: expected one reference to {main_js.name}, found {html.count(main_js.name)}")
+    main_js.rename(new)
+    index.write_text(html.replace(main_js.name, new.name), encoding="utf-8")
+    return True
+
+
 def rewrite(path, fn):
     old = path.read_text(encoding="utf-8")
     new = fn(old)
@@ -95,6 +124,12 @@ def main(dist):
         for name in changed:
             counts[name] += 1
     counts["config.js"] = sum(rewrite(p, config) for p in sorted(dist.rglob("config.js")))
+    mains = sorted(dist.glob("*/main.*.js"))
+    counts["main.js (mining units in PH/s)"] = sum(rewrite(p, mining_units) for p in mains)
+    left = [str(p) for p in mains if MINING_UNITS_STOCK in p.read_text(encoding="utf-8")]
+    if not mains or left:
+        raise SystemExit(f"mining units patch did not apply: {len(mains)} bundles, still EH/s in {left[:3]}")
+    counts["main.js renamed for browser caches"] = sum(rename_patched_bundle(p) for p in mains if not p.name.endswith(BUNDLE_TAG + ".js"))
     counts["webmanifest"] = int(rewrite(dist / "resources/favicons/site.webmanifest", manifest))
     counts["media"] = 0
     for rel in MEDIA:

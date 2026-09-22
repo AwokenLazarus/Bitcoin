@@ -1543,8 +1543,8 @@
   /* Retropex mining.service selectedPower = 12 (TH/s). Stock v3.3.1 uses 18 (EH/s)
    * and rounds this network to 0.01 / 0.00 EH/s. */
   function fmtThForced(hs) {
-    if (!(hs > 0)) return '0 TH/s';
-    return (hs / 1e12).toLocaleString(undefined, { maximumFractionDigits: 2 }) + ' TH/s';
+    if (!(hs > 0)) return '0 PH/s';
+    return (hs / 1e15).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + ' PH/s';
   }
   function miningThs() {
     if (!isPoolsGraph() && !isMiningDash()) return;
@@ -1595,7 +1595,7 @@
         if (cells[hi].getAttribute('data-lz-ths') === sig) continue;
         cells[hi].setAttribute('data-lz-ths', sig);
         cells[hi].textContent = fmtThForced(hs);
-        cells[hi].title = 'Estimated hashrate after Retropex/mempool (TH/s, not EH/s)';
+        cells[hi].title = 'Estimated hashrate (PH/s: this network is ~35 PH/s)';
       }
     }
   }

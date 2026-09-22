@@ -83,6 +83,23 @@ function unavailable() {
   });
 }
 
+// Hashrate and difficulty history starts at the BLAKE2b fork (block 961,640, 2026-08-30 06:14:37
+// UTC). Before it the chain was SHA-256 Bitcoin at ~1 ZH/s, and one such point is enough for the
+// charts to scale their axis to ZH/s or EH/s and flatten this network's ~35 PH/s to zero.
+const FORK_TS = 1788070477;
+const FORK_HEIGHT = 961640;
+const HASHRATE_HISTORY = /^\/api\/v1\/mining\/(hashrate|pool\/[^/]+\/hashrate)(\/|$)/;
+function postFork(doc) {
+  const keep = (x) => !x || typeof x !== "object" ||
+    (x.height != null ? Number(x.height) >= FORK_HEIGHT : Number(x.timestamp ?? x.time ?? FORK_TS) >= FORK_TS);
+  if (Array.isArray(doc)) return doc.filter(keep);
+  if (doc && typeof doc === "object") {
+    if (Array.isArray(doc.hashrates)) doc.hashrates = doc.hashrates.filter(keep);
+    if (Array.isArray(doc.difficulty)) doc.difficulty = doc.difficulty.filter(keep);
+  }
+  return doc;
+}
+
 async function proxy(request, env, ctx, url) {
   if (!env.ORIGIN_URL) return new Response("origin not configured", { status: 500 });
   const target = env.ORIGIN_URL.replace(/\/$/, "") + url.pathname + url.search;
@@ -121,7 +138,19 @@ async function proxy(request, env, ctx, url) {
   // A 3xx here is Access sending the service token to its login page (304 is a real answer).
   if ((res.status >= 300 && res.status < 400 && res.status !== 304) || res.status === 502 || res.status === 503 || res.status >= 520) return unavailable();
 
-  const out = new Response(res.body, res);
+  let out = new Response(res.body, res);
+  if (res.status === 200 && request.method === "GET" && HASHRATE_HISTORY.test(url.pathname)) {
+    try {
+      const body = JSON.stringify(postFork(await res.clone().json()));
+      const h = new Headers(res.headers);
+      h.delete("Content-Length");
+      h.delete("Content-Encoding");
+      h.delete("ETag");
+      out = new Response(body, { status: 200, headers: h });
+    } catch {
+      /* not JSON after all: pass it through unchanged */
+    }
+  }
   // Access sets its CF_Authorization session cookie on every answer; relayed, it would hand each
   // visitor a session for the origin.
   out.headers.delete("Set-Cookie");
