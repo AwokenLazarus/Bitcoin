@@ -1,0 +1,121 @@
+# Applies on top of electrs-0.11.1-header-v2.patch. Caches unsubscribed scripthash statuses so an
+# explorer address page (get_balance + get_history + listunspent) costs one rebuild, not three, and
+# a repeat view syncs only new blocks. Built on the hub 2026-09-22 as /opt/electrs/electrs-statuscache.
+diff --git a/src/electrum.rs b/src/electrum.rs
+index 4b07b86..737cd07 100644
+--- a/src/electrum.rs
++++ b/src/electrum.rs
+@@ -12,6 +12,8 @@ use std::fmt;
+ use std::iter::FromIterator;
+ use std::str::FromStr;
+ 
++use parking_lot::Mutex;
++
+ use crate::{
+     cache::Cache,
+     config::{Config, ELECTRS_VERSION},
+@@ -145,10 +147,25 @@ impl RpcError {
+     }
+ }
+ 
++/// Recently queried statuses of scripthashes no client subscribed to, kept so the next query for
++/// the same scripthash syncs only what changed since (new blocks, the mempool) instead of fetching
++/// every block of its history again. A block explorer asks get_balance, get_history and
++/// listunspent for one address page: without this that is three full rebuilds, each fetching every
++/// block the address appears in, while every other client waits (requests are served in turn).
++struct StatusCache {
++    entries: HashMap<ScriptHash, (ScriptHashStatus, u64)>,
++    tick: u64,
++}
++
++/// Statuses kept; the least recently used is dropped past this. An entry holds one address's
++/// history, capped by `index_lookup_limit`.
++const STATUS_CACHE_ENTRIES: usize = 256;
++
+ /// Electrum RPC handler
+ pub struct Rpc {
+     tracker: Tracker,
+     cache: Cache,
++    status_cache: Mutex<StatusCache>,
+     rpc_duration: Histogram,
+     daemon: Daemon,
+     signal: Signal,
+@@ -174,6 +191,10 @@ impl Rpc {
+         Ok(Self {
+             tracker,
+             cache,
++            status_cache: Mutex::new(StatusCache {
++                entries: HashMap::new(),
++                tick: 0,
++            }),
+             rpc_duration,
+             daemon,
+             signal,
+@@ -300,7 +321,7 @@ impl Rpc {
+                     "{} blockchain.scripthash.get_balance called for unsubscribed scripthash",
+                     UNSUBSCRIBED_QUERY_MESSAGE
+                 );
+-                self.tracker.get_balance(&self.new_status(*scripthash)?)
++                self.with_status(*scripthash, |status| self.tracker.get_balance(status))?
+             }
+         };
+         Ok(json!(balance))
+@@ -318,7 +339,7 @@ impl Rpc {
+                     "{} blockchain.scripthash.get_history called for unsubscribed scripthash",
+                     UNSUBSCRIBED_QUERY_MESSAGE
+                 );
+-                json!(self.new_status(*scripthash)?.get_history())
++                self.with_status(*scripthash, |status| json!(status.get_history()))?
+             }
+         };
+         Ok(history_entries)
+@@ -336,7 +357,7 @@ impl Rpc {
+                     "{} blockchain.scripthash.listunspent called for unsubscribed scripthash",
+                     UNSUBSCRIBED_QUERY_MESSAGE
+                 );
+-                self.tracker.get_unspent(&self.new_status(*scripthash)?)
++                self.with_status(*scripthash, |status| self.tracker.get_unspent(status))?
+             }
+         };
+         Ok(json!(unspent_entries))
+@@ -391,6 +412,40 @@ impl Rpc {
+         })
+     }
+ 
++    /// Answer from the cached status of an unsubscribed scripthash, brought up to date first. The
++    /// status is taken out of the cache while it syncs, so a failed sync simply drops it.
++    fn with_status<T>(
++        &self,
++        scripthash: ScriptHash,
++        f: impl FnOnce(&ScriptHashStatus) -> T,
++    ) -> Result<T> {
++        let cached = self
++            .status_cache
++            .lock()
++            .entries
++            .remove(&scripthash)
++            .map(|(status, _)| status);
++        let mut status = cached.unwrap_or_else(|| ScriptHashStatus::new(scripthash));
++        self.tracker
++            .update_scripthash_status(&mut status, &self.daemon, &self.cache)?;
++        let result = f(&status);
++        let mut cache = self.status_cache.lock();
++        cache.tick += 1;
++        let tick = cache.tick;
++        if cache.entries.len() >= STATUS_CACHE_ENTRIES {
++            let oldest = cache
++                .entries
++                .iter()
++                .min_by_key(|(_, (_, used))| *used)
++                .map(|(k, _)| *k);
++            if let Some(oldest) = oldest {
++                cache.entries.remove(&oldest);
++            }
++        }
++        cache.entries.insert(scripthash, (status, tick));
++        Ok(result)
++    }
++
+     fn new_status(&self, scripthash: ScriptHash) -> Result<ScriptHashStatus> {
+         let mut status = ScriptHashStatus::new(scripthash);
+         self.tracker
