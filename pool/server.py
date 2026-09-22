@@ -845,7 +845,7 @@ def makegood_status(height, blockhash, tip, jobs=None, settlements=None):
     payable_at = mature_height(height)
     out = {
         "payable_at": payable_at,
-        "blocks_to_payable": max(0, payable_at - int(tip)) if tip else MATURITY_CONFS,
+        "blocks_to_payable": max(0, payable_at - int(tip)) if tip else maturity_confs(height),
         "status": "owed",
         "txid": "",
         "confirmations": 0,
@@ -921,7 +921,7 @@ def makegoods_payload():
     pending = [b for b in blocks if b["status"] in MAKEGOOD_PENDING]
     return {
         "tip": tip,
-        "maturity_confs": MATURITY_CONFS,
+        "maturity_confs": current_maturity_confs(tip),
         "pending_sats": sum(b["owed_sats"] for b in pending),
         "pending_blocks": len(pending),
         "paid_sats": sum(b["owed_sats"] for b in blocks if b["status"] == "paid"),
@@ -2480,18 +2480,35 @@ def coinbase_splits(blockhash):
 
 
 MATURITY_CONFS = 100
-# Knots #419 (long coinbase maturity, temporary soft fork): a coinbase created at height
-# LONG_MATURITY_START or later cannot be spent before height LONG_MATURITY_RELEASE, where the
-# rule lapses back to 100 confirmations. So: pre-window blocks mature at height + 100; window
-# blocks mature at max(release, height + 100).
+# Knots #419 (long coinbase maturity, soft fork): a coinbase created from LONG_MATURITY_START
+# needs 6,480 blocks on top before it can be spent, and a 29.4.2 node will not relay or mine a
+# spend of any younger coinbase. Shown as confirmations counting the coinbase's own block, so
+# 6,481: spendable once the chain reaches height + 6,480. Coinbases from before the window keep
+# 100, and so do those from LONG_MATURITY_RELEASE on, when the rule lapses.
 LONG_MATURITY_START = int(CONF.get("long_maturity_start", 973440))
 LONG_MATURITY_RELEASE = int(CONF.get("long_maturity_release", 979920))
+LONG_MATURITY_CONFS = int(CONF.get("long_maturity_confs", 6481))
+
+
+def long_maturity(height):
+    return LONG_MATURITY_START <= int(height) < LONG_MATURITY_RELEASE
+
+
+def maturity_confs(height):
+    """Confirmations the coinbase of the block at `height` needs before it can be spent."""
+    return LONG_MATURITY_CONFS if long_maturity(height) else MATURITY_CONFS
+
+
+def current_maturity_confs(tip):
+    """What a coinbase maturing now needs: the long figure until the last window block matures."""
+    tip = int(tip or 0)
+    return LONG_MATURITY_CONFS if LONG_MATURITY_START <= tip < LONG_MATURITY_RELEASE + LONG_MATURITY_CONFS else MATURITY_CONFS
 
 
 def mature_height(height):
     height = int(height)
-    if height >= LONG_MATURITY_START:
-        return max(LONG_MATURITY_RELEASE, height + MATURITY_CONFS)
+    if long_maturity(height):
+        return height + LONG_MATURITY_CONFS - 1
     return height + MATURITY_CONFS
 
 
@@ -4002,9 +4019,10 @@ def miner_payload(address):
                 "work": 0,
                 "status": st,
                 "round_status": st,
-                # Coinbase outputs spend after 100 confirmations; the block itself is one.
+                # Confirmations count the block itself; see `maturity_confs`.
                 "confirmations": confs,
-                # Spendable once the chain reaches height + 100 (status flips to paid then).
+                "maturity_confs": maturity_confs(fb["height"]) if fb["height"] else MATURITY_CONFS,
+                # Spendable once the chain reaches `mature_height` (status flips to paid then).
                 "blocks_to_mature": max(0, mature_height(fb["height"]) - int(tip)) if tip and fb["height"] else MATURITY_CONFS,
             }
         )
@@ -4038,7 +4056,8 @@ def miner_payload(address):
         for p in payouts:
             confs = max(0, int(tip) - int(p["height"]) + 1) if tip and p.get("height") else 0
             p["confirmations"] = confs
-            p["blocks_to_mature"] = max(0, int(p["height"]) + MATURITY_CONFS - int(tip)) if tip and p.get("height") else MATURITY_CONFS
+            p["maturity_confs"] = maturity_confs(p["height"]) if p.get("height") else MATURITY_CONFS
+            p["blocks_to_mature"] = max(0, mature_height(p["height"]) - int(tip)) if tip and p.get("height") else MATURITY_CONFS
     # Average hashrate over the last hour / day from the per-minute samples, so the
     # miner page can show a steadier figure than the instantaneous one.
     now_ts = int(time.time())
@@ -4172,7 +4191,7 @@ def miner_payload(address):
         "makegood_paid_btc": sum(r["sats"] for r in makegoods if r["status"] == "paid") / 1e8,
         "makegood_failed_blocks": sum(1 for r in makegoods if r["status"] == "failed"),
         "tip_height": int(tip or 0),
-        "maturity_confs": MATURITY_CONFS,
+        "maturity_confs": current_maturity_confs(tip),
         "hr_1h_ghs": hr_1h,
         "hr_24h_ghs": hr_24h,
         "round_work": my_work,
@@ -5744,6 +5763,7 @@ class Handler(BaseHTTPRequestHandler):
                             "status": st,
                             "reward_btc": reward,
                             "confirmations": confs,
+                            "maturity_confs": maturity_confs(fb["height"]) if fb["height"] else MATURITY_CONFS,
                         }
                     )
             if not chain_ok:
@@ -5807,6 +5827,10 @@ class Handler(BaseHTTPRequestHandler):
                     row["to"] = "miner"
                     tagged.append(row)
             payouts = _collapse_found_payouts(tagged)
+            # each block's own requirement (the page compares confirmations against it)
+            for row in payouts:
+                if row.get("height"):
+                    row["maturity_confs"] = maturity_confs(row["height"])
             prime_by = state.get("prime") or {}
             current = sorted(
                 (
@@ -5822,7 +5846,7 @@ class Handler(BaseHTTPRequestHandler):
             return {
                 "scheme": "TIDES",
                 "fee_percent": POOL_FEE,
-                "maturity_blocks": MATURITY_CONFS,
+                "maturity_blocks": current_maturity_confs(tip),
                 "tip": int(tip or 0),
                 "current_round": current,
                 "payouts": payouts,

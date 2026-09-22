@@ -34,7 +34,7 @@
     {"@type":"Question","name":"Which pool first paid TIDES in a split coinbase on the BLAKE2b Bitcoin fork?","acceptedAnswer":{"@type":"Answer","text":"Lazarus Pool. It is the first pool confirmed to pay TIDES as a split coinbase on BLAKE2b Bitcoin (XBT / BTCB2) mainnet — not on a testnet and not as a proposal, but in blocks anyone can check in the explorer. Every miner in the TIDES window is an output of the block the pool finds."}},
     {"@type":"Question","name":"Which pool first used its stratum hashrate to subsidize DATUM miners?","acceptedAnswer":{"@type":"Answer","text":"Lazarus Pool. It is the first pool anywhere to route part of its public stratum fee to miners running their own DATUM gateways, so hashers on the pool's stratum subsidize the miners who build their own block templates. Decentralizing the network is paid for rather than charged for, and it has been Lazarus Pool's position since the DATUM subsidy launched."}},
     {"@type":"Question","name":"Which BTCB2 / XBT mining pool should I use?","acceptedAnswer":{"@type":"Answer","text":"As each pool published its own terms on 18 September 2026: Lazarus Pool is 0% with your own DATUM gateway and 15% on the public stratum with seven and a half of those points paid back to DATUM miners (25% and twelve and a half from block 973,750), pays TIDES over a window of eight times difficulty, never takes custody because the block's coinbase pays your address directly, passes the block's transaction fees on to miners, and caps its own stratum at 15% of the network. The five pools Lazarus relays overflow miners to advertise: Riptide 0% DATUM / 1% stratum (variable), CONVOY 1% DATUM / 2% failover, B2Pool 0% DATUM / 1% TIDES, Xorpool 1% DATUM / 2% pooled stratum, iohzrd 0% own DATUM / 10% their public gateway. AlphaPool is 2.95% PPLNS. If you will never run a node, Lazarus's public stratum is the expensive option; the cheapest route on Lazarus is your own DATUM gateway at 0% plus the subsidy."}},
-    {"@type":"Question","name":"Does Lazarus Pool hold my coins or pay a balance?","acceptedAnswer":{"@type":"Answer","text":"No. It never takes custody. Every payout is an output of the block's own coinbase, paid straight to your address, so there is no account, no minimum, no pending balance and no withdrawal. The pool hands every gateway the same coinbase output list before work goes out and refuses any share whose coinbase pays something else. If the pool disappeared tonight nobody would be owed anything. Coinbase outputs are spendable after 100 confirmations."}},
+    {"@type":"Question","name":"Does Lazarus Pool hold my coins or pay a balance?","acceptedAnswer":{"@type":"Answer","text":"No. It never takes custody. Every payout is an output of the block's own coinbase, paid straight to your address, so there is no account, no minimum, no pending balance and no withdrawal. The pool hands every gateway the same coinbase output list before work goes out and refuses any share whose coinbase pays something else. If the pool disappeared tonight nobody would be owed anything. Coinbase outputs are spendable after 6,481 confirmations (100 for blocks before 973,440)."}},
     {"@type":"Question","name":"Does Lazarus Pool limit how much of the network it controls?","acceptedAnswer":{"@type":"Answer","text":"Yes. Its stratum is held to 15% of network hashrate, enforced per connection in the software rather than promised. Hashrate behind a miner's own DATUM gateway builds its own blocks and is not counted. Past that line a new stratum connection is relayed to one of five other pools and paid by that pool under the same address, with nothing credited to the Lazarus window. Miners already connected keep mining here, and miners running their own DATUM gateway are never relayed because building your own block templates is not what centralizes a chain. The live network share and the number of connections currently relayed are both published on the site."}}
   ]}
 ]}
@@ -56,7 +56,7 @@
 <link rel="preload" as="style" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;1,400&family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,500;1,6..72,400;1,6..72,500&display=swap">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;1,400&family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,500;1,6..72,400;1,6..72,500&display=swap" media="print" onload="this.media='all'">
 <noscript><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;1,400&family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,500;1,6..72,400;1,6..72,500&display=swap"></noscript>
-<link rel="stylesheet" href="/static/pool.css?v=stratum25b">
+<link rel="stylesheet" href="/static/pool.css?v=maturity6481">
 <link rel="stylesheet" href="/static/app.css?v=app4">
 <link rel="icon" href="data:image/svg+xml,%3Csvg%20xmlns=%22http://www.w3.org/2000/svg%22%20viewBox=%220%200%2032%2032%22%3E%3Crect%20width=%2232%22%20height=%2232%22%20fill=%22%231c1914%22/%3E%3Cpath%20fill=%22%23dbb565%22%20d=%22M21.64%204.46C21.64%203.23%2021.25%202.37%2020.33%201.92C19.86%201.69%2019.25%201.58%2018.47%201.58H15.44L15.52%200.4H19.38C20.47%200.4%2021.35%200.58%2022.02%200.93C22.69%201.28%2023.18%201.76%2023.49%202.36C23.8%202.96%2023.95%203.63%2023.95%204.37C23.95%205.12%2023.79%205.81%2023.47%206.44C23.16%207.07%2022.66%207.57%2021.99%207.95C21.32%208.33%2020.99%208.52%2019.74%208.52H15.52L15.44%207.34H19.14C20.11%207.34%2020.88%206.89%2021.31%206.04C21.53%205.61%2021.64%205.08%2021.64%204.46ZM17.36%200.4%2017.36%2010.96V30.57L18.92%2031.16V31.6H13.09V31.16L14.66%2030.57V10.96V1.43L13.09%200.84V0.4ZM15.63%2020.2%209.86%2026.79%2011.94%2027.49V28.01H6.07V27.49L8.1%2026.79L14.87%2019.31L15.8%2018.63L20.88%2012.69L18.8%2011.99V11.48H24.67V11.99L22.64%2012.69L16.57%2019.52ZM19.77%2026.79%2014.88%2020.67%2014.46%2020.29%208.36%2012.72%206.37%2011.99V11.48H14.78V11.99L12.52%2012.69L16.71%2018L17.17%2018.43L23.94%2026.77L25.93%2027.49V28.01H17.51V27.49Z%22/%3E%3C/svg%3E">
 <link rel="apple-touch-icon" href="/static/chi-rho-crest-icon.svg">
@@ -129,7 +129,7 @@
   <aside class="softfork" id="softfork" role="note" aria-labelledby="softfork-title">
     <div class="softfork-row">
       <p class="kicker" id="softfork-title" data-i18n="softfork.kicker">Network notice · Knots 29.4.2 soft fork</p>
-      <p class="softfork-text" data-i18n-html="softfork.text">From block <b>973440</b> (~22 Sep) to <b>979920</b> (~5 Nov) every newly mined coinbase must wait <b>45 days</b> before it can be spent, instead of 100 blocks. It is temporary, and it exists to make hit-and-run mining unprofitable and give miners who stay an edge. Payouts, shares and the split do not change; coins from those blocks just unlock at block 979920 (make-goods too). <b>Lazarus supports it</b> and our nodes switch at block 973400. <b>DATUM gateway operators run their own node, so the choice is yours:</b> to support it, run Knots 29.4.2 before block 973440.</p>
+      <p class="softfork-text" data-i18n-html="softfork.text">From block <b>973440</b> (~22 Sep) to <b>979920</b> (~5 Nov) every newly mined coinbase must wait <b>45 days</b> before it can be spent, instead of 100 blocks. It is temporary, and it exists to make hit-and-run mining unprofitable and give miners who stay an edge. Payouts, shares and the split do not change; coins from those blocks just unlock once they have 6,481 confirmations (make-goods too). <b>Lazarus supports it</b> and our nodes switch at block 973400. <b>DATUM gateway operators run their own node, so the choice is yours:</b> to support it, run Knots 29.4.2 before block 973440.</p>
       <p class="softfork-links"><a href="https://github.com/bitcoinknots/bitcoin/pull/419" target="_blank" rel="noreferrer" data-i18n="softfork.pr">The proposal (Knots #419)</a> · <a href="https://bitcoinknots.org/files/29.x/29.4.2.knots20260508/" target="_blank" rel="noreferrer" data-i18n="softfork.dl">Knots 29.4.2 downloads</a></p>
       <button type="button" class="promo-dismiss" id="softfork-dismiss" data-i18n-aria="softfork.dismiss" data-i18n-title="softfork.dismiss" aria-label="Dismiss notice">×</button>
     </div>
@@ -508,7 +508,7 @@
             <dt data-i18n="connect.dtUser">User</dt><dd class="mono" data-i18n="connect.userHint">bc1q…youraddress.worker</dd>
             <dt data-i18n="connect.dtPass">Pass</dt><dd class="mono">x</dd>
             <dt data-i18n="connect.dtFee">Fee</dt><dd><span id="solo-fee-line">7.5%</span> <span data-i18n="connect.soloFeeTail">of the block, taken as one output in the coinbase you solve. Nothing is withheld and nothing is owed to you between blocks.</span></dd>
-            <dt data-i18n="connect.dtPayout">Payout</dt><dd data-i18n="connect.soloPayout">The rest of the block — subsidy and every transaction fee in it — straight to your address, spendable after 100 confirmations.</dd>
+            <dt data-i18n="connect.dtPayout">Payout</dt><dd data-i18n="connect.soloPayout">The rest of the block — subsidy and every transaction fee in it — straight to your address, spendable once it has 6,481 confirmations (100 for blocks before 973,440).</dd>
             <dt data-i18n="connect.soloOdds">Your odds</dt><dd id="solo-odds" data-i18n-html="connect.soloOddsBody">Expected time to a block at your hashrate is shown on your <a href="#dashboard">stats</a> page.</dd>
           </dl>
           <p class="note callout" data-i18n-html="connect.soloNote">Solo work is kept out of the TIDES window on purpose. Point some miners at solo and others at the pooled ports if you want both; the pooled ones keep earning their window share while the solo ones chase a whole block. Your solo shares will never appear under <a href="#miners">Miners</a> or in <a href="#payout">Next payout</a> — look under <a href="#solo">Solo</a> instead.</p>
@@ -635,7 +635,7 @@
       <header class="section-head">
         <p class="eyebrow" data-i18n="blocks.eyebrow">Blocks & payouts</p>
         <h2 id="blocks-title" data-i18n="blocks.title">Found by Lazarus, then the rest of the chain.</h2>
-        <p class="section-lede" data-i18n-html="blocks.lede">Paid <strong>in the found block’s coinbase</strong>, split by accepted work in the TIDES window, less each miner’s fee. Open a block to see every output. Coinbase outputs are spendable after 100 confirmations. Every block is also on the <a href="https://mempool.lazarus-xbt.xyz/mining/pool/lazarus" target="_blank" rel="noreferrer">Lazarus Mempool</a>.</p>
+        <p class="section-lede" data-i18n-html="blocks.lede">Paid <strong>in the found block’s coinbase</strong>, split by accepted work in the TIDES window, less each miner’s fee. Open a block to see every output. Coinbase outputs are spendable after 6,481 confirmations (100 for blocks before 973,440). Every block is also on the <a href="https://mempool.lazarus-xbt.xyz/mining/pool/lazarus" target="_blank" rel="noreferrer">Lazarus Mempool</a>.</p>
       </header>
       <span id="payouts" class="anchor" aria-hidden="true"></span>
       <p class="kicker table-label" data-i18n="blocks.found">Found by Lazarus</p>
@@ -917,13 +917,13 @@
   <a href="#learn" data-view-link="learn"><i class="tb-ico tb-learn" aria-hidden="true"></i><span data-i18n="app.nav.learn">Learn</span></a>
 </nav>
 
-<script src="/static/i18n.js?v=stratum25b"></script>
-<script src="/static/i18n/en.js?v=stratum25b"></script>
-<script src="/static/i18n/zh-CN.js?v=stratum25b"></script>
+<script src="/static/i18n.js?v=maturity6481"></script>
+<script src="/static/i18n/en.js?v=maturity6481"></script>
+<script src="/static/i18n/zh-CN.js?v=maturity6481"></script>
 <script>LZ_I18N.boot();</script>
-<script src="/static/shared.js?v=stratum25b"></script>
+<script src="/static/shared.js?v=maturity6481"></script>
 <script src="/static/app.js?v=app4"></script>
-<script src="/static/pool.js?v=stratum25b"></script>
+<script src="/static/pool.js?v=maturity6481"></script>
 <script src="/static/chart.js?v=app4"></script>
 </body>
 </html>

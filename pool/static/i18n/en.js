@@ -63,7 +63,7 @@ window.LZ_I18N_DICTS["en"] = {
   },
   "softfork": {
     "kicker": "Network notice · Knots 29.4.2 soft fork",
-    "text": "From block <b>973440</b> (~22 Sep) to <b>979920</b> (~5 Nov) every newly mined coinbase must wait <b>45 days</b> before it can be spent, instead of 100 blocks. It is temporary, and it exists to make hit-and-run mining unprofitable and give miners who stay an edge. Payouts, shares and the split do not change; coins from those blocks just unlock at block 979920 (make-goods too). <b>Lazarus supports it</b> and our nodes switch at block 973400. <b>DATUM gateway operators run their own node, so the choice is yours:</b> to support it, run Knots 29.4.2 before block 973440.",
+    "text": "From block <b>973440</b> (~22 Sep) to <b>979920</b> (~5 Nov) every newly mined coinbase must wait <b>45 days</b> before it can be spent, instead of 100 blocks. It is temporary, and it exists to make hit-and-run mining unprofitable and give miners who stay an edge. Payouts, shares and the split do not change; coins from those blocks just unlock once they have 6,481 confirmations (make-goods too). <b>Lazarus supports it</b> and our nodes switch at block 973400. <b>DATUM gateway operators run their own node, so the choice is yours:</b> to support it, run Knots 29.4.2 before block 973440.",
     "pr": "The proposal (Knots #419)",
     "dl": "Knots 29.4.2 downloads",
     "dismiss": "Dismiss notice"
@@ -444,7 +444,7 @@ window.LZ_I18N_DICTS["en"] = {
     "soloLead": "<strong>Solo is a bet, not a wage.</strong> Your shares buy you nothing — they only prove you are working. When one of them is a block, that block’s entire reward goes to the address in your username, less our fee, paid in that block’s own coinbase. Until then you earn nothing, however long you mine. Pooled mining pays you a steady share of every block the pool finds; solo pays you rarely and enormously. Most miners should stay pooled.",
     "soloFee": "{fee} of the block, taken as one output in the coinbase you solve. Nothing is withheld and nothing is owed to you between blocks.",
     "soloFeeTail": "of the block, taken as one output in the coinbase you solve. Nothing is withheld and nothing is owed to you between blocks.",
-    "soloPayout": "The rest of the block — subsidy and every transaction fee in it — straight to your address, spendable after 100 confirmations.",
+    "soloPayout": "The rest of the block — subsidy and every transaction fee in it — straight to your address, spendable once it has 6,481 confirmations (100 for blocks before 973,440).",
     "soloOdds": "Your odds",
     "soloOddsBody": "Expected time to a block at your hashrate is shown on your <a href=\"#dashboard\">stats</a> page.",
     "soloNote": "Solo work is kept out of the TIDES window on purpose. Point some miners at solo and others at the pooled ports if you want both; the pooled ones keep earning their window share while the solo ones chase a whole block. Your solo shares will never appear under <a href=\"#miners\">Miners</a> or in <a href=\"#payout\">Next payout</a> — look under <a href=\"#solo\">Solo</a> instead.",
@@ -664,7 +664,7 @@ window.LZ_I18N_DICTS["en"] = {
   "blocks": {
     "eyebrow": "Blocks & payouts",
     "title": "Found by Lazarus, then the rest of the chain.",
-    "lede": "Paid <strong>in the found block’s coinbase</strong>, split by accepted work in the TIDES window, less each miner’s fee. Open a block to see every output. Coinbase outputs are spendable after 100 confirmations. Every block is also on the <a href=\"https://mempool.lazarus-xbt.xyz/mining/pool/lazarus\" target=\"_blank\" rel=\"noreferrer\">Lazarus Mempool</a>.",
+    "lede": "Paid <strong>in the found block’s coinbase</strong>, split by accepted work in the TIDES window, less each miner’s fee. Open a block to see every output. Coinbase outputs are spendable after 6,481 confirmations (100 for blocks before 973,440). Every block is also on the <a href=\"https://mempool.lazarus-xbt.xyz/mining/pool/lazarus\" target=\"_blank\" rel=\"noreferrer\">Lazarus Mempool</a>.",
     "found": "Found by Lazarus",
     "recent": "Recent on this chain",
     "thHeight": "Height",
@@ -862,7 +862,7 @@ window.LZ_I18N_DICTS["en"] = {
     "pending": "Pending",
     "pendingN": "Pending · {n} block",
     "pendingNs": "Pending · {n} blocks",
-    "pendingTitle": "Coinbase outputs to this address still under 100 confirmations",
+    "pendingTitle": "Coinbase outputs to this address that are not spendable yet",
     "pendingExact": "{amt} in {n} block{s} under {need} confirmations",
     "paid": "Paid",
     "paidTitle": "Matured coinbase outputs to this address, lifetime",
@@ -980,13 +980,13 @@ window.LZ_I18N_DICTS["en"] = {
     "plusCarry": " · plus carry as room allows",
     "estFeeBonus": "{fee} fee and the {uplift} bonus, at current difficulty",
     "estFee": "after the {fee} fee at current difficulty",
-    "noBalance": "There is no pool balance and nothing to withdraw. Every block the pool finds pays this address directly in its coinbase; the output becomes spendable {n} blocks later.{carry}",
+    "noBalance": "There is no pool balance and nothing to withdraw. Every block the pool finds pays this address directly in its coinbase; the output becomes spendable once it has {n} confirmations.{carry}",
     "carryNote": " <strong>{amt}</strong> you earned in earlier blocks was under the minimum output and is carried forward: it is added to your next output that clears the floor, paid out of the pool's share.",
     "pendingLabel": {
       "one": "Pending · {n} block maturing",
       "other": "Pending · {n} blocks maturing"
     },
-    "pendingHelp": "A coinbase output can be spent {need} blocks after the block that carries it. Yours is already on chain; it just is not spendable yet.",
+    "pendingHelp": "A coinbase output can be spent once it has {need} confirmations, counting the block that carries it. Yours is already on chain; it just is not spendable yet.",
     "thBlock": "Block",
     "thAmt": "Amount",
     "thConfs": "Confirmations",
