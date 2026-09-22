@@ -99,11 +99,13 @@ const sun = new THREE.DirectionalLight(0xffffff, 1.4);
 sun.position.set(400, 600, 300);
 scene.add(sun);
 
-let composer = null;
+let composer = null, bloom = null;
+const BLOOM = 0.62;
 if (!lowPower) {
   composer = new EffectComposer(renderer);
   composer.addPass(new RenderPass(scene, camera));
-  composer.addPass(new UnrealBloomPass(new THREE.Vector2(innerWidth, innerHeight), 0.62, 0.5, 0.32));
+  bloom = new UnrealBloomPass(new THREE.Vector2(innerWidth, innerHeight), BLOOM, 0.5, 0.32);
+  composer.addPass(bloom);
   composer.addPass(new OutputPass());
 }
 
@@ -217,6 +219,7 @@ const timeMats = [];
 const galaxy = new THREE.Group();
 scene.add(galaxy);
 const ARMS = 4, ARM_TWIST = 0.0052, DISK_R = 1500;
+const HOLE_R = 30, DISK_IN = 48, DISK_OUT = 124, CAVITY_R = 190; // the core: see `blackHole`
 function armAngle(arm, r) { return (arm * Math.PI * 2) / ARMS + r * ARM_TWIST; }
 (function backdrop() {
   // distant stars
@@ -238,7 +241,8 @@ function armAngle(arm, r) { return (arm * Math.PI * 2) / ARMS + r * ARM_TWIST; }
   const D = lowPower ? 26000 : 70000, dp = new Float32Array(D * 3), dc = new Float32Array(D * 3), ds = new Float32Array(D), dph = new Float32Array(D);
   const core = new THREE.Color(0xffd9a0), mid = new THREE.Color(0xb9c7ff), edge = new THREE.Color(0x6f7fe0), pink = new THREE.Color(0xff8fd0);
   for (let i = 0; i < D; i++) {
-    const arm = i % ARMS, rr = Math.pow(r(), 0.72) * DISK_R + 30;
+    // nothing orbits inside CAVITY_R: that is the black hole's accretion disk
+    const arm = i % ARMS, rr = CAVITY_R + Math.pow(r(), 0.72) * (DISK_R - CAVITY_R);
     const spread = (r() - 0.5) * (0.55 - (rr / DISK_R) * 0.25) + (r() - 0.5) * 0.25 * (r() < 0.15 ? 3 : 1);
     const a = armAngle(arm, rr) + spread;
     const thick = (40 * (1 - rr / DISK_R) + 10) * (r() + r() - 1);
@@ -253,12 +257,11 @@ function armAngle(arm, r) { return (arm * Math.PI * 2) / ARMS + r * ARM_TWIST; }
   const dm = pointsMaterial(0.9); timeMats.push(dm);
   galaxy.add(new THREE.Points(dg, dm));
 
-  // core and nebulae
-  galaxy.add(sprite(TEX.glow, 0xffc890, 820, 0.32));
-  galaxy.add(sprite(TEX.glow, 0xfff1d8, 220, 0.6));
+  // the bulge, kept dim: the bright thing at the centre is the black hole's disk, not a haze
+  galaxy.add(sprite(TEX.glow, 0xffc890, 900, 0.16));
   const hues = [0x3a6bff, 0x7a4dff, 0x2ec4ff, 0xff4da6, 0x5affd8];
   for (let i = 0; i < (lowPower ? 26 : 60); i++) {
-    const arm = i % ARMS, rr = 250 + r() * (DISK_R - 250), a = armAngle(arm, rr) + (r() - 0.5) * 0.4;
+    const arm = i % ARMS, rr = 320 + r() * (DISK_R - 320), a = armAngle(arm, rr) + (r() - 0.5) * 0.4;
     const s = sprite(TEX.nebula, hues[Math.floor(r() * hues.length)], 260 + r() * 520, 0.05 + r() * 0.08);
     s.position.set(Math.cos(a) * rr, (r() - 0.5) * 40, Math.sin(a) * rr);
     s.material.rotation = r() * Math.PI; s.userData.spin = (r() - 0.5) * 0.02;
@@ -276,6 +279,146 @@ const effects = [];                // short-lived effects
 const typeGroups = { datum: new THREE.Group(), stratum: new THREE.Group(), independent: new THREE.Group() };
 Object.values(typeGroups).forEach((g) => scene.add(g));
 
+// ---------- the galactic core: a supermassive black hole, and the chain it throws out ----------
+// Every block found anywhere in the galaxy falls into the hole. What comes back out along the axis
+// is the chain: the newest block closest to the horizon, older ones carried away from it.
+const hole = new THREE.Group();
+hole.rotation.set(-0.06, 0, 0.13); // a slight tilt, so the disk and the chain read in three dimensions
+scene.add(hole);
+const diskVS = `
+  uniform float uIn; uniform float uOut;
+  varying float vR; varying float vA;
+  void main() {
+    float r = length(position.xy);
+    vR = clamp((r - uIn) / (uOut - uIn), 0.0, 1.0);
+    vA = atan(position.y, position.x);
+    gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+  }`;
+// Gas closer in goes round faster, and the side coming toward us is brighter: that lopsided
+// look is what makes a ring of light read as a black hole rather than a planet's ring.
+const diskFS = `
+  uniform float uTime; uniform float uFlash;
+  varying float vR; varying float vA;
+  void main() {
+    float spin = uTime * (1.7 / (0.3 + vR * 2.6));
+    float bands = 0.5 + 0.5 * sin(vA * 5.0 + spin * 2.2 + vR * 1.6);
+    float fine = 0.5 + 0.5 * sin(vA * 15.0 - spin * 1.3 + vR * 4.0);
+    float body = smoothstep(0.0, 0.07, vR) * (1.0 - smoothstep(0.45, 1.0, vR));
+    float heat = pow(1.0 - vR, 1.7);
+    float dop = 0.45 + 0.85 * smoothstep(-1.0, 1.0, sin(vA));
+    vec3 col = mix(vec3(1.0, 0.42, 0.10), vec3(1.0, 0.94, 0.80), heat);
+    float a = body * (0.30 + 0.70 * mix(bands, fine, 0.45)) * dop * (1.0 + uFlash * 1.6);
+    gl_FragColor = vec4(col * (0.45 + 0.95 * heat) * dop * (1.0 + uFlash), a * 0.62);
+  }`;
+const diskMat = new THREE.ShaderMaterial({
+  uniforms: { uTime: { value: 0 }, uFlash: { value: 0 }, uIn: { value: DISK_IN }, uOut: { value: DISK_OUT } },
+  vertexShader: diskVS, fragmentShader: diskFS,
+  transparent: true, depthWrite: false, side: THREE.DoubleSide, blending: THREE.AdditiveBlending,
+});
+(function blackHole() {
+  // the horizon itself: a hole in the picture, which is why it writes depth and emits nothing
+  hole.add(new THREE.Mesh(new THREE.SphereGeometry(HOLE_R, 48, 32), new THREE.MeshBasicMaterial({ color: 0x000000 })));
+  const disk = new THREE.Mesh(new THREE.RingGeometry(DISK_IN, DISK_OUT, lowPower ? 96 : 220, 10), diskMat);
+  disk.rotation.x = -Math.PI / 2; hole.add(disk);
+  // the photon ring hugs the silhouette from wherever you look, so it faces the camera
+  const photon = new THREE.Mesh(
+    new THREE.RingGeometry(HOLE_R * 1.03, HOLE_R * 1.1, 128),
+    new THREE.MeshBasicMaterial({ color: 0xffe3bc, transparent: true, opacity: 0.55, side: THREE.DoubleSide, blending: THREE.AdditiveBlending, depthWrite: false }),
+  );
+  hole.add(photon, sprite(TEX.soft, 0xffc184, HOLE_R * 7, 0.16));
+  // the jets: the chain rides the one going up
+  const jetMat = new THREE.MeshBasicMaterial({ color: 0x8fd0ff, transparent: true, opacity: 0.008, side: THREE.DoubleSide, blending: THREE.AdditiveBlending, depthWrite: false });
+  for (const s of [1, -1]) {
+    const jet = new THREE.Mesh(new THREE.CylinderGeometry(1.5, 11, 430, 20, 1, true), jetMat);
+    jet.position.y = s * 235; if (s < 0) jet.rotation.z = Math.PI;
+    hole.add(jet);
+  }
+  const w = new THREE.Vector3();
+  animated.push((dt, t) => {
+    diskMat.uniforms.uTime.value = t;
+    diskMat.uniforms.uFlash.value *= Math.max(0, 1 - dt * 1.6);
+    photon.lookAt(camera.position.clone().sub(hole.getWorldPosition(w)).add(photon.position));
+  });
+})();
+
+// ---- the chain ----
+// One box per block, newest at the bottom. A new block pushes the whole stack one slot outward.
+const CHAIN = { slots: lowPower ? 12 : 16, gap: 21, base: HOLE_R + 22, blocks: [], byHeight: new Map() };
+const chainGroup = new THREE.Group(); hole.add(chainGroup);
+const BLOCK_GEO = new THREE.BoxGeometry(8, 8, 8);
+const BLOCK_EDGES = new THREE.EdgesGeometry(BLOCK_GEO);
+const BLOCK_HIT = new THREE.BoxGeometry(19, 20, 19);
+const slotY = (i) => CHAIN.base + i * CHAIN.gap;
+// Same colours as the relay ticker: red came through a pool's stratum, green is a solo miner.
+const blockColor = (b) => (b.viaStratum ? 0xff7a66 : b.systemType === "independent" ? 0x8fffc8 : 0xffd27a);
+function makeBlock(b) {
+  const col = new THREE.Color(blockColor(b)), g = new THREE.Group();
+  const box = new THREE.Mesh(BLOCK_GEO, new THREE.MeshBasicMaterial({ color: col.clone().multiplyScalar(0.42), transparent: true, opacity: 0.85 }));
+  const edges = new THREE.LineSegments(BLOCK_EDGES, new THREE.LineBasicMaterial({ color: col, transparent: true, opacity: 0.95 }));
+  const halo = sprite(TEX.soft, col, 22, 0.26);
+  const hit = new THREE.Mesh(BLOCK_HIT, new THREE.MeshBasicMaterial({ visible: false }));
+  hit.userData = { kind: "block", h: b.height };
+  g.add(box, edges, halo, hit); pickables.push(hit);
+  g.rotation.y = (hash(b.id || String(b.height)) % 628) / 100;
+  g.userData = { b, box, edges, halo, hit };
+  return g;
+}
+function chainFade() {
+  CHAIN.blocks.forEach((g, i) => {
+    const f = clamp(1 - i / (CHAIN.slots + 4), 0.14, 1), u = g.userData;
+    u.box.material.opacity = 0.85 * f; u.edges.material.opacity = 0.95 * f; u.halo.material.opacity = 0.3 * f;
+  });
+}
+function dropBlock(g) {
+  chainGroup.remove(g);
+  const i = pickables.indexOf(g.userData.hit); if (i >= 0) pickables.splice(i, 1);
+  CHAIN.byHeight.delete(g.userData.b.height);
+  g.userData.box.material.dispose(); g.userData.edges.material.dispose(); g.userData.halo.material.dispose(); g.userData.hit.material.dispose();
+}
+let chainLabel = null;
+function chainBuild(recent) {
+  (recent || []).slice(0, CHAIN.slots).forEach((b, i) => {
+    const g = makeBlock(b); g.position.y = slotY(i);
+    chainGroup.add(g); CHAIN.blocks.push(g); CHAIN.byHeight.set(b.height, g);
+  });
+  const link = new THREE.Line(
+    new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(0, HOLE_R * 0.6, 0), new THREE.Vector3(0, slotY(CHAIN.slots), 0)]),
+    new THREE.LineBasicMaterial({ color: 0xbfd8ff, transparent: true, opacity: 0.22, blending: THREE.AdditiveBlending, depthWrite: false }),
+  );
+  chainGroup.add(link);
+  chainLabel = makeLabel("", "chain"); chainGroup.add(chainLabel);
+  chainFade(); chainLabelUpdate();
+}
+function chainLabelUpdate() {
+  const g = CHAIN.blocks[0];
+  if (!chainLabel) return;
+  chainLabel.element.textContent = g ? "#" + n(g.userData.b.height) : "";
+  chainLabel.position.set(0, (g ? g.position.y : CHAIN.base) - 14, 0);
+}
+// A found block falls in, and the chain is one longer. Called when the courier reaches the hole.
+function chainAdd(b) {
+  if (!b || CHAIN.byHeight.has(b.height)) return;
+  const g = makeBlock(b);
+  chainGroup.add(g); CHAIN.blocks.unshift(g); CHAIN.byHeight.set(b.height, g);
+  CHAIN.blocks.forEach((m, i) => { m.userData.from = m.position.y; m.userData.to = slotY(i); });
+  g.position.y = HOLE_R * 0.5; g.userData.from = g.position.y; g.scale.setScalar(0.08);
+  const spare = CHAIN.blocks.splice(CHAIN.slots + 2);
+  diskMat.uniforms.uFlash.value = 1;
+  const ring = new THREE.Mesh(new THREE.RingGeometry(DISK_IN * 0.9, DISK_IN, 96), new THREE.MeshBasicMaterial({ color: 0xffd9a0, transparent: true, opacity: 0.9, side: THREE.DoubleSide, blending: THREE.AdditiveBlending, depthWrite: false }));
+  ring.rotation.x = -Math.PI / 2; hole.add(ring);
+  effects.push({ age: 0, life: 1.3, step(t) {
+    const k = ease(t);
+    for (const m of CHAIN.blocks) m.position.y = m.userData.from + (m.userData.to - m.userData.from) * k;
+    g.scale.setScalar(0.08 + 0.92 * k);
+    ring.scale.setScalar(1 + k * 3.2); ring.material.opacity = 0.9 * (1 - k);
+  }, done() {
+    hole.remove(ring); ring.geometry.dispose(); ring.material.dispose();
+    for (const m of spare) dropBlock(m);
+    chainFade(); chainLabelUpdate();
+  } });
+}
+const blockData = (h) => { const g = CHAIN.byHeight.get(h); return g && g.userData.b; };
+
 // ---- size: close to hashrate, compressed so small pools stay visible ----
 // Radius grows with the square root of the pool's 7-day block share, so apparent area is roughly
 // proportional to hashrate, between a floor (so a small pool is still a world) and a ceiling.
@@ -290,7 +433,8 @@ function placeSystems(systems) {
   const rebel = systems.filter((s) => s.type === "datum");
   const rim = systems.filter((s) => s.type === "independent");
   stratumOnly.forEach((s, i) => {
-    const a = i * 2.39996 + 0.6, r = 150 + i * 34;
+    // just outside the black hole's cavity, inside the arms
+    const a = i * 2.39996 + 0.6, r = CAVITY_R + 70 + i * 38;
     out.set(s.id, new THREE.Vector3(Math.cos(a) * r, (rng(hash(s.id))() - 0.5) * 16, Math.sin(a) * r));
   });
   rebel.forEach((s, i) => {
@@ -401,7 +545,6 @@ function buildSystem(s, pos, i) {
   root.add(star);
   const halo = sprite(TEX.glow, color, starR * 9, sleepy ? 0.4 : 0.85), corona = sprite(TEX.soft, color, starR * 16, sleepy ? 0.1 : 0.25);
   root.add(halo, corona);
-  animated.push((dt, t) => { corona.scale.setScalar(starR * (15 + Math.sin(t * 0.8 + i) * 1.6)); });
   const rec = { data: s, root, pos, star, planets: [], starR, extent: starR * 3, type: s.type };
   const starWorld = pos.clone();
   const planets = s.planets.slice().sort((a, b) => (b.blocks - a.blocks) || ((b.live ? 1 : 0) - (a.live ? 1 : 0)));
@@ -437,6 +580,18 @@ function buildSystem(s, pos, i) {
     rec.extent = Math.max(rec.extent, orbit + pr);
     k++;
   }
+  // Seen from across the galaxy a star should glare; from inside its own system it must not wash
+  // the worlds out. Halo, corona and the core's brightness all fall away as the camera comes in
+  // (bloom eases off with them, in `tick`). `rec.extent` is final by now, so the fade is sized to
+  // the system the camera is actually flying into.
+  const haloA = sleepy ? 0.4 : 0.85, coronaA = sleepy ? 0.1 : 0.25, w = new THREE.Vector3();
+  animated.push((dt, t) => {
+    corona.scale.setScalar(starR * (15 + Math.sin(t * 0.8 + i) * 1.6));
+    const near = clamp((camera.position.distanceTo(root.getWorldPosition(w)) / (rec.extent * 2.2 + starR * 10) - 0.55) / 0.85, 0, 1);
+    halo.material.opacity = haloA * (0.09 + 0.91 * near);
+    corona.material.opacity = coronaA * near;
+    star.material.color.copy(color).multiplyScalar(0.75 + 0.85 * near);
+  });
   const hit = new THREE.Mesh(new THREE.SphereGeometry(Math.max(starR * 2.2, 10), 12, 8), new THREE.MeshBasicMaterial({ visible: false }));
   hit.userData = { kind: "system", sys: s.id }; root.add(hit); pickables.push(hit);
   const label = makeLabel(s.name); label.position.set(0, starR * 2 + 4, 0); root.add(label); labelled.push(label);
@@ -481,11 +636,16 @@ function buildAll(data) {
     else if (s.type === "stratum") systemsById.set(s.id, buildSystem(s, positions.get(s.id), ei++));
   }
   buildRim(data.systems.filter((s) => s.type === "independent"), positions);
+  chainBuild(data.recent);
 }
 
 // ---------- effects ----------
 const FX_COLOR = { datum: 0xffd27a, stratum: 0xcfe0f0, independent: 0x8fffc8 };
-function blockFlash(sysId, tag, viaStratum) {
+function blockFlash(b) {
+  // the courier reaches the hole at about three quarters of its flight; that is when the block
+  // falls in and the chain grows by one
+  setTimeout(() => chainAdd(b), FAST ? 80 : 3400);
+  const sysId = sysIdFor(b), tag = b.planet, viaStratum = b.viaStratum;
   const rec = systemsById.get(sysId);
   if (!rec) return;
   const at = new THREE.Vector3();
@@ -640,18 +800,81 @@ function factionRows(dl, s) {
   if (f.poolBuiltPct > 0) kv(dl, "Imperial outpost", `${f.poolBuiltPct}% of blocks come from the pool's own templates — the stratum endpoint in this system`);
   if (f.operatorNote) kv(dl, "Verdict", f.operatorNote, "live-off");
 }
+// Who found a block, as a system and (where there is one) the gateway or endpoint inside it.
+function finderOf(b) {
+  if (!b) return null;
+  const id = sysIdFor(b);
+  if (!id) return null;
+  return { sys: id, tag: b.systemType === "independent" ? null : b.planet || null };
+}
+function fillBlock(box, b) {
+  const solo = b.systemType === "independent";
+  box.className = "tip block " + (b.viaStratum ? "empire" : solo ? "rim" : "");
+  box.replaceChildren();
+  box.append(el("div", "t-kind", "Block on the chain"));
+  box.append(el("div", "t-name", "#" + n(b.height)));
+  box.append(el("div", "t-sub", b.viaStratum
+    ? `Built by ${b.system} on its own template and mined through its public stratum`
+    : solo ? "Found by an independent miner building on their own node"
+    : `Built by a DATUM gateway in the ${b.system} system, on the miner's own node`));
+  const dl = el("dl", "kv");
+  kv(dl, "Found by", solo ? b.system : b.planet ? `${b.planet} · ${b.system}` : b.system);
+  kv(dl, "When", `${ago(b.ts)} · ${new Date(b.ts * 1000).toLocaleString()}`);
+  kv(dl, "Route", b.viaStratum ? "pool stratum" : solo ? "solo, own node" : "DATUM gateway");
+  if (b.id) kv(dl, "Hash", b.id.slice(0, 10) + "…" + b.id.slice(-8));
+  box.append(dl);
+  box.append(el("div", "t-hint", "Click to fly to the miner who found it"));
+}
+
+// ---- the finder's light: hovering a block lights up whoever mined it ----
+let spot = null;
+function spotlight() {
+  if (spot) return spot;
+  const g = new THREE.Group(); g.visible = false; scene.add(g);
+  const ring = new THREE.Mesh(new THREE.RingGeometry(0.86, 1, 72), new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.9, side: THREE.DoubleSide, blending: THREE.AdditiveBlending, depthWrite: false }));
+  const halo = sprite(TEX.glow, 0xffffff, 26, 0.5);
+  const beam = new THREE.Line(new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(), new THREE.Vector3()]), new THREE.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.45, blending: THREE.AdditiveBlending, depthWrite: false }));
+  g.add(ring, halo);
+  scene.add(beam);
+  spot = { group: g, ring, halo, beam };
+  return spot;
+}
+const spotAt = new THREE.Vector3(), spotFrom = new THREE.Vector3();
+function updateSpot(height, t) {
+  const s = spotlight(), b = height != null && blockData(height), f = b && finderOf(b);
+  const at = f && liveTarget(f.sys, f.tag, spotAt);
+  if (!at) { s.group.visible = false; s.beam.visible = false; return; }
+  const rec = systemsById.get(f.sys), scale = Math.max(6, (rec ? (f.tag ? 6 : rec.extent) : 8)) * 1.5;
+  const col = new THREE.Color(blockColor(b));
+  s.group.visible = true; s.beam.visible = true;
+  s.group.position.copy(at);
+  s.group.scale.setScalar(scale * (1 + 0.06 * Math.sin(t * 4)));
+  s.ring.lookAt(camera.position);
+  s.ring.material.color.copy(col); s.halo.material.color.copy(col); s.beam.material.color.copy(col);
+  s.halo.scale.setScalar(2.4 + 0.3 * Math.sin(t * 3));
+  CHAIN.byHeight.get(height).getWorldPosition(spotFrom);
+  s.beam.geometry.setFromPoints([spotFrom, at]);
+  s.beam.material.opacity = 0.28 + 0.12 * Math.sin(t * 3);
+}
+
 let tipTarget = null;
 function showTip(obj, x, y) {
-  const key = obj ? obj.sys + "|" + (obj.tag || "") : null;
+  const key = obj ? (obj.block != null ? "b" + obj.block : obj.sys + "|" + (obj.tag || "")) : null;
   if (key !== tipTarget) {
     tipTarget = key;
     if (!obj) { tip.hidden = true; return; }
-    const s = systemData(obj.sys);
-    if (!s) { tip.hidden = true; return; }
-    if (obj.tag && s.type !== "independent") { const pd = planetData(obj.sys, obj.tag); if (pd && pd[1]) fillPlanet(tip, pd[0], pd[1]); else fillSystem(tip, s); }
-    else if (s.type === "independent") fillPlanet(tip, s, s.planets[0] || { tag: s.name, blocks: s.blocks, blocks7d: s.blocks7d, last: s.last, policy: s.policy });
-    else fillSystem(tip, s);
-    tip.hidden = false;
+    if (obj.block != null) {
+      const b = blockData(obj.block);
+      if (!b) { tip.hidden = true; return; }
+      fillBlock(tip, b); tip.hidden = false;
+    } else {
+      const s = systemData(obj.sys);
+      if (!s) { tip.hidden = true; return; }
+      if (obj.tag && s.type !== "independent") { const pd = planetData(obj.sys, obj.tag); if (pd && pd[1]) fillPlanet(tip, pd[0], pd[1]); else fillSystem(tip, s); }
+      else if (s.type === "independent") fillPlanet(tip, s, s.planets[0] || { tag: s.name, blocks: s.blocks, blocks7d: s.blocks7d, last: s.last, policy: s.policy });
+      else fillSystem(tip, s);
+      tip.hidden = false;
+    }
   }
   if (!obj) return;
   const w = tip.offsetWidth, h = tip.offsetHeight;
@@ -770,7 +993,7 @@ function renderRelay() {
 const ray = new THREE.Raycaster(), pointer = new THREE.Vector2();
 let pointerXY = null, downAt = null;
 renderer.domElement.addEventListener("pointermove", (e) => { pointerXY = [e.clientX, e.clientY]; });
-renderer.domElement.addEventListener("pointerleave", () => { pointerXY = null; showTip(null); });
+renderer.domElement.addEventListener("pointerleave", () => { pointerXY = null; showTip(null); updateSpot(null, 0); });
 renderer.domElement.addEventListener("pointerdown", (e) => { downAt = [e.clientX, e.clientY, performance.now()]; });
 renderer.domElement.addEventListener("pointerup", (e) => {
   if (!downAt) return;
@@ -778,7 +1001,9 @@ renderer.domElement.addEventListener("pointerup", (e) => {
   downAt = null;
   if (moved > 6 || !quick) return;
   const hit = pick(e.clientX, e.clientY);
-  if (hit) focusSystem(hit.sys, hit.tag && systemData(hit.sys).type !== "independent" ? hit.tag : null);
+  // a block on the chain sends you to whoever found it
+  if (hit && hit.block != null) { const f = finderOf(blockData(hit.block)); if (f) focusSystem(f.sys, f.tag); }
+  else if (hit) focusSystem(hit.sys, hit.tag && systemData(hit.sys).type !== "independent" ? hit.tag : null);
   if (hit && e.pointerType !== "mouse") showTip(hit, e.clientX, e.clientY);
 });
 function pick(x, y) {
@@ -789,6 +1014,7 @@ function pick(x, y) {
   let best = null;
   for (const h of hits) {
     const u = h.object.userData;
+    if (u.kind === "block") { best = { block: u.h }; break; }
     if (u.kind === "planet") { best = { sys: u.sys, tag: u.tag }; break; }
     if (!best) best = { sys: u.sys };
   }
@@ -816,7 +1042,7 @@ function introFlight() {
   camera.position.set(0, 2600, 5200); controls.target.set(0, 0, 0);
   flyTo(new THREE.Vector3(0, 0, 0), 1750, 4.2);
   // the latest real blocks light up as we arrive
-  DATA.recent.slice(0, 3).reverse().forEach((b, k) => setTimeout(() => blockFlash(sysIdFor(b), b.planet, b.viaStratum), 3600 + k * 2200));
+  DATA.recent.slice(0, 3).reverse().forEach((b, k) => setTimeout(() => blockFlash({ ...b, replay: true }), 3600 + k * 2200));
 }
 const sysIdFor = (b) => { const s = DATA.systems.find((x) => x.name === b.system && (b.systemType ? x.type === b.systemType : true)); return s ? s.id : null; };
 
@@ -833,7 +1059,7 @@ async function poll() {
     const lastSeen = DATA.tip ? DATA.tip.height : 0;
     const fresh = d.recent.filter((b) => b.height > lastSeen).sort((a, b) => a.height - b.height);
     DATA = d;
-    fresh.forEach((b, k) => { freshHeights.add(b.height); setTimeout(() => blockFlash(sysIdFor(b), b.planet, b.viaStratum), k * 1600); });
+    fresh.forEach((b, k) => { freshHeights.add(b.height); setTimeout(() => blockFlash(b), k * 1600); });
     renderHud(); renderRelay();
     if ($("search").value === "") renderChart();
   } catch { /* keep the last picture */ }
@@ -869,6 +1095,8 @@ function tick() {
   controls.update();
   // labels fade with distance so the far galaxy stays clean
   const camD = camera.position.distanceTo(controls.target);
+  // inside a system there is nothing far away to glare, so the bloom comes down with the stars
+  if (bloom) bloom.strength = BLOOM * clamp(0.3 + (camD - 40) / 620, 0.3, 1);
   for (const l of labelled) l.element.style.opacity = camD > 3600 ? "0" : camD > 2400 ? "0.6" : "1";
   const wp = new THREE.Vector3();
   for (const b of beacons) { b.getWorldPosition(wp); const d = camera.position.distanceTo(wp); b.material.opacity = clamp((d - 500) / 900, 0, 0.9); }
@@ -876,7 +1104,10 @@ function tick() {
   if (pointerXY && !flight) {
     const hit = pick(pointerXY[0], pointerXY[1]);
     showTip(hit, pointerXY[0], pointerXY[1]);
-    for (const rec of systemsById.values()) for (const p of rec.planets) if (p.mesh.material.uniforms) p.mesh.material.uniforms.uHover.value = hit && hit.sys === rec.data.id && (hit.tag === p.tag || rec.type === "independent") ? 1 : 0;
+    // hovering a block on the chain lights its finder as if the pointer were on it
+    const hl = hit && hit.block != null ? finderOf(blockData(hit.block)) : hit;
+    updateSpot(hit && hit.block != null ? hit.block : null, t);
+    for (const rec of systemsById.values()) for (const p of rec.planets) if (p.mesh.material.uniforms) p.mesh.material.uniforms.uHover.value = hl && hl.sys === rec.data.id && (hl.tag === p.tag || rec.type === "independent" || (hl.tag == null && hit && hit.block != null)) ? 1 : 0;
     renderer.domElement.style.cursor = hit ? "pointer" : "grab";
   }
   if (composer) composer.render(); else renderer.render(scene, camera);
@@ -897,6 +1128,9 @@ addEventListener("resize", () => {
   if (FAST) window.__xbtg = { // test hook: where a system or planet is on screen
     where(sys, tag) { const r = systemsById.get(sys); if (!r) return null; const pl = tag && r.planets.find((x) => x.tag === tag); const w = new THREE.Vector3(); (pl ? pl.mesh : r.star || r.planets[0].mesh).getWorldPosition(w); w.project(camera); return [Math.round((w.x + 1) / 2 * innerWidth), Math.round((1 - w.y) / 2 * innerHeight)]; },
     ids: () => [...systemsById.keys()],
+    chain(i = 0) { const g = CHAIN.blocks[i]; if (!g) return null; const w = new THREE.Vector3(); g.getWorldPosition(w).project(camera); return [Math.round((w.x + 1) / 2 * innerWidth), Math.round((1 - w.y) / 2 * innerHeight)]; },
+    heights: () => CHAIN.blocks.map((g) => g.userData.b.height),
+    flash: (b) => blockFlash(b), // pretend a block was found
     follow: null, // [sys, tag]: keep the pointer on it (hover test)
     zoom(d, dy = 0) { const t = controls.target.clone(); t.y += dy; flyTo(t, d); },
   };

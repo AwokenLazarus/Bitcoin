@@ -28,6 +28,8 @@ button { font: inherit; color: inherit; }
 /* The Empire marks a stratum endpoint, so the red dot names that, not a pool. */
 .dot.stratum { background: #c9d6e6; box-shadow: 0 0 8px rgba(201,214,230,.6); }
 .label2d.planet { font-size: 10px; border-left-color: var(--lcars-blue); opacity: .9; }
+/* the height of the newest block, riding the chain out of the black hole */
+.label2d.chain { font-size: 11px; border-left-color: var(--lcars-blue); color: #cfe6ff; background: rgba(5, 6, 13, .6); }
 
 /* ---------- HUD top ---------- */
 .hud-top { position: fixed; top: 0; left: 0; right: 0; display: flex; align-items: stretch; gap: 14px; padding: 12px 16px 0; pointer-events: none; z-index: 5; }
@@ -81,6 +83,9 @@ button { font: inherit; color: inherit; }
 .tip.empire .t-kind { color: var(--empire); }
 .tip .t-name { margin: 3px 0 6px; font: 700 18px/1.15 var(--display); letter-spacing: .04em; word-break: break-word; }
 .tip .t-sub { margin: -2px 0 8px; color: var(--ink-2); font-size: 12px; letter-spacing: .04em; }
+.tip.block { border-left-color: var(--lcars-blue); }
+.tip.block .t-kind { color: var(--lcars-blue); }
+.tip .t-hint { margin-top: 8px; font: 600 10px/1 var(--lcars); letter-spacing: .18em; text-transform: uppercase; color: var(--ink-2); opacity: .8; }
 .kv { display: grid; grid-template-columns: auto 1fr; gap: 3px 12px; margin: 0; }
 .kv dt { font: 700 10px/1.6 var(--lcars); letter-spacing: .18em; text-transform: uppercase; color: var(--lcars-blue); white-space: nowrap; }
 .kv dd { margin: 0; font: 13px/1.45 var(--mono); color: var(--ink); }
