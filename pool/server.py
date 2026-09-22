@@ -835,17 +835,17 @@ def makegood_status(height, blockhash, tip, jobs=None, settlements=None):
 
     owed      primed has booked the debt; the fee wallet has not signed a payment yet
               (it normally does within a minute of the block).
-    queued    signed and waiting: a coinbase output cannot be spent before it matures (100
-              confirmations; blocks 973440..979919 wait for height 979920, Knots #419).
+    queued    signed and waiting: a coinbase output cannot be spent before it matures, and the
+              network will not relay the spend before payable_height() (100 confirmations; blocks 973440..979919 wait for height 979920, Knots #419).
     broadcast sent to the network, not yet in a block.
     paid      confirmed on chain.
     failed    the node refused the transaction; needs an operator."""
     jobs = makegood_jobs() if jobs is None else jobs
     settlements = owed_settlements() if settlements is None else settlements
-    payable_at = mature_height(height)
+    payable_at = payable_height(height)
     out = {
         "payable_at": payable_at,
-        "blocks_to_payable": max(0, payable_at - int(tip)) if tip else MATURITY_CONFS,
+        "blocks_to_payable": max(0, payable_at - int(tip)) if tip else maturity_confs(height),
         "status": "owed",
         "txid": "",
         "confirmations": 0,
@@ -921,7 +921,7 @@ def makegoods_payload():
     pending = [b for b in blocks if b["status"] in MAKEGOOD_PENDING]
     return {
         "tip": tip,
-        "maturity_confs": MATURITY_CONFS,
+        "maturity_confs": current_maturity_confs(tip),
         "pending_sats": sum(b["owed_sats"] for b in pending),
         "pending_blocks": len(pending),
         "paid_sats": sum(b["owed_sats"] for b in blocks if b["status"] == "paid"),
@@ -2500,19 +2500,56 @@ def coinbase_splits(blockhash):
 
 
 MATURITY_CONFS = 100
-# Knots #419 (long coinbase maturity, temporary soft fork): a coinbase created at height
-# LONG_MATURITY_START or later cannot be spent before height LONG_MATURITY_RELEASE, where the
-# rule lapses back to 100 confirmations. So: pre-window blocks mature at height + 100; window
-# blocks mature at max(release, height + 100).
+# Knots #419 (long coinbase maturity, soft fork): a coinbase created from LONG_MATURITY_START
+# needs 6,480 blocks on top before it can be spent, and a 29.4.2 node will not relay or mine a
+# spend of any younger coinbase. Shown as confirmations counting the coinbase's own block, so
+# 6,481: spendable once the chain reaches height + 6,480. Coinbases from before the window keep
+# 100, and so do those from LONG_MATURITY_RELEASE on, when the rule lapses.
 LONG_MATURITY_START = int(CONF.get("long_maturity_start", 973440))
 LONG_MATURITY_RELEASE = int(CONF.get("long_maturity_release", 979920))
+LONG_MATURITY_CONFS = int(CONF.get("long_maturity_confs", 6481))
+
+
+def long_maturity(height):
+    return LONG_MATURITY_START <= int(height) < LONG_MATURITY_RELEASE
+
+
+def maturity_confs(height):
+    """Confirmations the coinbase of the block at `height` needs before it can be spent."""
+    return LONG_MATURITY_CONFS if long_maturity(height) else MATURITY_CONFS
+
+
+def current_maturity_confs(tip):
+    """What a coinbase maturing now needs: the long figure until the last window block matures."""
+    tip = int(tip or 0)
+    return LONG_MATURITY_CONFS if LONG_MATURITY_START <= tip < LONG_MATURITY_RELEASE + LONG_MATURITY_CONFS else MATURITY_CONFS
 
 
 def mature_height(height):
+    """Height at which consensus allows this block's coinbase to be spent."""
     height = int(height)
-    if height >= LONG_MATURITY_START:
-        return max(LONG_MATURITY_RELEASE, height + MATURITY_CONFS)
+    if long_maturity(height):
+        return height + LONG_MATURITY_CONFS - 1
     return height + MATURITY_CONFS
+
+
+# Relay is stricter than consensus, and not only inside the window. Knots' mempool calls
+# CheckTxInputs with the long maturity and a start height of 0, so *every* coinbase spend needs
+# LONG_MATURITY_CONFS - 1 confirmations to be accepted or relayed, whatever height it was mined
+# at, and that call is not gated on the deployment being active. Observed on the hub: make-goods
+# for blocks 973362-973407, well past 100 confirmations and below the window's start height, come
+# back bad-txns-premature-spend-of-coinbase on every retry.
+RELAY_MATURITY_CONFS = LONG_MATURITY_CONFS
+
+
+def payable_height(height):
+    """Height at which a spend of this block's coinbase can actually be broadcast.
+
+    The later of what consensus requires and what the mempool will relay. A miner who mines its
+    own spend can go at mature_height; anything that has to travel the network waits for this.
+    """
+    height = int(height)
+    return max(mature_height(height), height + RELAY_MATURITY_CONFS - 1)
 
 
 def payout_status_for_height(height, tip):
@@ -4022,9 +4059,10 @@ def miner_payload(address):
                 "work": 0,
                 "status": st,
                 "round_status": st,
-                # Coinbase outputs spend after 100 confirmations; the block itself is one.
+                # Confirmations count the block itself; see `maturity_confs`.
                 "confirmations": confs,
-                # Spendable once the chain reaches height + 100 (status flips to paid then).
+                "maturity_confs": maturity_confs(fb["height"]) if fb["height"] else MATURITY_CONFS,
+                # Spendable once the chain reaches `mature_height` (status flips to paid then).
                 "blocks_to_mature": max(0, mature_height(fb["height"]) - int(tip)) if tip and fb["height"] else MATURITY_CONFS,
             }
         )
@@ -4058,7 +4096,8 @@ def miner_payload(address):
         for p in payouts:
             confs = max(0, int(tip) - int(p["height"]) + 1) if tip and p.get("height") else 0
             p["confirmations"] = confs
-            p["blocks_to_mature"] = max(0, int(p["height"]) + MATURITY_CONFS - int(tip)) if tip and p.get("height") else MATURITY_CONFS
+            p["maturity_confs"] = maturity_confs(p["height"]) if p.get("height") else MATURITY_CONFS
+            p["blocks_to_mature"] = max(0, mature_height(p["height"]) - int(tip)) if tip and p.get("height") else MATURITY_CONFS
     # Average hashrate over the last hour / day from the per-minute samples, so the
     # miner page can show a steadier figure than the instantaneous one.
     now_ts = int(time.time())
@@ -4192,7 +4231,7 @@ def miner_payload(address):
         "makegood_paid_btc": sum(r["sats"] for r in makegoods if r["status"] == "paid") / 1e8,
         "makegood_failed_blocks": sum(1 for r in makegoods if r["status"] == "failed"),
         "tip_height": int(tip or 0),
-        "maturity_confs": MATURITY_CONFS,
+        "maturity_confs": current_maturity_confs(tip),
         "hr_1h_ghs": hr_1h,
         "hr_24h_ghs": hr_24h,
         "round_work": my_work,
@@ -4415,7 +4454,7 @@ _SEO_PAGES = {
                 "Mine Bitcoin (XBT / BTCB2) with any Siacoin BLAKE2b ASIC — Goldshell SC, iBeLink BM-S3, "
                 "Antminer A3. The first pool to pay TIDES as a split coinbase on this BIP-110 Bitcoin fork's "
                 "mainnet, and the first to subsidize DATUM miners with its own stratum hashers. 0% via DATUM, "
-                "15% public stratum (stratum+tcp://stratum.lazarus-xbt.xyz:23334)."
+                "25% public stratum from block 973,750 (stratum+tcp://stratum.lazarus-xbt.xyz:23334)."
             ),
             "scroll": "",
         },
@@ -4424,7 +4463,7 @@ _SEO_PAGES = {
             "description": (
                 "用任何能挖 Siacoin 的 BLAKE2b ASIC 挖比特币（XBT / BTCB2）——金贝 SC、iBeLink BM-S3、蚂蚁 A3。"
                 "本矿池是这条 BIP-110 比特币分叉主网上第一家用 TIDES 拆分 coinbase 支付的矿池，也是第一家"
-                "用自有 stratum 算力补贴 DATUM 矿工的矿池。自建 DATUM 0%，公共 stratum 15%"
+                "用自有 stratum 算力补贴 DATUM 矿工的矿池。自建 DATUM 0%，公共 stratum 自区块 973750 起 25%"
                 "（stratum+tcp://stratum.lazarus-xbt.xyz:23334）。"
             ),
             "scroll": "",
@@ -4691,7 +4730,7 @@ _POOL_TABLE_EN = """<div class="seo-table"><table>
         <caption>BLAKE2b Bitcoin (XBT / BTCB2) pools, as each publishes its own terms, 18 September 2026</caption>
         <thead><tr><th scope="col">Pool</th><th scope="col">Fee</th><th scope="col">Reward scheme</th><th scope="col">Who holds your coins</th><th scope="col">The block's transaction fees</th><th scope="col">Limit on its own share</th></tr></thead>
         <tbody>
-        <tr><th scope="row">Lazarus Pool</th><td>0% own DATUM gateway · 15% public stratum, 7.5 of those points paid back to DATUM miners</td><td>TIDES, 8&times; difficulty</td><td>Nobody. The block's coinbase pays your address</td><td>Scale every miner's payout up</td><td>Stratum held to 15%, enforced by relaying new miners elsewhere</td></tr>
+        <tr><th scope="row">Lazarus Pool</th><td>0% own DATUM gateway · 25% public stratum from block 973,750 (15% before), 12.5 of those points paid back to DATUM miners</td><td>TIDES, 8&times; difficulty</td><td>Nobody. The block's coinbase pays your address</td><td>Scale every miner's payout up</td><td>Stratum held to 15%, enforced by relaying new miners elsewhere</td></tr>
         <tr><th scope="row">Riptide</th><td>0% own DATUM · 1% stratum (variable; currently 1%, half the skim to live DATUM miners)</td><td>TIDES</td><td>Coinbase</td><td>Not published separately</td><td>None published</td></tr>
         <tr><th scope="row">CONVOY</th><td>1% DATUM · 2% failover stratum</td><td>TIDES</td><td>Generation transaction when it fits; otherwise a balance until 0.01048576 BTC</td><td>Included in the TIDES split</td><td>None published</td></tr>
         <tr><th scope="row">B2Pool</th><td>0% own DATUM · 1% TIDES stratum</td><td>TIDES, 4&times; difficulty</td><td>Coinbase where it fits, otherwise the pool until your balance passes 10,000 sat</td><td>Stay with the pool (only the subsidy is shared)</td><td>None published</td></tr>
@@ -4705,7 +4744,7 @@ _POOL_TABLE_ZH = """<div class="seo-table"><table>
         <caption>BLAKE2b 比特币（XBT / BTCB2）矿池对比，均按各家自行公布的口径，2026 年 9 月 18 日</caption>
         <thead><tr><th scope="col">矿池</th><th scope="col">手续费</th><th scope="col">奖励方式</th><th scope="col">谁替你拿着币</th><th scope="col">区块里的交易费</th><th scope="col">自身占比上限</th></tr></thead>
         <tbody>
-        <tr><th scope="row">Lazarus Pool</th><td>自建 DATUM 网关 0% · 公共 stratum 15%，其中 7.5 个点返还给 DATUM 矿工</td><td>TIDES，难度 8 倍</td><td>没有人。由区块的 coinbase 直接付到你的地址</td><td>等比例抬高每位矿工的收益</td><td>stratum 上限 15%，超过即把新矿工中继到别家</td></tr>
+        <tr><th scope="row">Lazarus Pool</th><td>自建 DATUM 网关 0% · 公共 stratum 自区块 973750 起 25%（此前 15%），其中 12.5 个点返还给 DATUM 矿工</td><td>TIDES，难度 8 倍</td><td>没有人。由区块的 coinbase 直接付到你的地址</td><td>等比例抬高每位矿工的收益</td><td>stratum 上限 15%，超过即把新矿工中继到别家</td></tr>
         <tr><th scope="row">Riptide</th><td>自建 DATUM 0% · stratum 1%（可变，目前 1%，抽成一半给在线 DATUM 矿工）</td><td>TIDES</td><td>coinbase</td><td>未单独公布</td><td>未公布</td></tr>
         <tr><th scope="row">CONVOY</th><td>DATUM 1% · 故障转移 stratum 2%</td><td>TIDES</td><td>能进 coinbase 就进，否则代持至 0.01048576 BTC</td><td>计入 TIDES 分配</td><td>未公布</td></tr>
         <tr><th scope="row">B2Pool</th><td>自建 DATUM 0% · TIDES stratum 1%</td><td>TIDES，难度 4 倍</td><td>能进 coinbase 就进，否则由矿池代持至余额超过 10,000 sat</td><td>留给矿池（只分享区块补贴）</td><td>未公布</td></tr>
@@ -4786,11 +4825,11 @@ _SEO_INTRO = {
     "/datum-subsidy": {
         "en": ("The DATUM subsidy: getting paid to decentralize", [
             "Running your own DATUM gateway against your own Bitcoin Knots node means you build the block template and choose the transactions in it. The pool only supplies the coinbase split and verifies your shares. That work costs you nothing in fees here — DATUM miners pay 0% — and it moves template construction out of the pool's hands, which is the part of mining centralization that actually matters.",
-            "Lazarus Pool is the first pool anywhere to fund a subsidy for that from its own stratum hashers. The public stratum charges 15%, and 7.5 of those points are not kept: on every block found they are credited pro rata to every DATUM miner holding work in the window, whether or not that miner's template produced the block. Decentralizing the network pays better than using the pool's own stratum, which is the incentive the right way round. <a href=\"/connect\">Gateway setup and the config to copy.</a>",
+            "Lazarus Pool is the first pool anywhere to fund a subsidy for that from its own stratum hashers. The public stratum charges 25% from block 973,750 (15% before), and 12.5 of those points are not kept: on every block found they are credited pro rata to every DATUM miner holding work in the window, whether or not that miner's template produced the block. Decentralizing the network pays better than using the pool's own stratum, which is the incentive the right way round. <a href=\"/connect\">Gateway setup and the config to copy.</a>",
         ]),
         "zh": ("DATUM 补贴：为去中心化拿钱", [
             "用自己的 Bitcoin Knots 节点跑自己的 DATUM 网关，意味着区块模板由你构建、交易由你挑选，矿池只提供 coinbase 拆分并校验你的份额。在这里这件事不收你一分手续费——DATUM 矿工 0%——而且它把模板构建权从矿池手里移走，那才是挖矿中心化真正要紧的一环。",
-            "Lazarus Pool 是全网第一家用自有 stratum 算力为此出资补贴的矿池。公共 stratum 收 15%，其中 7.5 个点并不留下：每找到一个区块，就按比例记给窗口内每一位 DATUM 矿工，无论那个区块是不是由他的模板产出。让网络去中心化比用矿池的 stratum 更赚钱——激励方向本该如此。<a href=\"/connect\">网关配置与可直接复制的 config。</a>",
+            "Lazarus Pool 是全网第一家用自有 stratum 算力为此出资补贴的矿池。公共 stratum 自区块 973750 起收 25%（此前 15%），其中 12.5 个点并不留下：每找到一个区块，就按比例记给窗口内每一位 DATUM 矿工，无论那个区块是不是由他的模板产出。让网络去中心化比用矿池的 stratum 更赚钱——激励方向本该如此。<a href=\"/connect\">网关配置与可直接复制的 config。</a>",
         ]),
     },
     "/profitability": {
@@ -4816,17 +4855,17 @@ _SEO_INTRO = {
     "/connect": {
         "en": ("Connect a miner to Lazarus Pool", [
             "Point the miner at <b>stratum+tcp://stratum.lazarus-xbt.xyz:23334</b>, set the username to the address you want paid — optionally <code>address.worker</code> — and the password to <code>x</code>. The algorithm is BLAKE2b with a Sia-style header, not SHA-256d. New sessions start at difficulty 4096 and vardiff steps up toward your hashrate from there. There is no account and no registration; the username is the payout instruction.",
-            "There are two ways in. The public stratum charges 15% and our node builds the templates, which is the one-line setup. Running your own Bitcoin Knots node and DATUM gateway costs 0% and pays you a <a href=\"/datum-subsidy\">share of that stratum fee</a> on every block, because you are building the templates yourself. Both land in the same TIDES window under your address, so switching later keeps the accepted work you already have. For a longer Knots + DATUM walkthrough, use <a href=\"https://convoy.xyz/getstarted\">CONVOY’s get-started guide</a> (also in <a href=\"https://convoy.xyz/getstarted?lang=zh\">中文</a>), then come back here for this pool’s host, port, and pubkey.",
+            "There are two ways in. The public stratum charges 25% from block 973,750 and our node builds the templates, which is the one-line setup, but Bitcoin Knots has announced a rule to invalidate payouts to addresses that hash through any pool's stratum, so it is a stopgap. Running your own Bitcoin Knots node and DATUM gateway costs 0% and pays you a <a href=\"/datum-subsidy\">share of that stratum fee</a> on every block, because you are building the templates yourself. Both land in the same TIDES window under your address, so switching later keeps the accepted work you already have. For a longer Knots + DATUM walkthrough, use <a href=\"https://convoy.xyz/getstarted\">CONVOY’s get-started guide</a> (also in <a href=\"https://convoy.xyz/getstarted?lang=zh\">中文</a>), then come back here for this pool’s host, port, and pubkey.",
         ]),
         "zh": ("把矿机接入 Lazarus Pool", [
             "把矿机指向 <b>stratum+tcp://stratum.lazarus-xbt.xyz:23334</b>，用户名填你要收款的地址（也可以写成 <code>地址.worker</code>），密码填 <code>x</code>。算法是 BLAKE2b（Sia 风格区块头），不是 SHA-256d。新会话从难度 4096 起步，之后 vardiff 会朝你的算力逐步调整。没有账户，也不用注册——用户名就是收款指令。",
-            "有两条路。公共 stratum 收 15%，模板由我们的节点构建，配置只有一行。自己跑 Bitcoin Knots 节点和 DATUM 网关则是 0%，而且因为模板是你自己构建的，每个区块还会把<a href=\"/datum-subsidy\">那笔 stratum 手续费的一部分</a>付给你。两条路都记入同一个 TIDES 窗口、同一个地址，所以以后切换不会丢掉已积累的工作量。更完整的 Knots + DATUM 说明见 <a href=\"https://convoy.xyz/getstarted?lang=zh\">CONVOY 入门指南（中文）</a>（<a href=\"https://convoy.xyz/getstarted\">English</a>），然后回到本页填写本池的主机、端口和公钥。",
+            "有两条路。公共 stratum 自区块 973750 起收 25%，模板由我们的节点构建，配置只有一行，但 Bitcoin Knots 已宣布将判定通过任何矿池 stratum 出算力的地址所获付款无效，所以它只是权宜之计。自己跑 Bitcoin Knots 节点和 DATUM 网关则是 0%，而且因为模板是你自己构建的，每个区块还会把<a href=\"/datum-subsidy\">那笔 stratum 手续费的一部分</a>付给你。两条路都记入同一个 TIDES 窗口、同一个地址，所以以后切换不会丢掉已积累的工作量。更完整的 Knots + DATUM 说明见 <a href=\"https://convoy.xyz/getstarted?lang=zh\">CONVOY 入门指南（中文）</a>（<a href=\"https://convoy.xyz/getstarted\">English</a>），然后回到本页填写本池的主机、端口和公钥。",
         ]),
     },
     "/mine-xbt": {
         "en": ("How to mine Bitcoin XBT (BTCB2)", [
             "You need three things: an ASIC that hashes BLAKE2b, an address on this chain to be paid to, and the pool endpoint. If you already own a Siacoin miner you have the first one — this is the same algorithm, so stock firmware works. Point it at <b>stratum+tcp://stratum.lazarus-xbt.xyz:23334</b> with your address as the username and <code>x</code> as the password, and it will start hashing immediately.",
-            "One warning worth reading twice: this chain shares every block of history with SHA-256 Bitcoin up to block 961,640, so an address holding real BTC should never be used here. Generate a fresh address for this chain. Payouts arrive as outputs in the coinbase of blocks the pool finds, spendable after 100 confirmations, with no balance to withdraw. <a href=\"/hardware\">Which machines work</a> · <a href=\"/tides\">how the payout is calculated</a>.",
+            "One warning worth reading twice: this chain shares every block of history with SHA-256 Bitcoin up to block 961,640, so an address holding real BTC should never be used here. Generate a fresh address for this chain. Payouts arrive as outputs in the coinbase of blocks the pool finds, with no balance to withdraw. Coinbase outputs normally spend after 100 confirmations; under the temporary Knots #419 rule a newly mined coin waits 6,480 confirmations, and nodes will not relay any coinbase spend below that, so a payout takes about 35 days to become spendable. <a href=\"/hardware\">Which machines work</a> · <a href=\"/tides\">how the payout is calculated</a>.",
         ]),
         "zh": ("如何挖比特币 XBT（BTCB2）", [
             "你需要三样东西：一台能算 BLAKE2b 的 ASIC、一个本链的收款地址，以及矿池地址。如果你已经有 Siacoin 矿机，第一样就有了——算法相同，原厂固件即可。把它指向 <b>stratum+tcp://stratum.lazarus-xbt.xyz:23334</b>，用户名填你的地址，密码填 <code>x</code>，立刻就能开始工作。",
@@ -4847,13 +4886,13 @@ _SEO_INTRO = {
         "en": ("Which XBT (BTCB2) pool should you point hashrate at?", [
             "The fee is the number everyone compares first and the least interesting of the four things that actually differ between pools on this chain. The others: whether the pool ever holds your coins, whether the transaction fees in a found block reach the miners or stay with the operator, and whether the pool does anything at all to limit its own share of the network.",
             _POOL_TABLE_EN,
-            "Read that honestly and our public stratum is the expensive one. If you have no intention of running a node, 1% elsewhere beats 15% here and we would rather say so than pretend otherwise. What that 15% buys is the other column: 7.5 of those points are handed back to DATUM miners on every block found, which is why the path we actually recommend costs 0% and gets paid a bonus on top of a full window share.",
+            "Read that honestly and our public stratum is the expensive one: 25% from block 973,750. That is deliberate. Bitcoin Knots has announced a rule to invalidate coinbase payouts to addresses that hash through a pool's stratum, on every pool, so a cheaper pool is not a way out: a stratum hasher there will not be paid either. What the fee buys is the other column: 12.5 of those points are handed back to DATUM miners on every block found, which is why the path we actually recommend, your own node and gateway, is 0% and earns the subsidy on top of a full window share.",
             "The rest of the table is where nothing else on this chain matches. Transaction fees in a block scale every payout up here instead of staying with the pool. Nothing is ever held — the block itself pays your address, so there is no balance, threshold or withdrawal. And once its stratum passes 15% of network hashrate this pool <a href=\"/self-cap\">turns new miners away</a> and hands them to someone else. The five pools we relay to are grouped in the table with Lazarus; figures are as each pool published them on 18 September 2026 — check their sites before you commit a fleet.",
         ]),
         "zh": ("XBT（BTCB2）该挖哪个矿池？", [
             "手续费是所有人第一个拿来比的数字，也是本链各矿池之间真正有差别的四件事里最不重要的一件。另外三件是：矿池会不会替你保管币、所出区块里的交易费是分给矿工还是留给运营者，以及这家矿池有没有采取任何措施限制自己在全网中的占比。",
             _POOL_TABLE_ZH,
-            "如实来看，我们的公共 stratum 是贵的那一个。如果你完全不打算自己跑节点，别家 1% 就是比这里 15% 划算，我们宁愿直说，也不想装作不是。这 15% 换来的是隔壁那一列：其中 7.5 个点在每次出块时都会返还给 DATUM 矿工——这也正是我们真正推荐的那条路为什么是 0%，而且在拿到完整窗口份额之外还额外拿补贴。",
+            "如实来看，我们的公共 stratum 是贵的那一个：自区块 973750 起 25%。这是有意为之。Bitcoin Knots 已宣布一项规则：在任何矿池，通过矿池 stratum 出算力的地址所获 coinbase 付款都将被判无效，所以换一家更便宜的矿池并不是出路，在那里用 stratum 出算力同样拿不到付款。这笔费用换来的是隔壁那一列：其中 12.5 个点在每次出块时都会返还给 DATUM 矿工——这也正是我们真正推荐的那条路（自己的节点和网关）为什么是 0%，而且在拿到完整窗口份额之外还额外拿补贴。",
             "表格剩下的部分，本链目前没有别家能对上。这里区块中的交易费会等比例抬高每一笔支付，而不是留在矿池。任何时候都不代持——由区块本身付到你的地址，因此没有余额、没有起付线、不用提现。而且一旦自家 stratum 超过全网 15% 的算力，本矿池会<a href=\"/self-cap\">把新矿工拒之门外</a>并转交给别家。我们转发到的五家矿池和 Lazarus 列在同一张表里；表中数字为各矿池 2026 年 9 月 18 日自行公布的口径，投入整批机器前请先到各家网站核对。",
         ]),
     },
@@ -4873,7 +4912,7 @@ _SEO_INTRO = {
         "en": ("No pool balance, no withdrawal, nothing to trust", [
             "Almost every mining pool credits your work to a balance and pays that balance out later — when it passes a threshold, when a block matures, when a batch cycle runs. That gap between earning and holding is where mining money has always gone missing: exits, hacks, thresholds you never reach, a dust balance stranded when you unplug. Lazarus does not have the gap, because it never takes custody in the first place.",
             "Your payout is an output of the block itself. Prime hands every gateway the same coinbase output list before any work goes out, and a share whose coinbase pays anything other than that list is refused — so whichever machine finds the block, that block's coinbase pays every address in the <a href=\"/tides\">TIDES window</a> directly. The pool never receives your coins, which means it cannot hold, batch, freeze or lose them.",
-            "In practice: no account, no registration, no KYC, no minimum payout, no withdrawal button, no pending balance, and nothing owed to anyone if this pool disappeared tonight. Coinbase outputs are spendable after 100 confirmations like any other. A pool that pays you \u201conce your balance passes a threshold\u201d or \u201cat maturity\u201d is holding your coins in between; that is a real difference in what you are trusting, and it is worth knowing which kind you are on. <a href=\"/pools\">Compare the pools on this chain.</a>",
+            "In practice: no account, no registration, no KYC, no minimum payout, no withdrawal button, no pending balance, and nothing owed to anyone if this pool disappeared tonight. Coinbase outputs are spendable after 100 confirmations like any other — except right now: the temporary Knots #419 rule makes every newly mined coin on this chain, at every pool and for every solo miner, wait 6,480 confirmations instead. A pool that pays you \u201conce your balance passes a threshold\u201d or \u201cat maturity\u201d is holding your coins in between; that is a real difference in what you are trusting, and it is worth knowing which kind you are on. <a href=\"/pools\">Compare the pools on this chain.</a>",
         ]),
         "zh": ("没有矿池余额，不用提现，没有需要信任的对象", [
             "几乎所有矿池都会把你的工作量记成一笔余额，之后再支付出去——攒够起付线时、区块成熟时、批量支付周期跑到时。赚到和拿到之间这段空隙，正是挖矿的钱历来消失的地方：跑路、被盗、永远攒不到的起付线、拔机后卡住的零星余额。Lazarus 没有这段空隙，因为它从一开始就不接管你的币。",
@@ -5031,6 +5070,7 @@ _LLMS_TXT = """# Lazarus Pool
 - Stratum protocol reference (markdown): {site}/stratum-protocol.md
 - Public API reference: {site}/api
 - Explorer: https://mempool.lazarus-xbt.xyz
+- Fee change: from block 973,750 (about 05:00 UTC, 23 Sep 2026) the public stratum fee is 25%, 12.5 points credited to DATUM miners. Bitcoin Knots has announced a rule to invalidate coinbase payouts to addresses that hash through any pool's stratum (SV1); moving to another pool does not avoid it. Run your own DATUM gateway.
 - MCP server for AI assistants (read-only, no login, Streamable HTTP): https://mcp.lazarus-xbt.xyz/mcp (guide: https://mcp.lazarus-xbt.xyz)
 - GitHub: https://github.com/AwokenLazarus/Bitcoin
 - Discord: https://discord.gg/fD33dJXnzz
@@ -5103,7 +5143,7 @@ block, and whether a pool limits its own share. As each pool published its own t
 2026:
 
 - Lazarus Pool: 0% with your own DATUM gateway, 15% on the public stratum with 7.5 of those points
-  paid back to DATUM miners. TIDES, window of 8x difficulty. No custody at all — the block's
+  paid back to DATUM miners (25% and 12.5 from block 973,750). TIDES, window of 8x difficulty. No custody at all — the block's
   coinbase pays your address, so there is no balance, threshold or withdrawal. The block's
   transaction fees scale every miner's payout up. Stratum self-capped at 15%.
 - Riptide (overflow): 0% own DATUM, 1% stratum (variable; currently 1%, half the skim to live DATUM
@@ -5763,6 +5803,7 @@ class Handler(BaseHTTPRequestHandler):
                             "status": st,
                             "reward_btc": reward,
                             "confirmations": confs,
+                            "maturity_confs": maturity_confs(fb["height"]) if fb["height"] else MATURITY_CONFS,
                         }
                     )
             if not chain_ok:
@@ -5826,6 +5867,10 @@ class Handler(BaseHTTPRequestHandler):
                     row["to"] = "miner"
                     tagged.append(row)
             payouts = _collapse_found_payouts(tagged)
+            # each block's own requirement (the page compares confirmations against it)
+            for row in payouts:
+                if row.get("height"):
+                    row["maturity_confs"] = maturity_confs(row["height"])
             prime_by = state.get("prime") or {}
             current = sorted(
                 (
@@ -5841,7 +5886,7 @@ class Handler(BaseHTTPRequestHandler):
             return {
                 "scheme": "TIDES",
                 "fee_percent": POOL_FEE,
-                "maturity_blocks": MATURITY_CONFS,
+                "maturity_blocks": current_maturity_confs(tip),
                 "tip": int(tip or 0),
                 "current_round": current,
                 "payouts": payouts,
