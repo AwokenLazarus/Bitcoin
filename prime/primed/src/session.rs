@@ -452,10 +452,15 @@ pub async fn run(shared: Arc<Shared>, mut stream: TcpStream, remote: SocketAddr)
         // Its own node handed us a block the chain refused, so its next one would go the same
         // way and the whole window would pay for it. Nothing it sends is counted meanwhile.
         log::warn!(
-            "[{id}] {remote} gateway={gateway_hex} refused: {} (block {}); until unix {}",
-            q.reason, q.height, q.until
+            "[{id}] {remote} gateway={gateway_hex} refused: {} (block {}, strike {}); {} min left",
+            q.reason,
+            q.height,
+            q.strikes,
+            q.until.saturating_sub(crate::state::now()) / 60
         );
-        return Err(SessionError::Bad("gateway refused: its node built a block this chain rejected; upgrade Bitcoin Knots and reconnect"));
+        return Err(SessionError::Bad(
+            "gateway refused: its node built a block this chain rejected. Upgrade Bitcoin Knots to a build that has the              rule (29.4.2 or later) and reconnect — the refusal lifts on its own and an upgraded gateway is taken back              straight away",
+        ));
     }
     let known_script = shared.lookup_gateway_script(&gateway_key);
     let fee_path = if house_stratum(&shared.cfg, remote, &gateway_key) { "stratum" } else { "datum" };
@@ -1869,17 +1874,19 @@ impl Session {
                 }
             }
             let height = shared.update_block(&hash_hex, |r| r.submit = outcome.clone()).map(|r| r.height);
+            // The house gateway builds on this pool's own node, so it can never be the one behind.
             if outdated && !house {
-                let at = height.unwrap_or(0);
-                if shared.quarantine_gateway(&key, at, &outcome) {
+                let height = height.unwrap_or(0);
+                if let Some(span) = shared.quarantine_gateway(&key, height, &outcome) {
                     log::error!(
-                        "[{id}] gateway={gw} built block {at} that the chain rejected ({outcome}); \
-                         refusing its work for {}h — its Bitcoin Knots is behind a consensus rule",
-                        shared.cfg.quarantine_hours
+                        "[{id}] gateway={gw} built block {height} that the chain rejected ({outcome}); \
+                         refusing its work for {} min — its Bitcoin Knots is behind a consensus rule. \
+                         Upgrading and reconnecting after that is all it takes to come back",
+                        span / 60
                     );
                 } else {
                     log::error!(
-                        "[{id}] gateway={gw} built block {at} that the chain rejected ({outcome}); \
+                        "[{id}] gateway={gw} built block {height} that the chain rejected ({outcome}); \
                          quarantine is off, so its work is still accepted"
                     );
                 }
