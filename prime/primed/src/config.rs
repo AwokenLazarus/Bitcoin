@@ -146,8 +146,8 @@ pub struct Config {
     /// rule its node does not know is a block the whole window loses. 0 turns this off.
     #[serde(default = "d_quarantine_hours")]
     pub quarantine_hours: u64,
-    /// Gateway identity keys refused outright, whatever they submit. Full hex keys, as logged
-    /// at `hello gateway=`; a prefix is not enough, for the reason `house-gateways` gives.
+    /// Gateway identity keys refused outright, whatever they submit. The 16-hex `gateway=`
+    /// from the logs is enough; a longer prefix or the whole key also works.
     #[serde(default)]
     pub blocked_gateways: Vec<String>,
     /// Coinbase section bytes one session may have Prime hold across all of its job slots.
