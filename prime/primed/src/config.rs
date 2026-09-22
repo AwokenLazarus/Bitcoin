@@ -348,7 +348,7 @@ mod tests {
     const LEGACY: &str = r#"
 listen = "0.0.0.0:28915"
 stats-listen = "127.0.0.1:28916"
-advertise-address = "stratum.awokenlazarus.xyz:28915"
+advertise-address = "datum.lazarus-xbt.xyz:28915"
 data-dir = "/home/umbrel/blake2b/lazarus-prime"
 motd = "Lazarus"
 min-diff = 1

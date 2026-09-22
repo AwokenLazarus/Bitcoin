@@ -14,7 +14,7 @@ listen = "0.0.0.0:28915"
 # HTTP: /stats.json (pool UI), /ledger.json (legacy credits view), /healthz.
 stats-listen = "127.0.0.1:28916"
 # Only reported in stats.
-advertise-address = "stratum.awokenlazarus.xyz:28915"
+advertise-address = "datum.lazarus-xbt.xyz:28915"
 # Key, ledger, block log, and mirrored stats.json / ledger.json.
 data-dir = "/home/umbrel/blake2b/lazarus-prime"
 # key-file = "/home/umbrel/blake2b/lazarus-prime/prime.key"   # default: <data-dir>/prime.key

@@ -92,7 +92,7 @@ In `datum_gateway_config.json`:
 
 ```json
 "datum": {
-  "pool_host": "stratum.awokenlazarus.xyz",
+  "pool_host": "datum.lazarus-xbt.xyz",
   "pool_port": 28915,
   "pool_pubkey": "<output of primed pubkey>",
   "pool_pass_workers": true,
