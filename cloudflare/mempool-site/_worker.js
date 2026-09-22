@@ -29,13 +29,32 @@ const API_TTL = [
   [/^\/api\/v1\/(mining\/|historical-price$|statistics\/)/, 60],
   [/^\/api\/v1\/(blocks(\/\d+)?$|prices$|fees\/|difficulty-adjustment$|backend-info$)/, 10],
   [/^\/api\/(v1\/)?block\/[0-9a-f]{64}\/(header|summary|txids)$/, 300],
+  // What a block holds never changes under its hash. Dashboards poll a block's first page of
+  // transactions (the coinbase) every few seconds; without this each poll is a node lookup.
+  [/^\/api\/(v1\/)?block\/[0-9a-f]{64}(\/txs(\/\d+)?|\/raw)?$/, 600],
+  // A transaction changes once, when it confirms; the page's websocket says so live.
+  [/^\/api\/tx\/[0-9a-f]{64}(\/status|\/hex|\/outspends|\/merkle-proof)?$/, 30],
   // Address answers come from electrs, which serves one request at a time and rebuilds an address
   // by fetching every block it appears in: a miner with a long payout history costs seconds, and
   // everyone else waits behind it. The page's websocket carries new transactions live, so a
   // summary a few seconds old costs nothing. Older pages of history do not change.
   [/^\/api\/address\/[A-Za-z0-9]{20,100}\/txs\/chain\/[0-9a-f]{64}$/, 300],
-  [/^\/api\/address\/[A-Za-z0-9]{20,100}(\/utxo|\/txs|\/txs\/chain)?$/, 30],
+  [/^\/api\/address\/[A-Za-z0-9]{20,100}(\/utxo|\/txs|\/txs\/chain)?$/, 60],
 ];
+
+// Search crawlers render pages like a browser, so every address page they index is a full electrs
+// rebuild of that address, and Googlebot alone walked ~55 a minute (22 Sep 2026), stalling every
+// visitor behind it. Address, transaction and API pages are kept out of indexes (robots.txt), and
+// until a crawler rereads that, its address lookups are turned away here.
+const CRAWLER_RE = /bot|crawl|spider|slurp|bingpreview|facebookexternalhit|embedly|headless/i;
+const ROBOTS = `User-agent: *
+Disallow: /address/
+Disallow: /tx/
+Disallow: /api/
+Disallow: /*/address/
+Disallow: /*/tx/
+Allow: /
+`;
 
 // No Content-Security-Policy on purpose: the Angular app uses inline styles and scripts, the
 // theme loads Google Fonts and calls the pool API cross-origin, and a policy tight enough to be
@@ -174,6 +193,15 @@ export default {
     const url = new URL(request.url);
     const path = url.pathname;
 
+    if (path === "/robots.txt") {
+      return new Response(ROBOTS, { headers: { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "public, max-age=3600" } });
+    }
+    if (path.startsWith("/api/address/") && CRAWLER_RE.test(request.headers.get("User-Agent") || "")) {
+      return new Response('{"error":"address lookups are not for crawlers; see /robots.txt"}', {
+        status: 429,
+        headers: { "Content-Type": "application/json", "Retry-After": "86400", "Cache-Control": "no-store" },
+      });
+    }
     // nginx: `location = /api` and `= /api/` are the static API docs, in English.
     if (path === "/api" || path === "/api/") return shell(env, request, "en-US");
     if (path.startsWith("/api/v1/services/")) {
