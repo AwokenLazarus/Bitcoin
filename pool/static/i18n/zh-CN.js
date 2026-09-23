@@ -2,7 +2,7 @@ window.LZ_I18N_DICTS = window.LZ_I18N_DICTS || {};
 window.LZ_I18N_DICTS["zh-CN"] = {
   "meta": {
     "title": "Lazarus Pool — 用 Siacoin BLAKE2b 矿机挖比特币（XBT / BTCB2）的矿池",
-    "description": "用任何能挖 Siacoin 的 BLAKE2b ASIC 挖比特币（XBT / BTCB2）——金贝 SC、iBeLink BM-S3、蚂蚁 A3。本矿池是这条 BIP-110 比特币分叉主网上第一家用 TIDES 拆分 coinbase 支付的矿池，也是第一家用自有 stratum 算力补贴 DATUM 矿工的矿池。自建 DATUM 0%，公共 stratum 自区块 973750 起 25%（stratum+tcp://stratum.lazarus-xbt.xyz:23334）。",
+    "description": "用任何能挖 Siacoin 的 BLAKE2b ASIC 挖比特币（XBT / BTCB2）——金贝 SC、iBeLink BM-S3、蚂蚁 A3。本矿池是这条 BIP-110 比特币分叉主网上第一家用 TIDES 拆分 coinbase 支付的矿池，也是第一家用自有 stratum 算力补贴 DATUM 矿工的矿池。",
     "minerTitle": "矿工 — Lazarus Pool",
     "minerDescription": "Lazarus Pool 上某个地址的实时算力、矿机、TIDES 窗口份额以及每一笔 coinbase 支付。",
     "minerTitleAddr": "{short} — Lazarus Pool"

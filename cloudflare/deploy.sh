@@ -24,11 +24,32 @@ export CLOUDFLARE_ACCOUNT_ID="${CLOUDFLARE_ACCOUNT_ID:-$(grep -E "^CLOUDFLARE_AC
 : "${CLOUDFLARE_ACCOUNT_ID:?CLOUDFLARE_ACCOUNT_ID not set}"
 unset CF_API_TOKEN CLOUDFLARE_API_TOKEN
 
+# Production is built from the node's running copy of pool/, so a node that has not pulled main
+# ships whatever it has instead (this is how production and GitHub drifted apart before
+# 2026-09-23). Refuse a production deploy from an out-of-date or dirty tree here, and after the
+# build refuse one whose static files differ from this tree's (the node is running other code).
+if [ "$BRANCH" = main ] && [ "${ALLOW_DRIFT:-}" != 1 ]; then
+  git -C "$HERE" fetch -q origin main
+  if [ -n "$(git -C "$HERE" status --porcelain -- ../pool ../cloudflare)" ] || [ "$(git -C "$HERE" rev-parse HEAD)" != "$(git -C "$HERE" rev-parse origin/main)" ]; then
+    echo "refusing a production deploy: this tree is not a clean copy of origin/main (pull, or ALLOW_DRIFT=1)" >&2
+    exit 3
+  fi
+fi
+
 case "$SITE" in
   pool)    PROJECT=lazarus-pool;    ORIGIN="http://$NODE:8889"; python3 "$HERE/pool-site/build.py" --origin "$ORIGIN"; VERIFY=verify-pool.py ;;
   mempool) PROJECT=lazarus-mempool; ORIGIN="http://$NODE:3006"; "$HERE/mempool-site/build.sh" "$ORIGIN"; VERIFY=verify-mempool.py ;;
   *) echo "unknown site: $SITE" >&2; exit 2 ;;
 esac
+
+if [ "$SITE" = pool ] && [ "$BRANCH" = main ] && [ "${ALLOW_DRIFT:-}" != 1 ]; then
+  if ! diff -rq "$HERE/pool-site/dist/static" "$HERE/../pool/static" >/dev/null; then
+    echo "refusing a production deploy: the node's /static differs from pool/static in this tree:" >&2
+    diff -rq "$HERE/pool-site/dist/static" "$HERE/../pool/static" >&2 || true
+    echo "pull main on the node and restart server.py (or ALLOW_DRIFT=1)" >&2
+    exit 3
+  fi
+fi
 
 cd "$HERE/$SITE-site"
 "$WRANGLER" pages deploy dist --project-name "$PROJECT" --branch "$BRANCH" --commit-dirty=true
