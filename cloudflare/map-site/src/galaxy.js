@@ -99,7 +99,13 @@ export function readable(s) {
   const odd = (t.match(/[\u0080-ÿ]/g) || []).length; // Latin-1 debris from binary
   return good / t.length >= 0.85 && odd / t.length < 0.3;
 }
-export const clean = (s) => String(s || "").replace(/[\u0000-\u001f\u007f]/g, "").trim().slice(0, 64);
+// Miners choose these strings. Besides control characters, drop the ones that let a tag lie about
+// itself on screen: bidi overrides can print a name backwards as another pool's, and zero-width
+// characters pad a name invisibly so it reads as one already on the map.
+// Built from a string so the ranges stay visible in the source: written as a regex literal, these
+// are the very characters that do not show up in an editor.
+const HIDDEN = new RegExp("[\\u0000-\\u001F\\u007F\\u200B-\\u200F\\u202A-\\u202E\\u2066-\\u2069\\uFEFF]", "g");
+export const clean = (s) => String(s || "").replace(HIDDEN, "").trim().slice(0, 64);
 const norm = (s) => String(s || "").toLowerCase().replace(/[^a-z0-9]/g, "");
 
 /** { layout: "datum" | "other", primary, secondary } from a coinbase scriptSig in hex. */
@@ -154,11 +160,14 @@ function policy(rows) {
   const avg = (f) => rows.reduce((s, r) => s + (Number(f(r)) || 0), 0) / n;
   const withMr = rows.filter((r) => r.mr != null);
   const withLf = rows.filter((r) => r.lf != null);
+  // A block that did not report a median fee must not be averaged in as a zero: that dragged whole
+  // pools toward "0 sat/vB", which is not what their blocks paid.
+  const withMf = rows.filter((r) => r.mf != null);
   return {
     txs: Math.round(avg((r) => r.n)),
     weightKwu: Math.round(avg((r) => r.w) / 1000),
     feesSats: Math.round(avg((r) => r.f)),
-    medianFee: Math.round(avg((r) => r.mf) * 10) / 10,
+    medianFee: withMf.length ? Math.round((withMf.reduce((s, r) => s + r.mf, 0) / withMf.length) * 10) / 10 : null,
     minFee: withLf.length ? Math.round(Math.min(...withLf.map((r) => r.lf)) * 10) / 10 : null,
     matchRate: withMr.length ? Math.round(withMr.reduce((s, r) => s + r.mr, 0) / withMr.length) : null,
     emptyBlocks: rows.filter((r) => r.n <= 1).length,
@@ -173,7 +182,11 @@ function policy(rows) {
 export function buildGalaxy(records, { now = Math.floor(Date.now() / 1000), lazarusGateways = [], lazarusPool = null, networkHashrate = null } = {}) {
   const recs = records.filter((r) => r && r.h >= FORK_HEIGHT).sort((a, b) => a.h - b.h);
   const weekAgo = now - 7 * 86400;
-  const week = recs.filter((r) => r.t >= weekAgo).length || 1;
+  // The denominator is the span of heights in the last week, not the number of records we hold: a
+  // gap in the record would otherwise shrink the denominator and inflate every pool's share.
+  const weekRecs = recs.filter((r) => r.t >= weekAgo);
+  const week = weekRecs.length ? Math.max(weekRecs.length, recs[recs.length - 1].h - weekRecs[0].h + 1) : 1;
+  const coverage = Math.round((1000 * weekRecs.length) / week) / 10; // 100 = no blocks missing
 
   // Pass 1: group by pool candidate (the primary tag, or the explorer's name for non-DATUM blocks).
   const byPool = new Map();
@@ -197,7 +210,10 @@ export function buildGalaxy(records, { now = Math.floor(Date.now() / 1000), laza
 
   // Pass 2: decide what each group is. Tags other than the pool's own are its gateways.
   const systems = [];
-  const planetOf = (sysName, r) => (r.l ? (r.s && !selfTag(sysName, r.s) ? r.s : null) : null);
+  // A planet is someone else's gateway on this pool's coinbase. A secondary that names the pool
+  // itself is not one, whether it matches the system's name or the block's own primary tag
+  // (DATUM-AP/DATUM-AP, DATUM-AlphaPool/AlphaPool): those blocks are the pool's own work.
+  const planetOf = (sysName, r) => (r.l ? (r.s && !selfTag(sysName, r.s) && !selfTag(r.p, r.s) ? r.s : null) : null);
   for (const g of byPool.values()) {
     const outs = g.rows.map((r) => r.o).sort((a, b) => a - b);
     const medOut = outs[outs.length >> 1] || 0;
@@ -227,19 +243,22 @@ export function buildGalaxy(records, { now = Math.floor(Date.now() / 1000), laza
     else type = faction.paysMinersEver && faction.datumEver ? "datum" : "stratum";      // a pool: the capability test
     if (!g.generic && OPERATOR_VERDICT[g.name]) { type = OPERATOR_VERDICT[g.name].type; faction.operatorNote = OPERATOR_VERDICT[g.name].note; }
     g.faction = faction;
+    // One miner, one world. A solo miner whose primary tag is their own name on some blocks and a
+    // software default on others used to land in two systems of the same name, splitting their
+    // blocks and their share, so independents are folded by name and not only by key.
+    const sameName = (name) => systems.find((x) => x.type === "independent" && norm(x.name) === norm(name));
     if (type === "cluster") {
       // Each operator under a software default primary is their own world.
       for (const r of g.rows) {
         const k = `indie:${soloKey(r)}`;
-        let t = byPool.get(k) && byPool.get(k).split;
-        let sys = systems.find((x) => x.key === k);
-        if (!sys) systems.push((sys = { key: k, name: soloKey(r), type: "independent", rows: [] }));
-        sys.rows.push(r);
+        const sys = systems.find((x) => x.key === k) || sameName(soloKey(r));
+        if (sys) sys.rows.push(r);
+        else systems.push({ key: k, name: soloKey(r), type: "independent", rows: [r] });
       }
       continue;
     }
-    const existing = systems.find((x) => x.key === g.key);
-    if (existing) existing.rows.push(...g.rows);
+    const existing = systems.find((x) => x.key === g.key) || (type === "independent" && sameName(g.name));
+    if (existing) for (const r of g.rows) existing.rows.push(r);
     else systems.push({ key: g.key, name: g.name, type, rows: g.rows, faction: g.faction });
   }
 
@@ -271,7 +290,12 @@ export function buildGalaxy(records, { now = Math.floor(Date.now() / 1000), laza
       blocks: s.rows.length, blocks7d: blocks7, share7d: Math.round((10000 * blocks7) / week) / 100,
       estHashrate: networkHashrate ? Math.round((networkHashrate * blocks7) / week) : null,
       firstHeight: s.rows[0].h, last: { height: last.h, ts: last.t, id: last.id },
-      gateways: plist.filter((p) => !p.house).length, policy: policy(s.rows), planets: plist, faction: s.type === "independent" ? null : s.faction || null,
+      gateways: plist.filter((p) => !p.house).length, policy: policy(s.rows),
+      // An independent is one miner on one node: its single "planet" is the system itself, and the
+      // page falls back to the system's own figures. Shipping it repeated everything about three
+      // hundred solo miners twice, for two thirds of the file.
+      planets: s.type === "independent" ? [] : plist,
+      faction: s.type === "independent" ? null : s.faction || null,
     });
   }
   const sysOf = new Map();
@@ -330,15 +354,17 @@ export function buildGalaxy(records, { now = Math.floor(Date.now() / 1000), laza
   out.sort((a, b) => b.blocks - a.blocks);
   const recent = recs.slice(-40).reverse().map((r) => {
     const sy = sysOf.get(r.h); let t = sy && sy.type !== "independent" ? planetOf(sy.name, r) : null;
-    // a DATUM pool's own blocks came through its public stratum: its Imperial outpost
-    const viaStratum = !!(sy && sy.type === "datum" && t == null);
-    if (viaStratum) t = `${sy.name} public stratum`;
+    // A block a pool built itself came through that pool's own stratum, whether or not the pool
+    // also takes DATUM: that endpoint is the outpost, and the tag has to match the one the map
+    // gives the outpost world so the flash and the chain land on it.
+    const viaStratum = !!(sy && sy.type !== "independent" && t == null);
+    if (viaStratum) t = sy.type === "stratum" ? `${sy.name} (pool-built templates)` : `${sy.name} public stratum`;
     return { height: r.h, ts: r.t, id: r.id, system: sy ? sy.name : "?", systemType: sy ? sy.type : null, planet: t, viaStratum };
   });
   const tip = recs.length ? recs[recs.length - 1] : null;
   return {
     asOf: now, tip: tip && { height: tip.h, ts: tip.t, id: tip.id }, forkHeight: FORK_HEIGHT,
-    blocks: recs.length, blocks7d: week, networkHashrate,
+    blocks: recs.length, blocks7d: week, coverage, networkHashrate,
     counts: { datum: out.filter((s) => s.type === "datum").length, stratum: out.filter((s) => s.type === "stratum").length, independent: out.filter((s) => s.type === "independent").length },
     systems: out, recent,
   };

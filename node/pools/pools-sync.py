@@ -391,7 +391,7 @@ def compile_matchers(merged, ids):
     return out
 
 
-def retag(cur, matchers, unknown, ids_by_slug, names):
+def retag(cur, matchers, unknown, ids_by_slug, names, tags_by_slug=None):
     cur.execute("SELECT height, hash, pool_id, coinbase_addresses, coinbase_raw, blockTimestamp, stale "
                 "FROM blocks WHERE height >= %s", (START_HEIGHT,))
     updated = 0
@@ -416,7 +416,7 @@ def retag(cur, matchers, unknown, ids_by_slug, names):
         # The pool stats the pie is drawn from count only blocks on the best chain, so the
         # gateway aggregate has to skip stale rows too or the bands would not add up.
         if not stale:
-            meta.append((block_epoch(block_ts), slug, name, secondary_tag(raw, name)))
+            meta.append((block_epoch(block_ts), slug, name, secondary_tag(raw, name, (tags_by_slug or {}).get(slug, ()))))
         if new_id != pool_id:
             if DRY_RUN:
                 log(f"  would retag block {height}: pool_id {pool_id} -> {new_id} ({slug})")
@@ -493,11 +493,23 @@ def datum_names(raw):
     return [re.sub(r"[^a-zA-Z0-9 ]", "", n) for n in text.split("\x0f")]
 
 
-def secondary_tag(raw, pool_name):
+def _same_party(a, b):
+    """Whether two coinbase tags name the same party, ignoring case and punctuation.
+
+    Containment, not equality: "Pow.re" and "buy hashrate @ pow.re" are one operator, and so
+    are "DATUM-AlphaPool" and "AlphaPool". The map applies the same test (galaxy.js selfTag).
+    """
+    x, y = (re.sub(r"[^a-z0-9]", "", (t or "").lower()) for t in (a, b))
+    return bool(x) and bool(y) and (x in y or y in x)
+
+
+def secondary_tag(raw, pool_name, pool_tags=()):
     """The gateway operator's tag for a pooled DATUM block, or None.
 
-    A secondary that only repeats the pool's own tag carries no information, so such a block
-    counts as untagged rather than as a band of its own.
+    A band means: this block was built by someone else's gateway on the pool's coinbase. So a
+    secondary that names the pool itself is not a gateway, whether it repeats the coinbase's
+    own primary tag (AlphaPool/AlphaPool), the pool's display name, or one of its matchers
+    (DATUM-AlphaPool/AlphaPool). Such a block counts as the pool's own, not as a band.
     """
     if not is_datum_coinbase(raw or ""):
         return None
@@ -508,7 +520,11 @@ def secondary_tag(raw, pool_name):
     if len(names) < 2:
         return None
     tag = names[1].strip()
-    if not tag or tag.lower() == names[0].strip().lower():
+    if not tag:
+        return None
+    if _same_party(tag, names[0]) or _same_party(tag, pool_name):
+        return None
+    if any(_same_party(tag, t) for t in pool_tags or ()):
         return None
     return tag
 
@@ -631,8 +647,9 @@ def main():
         else:
             conn.commit()
         names = {slug: e["name"] for slug, e, _ in merged}
+        tags_by_slug = {slug: e["tags"] for slug, e, _ in merged}
         matchers = compile_matchers(merged, ids)
-        updated, by_height, meta = retag(cur, matchers, ids["unknown"], ids, names)
+        updated, by_height, meta = retag(cur, matchers, ids["unknown"], ids, names, tags_by_slug)
         if DRY_RUN:
             conn.rollback()
         else:

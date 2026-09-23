@@ -57,6 +57,31 @@ class DatumMinersGeneric(unittest.TestCase):
         self.assertEqual(_hit(matchers, "DATUM"), "datumminers")
         self.assertEqual(_hit(matchers, "DATUM solo mined"), "datumminers")
 
+# Real coinbases from this chain, so the gateway-band rule is tested against what miners send.
+CB_POOL_OWN = "039adb0e14416c706861506f6f6c0f416c706861506f6f6c00030e92100e5cdb000000000000000000000000"
+CB_POOL_ALIAS = "03b2d70e1a444154554d2d416c706861506f6f6c0f416c706861506f6f6c00070e92100150de710e48cc000000000000000000000000"
+CB_GATEWAY = "039cdb0e19416c706861506f6f6c0f546865204d6f746865727368697000070e92100150de710eb124000000000000000000000000"
+
+
+class SecondaryTagTests(unittest.TestCase):
+    """A band means someone else's gateway built the block on the pool's coinbase."""
+
+    def test_a_third_party_gateway_is_a_band(self):
+        self.assertEqual(PS.secondary_tag(CB_GATEWAY, "AlphaPool", ["AlphaPool"]), "The Mothership")
+
+    def test_the_pools_own_tag_is_not_a_band(self):
+        self.assertIsNone(PS.secondary_tag(CB_POOL_OWN, "AlphaPool", ["AlphaPool"]))
+
+    def test_a_pool_naming_itself_under_an_alias_is_not_a_band(self):
+        # primary DATUM-AlphaPool, secondary AlphaPool: one operator, not a gateway of its own
+        self.assertIsNone(PS.secondary_tag(CB_POOL_ALIAS, "AlphaPool", ["AlphaPool", "DATUM-AP(?![A-Za-z0-9])"]))
+
+    def test_punctuation_and_case_do_not_hide_the_pools_own_name(self):
+        self.assertTrue(PS._same_party("Pow.re", "buy hashrate @ pow.re"))
+        self.assertTrue(PS._same_party("/mined on B2Pool.io/", "b2pool.io"))
+        self.assertFalse(PS._same_party("AlphaPool", "The Mothership"))
+        self.assertFalse(PS._same_party("Lazarus", ""))
+
 
 if __name__ == "__main__":
     unittest.main()
