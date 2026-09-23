@@ -279,6 +279,9 @@
   .softfork-text { margin: 0; color: var(--ink); font-size: 0.95rem; line-height: 1.45; max-width: 68rem; }
   .softfork-links { margin: 0; font-size: 0.85rem; color: var(--muted); }
   .softfork-links a { color: var(--brass); }
+  .softfork.urgent { border-color: #e0443a; background: linear-gradient(90deg, rgba(224, 68, 58, 0.16), rgba(224, 68, 58, 0.05)); }
+  .softfork.urgent .kicker { color: #ff7a6e; }
+  .softfork.urgent .softfork-links a { color: #ff9a90; }
   .softfork .promo-dismiss { position: absolute; right: 0.6rem; top: 0.6rem; }
   .promo {
     margin: 0;

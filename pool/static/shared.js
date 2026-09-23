@@ -446,13 +446,15 @@
     const body = rows
       .map((b) => {
         const confs = Number.isFinite(Number(b.confirmations)) ? Number(b.confirmations) : Math.max(0, tip - Number(b.height) + 1);
-        const left = Number.isFinite(Number(b.blocks_to_mature)) ? Number(b.blocks_to_mature) : Math.max(0, need - confs + 1);
-        const p = Math.max(0, Math.min(100, (100 * confs) / need));
+        // each block's own requirement: 6,481 inside the long-maturity window, 100 outside it
+        const needB = Number(b.maturity_confs) || need;
+        const left = Number.isFinite(Number(b.blocks_to_mature)) ? Number(b.blocks_to_mature) : Math.max(0, needB - confs);
+        const p = Math.max(0, Math.min(100, (100 * confs) / needB));
         const eta = interval && left ? "~" + dur(left * interval) : left ? "\u2014" : t("time.nextBlock");
         return `<tr>
           <td class="num">${blockLink(b)}</td>
           <td class="num" title="${amtExact(b.miner_btc)}">${amt(b.miner_btc)}${ctx.money ? ctx.money(b.miner_btc) : ""}</td>
-          <td class="num"><span class="mature"><span>${num(confs)} / ${num(need)}</span><span class="mature-bar" style="--p:${p.toFixed(1)}%"></span></span></td>
+          <td class="num"><span class="mature"><span>${num(confs)} / ${num(needB)}</span><span class="mature-bar" style="--p:${p.toFixed(1)}%"></span></span></td>
           <td class="num">${num(left)}</td>
           <td>${eta}</td>
           <td>${statusPill(left ? "immature" : "maturing")}</td>
