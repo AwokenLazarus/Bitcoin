@@ -76,6 +76,7 @@ window.LZ_I18N_DICTS["en"] = {
     "title": "Mine Bitcoin (XBT).<br><em>Get paid in the block itself.</em><br>Earn extra for Decentralizing the network.",
     "lede": "No pool balance, no withdrawals, direct to you on chain. Any Siacoin BLAKE2b ASIC works. Build your own blocks with DATUM: pay <span>0%</span> and collect a share of the public stratum’s fee on every block the pool finds.",
     "firsts": "The first pool anywhere to put its <b>stratum hashrate behind a DATUM subsidy</b>, paying miners to decentralize the network instead of charging them for it.",
+    "since": "<b>Here since day one.</b> <a href=\"https://x.com/Awoken_Lazarus\" target=\"_blank\" rel=\"noreferrer\">Lazarus</a>, who runs Lazarus Pool, has mined crypto since 2018. Bitcoin moved to BLAKE2b proof of work on 30 August 2026, at block 961,640. Lazarus Pool was built that same day, and every line of its code since is public on <a href=\"https://github.com/AwokenLazarus/Bitcoin/commits/main\" target=\"_blank\" rel=\"noreferrer\">GitHub</a>.",
     "setup": "Set up DATUM",
     "lookup": "Look up your stats",
     "more": "How it works",

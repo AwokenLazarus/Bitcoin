@@ -76,6 +76,7 @@ window.LZ_I18N_DICTS["zh-CN"] = {
     "title": "挖比特币（XBT）。<br><em>在区块里直接拿到钱。</em><br>为去中心化网络出力，还能多赚。",
     "lede": "没有矿池余额，不用提现，链上直接到你。能挖 Siacoin 的 BLAKE2b ASIC 都能挖。用 DATUM 自己组块：手续费 <span>0%</span>，并在矿池找到的每个区块上分得公共 stratum 手续费的一部分。",
     "firsts": "全网第一家把自己的 <b>stratum 算力用于补贴 DATUM 矿工</b> 的矿池：为去中心化付钱给矿工，而不是向他们收费。",
+    "since": "<b>从第一天起就在。</b>Lazarus Pool 的负责人 <a href=\"https://x.com/Awoken_Lazarus\" target=\"_blank\" rel=\"noreferrer\">Lazarus</a> 自 2018 年起从事加密货币挖矿。2026 年 8 月 30 日，比特币在区块 961,640 改用 BLAKE2b 工作量证明；Lazarus Pool 在同一天建成，此后的每一行代码都公开在 <a href=\"https://github.com/AwokenLazarus/Bitcoin/commits/main\" target=\"_blank\" rel=\"noreferrer\">GitHub</a> 上。",
     "setup": "配置 DATUM",
     "lookup": "查询你的数据",
     "more": "原理",
