@@ -27,11 +27,12 @@
     },
     {
       "name": "AlphaPool",
-      "link": "",
+      "link": "https://alphapool.tech",
       "addresses": [],
       "tags": [
         "AlphaPool"
-      ]
+      ],
+      "pool": true
     },
     {
       "name": "PyBLOCK",
