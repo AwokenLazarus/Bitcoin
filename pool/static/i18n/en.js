@@ -1,8 +1,8 @@
 window.LZ_I18N_DICTS = window.LZ_I18N_DICTS || {};
 window.LZ_I18N_DICTS["en"] = {
   "meta": {
-    "title": "Lazarus Pool — BLAKE2b Bitcoin (XBT / BTCB2) mining pool for Siacoin ASICs",
-    "description": "Mine Bitcoin (XBT / BTCB2) with any Siacoin BLAKE2b ASIC — Goldshell SC, iBeLink BM-S3, Antminer A3. The first pool to pay TIDES as a split coinbase on this BIP-110 Bitcoin fork's mainnet, and the first to subsidize DATUM miners with its own stratum hashers. 0% via DATUM, 25% public stratum from block 973,750 (stratum+tcp://stratum.lazarus-xbt.xyz:23334).",
+    "title": "XBT (BTCB2) Mining Pool for Sia ASICs | Lazarus Pool",
+    "description": "Non-custodial pool for Bitcoin on BLAKE2b proof of work. Point a Goldshell SC, iBeLink BM-S3 or Antminer A3 and get paid in the block itself via TIDES.",
     "minerTitle": "Miner — Lazarus Pool",
     "minerDescription": "Live hashrate, workers, TIDES window share and every coinbase payout for one address on Lazarus Pool.",
     "minerTitleAddr": "{short} — Lazarus Pool"
