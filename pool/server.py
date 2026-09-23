@@ -5218,6 +5218,25 @@ _SEO_KEEP = {
 _HASH_ALIAS = {"top": "fees", "datum": "connect", "mine": "connect", "window": "payout", "payouts": "dashboard"}
 _TOP_SECTION = re.compile(r'\n  <section\b[^>]*\bid="([^"]+)"[^>]*>.*?\n  </section>', re.S)
 _ORG_ID = "https://lazarus-xbt.xyz/#org"
+# Topic pages that are articles, with their schema type and (published, modified) dates. Published
+# is when the page first shipped (3e20ab9); modified is the last change to its copy (6b7da3c). Bump
+# a page's modified date only when its words change, never per deploy. /blocks and /calculator are
+# live data and a tool, so they stay plain WebPages.
+_SEO_ARTICLE = {
+    "/hardware": ("Article", "2026-09-13", "2026-09-23"),
+    "/profitability": ("Article", "2026-09-13", "2026-09-23"),
+    "/pools": ("Article", "2026-09-13", "2026-09-23"),
+    "/self-cap": ("Article", "2026-09-13", "2026-09-23"),
+    "/non-custodial": ("Article", "2026-09-13", "2026-09-23"),
+    "/tides": ("Article", "2026-09-13", "2026-09-23"),
+    "/bip110": ("Article", "2026-09-13", "2026-09-23"),
+    "/how": ("Article", "2026-09-13", "2026-09-23"),
+    "/mine-xbt": ("TechArticle", "2026-09-13", "2026-09-23"),
+    "/connect": ("TechArticle", "2026-09-13", "2026-09-23"),
+    "/datum-subsidy": ("TechArticle", "2026-09-13", "2026-09-23"),
+    "/api": ("TechArticle", "2026-09-13", "2026-09-23"),
+}
+_OG_IMAGE = "https://pool.lazarus-xbt.xyz/static/og-pool.png"
 
 
 def _keyword_page(raw, meta):
@@ -5259,6 +5278,26 @@ def _keyword_page(raw, meta):
             {"@type": "ListItem", "position": 1, "name": "Lazarus Pool", "item": _seo_url("/", "zh" if home == "/zh/" else "en")},
             {"@type": "ListItem", "position": 2, "name": h1, "item": canon}]},
     ]
+    article = _SEO_ARTICLE.get(meta["path"])
+    if article:
+        kind, published, modified = article
+        graph[0]["mainEntity"] = {"@id": canon + "#article"}
+        graph.append(
+            {"@type": kind, "@id": canon + "#article", "headline": h1[:110], "description": meta["description"],
+             "inLanguage": meta["lang"], "url": canon, "mainEntityOfPage": {"@id": canon + "#webpage"},
+             "image": _OG_IMAGE, "datePublished": published, "dateModified": modified,
+             "author": {"@id": _ORG_ID}, "publisher": {"@id": _ORG_ID},
+             "isPartOf": {"@id": _PUBLIC_SITE + "/#website"}})
+        raw = raw.replace(
+            '<meta property="og:type" content="website">',
+            '<meta property="og:type" content="article">\n'
+            f'<meta property="article:published_time" content="{published}">\n'
+            f'<meta property="article:modified_time" content="{modified}">',
+            1)
+    # Google does not follow an @id to another page, so the publisher the nodes point at has to be
+    # described here too, not only in the homepage's graph.
+    graph.append({"@type": "Organization", "@id": _ORG_ID, "name": "Lazarus Pool", "url": "https://lazarus-xbt.xyz/",
+                  "logo": "https://pool.lazarus-xbt.xyz/static/favicon-512.png"})
     ld = json.dumps({"@context": "https://schema.org", "@graph": graph}, ensure_ascii=False)
     return re.sub(r'<script type="application/ld\+json">.*?</script>',
                   lambda _m: f'<script type="application/ld+json">\n{ld}\n</script>', raw, count=1, flags=re.S)
