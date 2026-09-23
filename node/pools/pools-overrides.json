@@ -88,6 +88,24 @@
       "tags": [
         "blake2b-mainnet"
       ]
+    },
+    {
+      "name": "PlebMiner",
+      "link": "",
+      "addresses": [],
+      "tags": [
+        "PlebMiner"
+      ],
+      "_comment": "Kilombino lists PlebMiner by two addresses, but its blocks pay whoever found them, a different address each time, so only the coinbase tag identifies it. Without this, 90 of its blocks fall back to Unknown."
+    },
+    {
+      "name": "ForkLift",
+      "link": "",
+      "addresses": [],
+      "tags": [
+        "ForkLift"
+      ],
+      "_comment": "Identified by its coinbase tag, not by a fixed payout address, like PlebMiner."
     }
   ],
   "drop": [
