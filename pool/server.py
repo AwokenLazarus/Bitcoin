@@ -4449,7 +4449,7 @@ _PUBLIC_SITE = str(CONF.get("public_url") or "https://pool.lazarus-xbt.xyz").rst
 _SEO_PAGES = {
     "/": {
         "en": {
-            "title": "XBT (BTCB2) Mining Pool for Sia ASICs | Lazarus Pool",
+            "title": "BTCB2 (XBT) Mining Pool for Sia ASICs | Lazarus Pool",
             "description": "Non-custodial pool for Bitcoin on BLAKE2b proof of work. Point a Goldshell SC, iBeLink BM-S3 or Antminer A3 and get paid in the block itself via TIDES.",
             "scroll": "",
         },
@@ -5190,6 +5190,15 @@ def render_pool_index(path, query=""):
     raw = re.sub(r'<meta name="twitter:title"[^>]*>', f'<meta name="twitter:title" content="{_xml_attr(title)}">', raw, count=1)
     raw = re.sub(r'<meta name="twitter:description"[^>]*>', f'<meta name="twitter:description" content="{_xml_attr(desc)}">', raw, count=1)
     raw = raw.replace('<html lang="en" data-scroll="">', f'<html lang="{meta["lang"]}" data-scroll="{_xml_attr(meta.get("scroll") or "")}">', 1)
+    if home:
+        # The static WebPage node describes the English homepage; point it at this language's URL.
+        raw = re.sub(
+            r'\{"@type":"WebPage".*?"inLanguage":"en"\}',
+            lambda _m: json.dumps({"@type": "WebPage", "@id": canon + "#webpage", "url": canon, "name": title,
+                                   "isPartOf": {"@id": _PUBLIC_SITE + "/#website"},
+                                   "about": {"@id": _PUBLIC_SITE + "/#service"}, "publisher": {"@id": _ORG_ID},
+                                   "inLanguage": meta["lang"]}, ensure_ascii=False, separators=(",", ":")),
+            raw, count=1)
     raw = _inject_intro(raw, meta)
     return raw if home else _keyword_page(raw, meta)
 

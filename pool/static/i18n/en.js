@@ -1,7 +1,7 @@
 window.LZ_I18N_DICTS = window.LZ_I18N_DICTS || {};
 window.LZ_I18N_DICTS["en"] = {
   "meta": {
-    "title": "XBT (BTCB2) Mining Pool for Sia ASICs | Lazarus Pool",
+    "title": "BTCB2 (XBT) Mining Pool for Sia ASICs | Lazarus Pool",
     "description": "Non-custodial pool for Bitcoin on BLAKE2b proof of work. Point a Goldshell SC, iBeLink BM-S3 or Antminer A3 and get paid in the block itself via TIDES.",
     "minerTitle": "Miner — Lazarus Pool",
     "minerDescription": "Live hashrate, workers, TIDES window share and every coinbase payout for one address on Lazarus Pool.",
@@ -73,7 +73,7 @@ window.LZ_I18N_DICTS["en"] = {
   },
   "hero": {
     "eyebrow": "Bitcoin (XBT / BTCB2) · BLAKE2b · DATUM · TIDES · ",
-    "title": "Mine Bitcoin (XBT).<br><em>Get paid in the block itself.</em><br>Earn extra for Decentralizing the network.",
+    "title": "The Bitcoin mining pool for Sia ASICs.<br><em>Get paid in the block itself.</em><br>Earn extra for Decentralizing the network.",
     "lede": "No pool balance, no withdrawals, direct to you on chain. Any Siacoin BLAKE2b ASIC works. Build your own blocks with DATUM: pay <span>0%</span> and collect a share of the public stratum’s fee on every block the pool finds.",
     "firsts": "The first pool anywhere to put its <b>stratum hashrate behind a DATUM subsidy</b>, paying miners to decentralize the network instead of charging them for it.",
     "setup": "Set up DATUM",
