@@ -14,16 +14,21 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Antonio:wght@400;600;700&family=Orbitron:wght@500;700;900&family=Share+Tech+Mono&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="./style.css?v=2">
+<link rel="stylesheet" href="./style.css?v=3">
+<link rel="modulepreload" href="./vendor/build/three.module.min.js">
+<!-- three.js is served from here, not a CDN: an import map carries no integrity check, so a CDN
+     compromise would have run arbitrary code on this origin. It also saves a DNS and TLS
+     handshake on first load, and the minified build is about half the size of the one we used. -->
 <script type="importmap">
 { "imports": {
-    "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js",
-    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/"
+    "three": "./vendor/build/three.module.min.js",
+    "three/addons/": "./vendor/examples/jsm/"
 } }
 </script>
 </head>
 <body>
 <div id="stage" aria-hidden="true"></div>
+<p class="sr">This page draws every mining pool on the Bitcoin BLAKE2b network as a galaxy: each pool is a star system, each DATUM gateway a world orbiting it, and the chain rises out of the black hole at the centre. The picture needs sight and a mouse; the star chart below lists the same pools and gateways with their block counts, and every figure it shows comes from <a href="/map/data.json">/map/data.json</a>.</p>
 
 <!-- Opening crawl -->
 <section id="crawl" class="crawl" aria-label="Introduction">
@@ -31,7 +36,7 @@
   <p class="crawl-pre">A long time ago, at block 961,640, in a mempool far, far away....</p>
   <div class="crawl-view"><div class="crawl-text">
     <p class="crawl-ep">EPISODE XBT</p>
-    <h1 class="crawl-title">THE BLAKE2B AWAKENS</h1>
+    <p class="crawl-title">THE BLAKE2B AWAKENS</p>
     <p>It is a period of civil war. On the thirtieth day of August the chain broke from SHA-256 and was reforged in BLAKE2b.</p>
     <p>Wherever a pool runs a public stratum, the GALACTIC EMPIRE plants an outpost: one armoured red world that builds every template itself. Its hashers may still be paid fairly, share for share, but the block is the outpost's: what goes in it was never theirs to choose.</p>
     <p>Across the spiral arms, the REBELLION runs DATUM and pays every miner in the coinbase itself: each gateway a free world that builds its own template and answers only to its own node.</p>
@@ -60,32 +65,33 @@
   </div>
 </header>
 
-<!-- Legend / filters -->
-<aside class="legend" aria-label="Legend">
-  <button type="button" class="leg on" data-type="datum"><i class="dot rebel"></i><span><b>Rebel Alliance</b><em>Pays miners in the coinbase, takes DATUM</em></span></button>
-  <button type="button" class="leg on" data-type="stratum"><i class="dot stratum"></i><span><b>Stratum pools</b><em>Pool builds the template · red world = stratum endpoint</em></span></button>
-  <button type="button" class="leg on" data-type="independent"><i class="dot rim"></i><span><b>Outer Rim</b><em>Solo miners on their own node</em></span></button>
-</aside>
-
-<!-- Star chart -->
+<!-- Star chart. Before the legend in the source because it comes first on screen. -->
 <nav class="chart" id="chart" aria-label="Star chart">
   <div class="chart-head">
-    <button type="button" id="chart-toggle" class="lcars-tab" aria-expanded="true">Star chart</button>
+    <button type="button" id="chart-toggle" class="lcars-tab" aria-expanded="true" aria-controls="chart-body">Star chart</button>
   </div>
-  <div class="chart-body">
+  <div class="chart-body" id="chart-body" role="search">
     <label class="sr" for="search">Find a pool or gateway</label>
     <input id="search" type="search" placeholder="Scan for a pool or gateway…" autocomplete="off" spellcheck="false">
-    <ol id="systems" class="sys-list"></ol>
+    <p id="chart-count" class="sr" role="status"></p>
+    <ol id="systems" class="sys-list" role="listbox" aria-label="Pools and gateways"></ol>
   </div>
 </nav>
 
-<!-- Hover readout -->
-<div id="tip" class="tip" role="status" hidden></div>
+<!-- Legend / filters -->
+<aside class="legend" aria-label="Show or hide by faction">
+  <button type="button" class="leg on" data-type="datum" aria-pressed="true"><i class="dot rebel"></i><span><b>Rebel Alliance</b><em>Pays miners in the coinbase, takes DATUM</em></span></button>
+  <button type="button" class="leg on" data-type="stratum" aria-pressed="true"><i class="dot stratum"></i><span><b>Stratum pools</b><em>Pool builds the template · red world = stratum endpoint</em></span></button>
+  <button type="button" class="leg on" data-type="independent" aria-pressed="true"><i class="dot rim"></i><span><b>Outer Rim</b><em>Solo miners on their own node</em></span></button>
+</aside>
+
+<!-- Hover readout: decoration for the pointer, so it is not announced; the panel is the readout. -->
+<div id="tip" class="tip" aria-hidden="true" hidden></div>
 
 <!-- Pinned system panel -->
-<section id="panel" class="panel" hidden aria-live="polite">
-  <div class="panel-bar"><span id="panel-kind">System</span><button type="button" id="panel-close" class="x" aria-label="Back to the galaxy">Back to galaxy</button></div>
-  <h2 id="panel-name"></h2>
+<section id="panel" class="panel" hidden role="region" aria-labelledby="panel-name">
+  <div class="panel-bar"><span id="panel-kind">System</span><button type="button" id="panel-close" class="x">Back to galaxy</button></div>
+  <h2 id="panel-name" tabindex="-1"></h2>
   <p id="panel-sub" class="panel-sub"></p>
   <dl id="panel-stats" class="kv"></dl>
   <h3 id="panel-planets-h">Gateways</h3>
@@ -94,15 +100,15 @@
 </section>
 
 <!-- Subspace relay: recent blocks -->
-<footer class="relay" aria-label="Recent blocks">
-  <span class="relay-k">Subspace relay</span>
+<footer class="relay" id="relay-bar" aria-label="Recent blocks">
+  <button type="button" class="relay-k" id="relay-pause" aria-pressed="false" title="Pause the ticker">Subspace relay</button>
   <div class="relay-track"><div id="relay" class="relay-items"></div></div>
 </footer>
 
-<div id="loading" class="loading"><div class="warp-core"></div><p>Calibrating long-range sensors…</p></div>
-<div id="error" class="error" hidden></div>
+<div id="loading" class="loading" role="status"><div class="warp-core"></div><p>Calibrating long-range sensors…</p></div>
+<div id="error" class="error" role="alert" hidden></div>
 
 <noscript><p class="noscript">This map needs JavaScript and WebGL. The same data is at <a href="/map/data.json">/map/data.json</a>.</p></noscript>
-<script type="module" src="./app.js?v=5"></script>
+<script type="module" src="./app.js?v=6"></script>
 </body>
 </html>

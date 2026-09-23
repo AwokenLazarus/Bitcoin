@@ -77,13 +77,15 @@ try {
   throw e;
 }
 renderer.setPixelRatio(Math.min(devicePixelRatio || 1, lowPower ? 1.25 : 1.75));
+if (FAST) renderer.info.autoReset = false;
 renderer.setSize(innerWidth, innerHeight);
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
 renderer.toneMappingExposure = 0.92;
 $("stage").append(renderer.domElement);
 const labels = new CSS2DRenderer();
 labels.setSize(innerWidth, innerHeight);
-Object.assign(labels.domElement.style, { position: "fixed", inset: "0", pointerEvents: "none" });
+// Below the HUD (z-index 5): a world's label must not read as part of the star chart over it.
+Object.assign(labels.domElement.style, { position: "fixed", inset: "0", pointerEvents: "none", zIndex: "1" });
 $("stage").append(labels.domElement);
 
 const scene = new THREE.Scene();
@@ -203,9 +205,71 @@ const planetFS = `
     vec3 col = uColor * diff * bands;
     float rim = pow(1.0 - max(dot(n, V), 0.0), 3.0);
     float pulse = uLive * (0.55 + 0.45 * sin(uTime * 2.4 + uSeed * 30.0));
-    col += rim * mix(uColor, vec3(0.55, 0.95, 1.0), 0.55) * (0.5 + pulse * 1.3 + uHover * 2.2);
+    col += rim * mix(uColor, vec3(0.55, 0.95, 1.0), 0.55) * (0.5 + pulse * 2.1 + uHover * 2.2);
+    col += uLive * vec3(0.10, 0.42, 0.38) * pulse * (0.35 + rim);
     gl_FragColor = vec4(col, uAlpha);
   }`;
+// The Outer Rim, drawn as one instanced mesh: same look as a planet, but the colour comes from the
+// instance and the hovered one is picked out by index instead of by its own material.
+const rimWorldVS = `
+  attribute float aSeed; attribute float aIndex;
+  uniform float uHover;
+  varying vec3 vN; varying vec3 vW; varying vec3 vO; varying vec3 vC; varying float vSeed; varying float vHi;
+  void main() {
+    mat4 m = modelMatrix * instanceMatrix;
+    vN = normalize(mat3(m) * normal); vO = normal; vSeed = aSeed; vC = instanceColor;
+    vHi = step(abs(aIndex - uHover), 0.5);
+    vec4 w = m * vec4(position, 1.0); vW = w.xyz;
+    gl_Position = projectionMatrix * viewMatrix * w;
+  }`;
+const rimWorldFS = `
+  uniform float uTime;
+  varying vec3 vN; varying vec3 vW; varying vec3 vO; varying vec3 vC; varying float vSeed; varying float vHi;
+  void main() {
+    vec3 n = normalize(vN), L = normalize(-vW), V = normalize(cameraPosition - vW);
+    float diff = max(dot(n, L), 0.0) * 0.95 + 0.08;
+    float bands = 0.82 + 0.18 * sin(vO.y * (6.0 + vSeed * 10.0) + sin(vO.x * 3.0 + vSeed * 20.0) * 1.4 + uTime * 0.05);
+    vec3 col = vC * diff * bands;
+    float rim = pow(1.0 - max(dot(n, V), 0.0), 3.0);
+    col += rim * mix(vC, vec3(0.55, 0.95, 1.0), 0.55) * (0.5 + vHi * 2.2);
+    gl_FragColor = vec4(col, 1.0);
+  }`;
+function rimWorldMaterial() {
+  const m = new THREE.ShaderMaterial({ uniforms: { uTime: { value: 0 }, uHover: { value: -1 } }, vertexShader: rimWorldVS, fragmentShader: rimWorldFS });
+  timeMats.push(m);
+  return m;
+}
+// A star, not a flat disc: limb darkening towards the edge, granulation crawling over the surface
+// and a thin hot edge. uDim is driven by how close the camera is (see `buildSystem`), so a star
+// keeps its shape instead of blowing out once you are inside its own system.
+const starVS = `
+  varying vec3 vN; varying vec3 vW; varying vec3 vO;
+  void main() { vN = normalize(mat3(modelMatrix) * normal); vO = normal; vec4 w = modelMatrix * vec4(position, 1.0); vW = w.xyz; gl_Position = projectionMatrix * viewMatrix * w; }`;
+const starFS = `
+  uniform vec3 uColor; uniform float uTime; uniform float uDim; uniform float uSeed;
+  varying vec3 vN; varying vec3 vW; varying vec3 vO;
+  float h3(vec3 p) { return fract(sin(dot(p, vec3(17.1, 31.7, 53.3))) * 43758.5453); }
+  float noise3(vec3 p) {
+    vec3 i = floor(p), f = fract(p); f = f * f * (3.0 - 2.0 * f);
+    return mix(mix(mix(h3(i), h3(i + vec3(1, 0, 0)), f.x), mix(h3(i + vec3(0, 1, 0)), h3(i + vec3(1, 1, 0)), f.x), f.y),
+               mix(mix(h3(i + vec3(0, 0, 1)), h3(i + vec3(1, 0, 1)), f.x), mix(h3(i + vec3(0, 1, 1)), h3(i + vec3(1, 1, 1)), f.x), f.y), f.z);
+  }
+  void main() {
+    vec3 N = normalize(vN), V = normalize(cameraPosition - vW);
+    float mu = max(dot(N, V), 0.0);
+    vec3 q = vO * 6.0 + vec3(uSeed * 10.0, uTime * 0.05, -uTime * 0.03);
+    float gran = noise3(q) * 0.65 + noise3(q * 2.7) * 0.35;
+    float limb = 0.42 + 0.58 * pow(mu, 0.5);
+    vec3 col = uColor * limb * (0.82 + 0.4 * gran);
+    col += mix(uColor, vec3(1.0), 0.35) * pow(1.0 - mu, 2.5) * 0.9; // the hot edge
+    gl_FragColor = vec4(col * uDim, 1.0);
+  }`;
+function starMaterial(color) {
+  return new THREE.ShaderMaterial({
+    uniforms: { uColor: { value: color.clone() }, uTime: planetUniformsShared.uTime, uDim: { value: 1 }, uSeed: { value: Math.random() } },
+    vertexShader: starVS, fragmentShader: starFS,
+  });
+}
 const planetUniformsShared = { uTime: { value: 0 } };
 function planetMaterial(color, star, seed, alpha = 1) {
   return new THREE.ShaderMaterial({
@@ -260,7 +324,8 @@ function armAngle(arm, r) { return (arm * Math.PI * 2) / ARMS + r * ARM_TWIST; }
   // the bulge, kept dim: the bright thing at the centre is the black hole's disk, not a haze
   galaxy.add(sprite(TEX.glow, 0xffc890, 900, 0.16));
   const hues = [0x3a6bff, 0x7a4dff, 0x2ec4ff, 0xff4da6, 0x5affd8];
-  for (let i = 0; i < (lowPower ? 26 : 60); i++) {
+  // big additive sprites are cheap to submit and expensive to fill, so there are fewer of them now
+  for (let i = 0; i < (lowPower ? 20 : 44); i++) {
     const arm = i % ARMS, rr = 320 + r() * (DISK_R - 320), a = armAngle(arm, rr) + (r() - 0.5) * 0.4;
     const s = sprite(TEX.nebula, hues[Math.floor(r() * hues.length)], 260 + r() * 520, 0.05 + r() * 0.08);
     s.position.set(Math.cos(a) * rr, (r() - 0.5) * 40, Math.sin(a) * rr);
@@ -358,7 +423,7 @@ function makeBlock(b) {
   const halo = sprite(TEX.soft, col, 22, 0.26);
   const hit = new THREE.Mesh(BLOCK_HIT, new THREE.MeshBasicMaterial({ visible: false }));
   hit.userData = { kind: "block", h: b.height };
-  g.add(box, edges, halo, hit); pickables.push(hit);
+  g.add(box, edges, halo, hit); pickables.push(hit); pickDirty = true;
   g.rotation.y = (hash(b.id || String(b.height)) % 628) / 100;
   g.userData = { b, box, edges, halo, hit };
   return g;
@@ -372,6 +437,7 @@ function chainFade() {
 function dropBlock(g) {
   chainGroup.remove(g);
   const i = pickables.indexOf(g.userData.hit); if (i >= 0) pickables.splice(i, 1);
+  pickDirty = true;
   CHAIN.byHeight.delete(g.userData.b.height);
   g.userData.box.material.dispose(); g.userData.edges.material.dispose(); g.userData.halo.material.dispose(); g.userData.hit.material.dispose();
 }
@@ -541,7 +607,7 @@ function buildSystem(s, pos, i) {
   const rr = rng(hash(s.id)), starR = sizeFor(s.share7d) * 0.85, sleepy = dormant(s);
   const color = new THREE.Color(s.name === "Lazarus" ? 0xffcf5c : stratumOnly ? STRATUM_STAR[i % STRATUM_STAR.length] : REBEL[i % REBEL.length]);
   if (sleepy) color.multiplyScalar(0.55);
-  const star = new THREE.Mesh(new THREE.SphereGeometry(starR, 32, 16), new THREE.MeshBasicMaterial({ color: color.clone().multiplyScalar(1.6) }));
+  const star = new THREE.Mesh(new THREE.SphereGeometry(starR, 32, 16), starMaterial(color));
   root.add(star);
   const halo = sprite(TEX.glow, color, starR * 9, sleepy ? 0.4 : 0.85), corona = sprite(TEX.soft, color, starR * 16, sleepy ? 0.1 : 0.25);
   root.add(halo, corona);
@@ -549,6 +615,7 @@ function buildSystem(s, pos, i) {
   const starWorld = pos.clone();
   const planets = s.planets.slice().sort((a, b) => (b.blocks - a.blocks) || ((b.live ? 1 : 0) - (a.live ? 1 : 0)));
   let k = 0;
+  const orbitPos = [], orbitCol = [];
   const house = planets.find((p) => p.house);
   if (house) { const o = starR * 2.6 + 6; const pr = outpost(root, rec, house, o, starWorld, rr); rec.extent = Math.max(rec.extent, o + pr); }
   for (const p of planets) {
@@ -562,15 +629,20 @@ function buildSystem(s, pos, i) {
     const mat = planetMaterial(c, starWorld, (hash(p.tag) % 1000) / 1000, p.blocks ? 1 : 0.55);
     const mesh = new THREE.Mesh(new THREE.SphereGeometry(pr, 20, 14), mat);
     mesh.position.x = orbit; pivot.add(mesh);
-    if (p.live && p.live.online) {
-      mat.uniforms.uLive.value = 1;
-      const b = sprite(TEX.soft, 0x7dffea, pr * 4.5, 0.5); mesh.add(b);
-      const kk = k; animated.push((dt, t) => { b.material.opacity = 0.25 + 0.35 * (0.5 + 0.5 * Math.sin(t * 2.2 + kk)); });
-    }
+    // A live gateway pulses through its own shader (uLive); it used to carry a sprite as well,
+    // which on a big pool meant a hundred extra draws for something the shader already says.
+    if (p.live && p.live.online) mat.uniforms.uLive.value = 1;
+    // Orbit rings all go into one buffer per system: the tilt is baked into the points and the
+    // colour into the vertices, so a system with a hundred gateways is still a single draw.
     if (k < 36) {
-      const pts = []; for (let a = 0; a <= 96; a++) pts.push(new THREE.Vector3(Math.cos((a / 96) * Math.PI * 2) * orbit, 0, Math.sin((a / 96) * Math.PI * 2) * orbit));
-      const line = new THREE.Line(new THREE.BufferGeometry().setFromPoints(pts), new THREE.LineBasicMaterial({ color: c, transparent: true, opacity: 0.09, depthWrite: false }));
-      line.quaternion.copy(pivot.quaternion); root.add(line);
+      const SEG = 72, v = new THREE.Vector3();
+      for (let a = 0; a < SEG; a++) {
+        for (const q of [a, a + 1]) {
+          const ang = (q / SEG) * Math.PI * 2;
+          v.set(Math.cos(ang) * orbit, 0, Math.sin(ang) * orbit).applyQuaternion(pivot.quaternion);
+          orbitPos.push(v.x, v.y, v.z); orbitCol.push(c.r, c.g, c.b);
+        }
+      }
     }
     const speed = (0.9 / Math.sqrt(orbit)) * (0.6 + rr() * 0.5) * MOTION;
     animated.push((dt) => { pivot.rotateY(speed * dt); });
@@ -579,6 +651,12 @@ function buildSystem(s, pos, i) {
     rec.planets.push({ tag: p.tag, mesh, radius: pr });
     rec.extent = Math.max(rec.extent, orbit + pr);
     k++;
+  }
+  if (orbitPos.length) {
+    const og = new THREE.BufferGeometry();
+    og.setAttribute("position", new THREE.Float32BufferAttribute(orbitPos, 3));
+    og.setAttribute("color", new THREE.Float32BufferAttribute(orbitCol, 3));
+    root.add(new THREE.LineSegments(og, new THREE.LineBasicMaterial({ vertexColors: true, transparent: true, opacity: 0.09, depthWrite: false })));
   }
   // Seen from across the galaxy a star should glare; from inside its own system it must not wash
   // the worlds out. Halo, corona and the core's brightness all fall away as the camera comes in
@@ -590,7 +668,7 @@ function buildSystem(s, pos, i) {
     const near = clamp((camera.position.distanceTo(root.getWorldPosition(w)) / (rec.extent * 2.2 + starR * 10) - 0.55) / 0.85, 0, 1);
     halo.material.opacity = haloA * (0.09 + 0.91 * near);
     corona.material.opacity = coronaA * near;
-    star.material.color.copy(color).multiplyScalar(0.75 + 0.85 * near);
+    star.material.uniforms.uDim.value = 0.8 + 0.9 * near;
   });
   const hit = new THREE.Mesh(new THREE.SphereGeometry(Math.max(starR * 2.2, 10), 12, 8), new THREE.MeshBasicMaterial({ visible: false }));
   hit.userData = { kind: "system", sys: s.id }; root.add(hit); pickables.push(hit);
@@ -600,7 +678,7 @@ function buildSystem(s, pos, i) {
 }
 
 
-let rimPoints = null, rimIndex = [];
+let rimPoints = null, rimWorlds = null, rimIndex = [];
 function buildRim(systems, positions) {
   const N = systems.length, pos = new Float32Array(N * 3), col = new Float32Array(N * 3), size = new Float32Array(N), ph = new Float32Array(N);
   systems.forEach((s, i) => {
@@ -617,14 +695,27 @@ function buildRim(systems, positions) {
   rimPoints = new THREE.Points(g, m); rimPoints.userData = { kind: "rim" };
   typeGroups.independent.add(rimPoints);
   rimIndex = systems.map((s) => s.id);
-  // every independent is also a small lit world, so there is a planet to arrive at up close
-  const unit = new THREE.SphereGeometry(1, 16, 12);
-  systems.forEach((s) => {
+  // Every independent is also a small lit world, so there is somewhere to arrive up close. There
+  // are hundreds of them and they never move relative to each other, so they are one instanced
+  // draw rather than one mesh each (it was 347 draw calls a frame).
+  const geo = new THREE.SphereGeometry(1, 16, 12);
+  const seed = new Float32Array(N), idx = new Float32Array(N);
+  const inst = new THREE.InstancedMesh(geo, rimWorldMaterial(), N);
+  inst.instanceMatrix.setUsage(THREE.StaticDrawUsage);
+  const dummy = new THREE.Object3D();
+  systems.forEach((s, i) => {
     const p = positions.get(s.id), pr = 0.8 + 1.1 * Math.log10(s.blocks + 1);
-    const mesh = new THREE.Mesh(unit, planetMaterial(planetColor(s.name), new THREE.Vector3(0, 0, 0), (hash(s.id) % 1000) / 1000));
-    mesh.scale.setScalar(pr); mesh.position.copy(p); mesh.userData = { kind: "system", sys: s.id }; typeGroups.independent.add(mesh); pickables.push(mesh);
-    systemsById.get(s.id).planets.push({ tag: s.name, mesh, radius: pr });
+    dummy.position.copy(p); dummy.scale.setScalar(pr); dummy.updateMatrix();
+    inst.setMatrixAt(i, dummy.matrix);
+    inst.setColorAt(i, planetColor(s.name));
+    seed[i] = (hash(s.id) % 1000) / 1000; idx[i] = i;
+    const rec = systemsById.get(s.id); rec.radius = pr; rec.extent = Math.max(12, pr * 6);
   });
+  geo.setAttribute("aSeed", new THREE.InstancedBufferAttribute(seed, 1));
+  geo.setAttribute("aIndex", new THREE.InstancedBufferAttribute(idx, 1));
+  inst.userData = { kind: "rimworld" };
+  rimWorlds = inst;
+  typeGroups.independent.add(inst); pickables.push(inst);
 }
 
 function buildAll(data) {
@@ -684,6 +775,9 @@ function shootingStar() {
   effects.push({ age: 0, life: 1.8, step(t) { s.position.lerpVectors(from, to, t); s.material.opacity = Math.sin(Math.PI * t); }, done() { scene.remove(s); s.material.dispose(); } });
 }
 function warp() {
+  // A full-screen conic gradient is expensive to rasterise, and it fires exactly when the camera
+  // flight starts; the machines that can least afford it are the ones that skip it.
+  if (reduced || lowPower) return;
   const w = el("div", "warp-fx"); document.body.append(w); setTimeout(() => w.remove(), 900);
 }
 
@@ -707,7 +801,7 @@ function flyTo(target, distance, dur = 1.8, track = null) {
   flight = { t: 0, dur: FAST ? 0.05 : dur / Math.max(MOTION, 0.5), fromPos, fromTarget, toPos, toTarget: target.clone(), track };
   if (fromPos.distanceTo(toPos) > 400 && !reduced) warp();
 }
-function focusSystem(id, tag) {
+function focusSystem(id, tag, fromList = false) {
   const rec = systemsById.get(id);
   if (!rec) return;
   const planet = tag && rec.planets.find((p) => p.tag === tag);
@@ -718,6 +812,11 @@ function focusSystem(id, tag) {
   flyTo(target, dist, 1.8, focused.follow ? () => liveTarget(id, focused.tag) : null);
   showPanel(rec, tag);
   setPlanetLabels(rec);
+  // On a phone the panel is a bottom sheet and the chart a top sheet; open together they overlap,
+  // and the panel covers the row that was just chosen.
+  if (narrow) { $("chart").classList.add("closed"); $("chart-toggle").setAttribute("aria-expanded", "false"); }
+  // Chosen from a list, so send the reader to the answer; a click on the map must not steal focus.
+  if (fromList) $("panel-name").focus({ preventScroll: true });
 }
 function unfocus() {
   focused = null; hidePanel(); setPlanetLabels(null);
@@ -857,7 +956,7 @@ function updateSpot(height, t) {
   s.beam.material.opacity = 0.28 + 0.12 * Math.sin(t * 3);
 }
 
-let tipTarget = null;
+let tipTarget = null, tipMeasured = null, tipW = 0, tipH = 0;
 function showTip(obj, x, y) {
   const key = obj ? (obj.block != null ? "b" + obj.block : obj.sys + "|" + (obj.tag || "")) : null;
   if (key !== tipTarget) {
@@ -877,9 +976,11 @@ function showTip(obj, x, y) {
     }
   }
   if (!obj) return;
-  const w = tip.offsetWidth, h = tip.offsetHeight;
-  tip.style.left = clamp(x + 18, 8, innerWidth - w - 8) + "px";
-  tip.style.top = clamp(y + 18, 8, innerHeight - h - 50) + "px";
+  // Measure only when the contents change. Reading offsetWidth every frame, right after writing
+  // styles, forced a full layout of the document on top of the WebGL render.
+  if (key !== tipMeasured) { tipMeasured = key; tipW = tip.offsetWidth; tipH = tip.offsetHeight; }
+  const left = clamp(x + 18, 8, innerWidth - tipW - 8), top = clamp(y + 18, 8, innerHeight - tipH - 50);
+  tip.style.transform = `translate3d(${Math.round(left)}px, ${Math.round(top)}px, 0)`;
 }
 
 // ---------- pinned panel ----------
@@ -902,15 +1003,13 @@ function showPanel(rec, tag) {
   const planets = s.type === "independent" ? [] : s.planets;
   $("panel-planets-h").textContent = s.type === "stratum" ? `Worlds in this system (${planets.length})` : `Gateways (${planets.length})`;
   $("panel-planets-h").hidden = !planets.length;
-  for (const p of planets.slice(0, 250)) {
-    const li = el("li"); li.tabIndex = 0;
+  planets.slice(0, 250).forEach((p, i) => {
+    const li = optionRow(p.tag, () => { const r = systemsById.get(s.id); const pl = r && r.planets.find((x) => x.tag === p.tag); if (pl) focusSystem(s.id, p.tag, true); }, i === 0);
     const d = el("i", "d" + (p.live && p.live.online ? " on" : "")); d.style.background = "#" + (p.house ? new THREE.Color(0xff2a2a) : planetColor(p.tag)).getHexString();
     li.append(d, el("span", "n", p.tag), el("span", "c", p.blocks ? `${n(p.blocks)} blk` : p.live ? "forming" : "–"));
-    if (p.tag === tag) li.style.background = "rgba(255,204,102,.14)";
-    const go = () => { const r = systemsById.get(s.id); const pl = r && r.planets.find((x) => x.tag === p.tag); if (pl) focusSystem(s.id, p.tag); };
-    li.addEventListener("click", go); li.addEventListener("keydown", (e) => { if (e.key === "Enter") go(); });
+    if (p.tag === tag) { li.style.background = "rgba(255,204,102,.14)"; li.setAttribute("aria-selected", "true"); }
     list.append(li);
-  }
+  });
   const foot = $("panel-link"); foot.replaceChildren();
   const link = safeLink(s.link);
   if (link) { const a = el("a", null, link.replace(/^https:\/\//, "")); a.href = link; a.target = "_blank"; a.rel = "noopener noreferrer"; foot.append("Pool site: ", a, " · "); }
@@ -921,20 +1020,53 @@ $("panel-close").addEventListener("click", unfocus);
 addEventListener("keydown", (e) => { if (e.key === "Escape") { if (focused) unfocus(); } });
 
 // ---------- star chart ----------
+// One tab stop for a list of hundreds: Tab reaches the list, then the arrows walk it. Rows are
+// options rather than plain list items, so they are announced as something you can choose.
+function rovingList(ol) {
+  const rows = () => [...ol.querySelectorAll("li[role=option]")];
+  const move = (from, step) => {
+    const all = rows(), i = all.indexOf(from), next = all[clamp(i + step, 0, all.length - 1)];
+    if (!next || next === from) return;
+    from.tabIndex = -1; next.tabIndex = 0; next.focus();
+  };
+  ol.addEventListener("keydown", (e) => {
+    const li = e.target.closest && e.target.closest("li[role=option]");
+    if (!li) return;
+    const all = rows();
+    if (e.key === "ArrowDown") { move(li, 1); e.preventDefault(); }
+    else if (e.key === "ArrowUp") { move(li, -1); e.preventDefault(); }
+    else if (e.key === "Home") { move(li, -all.length); e.preventDefault(); }
+    else if (e.key === "End") { move(li, all.length); e.preventDefault(); }
+    else if (e.key === "Enter" || e.key === " ") { li.click(); e.preventDefault(); }
+  });
+}
+function optionRow(label, onGo, first) {
+  const li = el("li");
+  li.setAttribute("role", "option"); li.setAttribute("aria-selected", "false");
+  li.tabIndex = first ? 0 : -1;
+  li.addEventListener("click", () => onGo(li));
+  return li;
+}
 function renderChart(filter = "") {
   const ol = $("systems"); ol.replaceChildren();
   const q = filter.trim().toLowerCase();
+  let shownRows = 0;
   // Imperial red names a stratum endpoint, not a pool, so the list uses the system's star.
   const color = (s) => (s.type === "stratum" ? "#c9d6e6" : s.type === "independent" ? "#7fe0b0" : "#ffcf5c");
   const add = (s, label, count, tag) => {
-    const li = el("li"); li.tabIndex = 0; if (tag) li.classList.add("hit");
+    const li = optionRow(label, (row) => {
+      for (const o of ol.querySelectorAll("li[aria-selected=true]")) o.setAttribute("aria-selected", "false");
+      row.setAttribute("aria-selected", "true");
+      focusSystem(s.id, tag, true);
+    }, shownRows === 0);
+    shownRows++;
+    if (tag) li.classList.add("hit");
     const d = el("i", "d"); d.style.background = color(s); li.append(d);
     const nm = el("span", "n", label); li.append(nm); li.append(el("span", "c", count));
-    const go = () => focusSystem(s.id, tag);
-    li.addEventListener("click", go); li.addEventListener("keydown", (e) => { if (e.key === "Enter") go(); });
     ol.append(li);
   };
-  const sep = (t) => ol.append(el("li", "sep", t));
+  const sep = (t) => { const li = el("li", "sep", t); li.setAttribute("role", "presentation"); ol.append(li); };
+  const say = (msg) => { $("chart-count").textContent = msg; };
   if (q) {
     let shown = 0;
     for (const s of DATA.systems) {
@@ -944,8 +1076,10 @@ function renderChart(filter = "") {
       for (const p of s.planets) if (!p.house && p.tag.toLowerCase().includes(q)) { add(s, `${p.tag} · ${s.name}`, p.blocks ? `${n(p.blocks)} blk` : "forming", p.tag); shown++; }
     }
     if (!shown) ol.append(el("li", "sub", "No contact. Try another name."));
+    say(shown ? `${shown} found` : "Nothing found");
     return;
   }
+  say("");
   const byType = (t) => DATA.systems.filter((s) => s.type === t).sort((a, b) => b.blocks7d - a.blocks7d || b.blocks - a.blocks);
   sep(`Rebel Alliance · ${DATA.counts.datum}`); byType("datum").forEach((s) => add(s, s.name, `${s.share7d}%`));
   sep(`Stratum pools · ${DATA.counts.stratum}`); byType("stratum").forEach((s) => add(s, s.name, `${s.share7d}%`));
@@ -960,8 +1094,28 @@ $("chart-toggle").addEventListener("click", () => {
 });
 if (store.get("xbtg-chart") === "closed" || narrow) { $("chart").classList.add("closed"); $("chart-toggle").setAttribute("aria-expanded", "false"); }
 document.querySelectorAll(".leg").forEach((b) => b.addEventListener("click", () => {
-  const on = b.classList.toggle("on"); typeGroups[b.dataset.type].visible = on;
+  const on = b.classList.toggle("on");
+  typeGroups[b.dataset.type].visible = on;
+  b.setAttribute("aria-pressed", String(on)); // the state was colour-only before
+  pickDirty = true;
 }));
+rovingList($("systems"));
+rovingList($("panel-planets"));
+// The ticker moves forever, so it can be stopped; it also stops itself when the tab is hidden.
+const relayBar = $("relay-bar"), relayPause = $("relay-pause");
+relayPause.addEventListener("click", () => {
+  const paused = relayBar.classList.toggle("paused");
+  relayPause.setAttribute("aria-pressed", String(paused));
+  relayPause.title = paused ? "Start the ticker" : "Pause the ticker";
+});
+addEventListener("visibilitychange", () => { if (document.hidden) relayBar.classList.add("paused"); else if (relayPause.getAttribute("aria-pressed") !== "true") relayBar.classList.remove("paused"); });
+addEventListener("keydown", (e) => {
+  if (e.key !== "/" || e.metaKey || e.ctrlKey) return;
+  const t = e.target;
+  if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA")) return;
+  $("chart").classList.remove("closed"); $("chart-toggle").setAttribute("aria-expanded", "true");
+  $("search").focus(); e.preventDefault();
+});
 
 // ---------- header + relay ----------
 function renderHud() {
@@ -993,7 +1147,12 @@ function renderRelay() {
 const ray = new THREE.Raycaster(), pointer = new THREE.Vector2();
 let pointerXY = null, downAt = null;
 renderer.domElement.addEventListener("pointermove", (e) => { pointerXY = [e.clientX, e.clientY]; });
-renderer.domElement.addEventListener("pointerleave", () => { pointerXY = null; showTip(null); updateSpot(null, 0); });
+// Touch destroys the pointer right after the tap, firing pointerleave; hiding the tooltip there
+// made a tap readout flash for a frame and vanish on phones.
+renderer.domElement.addEventListener("pointerleave", (e) => {
+  pointerXY = null; updateSpot(null, 0);
+  if (e.pointerType === "mouse") showTip(null);
+});
 renderer.domElement.addEventListener("pointerdown", (e) => { downAt = [e.clientX, e.clientY, performance.now()]; });
 renderer.domElement.addEventListener("pointerup", (e) => {
   if (!downAt) return;
@@ -1004,17 +1163,27 @@ renderer.domElement.addEventListener("pointerup", (e) => {
   // a block on the chain sends you to whoever found it
   if (hit && hit.block != null) { const f = finderOf(blockData(hit.block)); if (f) focusSystem(f.sys, f.tag); }
   else if (hit) focusSystem(hit.sys, hit.tag && systemData(hit.sys).type !== "independent" ? hit.tag : null);
-  if (hit && e.pointerType !== "mouse") showTip(hit, e.clientX, e.clientY);
+  if (e.pointerType !== "mouse") showTip(hit, e.clientX, e.clientY); // a tap on empty space dismisses it
 });
+// The visible set only changes when a filter is toggled or the chain grows, so it is built then
+// rather than filtering a few hundred objects on every frame the pointer moves.
+let pickDirty = true, pickList = [];
+function visiblePickables() {
+  if (pickDirty) {
+    pickDirty = false;
+    pickList = pickables.filter((m) => { let o = m; while (o) { if (!o.visible) return false; o = o.parent; } return true; });
+  }
+  return pickList;
+}
 function pick(x, y) {
   pointer.set((x / innerWidth) * 2 - 1, -(y / innerHeight) * 2 + 1);
   ray.setFromCamera(pointer, camera);
-  const vis = pickables.filter((m) => { let o = m; while (o) { if (!o.visible) return false; o = o.parent; } return true; });
-  const hits = ray.intersectObjects(vis, false);
+  const hits = ray.intersectObjects(visiblePickables(), false);
   let best = null;
   for (const h of hits) {
     const u = h.object.userData;
     if (u.kind === "block") { best = { block: u.h }; break; }
+    if (u.kind === "rimworld") { best = { sys: rimIndex[h.instanceId] }; break; }
     if (u.kind === "planet") { best = { sys: u.sys, tag: u.tag }; break; }
     if (!best) best = { sys: u.sys };
   }
@@ -1027,15 +1196,25 @@ function pick(x, y) {
 }
 
 // ---------- crawl ----------
+// The crawl covers the page, so while it is up the controls behind it are not reachable by Tab,
+// and when it goes the focus lands somewhere real instead of falling to the body.
+const behindCrawl = () => [...document.body.children].filter((x) => x.id !== "crawl");
 function endCrawl() {
   const c = $("crawl"); if (!c || c.classList.contains("gone")) return;
   c.classList.add("gone"); store.set("xbtg-crawl", "seen"); setTimeout(() => c.remove(), 1400);
+  for (const x of behindCrawl()) x.removeAttribute("inert");
+  $("chart-toggle").focus({ preventScroll: true });
   introFlight();
 }
 $("engage").addEventListener("click", endCrawl);
 $("skip").addEventListener("click", endCrawl);
 const showCrawl = !reduced && (store.get("xbtg-crawl") !== "seen" || new URLSearchParams(location.search).has("crawl"));
-if (!showCrawl) $("crawl").remove(); else setTimeout(endCrawl, 50000);
+if (!showCrawl) $("crawl").remove();
+else {
+  for (const x of behindCrawl()) x.setAttribute("inert", "");
+  $("engage").focus({ preventScroll: true });
+  setTimeout(endCrawl, 50000);
+}
 let introDone = false;
 function introFlight() {
   if (introDone) return; introDone = true;
@@ -1049,7 +1228,9 @@ const sysIdFor = (b) => { const s = DATA.systems.find((x) => x.name === b.system
 // ---------- data ----------
 function fail(msg) { const e = $("error"); e.textContent = msg; e.hidden = false; $("loading").classList.add("done"); }
 async function load() {
-  const r = await fetch(DATA_URL, { cache: "no-store" });
+  // "no-cache" revalidates rather than refetches: with the ETag the worker serves, a poll that
+  // finds nothing new costs an empty 304 instead of the whole model.
+  const r = await fetch(DATA_URL, { cache: "no-cache" });
   if (!r.ok) throw new Error(`HTTP ${r.status}`);
   return r.json();
 }
@@ -1067,8 +1248,9 @@ async function poll() {
 
 // ---------- loop ----------
 const clock = new THREE.Clock();
-let nextComet = 6;
+let nextComet = 6, labelOpacity = null, cursorNow = null;
 function tick() {
+  if (FAST) renderer.info.reset(); // measure a whole frame, not just the last pass
   const dt = Math.min(clock.getDelta(), 0.1), t = clock.elapsedTime;
   planetUniformsShared.uTime.value = t;
   for (const m of timeMats) m.uniforms.uTime.value = t;
@@ -1097,7 +1279,11 @@ function tick() {
   const camD = camera.position.distanceTo(controls.target);
   // inside a system there is nothing far away to glare, so the bloom comes down with the stars
   if (bloom) bloom.strength = BLOOM * clamp(0.3 + (camD - 40) / 620, 0.3, 1);
-  for (const l of labelled) l.element.style.opacity = camD > 3600 ? "0" : camD > 2400 ? "0.6" : "1";
+  // Far out, an Outer Rim world is under a pixel wide and the points already draw it; there is no
+  // reason to put three hundred spheres through the pipe.
+  if (rimWorlds && rimWorlds.visible !== camD < 620) { rimWorlds.visible = camD < 620; pickDirty = true; }
+  const lab = camD > 3600 ? "0" : camD > 2400 ? "0.6" : "1";
+  if (lab !== labelOpacity) { labelOpacity = lab; for (const l of labelled) l.element.style.opacity = lab; }
   const wp = new THREE.Vector3();
   for (const b of beacons) { b.getWorldPosition(wp); const d = camera.position.distanceTo(wp); b.material.opacity = clamp((d - 500) / 900, 0, 0.9); }
   if (FAST && window.__xbtg && window.__xbtg.follow) pointerXY = window.__xbtg.where(...window.__xbtg.follow);
@@ -1107,8 +1293,10 @@ function tick() {
     // hovering a block on the chain lights its finder as if the pointer were on it
     const hl = hit && hit.block != null ? finderOf(blockData(hit.block)) : hit;
     updateSpot(hit && hit.block != null ? hit.block : null, t);
-    for (const rec of systemsById.values()) for (const p of rec.planets) if (p.mesh.material.uniforms) p.mesh.material.uniforms.uHover.value = hl && hl.sys === rec.data.id && (hl.tag === p.tag || rec.type === "independent" || (hl.tag == null && hit && hit.block != null)) ? 1 : 0;
-    renderer.domElement.style.cursor = hit ? "pointer" : "grab";
+    for (const rec of systemsById.values()) for (const p of rec.planets) if (p.mesh.material.uniforms) p.mesh.material.uniforms.uHover.value = hl && hl.sys === rec.data.id && (hl.tag === p.tag || (hl.tag == null && hit && hit.block != null)) ? 1 : 0;
+    if (rimWorlds) { const r = hl && systemsById.get(hl.sys); rimWorlds.material.uniforms.uHover.value = r && r.type === "independent" ? r.rimIndex : -1; }
+    const cur = hit ? "pointer" : "grab";
+    if (cur !== cursorNow) { cursorNow = cur; renderer.domElement.style.cursor = cur; }
   }
   if (composer) composer.render(); else renderer.render(scene, camera);
   labels.render(scene, camera);
@@ -1126,11 +1314,12 @@ addEventListener("resize", () => {
   setInterval(stardate, 1000); setInterval(renderRelay, 30_000); setInterval(poll, POLL_MS);
   renderer.setAnimationLoop(tick);
   if (FAST) window.__xbtg = { // test hook: where a system or planet is on screen
-    where(sys, tag) { const r = systemsById.get(sys); if (!r) return null; const pl = tag && r.planets.find((x) => x.tag === tag); const w = new THREE.Vector3(); (pl ? pl.mesh : r.star || r.planets[0].mesh).getWorldPosition(w); w.project(camera); return [Math.round((w.x + 1) / 2 * innerWidth), Math.round((1 - w.y) / 2 * innerHeight)]; },
+    where(sys, tag) { const r = systemsById.get(sys); if (!r) return null; const pl = tag && r.planets.find((x) => x.tag === tag); const w = new THREE.Vector3(); if (pl) pl.mesh.getWorldPosition(w); else if (r.star) r.star.getWorldPosition(w); else liveTarget(sys, null, w); w.project(camera); return [Math.round((w.x + 1) / 2 * innerWidth), Math.round((1 - w.y) / 2 * innerHeight)]; },
     ids: () => [...systemsById.keys()],
     chain(i = 0) { const g = CHAIN.blocks[i]; if (!g) return null; const w = new THREE.Vector3(); g.getWorldPosition(w).project(camera); return [Math.round((w.x + 1) / 2 * innerWidth), Math.round((1 - w.y) / 2 * innerHeight)]; },
     heights: () => CHAIN.blocks.map((g) => g.userData.b.height),
     flash: (b) => blockFlash(b), // pretend a block was found
+    info: () => ({ ...renderer.info.render, geometries: renderer.info.memory.geometries, textures: renderer.info.memory.textures, pickables: pickables.length }),
     follow: null, // [sys, tag]: keep the pointer on it (hover test)
     zoom(d, dy = 0) { const t = controls.target.clone(); t.y += dy; flyTo(t, d); },
   };
