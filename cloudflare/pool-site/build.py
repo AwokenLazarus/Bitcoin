@@ -99,7 +99,10 @@ def main():
     # server.py serves index.html only through the renderer, never as /static/index.html's twin.
     n += sum(1 for _ in static_out.rglob("*") if _.is_file())
 
-    for name in ("_headers", "_redirects", "_routes.json", "_worker.js"):
+    # 404.html also switches Pages off its single-page-app fallback, which answered every unknown
+    # URL with the homepage and a 200. favicon.ico sits at the root because that is where browsers
+    # and search engines look before reading any <link rel="icon">.
+    for name in ("_headers", "_redirects", "_routes.json", "_worker.js", "404.html", "favicon.ico"):
         shutil.copy(HERE / name, out / name)
     print(f"wrote {n} files to {out}")
 
