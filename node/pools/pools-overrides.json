@@ -27,11 +27,14 @@
     },
     {
       "name": "AlphaPool",
-      "link": "",
+      "link": "https://alphapool.tech",
       "addresses": [],
       "tags": [
-        "AlphaPool"
-      ]
+        "AlphaPool",
+        "DATUM-AP(?![A-Za-z0-9])"
+      ],
+      "pool": true,
+      "_comment": "AlphaPool's coinbase pays its members, so a member's payout address (richlab) matched before the pool's tag and took the blocks. pool=true puts the tag first. DATUM-AP was its Prime's primary tag from 18 Sep until 22 Sep ~20:18 UTC, after which its blocks carry AlphaPool with each gateway's name as the secondary tag (973724 = AlphaPool/The Mothership). Both eras pay the same 1% fee output to bc1qycx42j0mm2we68g5t8k0ul9sgccha0ewkawedw (9 of 9 blocks checked), which is what ties them together; the lookahead keeps DATUM-AP off a longer name like DATUM-APEX."
     },
     {
       "name": "PyBLOCK",

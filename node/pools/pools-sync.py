@@ -70,6 +70,7 @@ GUIDE_FETCH_BUDGET = 25          # per run; their API answers in ~1-3 s per pool
 START_HEIGHT = int(os.environ.get("START_HEIGHT", "961640"))
 CACHE_JSON = Path(os.environ.get("MEMPOOL_CACHE", "/home/umbrel/umbrel/app-data/mempool/data/cache.json"))
 DB = dict(host=os.environ.get("MEMPOOL_DB_HOST", "10.21.21.28"),
+          port=int(os.environ.get("MEMPOOL_DB_PORT", "3306")),
           user=os.environ.get("MEMPOOL_DB_USER", "mempool"),
           password=os.environ.get("MEMPOOL_DB_PASS", "mempool"),
           database=os.environ.get("MEMPOOL_DB_NAME", "mempool"))
