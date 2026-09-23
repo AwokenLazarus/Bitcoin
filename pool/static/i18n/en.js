@@ -43,7 +43,9 @@ window.LZ_I18N_DICTS["en"] = {
     "workers": "Workers",
     "pool": "Pool",
     "lookUpAnother": "Look up another",
-    "navHr": "Pool hashrate right now"
+    "navHr": "Pool hashrate right now",
+    "joinDiscord": "Join Discord",
+    "joinDiscordTitle": "Chat with miners and the team on the Lazarus Pool Discord"
   },
   "promo": {
     "aria": "DATUM miners are paid a bonus",
@@ -782,6 +784,19 @@ window.LZ_I18N_DICTS["en"] = {
     "api": "Pool API (JSON)",
     "thisAddr": "This address on the explorer",
     "minerApi": "This miner’s API (JSON)"
+  },
+  "askai": {
+    "title": "Ask your favorite AI",
+    "lede": "Opens a new chat with a question about Lazarus Pool and the DATUM bonus already typed in. It explains the pool, then helps you get set up.",
+    "chatgptAria": "Ask ChatGPT about Lazarus Pool",
+    "chatgptTitle": "Ask ChatGPT about Lazarus Pool: opens a new chat with the question already typed in",
+    "claudeAria": "Ask Claude about Lazarus Pool",
+    "claudeTitle": "Ask Claude about Lazarus Pool: opens a new chat with the question already typed in",
+    "grokAria": "Ask Grok about Lazarus Pool",
+    "grokTitle": "Ask Grok about Lazarus Pool: opens a new chat with the question already typed in",
+    "prompt": "I'm checking out Lazarus Pool (https://pool.lazarus-xbt.xyz), a non-custodial mining pool for Bitcoin on BLAKE2b proof of work. Sia-family ASICs (Goldshell SC series, iBeLink BM-S3, Antminer A3) can mine it, and every payout goes straight to the miner's own address inside the block's coinbase, with no pool balance to withdraw. Miners who run their own Bitcoin Knots node and DATUM gateway build their own block templates, pay no pool fee, and earn a DATUM bonus: a share of the public stratum's fee is credited to them on every block the pool finds. {bonusLine} Please read the site and explain in plain language how the pool, its TIDES payouts and the DATUM bonus work. Then help me get started by asking me: am I interested in mining here, which miner do I have (or am I considering) and how many, would I point it at the public stratum or run my own DATUM gateway, and do I want help setting up the node and gateway? After that, walk me through the setup step by step.",
+    "bonusLive": "Right now the site shows the DATUM bonus at {bonus} above a miner's proportional share of each block.",
+    "bonusUnknown": "The site shows the current DATUM bonus live."
   },
   "path": {
     "stratumGw": "stratum + {gw}",

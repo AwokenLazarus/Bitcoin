@@ -43,7 +43,9 @@ window.LZ_I18N_DICTS["zh-CN"] = {
     "workers": "矿机",
     "pool": "矿池",
     "lookUpAnother": "查询其他地址",
-    "navHr": "当前矿池算力"
+    "navHr": "当前矿池算力",
+    "joinDiscord": "加入 Discord",
+    "joinDiscordTitle": "在 Lazarus Pool 的 Discord 上与矿工和团队交流"
   },
   "promo": {
     "aria": "DATUM 矿工获得奖励",
@@ -782,6 +784,19 @@ window.LZ_I18N_DICTS["zh-CN"] = {
     "api": "矿池 API（JSON）",
     "thisAddr": "在浏览器中打开此地址",
     "minerApi": "此矿工的 API（JSON）"
+  },
+  "askai": {
+    "title": "问问你常用的 AI",
+    "lede": "会开启一个新对话，关于 Lazarus Pool 和 DATUM 奖励的问题已经填好。AI 会先讲清楚矿池，再帮你完成设置。",
+    "chatgptAria": "向 ChatGPT 询问 Lazarus Pool",
+    "chatgptTitle": "向 ChatGPT 询问 Lazarus Pool：新对话中已填好问题",
+    "claudeAria": "向 Claude 询问 Lazarus Pool",
+    "claudeTitle": "向 Claude 询问 Lazarus Pool：新对话中已填好问题",
+    "grokAria": "向 Grok 询问 Lazarus Pool",
+    "grokTitle": "向 Grok 询问 Lazarus Pool：新对话中已填好问题",
+    "prompt": "我在了解 Lazarus Pool（https://pool.lazarus-xbt.xyz/zh/）：一个非托管矿池，挖的是采用 BLAKE2b 工作量证明的比特币（Bitcoin）。Sia 系列 ASIC 矿机（金贝 SC 系列、iBeLink BM-S3、蚂蚁 A3）都能挖，每笔收益直接写进区块的 coinbase，付到矿工自己的地址，矿池里没有余额需要提现。自己运行 Bitcoin Knots 节点和 DATUM 网关的矿工自建区块模板、不付矿池手续费，还能拿到 DATUM 奖励：矿池每出一个块，都会把公共 stratum 手续费的一部分记给他们。{bonusLine}请阅读这个网站，用通俗的话讲清楚这个矿池、TIDES 支付和 DATUM 奖励是怎么运作的。然后帮我入门，先问我：我是否有兴趣在这里挖矿？我有（或打算买）哪种矿机、几台？我打算接公共 stratum 还是自己运行 DATUM 网关？需不需要帮忙搭建节点和网关？之后一步一步带我完成设置。",
+    "bonusLive": "网站目前显示的 DATUM 奖励比按算力比例应得的份额高 {bonus}。",
+    "bonusUnknown": "网站上实时显示当前的 DATUM 奖励。"
   },
   "path": {
     "stratumGw": "stratum + {gw}",
