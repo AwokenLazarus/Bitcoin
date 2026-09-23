@@ -75,6 +75,11 @@
   const promoDismissed = () => {
     try { return localStorage.getItem(PROMO_DISMISS_KEY) === "1"; } catch (e) { return false; }
   };
+  try { if (localStorage.getItem("lazarus.stratum25.dismissed") === "1") { const el = $("stratumnotice"); if (el) el.hidden = true; } } catch (e) { /* private mode */ }
+  $("stratumnotice-dismiss")?.addEventListener("click", () => {
+    try { localStorage.setItem("lazarus.stratum25.dismissed", "1"); } catch (e) { /* private mode */ }
+    const el = $("stratumnotice"); if (el) el.hidden = true;
+  });
   try { if (localStorage.getItem("lazarus.softfork419.dismissed") === "1") { const el = $("softfork"); if (el) el.hidden = true; } } catch (e) { /* private mode */ }
   $("softfork-dismiss")?.addEventListener("click", () => {
     try { localStorage.setItem("lazarus.softfork419.dismissed", "1"); } catch (e) { /* private mode */ }
@@ -1237,7 +1242,7 @@
         });
         continue;
       }
-      const b = byHeight.get(key) || { height: r.height, hash: r.hash, ts: r.ts, outputs: [], miner_btc: 0, pool_btc: 0, status: r.status, kind: r.kind, block_status: r.block_status, owed_sats: r.owed_sats, owed_txid: r.owed_txid, owed_resolved: r.owed_resolved, owed_status: r.owed_status, owed_payable_at: r.owed_payable_at, found_by: r.found_by, reward: r.reward_btc, confirmations: r.confirmations };
+      const b = byHeight.get(key) || { height: r.height, hash: r.hash, ts: r.ts, outputs: [], miner_btc: 0, pool_btc: 0, status: r.status, kind: r.kind, block_status: r.block_status, owed_sats: r.owed_sats, owed_txid: r.owed_txid, owed_resolved: r.owed_resolved, owed_status: r.owed_status, owed_payable_at: r.owed_payable_at, found_by: r.found_by, reward: r.reward_btc, confirmations: r.confirmations, maturity_confs: r.maturity_confs };
       const combined = Number(r.miner_btc) || 0;
       if (r.to === "pool" && poolAddr && r.finder === poolAddr) {
         const parts = partsFor(r.hash, combined);
@@ -1274,8 +1279,9 @@
       if (b.prime_only) return bs || b.status || "pending";
       const h = Number(b.height);
       const confs = Number(b.confirmations) || (tip && h ? tip - h + 1 : 0);
-      if (h && confs < need) return "immature";
-      if (h && confs >= need) return "spendable";
+      const needB = Number(b.maturity_confs) || need;
+      if (h && confs < needB) return "immature";
+      if (h && confs >= needB) return "spendable";
       return b.status === "unsplit" ? "pool_only" : (b.status || bs || "\u2014");
     };
     for (const b of blocks) {

@@ -2,7 +2,7 @@ window.LZ_I18N_DICTS = window.LZ_I18N_DICTS || {};
 window.LZ_I18N_DICTS["zh-CN"] = {
   "meta": {
     "title": "Lazarus Pool — 用 Siacoin BLAKE2b 矿机挖比特币（XBT / BTCB2）的矿池",
-    "description": "用任何能挖 Siacoin 的 BLAKE2b ASIC 挖比特币（XBT / BTCB2）——金贝 SC、iBeLink BM-S3、蚂蚁 A3。本矿池是这条 BIP-110 比特币分叉主网上第一家用 TIDES 拆分 coinbase 支付的矿池，也是第一家用自有 stratum 算力补贴 DATUM 矿工的矿池。自建 DATUM 0%，公共 stratum 15%（stratum+tcp://stratum.lazarus-xbt.xyz:23334）。",
+    "description": "用任何能挖 Siacoin 的 BLAKE2b ASIC 挖比特币（XBT / BTCB2）——金贝 SC、iBeLink BM-S3、蚂蚁 A3。本矿池是这条 BIP-110 比特币分叉主网上第一家用 TIDES 拆分 coinbase 支付的矿池，也是第一家用自有 stratum 算力补贴 DATUM 矿工的矿池。自建 DATUM 0%，公共 stratum 自区块 973750 起 25%（stratum+tcp://stratum.lazarus-xbt.xyz:23334）。",
     "minerTitle": "矿工 — Lazarus Pool",
     "minerDescription": "Lazarus Pool 上某个地址的实时算力、矿机、TIDES 窗口份额以及每一笔 coinbase 支付。",
     "minerTitleAddr": "{short} — Lazarus Pool"
@@ -33,6 +33,7 @@ window.LZ_I18N_DICTS["zh-CN"] = {
     "how": "原理",
     "explorer": "浏览器",
     "explorerTitle": "Lazarus Mempool — 本链区块浏览器",
+    "hub": "Lazarus 中心 · 了解本链",
     "discord": "Discord",
     "exchange": "交易所",
     "exchangeTitle": "在 Neoxa Exchange 注册交易比特币（BTCB2）",
@@ -54,9 +55,16 @@ window.LZ_I18N_DICTS["zh-CN"] = {
     "liveTitle": "DATUM 工作占窗口 {datumPct}，公共 stratum 占 {stratumPct}，因此从 stratum 工作里拿出的 {pts}，对 DATUM 工作相当于 {uplift}。",
     "text": "公共 stratum 手续费为 {fee}。其中 {Pts} 会在矿池找到的每一个区块上，按 DATUM 工作比例记给窗口里每一位持有 DATUM 工作的矿工——不论该 coinbase 是否由你打出。"
   },
+  "stratumnotice": {
+    "kicker": "紧急 · stratum 矿工：请尽快改用自己的 DATUM 网关",
+    "text": "节点正在决定：<b>凡是通过矿池 stratum（SV1）而不是自己节点出算力的地址，其 coinbase 收款将被判为无效</b>。<b>换到别的矿池也改变不了结果</b>：在任何矿池，付给 SV1 出算力地址的款项都会被判无效，所以换到费率更低的矿池既省不了更高的费用，也多赚不到钱：在那里用 stratum 出算力依然拿不到付款。唯一的出路是用自己的 Bitcoin Knots 节点和 DATUM 网关自己组块，<b>越快越好</b>。为加快迁移，自区块 <b>973,750</b>（约 9 月 23 日 05:00 UTC）起，公共 stratum 费率由 15% 提高到 <b>25%</b>：每个区块其中 <b>12.5 个点</b>记给 DATUM 矿工，12.5 个点归矿池。自建网关费率为 0%，切换时已被接受的工作量会随你一起保留。",
+    "setup": "搭建 DATUM 网关",
+    "plan": "Knots 计划（长 coinbase 成熟期，三部分之一）",
+    "dismiss": "关闭公告"
+  },
   "softfork": {
     "kicker": "网络公告 · Knots 29.4.2 软分叉",
-    "text": "从区块 <b>973440</b>（约 9 月 22 日）到 <b>979920</b>（约 11 月 5 日），每个新挖出的 coinbase 需等待 <b>45 天</b> 才能花费，而不是 100 个区块。这是临时措施，目的是让打了就跑的挖矿无利可图，让留下来的矿工占优。支付、份额和分账都不变；这些区块的币只是要到区块 979920 才解锁（补付也一样）。<b>Lazarus 支持它</b>，我们的节点将在区块 973400 切换。<b>DATUM 网关运营者运行自己的节点，选择权在你：</b>若要支持，请在区块 973440 之前运行 Knots 29.4.2。",
+    "text": "从区块 <b>973440</b>（约 9 月 22 日）到 <b>979920</b>（约 11 月 5 日），每个新挖出的 coinbase 需等待 <b>45 天</b> 才能花费，而不是 100 个区块。这是临时措施，目的是让打了就跑的挖矿无利可图，让留下来的矿工占优。支付、份额和分账都不变；这些区块的币只是要满 6,481 个确认才解锁（补付也一样）。<b>Lazarus 支持它</b>，我们的节点将在区块 973400 切换。<b>DATUM 网关运营者运行自己的节点，选择权在你：</b>若要支持，请在区块 973440 之前运行 Knots 29.4.2。",
     "pr": "提案（Knots #419）",
     "dl": "Knots 29.4.2 下载",
     "dismiss": "关闭公告"
@@ -437,7 +445,7 @@ window.LZ_I18N_DICTS["zh-CN"] = {
     "soloLead": "<strong>独挖是赌注，不是工资。</strong>你的 shares 买不到任何东西——只证明你在干活。其中一份成为区块时，该块的全部奖励扣除我们的手续费，付给用户名里的地址，并写在该块自己的 coinbase 里。在那之前，无论挖多久都没有收入。矿池挖矿让你稳定分得矿池找到的每个块；独挖很少发生、一旦发生就很大。多数矿工应留在矿池。",
     "soloFee": "占区块的 {fee}，作为你解出的 coinbase 中的一笔输出。块与块之间既不扣留，也不欠你任何东西。",
     "soloFeeTail": "的区块奖励，作为你解出的 coinbase 中的一笔输出。块与块之间既不扣留，也不欠你任何东西。",
-    "soloPayout": "区块的其余部分——补贴与其中每一笔交易费——直接到你的地址，100 个确认后可花费。",
+    "soloPayout": "区块的其余部分——补贴与其中每一笔交易费——直接到你的地址，满 6,481 个确认后可花费（区块 973,440 之前为 100 个）。",
     "soloOdds": "你的几率",
     "soloOddsBody": "按你的算力预计出块时间显示在你的 <a href=\"#dashboard\">数据</a> 页。",
     "soloNote": "独挖工作故意不进入 TIDES 窗口。若你想两者都要，可把一部分矿机指向独挖、其余指向矿池端口；矿池的继续赚窗口份额，独挖的去追整块。你的独挖 shares 不会出现在 <a href=\"#miners\">矿工</a> 或 <a href=\"#payout\">下一次支付</a>——请看 <a href=\"#solo\">独挖</a>。",
@@ -657,7 +665,7 @@ window.LZ_I18N_DICTS["zh-CN"] = {
   "blocks": {
     "eyebrow": "区块与支付",
     "title": "Lazarus 找到的，然后是本链其余区块。",
-    "lede": "在<strong>所找到区块的 coinbase</strong> 里支付，按 TIDES 窗口内已接受工作分配，扣除每位矿工的手续费。打开一个区块可看到每一笔输出。Coinbase 输出在 100 个确认后可花费。每个区块也在 <a href=\"https://mempool.lazarus-xbt.xyz/mining/pool/lazarus\" target=\"_blank\" rel=\"noreferrer\">Lazarus Mempool</a>。",
+    "lede": "在<strong>所找到区块的 coinbase</strong> 里支付，按 TIDES 窗口内已接受工作分配，扣除每位矿工的手续费。打开一个区块可看到每一笔输出。Coinbase 输出在 6,481 个确认后可花费（区块 973,440 之前为 100 个）。每个区块也在 <a href=\"https://mempool.lazarus-xbt.xyz/mining/pool/lazarus\" target=\"_blank\" rel=\"noreferrer\">Lazarus Mempool</a>。",
     "found": "Lazarus 找到的",
     "recent": "本链最近",
     "thHeight": "高度",
@@ -763,6 +771,7 @@ window.LZ_I18N_DICTS["zh-CN"] = {
     "convoyGuide": "DATUM 网关安装（CONVOY 英文）",
     "convoyGuideZh": "DATUM 网关安装（CONVOY 中文）",
     "project": "项目",
+    "hub": "Lazarus 中心 · 了解本链",
     "discord": "Discord",
     "exchange": "交易所",
     "source": "GitHub 源码",
@@ -855,7 +864,7 @@ window.LZ_I18N_DICTS["zh-CN"] = {
     "pending": "待成熟",
     "pendingN": "待成熟 · {n} 块",
     "pendingNs": "待成熟 · {n} 块",
-    "pendingTitle": "付给此地址、尚未满 100 个确认的 coinbase 输出",
+    "pendingTitle": "付给此地址、尚不可花费的 coinbase 输出",
     "pendingExact": "{amt} 在 {n} 个区块中，未满 {need} 个确认",
     "paid": "已支付",
     "paidTitle": "付给此地址、已成熟的 coinbase 输出，累计",
@@ -973,13 +982,13 @@ window.LZ_I18N_DICTS["zh-CN"] = {
     "plusCarry": " · 有空间时外加结转",
     "estFeeBonus": "{fee} 手续费及 {uplift} 奖励，按当前难度",
     "estFee": "扣除 {fee} 手续费，按当前难度",
-    "noBalance": "没有矿池余额，也没有需要提取的东西。矿池找到的每个区块都在其 coinbase 里直接付给此地址；输出在 {n} 个区块后可花费。{carry}",
+    "noBalance": "没有矿池余额，也没有需要提取的东西。矿池找到的每个区块都在其 coinbase 里直接付给此地址；输出满 {n} 个确认后可花费。{carry}",
     "carryNote": " 你在更早区块挣得的 <strong>{amt}</strong> 未达最低输出，已结转：会加在下一笔跨过门槛的输出上，从矿池份额中支付。",
     "pendingLabel": {
       "one": "待成熟 · {n} 块正在成熟",
       "other": "待成熟 · {n} 块正在成熟"
     },
-    "pendingHelp": "Coinbase 输出在承载它的区块之后 {need} 个区块才能花费。你的已经在链上，只是还不能花。",
+    "pendingHelp": "Coinbase 输出满 {need} 个确认（含承载它的区块）后才能花费。你的已经在链上，只是还不能花。",
     "thBlock": "区块",
     "thAmt": "金额",
     "thConfs": "确认数",
