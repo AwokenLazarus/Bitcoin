@@ -53,8 +53,17 @@
     return target ? "me" : "home";
   }
 
+  // A keyword page carries only its article and the sections it is about (server.py _SEO_KEEP).
+  // A view it does not carry, asked for by a link built in the browser (an address, a nav tab),
+  // lives on the homepage, so go there with the same hash rather than show an empty view.
+  const homeURL = pagePath === "/" ? null : (/^\/zh(\/|$)/.test(location.pathname) ? "/zh/" : "/");
+
   function show(view, opts) {
     if (!VIEWS[view]) view = "home";
+    if (homeURL && view !== articleView && !VIEWS[view].some((id) => $(id))) {
+      location.assign(homeURL + location.hash);
+      return;
+    }
     const changed = view !== current;
     current = view;
     root.dataset.view = view;

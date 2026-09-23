@@ -661,14 +661,14 @@
       [t("status.found"), String(p.blocks_found ?? 0), luckSub],
       [t("status.network"), net, t("status.tipDiff", { h: p.height ? num(p.height) : "\u2014", d: bigNum(p.difficulty) })],
     ];
-    $("stats").innerHTML = cells
+    if ($("stats")) $("stats").innerHTML = cells
       .map(([k, v, s]) => `<div><dt>${k}</dt><dd>${v}<small>${s}</small></dd></div>`)
       .join("");
     overflowNote(p.overflow);
     poolCards(p.overflow);
     fillPathHr(p, so);
 
-    $("stratum").textContent = p.stratum;
+    if ($("stratum")) $("stratum").textContent = p.stratum;
 
     const d = p.datum || {};
     const host = d.pool_host || "stratum.lazarus-xbt.xyz";
@@ -1384,6 +1384,8 @@
   let minerTab = "overview";
   let minerAddr = "";
   async function showMiner(addr, tab) {
+    // Keyword pages carry no lookup card; app.js sends an address there on to the homepage.
+    if (!$("miner")) return;
     if (tab) minerTab = tab;
     if (!addr) {
       minerAddr = "";
@@ -1409,7 +1411,7 @@
     window.LZ_HashChart?.mount($("minerchart"), "miner")?.setData(m);
   }
   // Tab clicks inside the card switch panels and update the URL without a reload.
-  $("miner").addEventListener("click", (e) => {
+  $("miner")?.addEventListener("click", (e) => {
     const t = e.target.closest(".mtab[data-mtab]");
     if (!t) return;
     e.preventDefault();
@@ -1658,7 +1660,7 @@
     }
     if (a && !SECTIONS.has(a)) {
       const [addr, tab] = a.split("/");
-      $("lookup").value = addr;
+      if ($("lookup")) $("lookup").value = addr;
       showMiner(addr, tab || "overview");
       // No element carries the address as its id, so the browser has nothing to scroll to;
       // take the reader to the lookup card ourselves.
@@ -1693,12 +1695,12 @@
     requestAnimationFrame(tick);
   }
 
-  $("go").onclick = () => {
+  if ($("go")) $("go").onclick = () => {
     const a = $("lookup").value.trim();
     location.hash = a;
     showMiner(a);
   };
-  $("lookup").addEventListener("keydown", (e) => {
+  $("lookup")?.addEventListener("keydown", (e) => {
     if (e.key === "Enter") $("go").click();
   });
   for (const id of ["calc-hr", "calc-unit"]) {

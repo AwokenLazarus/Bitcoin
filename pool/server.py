@@ -4449,13 +4449,8 @@ _PUBLIC_SITE = str(CONF.get("public_url") or "https://pool.lazarus-xbt.xyz").rst
 _SEO_PAGES = {
     "/": {
         "en": {
-            "title": "Lazarus Pool — BLAKE2b Bitcoin (XBT / BTCB2) mining pool for Siacoin ASICs",
-            "description": (
-                "Mine Bitcoin (XBT / BTCB2) with any Siacoin BLAKE2b ASIC — Goldshell SC, iBeLink BM-S3, "
-                "Antminer A3. The first pool to pay TIDES as a split coinbase on this BIP-110 Bitcoin fork's "
-                "mainnet, and the first to subsidize DATUM miners with its own stratum hashers. 0% via DATUM, "
-                "25% public stratum from block 973,750 (stratum+tcp://stratum.lazarus-xbt.xyz:23334)."
-            ),
+            "title": "XBT (BTCB2) Mining Pool for Sia ASICs | Lazarus Pool",
+            "description": "Non-custodial pool for Bitcoin on BLAKE2b proof of work. Point a Goldshell SC, iBeLink BM-S3 or Antminer A3 and get paid in the block itself via TIDES.",
             "scroll": "",
         },
         "zh": {
@@ -4463,19 +4458,15 @@ _SEO_PAGES = {
             "description": (
                 "用任何能挖 Siacoin 的 BLAKE2b ASIC 挖比特币（XBT / BTCB2）——金贝 SC、iBeLink BM-S3、蚂蚁 A3。"
                 "本矿池是这条 BIP-110 比特币分叉主网上第一家用 TIDES 拆分 coinbase 支付的矿池，也是第一家"
-                "用自有 stratum 算力补贴 DATUM 矿工的矿池。自建 DATUM 0%，公共 stratum 自区块 973750 起 25%"
-                "（stratum+tcp://stratum.lazarus-xbt.xyz:23334）。"
+                "用自有 stratum 算力补贴 DATUM 矿工的矿池。"
             ),
             "scroll": "",
         },
     },
     "/hardware": {
         "en": {
-            "title": "Siacoin ASICs that mine Bitcoin XBT (BTCB2) — Lazarus Pool",
-            "description": (
-                "Any ASIC that can mine Siacoin can mine Bitcoin XBT on BLAKE2b. "
-                "Goldshell SC, iBeLink BM-S3, Antminer A3 — prices and estimated XBT per day on Lazarus Pool."
-            ),
+            "title": "BLAKE2b Miners That Mine XBT (BTCB2) | Lazarus Pool",
+            "description": "Every Sia-family ASIC can mine Bitcoin on BLAKE2b: Goldshell SC Lite, SC Box II, SC5 Pro, iBeLink BM-S3, Antminer A3. Live earnings per machine.",
             "scroll": "hardware",
         },
         "zh": {
@@ -4486,11 +4477,8 @@ _SEO_PAGES = {
     },
     "/connect": {
         "en": {
-            "title": "Connect a miner to Lazarus Pool — XBT / BTCB2 stratum and DATUM",
-            "description": (
-                "Point a BLAKE2b ASIC at stratum+tcp://stratum.lazarus-xbt.xyz:23334. "
-                "Username is your Bitcoin (XBT) payout address. Or run a DATUM gateway at 0% fee."
-            ),
+            "title": "Connect to Lazarus Pool: XBT Stratum & DATUM Settings",
+            "description": "Point a BLAKE2b ASIC at stratum+tcp://stratum.lazarus-xbt.xyz:23334 with your payout address as the username, or run your own DATUM gateway.",
             "scroll": "connect",
         },
         "zh": {
@@ -4501,11 +4489,8 @@ _SEO_PAGES = {
     },
     "/mine-xbt": {
         "en": {
-            "title": "How to mine XBT (BTCB2) — Lazarus Pool",
-            "description": (
-                "Mine Bitcoin XBT / BTCB2 with a Siacoin ASIC. Algorithm BLAKE2b, not SHA-256. "
-                "Stratum: stratum+tcp://stratum.lazarus-xbt.xyz:23334 — user = payout address, pass = x."
-            ),
+            "title": "How to Mine XBT (BTCB2) with a Sia ASIC | Lazarus Pool",
+            "description": "Step by step: set your Sia-family ASIC to BLAKE2b, point it at the pool with your payout address, and confirm your first share. Stratum or your own DATUM.",
             "scroll": "connect",
         },
         "zh": {
@@ -4516,11 +4501,8 @@ _SEO_PAGES = {
     },
     "/how": {
         "en": {
-            "title": "How TIDES payouts work — Lazarus Pool (Bitcoin XBT / BTCB2)",
-            "description": (
-                "TIDES window share, the DATUM subsidy, and coinbase payouts on the BLAKE2b Bitcoin "
-                "(XBT / BTCB2) chain. No pool balance, no withdrawals — the block pays your address directly."
-            ),
+            "title": "How Payouts Work on Lazarus Pool: TIDES & DATUM",
+            "description": "Your share of the TIDES window, the DATUM share and coinbase payouts, step by step. No pool balance and no withdrawals: the block pays your address.",
             "scroll": "how",
         },
         "zh": {
@@ -4531,12 +4513,8 @@ _SEO_PAGES = {
     },
     "/bip110": {
         "en": {
-            "title": "BIP-110 Bitcoin fork mining — BLAKE2b (XBT / BTCB2) | Lazarus Pool",
-            "description": (
-                "BIP-110 split Bitcoin at block 961,632 in August 2026; the resulting chain then moved its "
-                "proof-of-work to BLAKE2b at block 961,640. Mine this Bitcoin fork (XBT / BTCB2) with Siacoin "
-                "ASICs on Lazarus Pool — TIDES, DATUM, and payouts inside the coinbase."
-            ),
+            "title": "Mining the BIP-110 Fork Chain (XBT) | Lazarus Pool",
+            "description": "BIP-110 split Bitcoin at block 961,632 in August 2026 and the chain moved to BLAKE2b at 961,640. How to mine it today with Sia-family hardware.",
             "scroll": "how",
         },
         "zh": {
@@ -4551,12 +4529,8 @@ _SEO_PAGES = {
     },
     "/datum-subsidy": {
         "en": {
-            "title": "DATUM subsidy — the first pool to pay for decentralization | Lazarus Pool",
-            "description": (
-                "Lazarus Pool was the first pool anywhere to use its stratum hashers to subsidize DATUM miners. "
-                "Run your own DATUM gateway and Bitcoin Knots node: 0% fee plus a share of the public stratum's "
-                "fee on every block. Decentralization that pays instead of costing."
-            ),
+            "title": "Mine XBT with Your Own DATUM Gateway | Lazarus Pool",
+            "description": "Build your own block templates with a DATUM gateway and a Bitcoin Knots node, and get paid in the coinbase. How the DATUM share works on Lazarus Pool.",
             "scroll": "connect",
         },
         "zh": {
@@ -4571,11 +4545,8 @@ _SEO_PAGES = {
     },
     "/profitability": {
         "en": {
-            "title": "Is mining XBT profitable? BLAKE2b ASIC earnings | Lazarus Pool",
-            "description": (
-                "Profitable crypto mining for idle Siacoin hardware: live XBT / BTCB2 per TH/s per day at current "
-                "difficulty, per-machine estimates in XBT and dollars, and the DATUM subsidy on top."
-            ),
+            "title": "Is Mining XBT Profitable? Sia ASIC Earnings | Lazarus Pool",
+            "description": "Live XBT per TH/s per day at current difficulty, per-machine estimates in XBT and dollars, and what moves the answer: price, difficulty and fees.",
             "scroll": "hardware",
         },
         "zh": {
@@ -4589,12 +4560,8 @@ _SEO_PAGES = {
     },
     "/tides": {
         "en": {
-            "title": "TIDES split coinbase — first on BLAKE2b Bitcoin mainnet | Lazarus Pool",
-            "description": (
-                "Lazarus Pool is the first pool confirmed to pay TIDES as a split coinbase on BLAKE2b Bitcoin "
-                "(XBT / BTCB2) mainnet. Every address in a window worth eight times difficulty is an output of "
-                "the block found — non-custodial by construction, with no pool balance to trust."
-            ),
+            "title": "TIDES Payouts: Paid in the Coinbase | Lazarus Pool",
+            "description": "How TIDES splits each block's coinbase across every miner in the window: no pool balance, no withdrawal, every payout checkable on-chain.",
             "scroll": "how",
         },
         "zh": {
@@ -4608,12 +4575,8 @@ _SEO_PAGES = {
     },
     "/pools": {
         "en": {
-            "title": "BTCB2 / XBT mining pools compared — fees, custody, transaction fees",
-            "description": (
-                "Every BLAKE2b Bitcoin (XBT / BTCB2) pool worth pointing hashrate at, compared on what "
-                "actually differs: the fee, whether the pool holds a balance for you, whether the block's "
-                "transaction fees reach miners, and whether it limits its own share of the network."
-            ),
+            "title": "XBT (BTCB2) Mining Pools Compared: Fees & Custody",
+            "description": "Every pool mining Bitcoin on BLAKE2b, compared on fee, custody, payout method and who builds the block, as each pool publishes it.",
             "scroll": "pools",
         },
         "zh": {
@@ -4627,12 +4590,8 @@ _SEO_PAGES = {
     },
     "/self-cap": {
         "en": {
-            "title": "The 15% line: a mining pool that turns hashrate away — Lazarus Pool",
-            "description": (
-                "No pool should hold a third of a chain. Once its stratum passes 15% of network hashrate Lazarus relays new "
-                "stratum miners to another BTCB2 / XBT pool and lets that pool pay them. Enforced in the "
-                "software on every connection, not promised in a blog post."
-            ),
+            "title": "Why Lazarus Pool Caps Its Share of XBT Hashrate",
+            "description": "No pool should hold a third of a chain. Past its cap, Lazarus relays new stratum miners to other pools and lets them earn there.",
             "scroll": "pools",
         },
         "zh": {
@@ -4646,12 +4605,8 @@ _SEO_PAGES = {
     },
     "/non-custodial": {
         "en": {
-            "title": "Non-custodial XBT mining: no pool balance, no withdrawal — Lazarus Pool",
-            "description": (
-                "Lazarus Pool never holds your coins. Every payout is an output of the block itself, paid to "
-                "your address by the coinbase — no balance, no minimum, no withdrawal, nothing owed to anyone "
-                "if the pool disappeared tonight."
-            ),
+            "title": "Non-Custodial XBT Mining Pool: No Balance to Withdraw",
+            "description": "Lazarus Pool never holds your coins. Every payout is an output of the block itself, paid straight to your address: no balance, no minimum, no withdrawal.",
             "scroll": "how",
         },
         "zh": {
@@ -4665,12 +4620,8 @@ _SEO_PAGES = {
     },
     "/calculator": {
         "en": {
-            "title": "XBT / BTCB2 mining calculator — earnings per TH/s at live difficulty",
-            "description": (
-                "Type in your hashrate and get estimated XBT and dollars per day on the BLAKE2b Bitcoin chain, "
-                "from live difficulty, price and the DATUM subsidy. Per-machine estimates for every Siacoin "
-                "ASIC are listed below it."
-            ),
+            "title": "BLAKE2b Mining Calculator: XBT (BTCB2) per TH/s | Lazarus",
+            "description": "Enter your hashrate for estimated XBT and dollars per day at live difficulty and price, or pick your machine from the list.",
             "scroll": "calc",
         },
         "zh": {
@@ -4684,12 +4635,8 @@ _SEO_PAGES = {
     },
     "/blocks": {
         "en": {
-            "title": "Blocks found by Lazarus Pool — XBT / BTCB2 coinbase payouts you can open",
-            "description": (
-                "Every block Lazarus Pool has found on the BLAKE2b Bitcoin (XBT / BTCB2) chain, with the "
-                "coinbase outputs it paid. Open any of them in the explorer and check your own address "
-                "against the TIDES window."
-            ),
+            "title": "Blocks Found by Lazarus Pool: XBT Coinbase Payouts",
+            "description": "Every block Lazarus Pool has found, with every coinbase output it paid. Open any block in the explorer and check your own address.",
             "scroll": "blocks",
         },
         "zh": {
@@ -4703,12 +4650,8 @@ _SEO_PAGES = {
     },
     "/api": {
         "en": {
-            "title": "Lazarus Pool API — public JSON for the BLAKE2b Bitcoin (XBT / BTCB2) pool",
-            "description": (
-                "Public, unauthenticated JSON endpoints for pool hashrate, the TIDES window, blocks found, "
-                "coinbase outputs, gateways, payouts, price and hardware estimates. No key, no rate limit "
-                "worth worrying about, CORS open."
-            ),
+            "title": "Lazarus Pool API: Public JSON for XBT Pool Data",
+            "description": "Unauthenticated JSON for pool hashrate, the TIDES window, blocks found, coinbase outputs, gateways and payouts. Also on the MCP server.",
             "scroll": "",
         },
         "zh": {
@@ -5247,7 +5190,78 @@ def render_pool_index(path, query=""):
     raw = re.sub(r'<meta name="twitter:title"[^>]*>', f'<meta name="twitter:title" content="{_xml_attr(title)}">', raw, count=1)
     raw = re.sub(r'<meta name="twitter:description"[^>]*>', f'<meta name="twitter:description" content="{_xml_attr(desc)}">', raw, count=1)
     raw = raw.replace('<html lang="en" data-scroll="">', f'<html lang="{meta["lang"]}" data-scroll="{_xml_attr(meta.get("scroll") or "")}">', 1)
-    return _inject_intro(raw, meta)
+    raw = _inject_intro(raw, meta)
+    return raw if home else _keyword_page(raw, meta)
+
+
+# The dashboard sections a keyword page keeps under its own article; the homepage keeps them all.
+# Carrying the whole dashboard made every keyword URL a 94-98% copy of the homepage, and Google
+# indexed none of them ("Crawled - currently not indexed"). Each list is the part of the page's
+# app view (app.js PATH_VIEW) the topic is about. Links into anything cut go to the homepage.
+_SEO_KEEP = {
+    "/hardware": ("hardware",),
+    "/calculator": ("hardware",),
+    "/profitability": ("hardware",),
+    "/connect": ("connect",),
+    "/mine-xbt": ("connect",),
+    "/datum-subsidy": ("learn",),
+    "/how": ("how",),
+    "/tides": ("how",),
+    "/non-custodial": ("how",),
+    "/bip110": ("learn",),
+    "/pools": ("pools",),
+    "/self-cap": ("pools",),
+    "/blocks": ("payout", "blocks"),
+    "/api": (),
+}
+# Hash targets that stand for a section without being its id (mirrors ALIAS in app.js).
+_HASH_ALIAS = {"top": "fees", "datum": "connect", "mine": "connect", "window": "payout", "payouts": "dashboard"}
+_TOP_SECTION = re.compile(r'\n  <section\b[^>]*\bid="([^"]+)"[^>]*>.*?\n  </section>', re.S)
+_ORG_ID = "https://lazarus-xbt.xyz/#org"
+
+
+def _keyword_page(raw, meta):
+    """Cut a keyword page down to its article plus the sections it is about, and describe it as
+    its own page in structured data instead of repeating the homepage's FAQ."""
+    keep = set(_SEO_KEEP.get(meta["path"], ()))
+    cut_ids = set()
+
+    def cut(m):
+        if m.group(1) in keep:
+            return m.group(0)
+        cut_ids.update(re.findall(r'\bid="([^"]+)"', m.group(0)))
+        return ""
+
+    raw = _TOP_SECTION.sub(cut, raw)
+    home = "/zh/" if meta["lang"] == "zh-CN" else "/"
+
+    def relink(m):
+        target = m.group(1)
+        if target in cut_ids or _HASH_ALIAS.get(target) in cut_ids:
+            return f'href="{home}#{target}"' if target != "top" else f'href="{home}"'
+        return m.group(0)
+
+    raw = re.sub(r'href="#([^"]*)"', relink, raw)
+    raw = raw.replace('<a class="skip" href="/#status"', '<a class="skip" href="#seo-intro-title"', 1)
+    raw = raw.replace('<a class="skip" href="/zh/#status"', '<a class="skip" href="#seo-intro-title"', 1)
+
+    h1 = meta["title"].split(" — ")[0].split(" | ")[0]
+    intro = _SEO_INTRO.get(meta["path"], {}).get("zh" if home == "/zh/" else "en")
+    if intro:
+        h1 = intro[0]
+    canon = meta["canonical"]
+    graph = [
+        {"@type": "WebPage", "@id": canon + "#webpage", "url": canon, "name": meta["title"],
+         "description": meta["description"], "inLanguage": meta["lang"],
+         "isPartOf": {"@id": _PUBLIC_SITE + "/#website"}, "publisher": {"@id": _ORG_ID},
+         "breadcrumb": {"@id": canon + "#breadcrumb"}},
+        {"@type": "BreadcrumbList", "@id": canon + "#breadcrumb", "itemListElement": [
+            {"@type": "ListItem", "position": 1, "name": "Lazarus Pool", "item": _seo_url("/", "zh" if home == "/zh/" else "en")},
+            {"@type": "ListItem", "position": 2, "name": h1, "item": canon}]},
+    ]
+    ld = json.dumps({"@context": "https://schema.org", "@graph": graph}, ensure_ascii=False)
+    return re.sub(r'<script type="application/ld\+json">.*?</script>',
+                  lambda _m: f'<script type="application/ld+json">\n{ld}\n</script>', raw, count=1, flags=re.S)
 
 
 def _inject_intro(raw, meta):
