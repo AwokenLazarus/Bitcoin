@@ -43,7 +43,9 @@ window.LZ_I18N_DICTS["en"] = {
     "workers": "Workers",
     "pool": "Pool",
     "lookUpAnother": "Look up another",
-    "navHr": "Pool hashrate right now"
+    "navHr": "Pool hashrate right now",
+    "joinDiscord": "Join Discord",
+    "joinDiscordTitle": "Chat with miners and the team on the Lazarus Pool Discord"
   },
   "promo": {
     "aria": "DATUM miners are paid a bonus",
@@ -782,6 +784,17 @@ window.LZ_I18N_DICTS["en"] = {
     "api": "Pool API (JSON)",
     "thisAddr": "This address on the explorer",
     "minerApi": "This miner’s API (JSON)"
+  },
+  "askai": {
+    "title": "Ask AI about Lazarus Pool",
+    "lede": "Pick an assistant to start a new chat in a new tab, pre-filled with a question about the pool.",
+    "chatgptAria": "Ask ChatGPT about Lazarus Pool",
+    "chatgptTitle": "Ask ChatGPT about Lazarus Pool: opens a new chat with the question already typed in",
+    "claudeAria": "Ask Claude about Lazarus Pool",
+    "claudeTitle": "Ask Claude about Lazarus Pool: opens a new chat with the question already typed in",
+    "grokAria": "Ask Grok about Lazarus Pool",
+    "grokTitle": "Ask Grok about Lazarus Pool: opens a new chat with the question already typed in",
+    "prompt": "Lazarus Pool is a non-custodial mining pool for Bitcoin on BLAKE2b proof of work, where Sia-family ASICs (Goldshell, iBeLink, Antminer A3) mine and get paid directly in the block's coinbase. Summarize the highlights from https://pool.lazarus-xbt.xyz and explain how I can start mining there."
   },
   "path": {
     "stratumGw": "stratum + {gw}",

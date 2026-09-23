@@ -388,3 +388,89 @@ html.app { scroll-padding-top: calc(var(--mast-full, 7.5rem) + 14px); }
 .hx-split li.is-you a { color: var(--brass); }
 .hx-split li.is-you a::after { content: " ◆"; font-size: 0.7em; }
 .hx-split li.is-you .hx-bar i { background: var(--brass); }
+
+/* ------------------------------------------------------------------ Join Discord (header) */
+/* Its own class, not .btn.small: the header hides .btn.small (Connect) as it narrows, and this
+   one stays. Brass-tinted rather than solid so it does not compete with Connect. */
+.discord-cta {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  flex: none;
+  height: 2.1rem;
+  padding: 0 0.85rem 0 0.72rem;
+  border: 1px solid color-mix(in oklch, var(--brass) 55%, transparent);
+  border-radius: 999px;
+  background: color-mix(in oklch, var(--brass) 11%, transparent);
+  color: var(--ink);
+  font: 600 0.78rem var(--sans);
+  letter-spacing: 0.01em;
+  text-decoration: none;
+  white-space: nowrap;
+  transition: background-color 0.18s, border-color 0.18s, color 0.18s;
+}
+.discord-ico { width: 1.05rem; height: 1.05rem; flex: none; fill: var(--brass); }
+.discord-cta:hover { background: color-mix(in oklch, var(--brass) 22%, transparent); border-color: var(--brass); }
+.discord-cta:focus-visible { outline: 2px solid var(--brass); outline-offset: 2px; border-radius: 999px; }
+/* Room for it without scrolling the six tabs: on a wide screen the search button shows its icon
+   and "/" hint without the word (as it already does at 1320px and below). */
+@media (min-width: 1321px) { .app .pal-label { display: none; } .app .pal-btn { padding: 0 0.65rem; } }
+/* Where the tabs share the row with it (861-1300px) and on phones, it is a round button the size
+   of the search button; the name stays for screen readers and the tooltip. */
+@media (max-width: 520px), (min-width: 861px) and (max-width: 1300px) {
+  .discord-cta { width: 2.1rem; padding: 0; justify-content: center; }
+  .discord-cta-label { position: absolute; width: 1px; height: 1px; margin: -1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+}
+@media (max-width: 520px) { .topbar-side { gap: 0.45rem; } }
+
+/* ------------------------------------------------------------------ Ask AI (top of the footer) */
+/* Outside <main>, so every view and every keyword page carries it. */
+.ask-ai {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1.2rem 2.5rem;
+  padding-block: 2.4rem;
+  border-bottom: 1px solid var(--line);
+}
+.ask-ai-copy { flex: 1 1 22rem; min-width: 0; }
+.ask-ai-title {
+  font: 500 clamp(1.4rem, 2.4vw, 1.75rem) / 1.15 var(--serif);
+  letter-spacing: -0.01em;
+  color: var(--ink);
+}
+.ask-ai-lede { margin-top: 0.45rem; max-width: 36rem; font-size: 0.9rem; line-height: 1.5; color: var(--muted); }
+.ask-ai-links { display: flex; flex-wrap: wrap; gap: 0.6rem; }
+.ask-ai-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.6rem;
+  height: 2.9rem;
+  padding: 0 1.2rem 0 1rem;
+  border: 1px solid var(--line-strong);
+  border-radius: 999px;
+  background: var(--bg-raised);
+  color: var(--ink);
+  font: 500 0.9rem var(--sans);
+  text-decoration: none;
+  white-space: nowrap;
+  transition: color 0.18s, border-color 0.18s, background-color 0.18s, transform 0.18s;
+}
+.ask-ai-ico { width: 1.2rem; height: 1.2rem; flex: none; fill: var(--muted); transition: fill 0.18s; }
+.ask-ai-btn:hover, .ask-ai-btn:focus-visible {
+  color: var(--brass);
+  border-color: color-mix(in oklch, var(--brass) 65%, transparent);
+  background: color-mix(in oklch, var(--brass) 8%, var(--bg-raised));
+}
+.ask-ai-btn:hover .ask-ai-ico, .ask-ai-btn:focus-visible .ask-ai-ico { fill: var(--brass); }
+.ask-ai-btn:focus-visible { outline: 2px solid var(--brass); outline-offset: 2px; border-radius: 999px; }
+.ask-ai-btn:active { transform: translateY(1px); }
+@media (max-width: 640px) {
+  .ask-ai { flex-direction: column; align-items: stretch; padding-block: 2rem 1.8rem; }
+  .ask-ai-copy { flex: none; }
+  .ask-ai-links { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0.5rem; }
+  .ask-ai-btn { padding: 0 0.5rem; gap: 0.45rem; font-size: 0.86rem; }
+}
+@media (prefers-reduced-motion: reduce) { .ask-ai-btn { transition: none; } }

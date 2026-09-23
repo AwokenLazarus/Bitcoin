@@ -43,7 +43,9 @@ window.LZ_I18N_DICTS["zh-CN"] = {
     "workers": "矿机",
     "pool": "矿池",
     "lookUpAnother": "查询其他地址",
-    "navHr": "当前矿池算力"
+    "navHr": "当前矿池算力",
+    "joinDiscord": "加入 Discord",
+    "joinDiscordTitle": "在 Lazarus Pool 的 Discord 上与矿工和团队交流"
   },
   "promo": {
     "aria": "DATUM 矿工获得奖励",
@@ -782,6 +784,17 @@ window.LZ_I18N_DICTS["zh-CN"] = {
     "api": "矿池 API（JSON）",
     "thisAddr": "在浏览器中打开此地址",
     "minerApi": "此矿工的 API（JSON）"
+  },
+  "askai": {
+    "title": "向 AI 了解 Lazarus Pool",
+    "lede": "选一个 AI 助手，会在新标签页开启对话，关于本矿池的问题已预先填好。",
+    "chatgptAria": "向 ChatGPT 询问 Lazarus Pool",
+    "chatgptTitle": "向 ChatGPT 询问 Lazarus Pool：新对话中已填好问题",
+    "claudeAria": "向 Claude 询问 Lazarus Pool",
+    "claudeTitle": "向 Claude 询问 Lazarus Pool：新对话中已填好问题",
+    "grokAria": "向 Grok 询问 Lazarus Pool",
+    "grokTitle": "向 Grok 询问 Lazarus Pool：新对话中已填好问题",
+    "prompt": "Lazarus Pool 是一个非托管矿池，挖的是采用 BLAKE2b 工作量证明的比特币（Bitcoin）。Sia 系列 ASIC 矿机（Goldshell、iBeLink、Antminer A3）接入即可挖矿，收益直接写在区块的 coinbase 里支付。请总结 https://pool.lazarus-xbt.xyz/zh/ 的要点，并告诉我如何开始在这里挖矿。"
   },
   "path": {
     "stratumGw": "stratum + {gw}",

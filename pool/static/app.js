@@ -387,6 +387,25 @@
     if (e.target.closest("[data-palette]")) { e.preventDefault(); openPalette(); }
   });
 
+  // ------------------------------------------------------------ ask AI (footer)
+  // Each assistant opens a new chat with a question about the pool already typed in. The question
+  // is askai.prompt in the dictionary, so /zh/ asks in Chinese and points at the Chinese page; the
+  // hrefs in the HTML are the English fallback for a browser without JS.
+  const ASK_AI = {
+    chatgpt: "https://chatgpt.com/?prompt=",
+    claude: "https://claude.ai/new?q=",
+    grok: "https://grok.com/?q=",
+  };
+  function askLinks() {
+    const prompt = window.LZ_I18N ? window.LZ_I18N.t("askai.prompt") : "";
+    if (!prompt || prompt === "askai.prompt") return;
+    for (const a of document.querySelectorAll("a[data-ask-ai]")) {
+      const base = ASK_AI[a.dataset.askAi];
+      if (base) a.href = base + encodeURIComponent(prompt);
+    }
+  }
+  document.addEventListener("lz:i18n", askLinks);
+
   // ------------------------------------------------------------ boot
   root.classList.add("app");
   // Thumbs get the bottom tab bar; a mouse keeps the header tabs however narrow the window is.
@@ -399,6 +418,7 @@
     scroller(document.querySelector(".subnav .wrap"));
     reveal(document.querySelector(".nav.views"), "a.is-active");
     watchBumps();
+    askLinks();
   };
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", ready); else ready();
   window.LZ_APP = { show, toast, openPalette };
