@@ -116,11 +116,19 @@ if "function isDATUMCoinbase" not in s:
     shutil.copy2(script, str(script) + f".bak-{TS}-pre-datum")
     script.write_text(s.rstrip() + "\n" + HELPERS)
     print("added helpers to utils/bitcoin-script.js")
+elif "b > 0x7e" in s:
+    # applied before UTF-8 tags were accepted (XBT-047): upgrade the one byte test in place
+    shutil.copy2(script, str(script) + f".bak-{TS}-pre-utf8")
+    script.write_text(s.replace("(b < 0x20 || b > 0x7e)", "(b < 0x20 || b === 0x7f)"))
+    print("upgraded utils/bitcoin-script.js: UTF-8 tags accepted")
 
 for rel in ("api/blocks.js", "repositories/BlocksRepository.js"):
     p = BASE / rel
     s = p.read_text()
     new, n = CALL_SITE.subn(REPLACEMENT, s)
+    if not n and "bitcoin_script_1.parseTemplateCreator)(extras.pool.name" in s:
+        print(f"already patched {rel}")
+        continue
     if not n:
         print(f"ANCHOR MISSING in {rel}", file=sys.stderr); sys.exit(1)
     shutil.copy2(p, str(p) + f".bak-{TS}-pre-datum")
