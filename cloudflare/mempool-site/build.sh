@@ -60,5 +60,15 @@ for f in LICENSE NOTICE; do
   [ -s "$DIST/lazarus/$f" ] || { echo "lazarus/$f missing: the footer links to it" >&2; exit 1; }
 done
 
-cp "$HERE/_worker.js" "$HERE/_routes.json" "$HERE/_headers" "$DIST/"
+cp "$HERE/_worker.js" "$HERE/_headers" "$DIST/"
+# Static files skip the worker, except pool-tags.json, which it fetches live from the node. Pages
+# gives exclude priority over include, so the theme files are excluded by name, not /lazarus/*.
+python3 - "$DIST" <<'PY'
+import json, pathlib, sys
+dist = pathlib.Path(sys.argv[1])
+names = sorted(p.name for p in (dist / "lazarus").iterdir() if p.is_file() and p.name != "pool-tags.json")
+routes = {"version": 1, "include": ["/*"], "exclude": ["/resources/*"] + ["/lazarus/" + n for n in names]}
+assert len(routes["include"]) + len(routes["exclude"]) <= 100, "Pages allows 100 route rules"
+(dist / "_routes.json").write_text(json.dumps(routes, indent=2) + "\n")
+PY
 echo "built $(find "$DIST" -type f | wc -l) files, $(du -sh "$DIST" | cut -f1)"

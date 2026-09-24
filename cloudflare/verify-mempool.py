@@ -82,6 +82,20 @@ for p in ("/lazarus/NOTICE", "/lazarus/LICENSE"):
     if not (st == 200 and body.strip() and "text/plain" in (hh.get("Content-Type") or "")):
         bad += 1
         print(f"DIFF {p}: {st}/{len(body)} {hh.get('Content-Type')}")
+# The pie's gateway bands read pool-tags.json, which the worker fetches live from the node
+# (pools-sync rewrites it every 3 min). A build-time copy would freeze the bands at deploy.
+import json, time
+st, body, hh = get(cand, "/lazarus/pool-tags.json")
+n += 1
+try:
+    age = time.time() - json.loads(body)["generated"]
+except Exception:
+    age = None
+if st == 200 and age is not None and age < 900:
+    print(f"ok   /lazarus/pool-tags.json: generated {int(age)} s ago")
+else:
+    bad += 1
+    print(f"DIFF /lazarus/pool-tags.json: {st}, generated {'?' if age is None else f'{int(age)} s'} ago (stale or unreadable: is pools-sync running?)")
 # A browser revalidating its cache sends If-None-Match. The answer must be 304 (or the file again),
 # never the HTML shell: a <script> that receives HTML leaves the explorer as a blank themed page.
 for label, hdr in (("en", {"Accept-Language": "en-US"}), ("zh", {"Accept-Language": "zh-CN"})):

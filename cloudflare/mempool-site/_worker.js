@@ -6,10 +6,14 @@
 //                   the edge cache for seconds so a busy page does not hammer a home server
 //   /api/v1/services/*  answered here with []: the node would relay it to mempool.space, which
 //                   is a different chain and 800+ ms away
+//   /lazarus/pool-tags.json  proxied like the API: pools-sync rewrites it on the node every
+//                   3 min, and the pie's gateway bands are only as current as it is. The copy
+//                   taken at build time answers when the node cannot
 //   everything else try /<lang>/<path>, then /<path>, then /en-US/<path>, then the locale's
 //                   app shell, where <lang> comes from the `lang` cookie or Accept-Language
 //
-// /resources/* and /lazarus/* never reach this worker (_routes.json).
+// /resources/* and the rest of /lazarus/* never reach this worker (_routes.json, which build.sh
+// writes from the theme files it ships).
 const LANGS = ["ar", "cs", "da", "de", "es", "fa", "fr", "ko", "it", "he", "ka", "hu", "mk", "nl", "ja", "nb", "pl", "pt", "ro", "ru", "sl", "fi", "sv", "th", "tr", "uk", "vi", "zh", "hi", "ne", "lt", "hr"];
 // The /<lang>/ URL prefixes nginx answers with that locale's shell. Locales in this list that
 // were never built fall through to the 404 branch, as they do on the node.
@@ -27,6 +31,7 @@ const HASHED_CACHE = "private, max-age=2592000, immutable";
 // Edge cache lifetimes, in seconds, for API GETs whose answer is the same for every visitor.
 const API_TTL = [
   [/^\/api\/v1\/(mining\/|historical-price$|statistics\/)/, 60],
+  [/^\/lazarus\/pool-tags\.json$/, 60],
   [/^\/api\/v1\/(blocks(\/\d+)?$|prices$|fees\/|difficulty-adjustment$|backend-info$)/, 10],
   [/^\/api\/(v1\/)?block\/[0-9a-f]{64}\/(header|summary|txids)$/, 300],
   // What a block holds never changes under its hash. Dashboards poll a block's first page of
@@ -113,6 +118,7 @@ function unavailable() {
 // charts to scale their axis to ZH/s or EH/s and flatten this network's ~35 PH/s to zero.
 const FORK_TS = 1788070477;
 const FORK_HEIGHT = 961640;
+const POOL_TAGS = "/lazarus/pool-tags.json";
 const HASHRATE_HISTORY = /^\/api\/v1\/mining\/(hashrate|pool\/[^/]+\/hashrate)(\/|$)/;
 function postFork(doc) {
   const keep = (x) => !x || typeof x !== "object" ||
@@ -208,6 +214,12 @@ export default {
       return new Response("[]", { headers: { "Content-Type": "application/json", "Cache-Control": "public, max-age=3600" } });
     }
     if (path.startsWith("/api/") || path === "/ws" || path.startsWith("/ws/")) return proxy(request, env, ctx, url);
+    if (path === POOL_TAGS) {
+      const live = request.method === "GET" ? await proxy(request, env, ctx, url) : null;
+      if (live && (live.status === 200 || live.status === 304)) return live;
+      const snap = await asset(env, request, path);
+      return snap || live || new Response(null, { status: 405 });
+    }
 
     if (request.method !== "GET" && request.method !== "HEAD") return new Response(null, { status: 405 });
 
