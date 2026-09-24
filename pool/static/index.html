@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title data-i18n="meta.title">XBT (BTCB2) Mining Pool for Sia ASICs | Lazarus Pool</title>
+<title data-i18n="meta.title">BTCB2 (XBT) Mining Pool for Sia ASICs | Lazarus Pool</title>
 <meta name="description" data-i18n="meta.description" content="Non-custodial pool for Bitcoin on BLAKE2b proof of work. Point a Goldshell SC, iBeLink BM-S3 or Antminer A3 and get paid in the block itself via TIDES.">
 <meta name="theme-color" content="#16130f">
 <link rel="canonical" href="https://pool.lazarus-xbt.xyz/">
@@ -12,7 +12,7 @@
 <link rel="alternate" hreflang="x-default" href="https://pool.lazarus-xbt.xyz/">
 <meta property="og:type" content="website">
 <meta property="og:site_name" content="Lazarus Pool">
-<meta property="og:title" content="Lazarus Pool — BLAKE2b Bitcoin (XBT / BTCB2) mining pool for Siacoin ASICs">
+<meta property="og:title" content="BTCB2 (XBT) Mining Pool for Sia ASICs | Lazarus Pool">
 <meta property="og:description" content="Any ASIC that can mine Siacoin can mine Bitcoin XBT. First pool to pay TIDES as a split coinbase on BLAKE2b Bitcoin mainnet, and first to subsidize DATUM miners with its own stratum hashers.">
 <meta property="og:url" content="https://pool.lazarus-xbt.xyz/">
 <meta property="og:image" content="https://pool.lazarus-xbt.xyz/static/og-pool.png">
@@ -21,12 +21,14 @@
 <meta property="og:image:alt" content="Lazarus Pool: mine Bitcoin with your Sia-family ASIC, paid in the block itself">
 <meta name="twitter:card" content="summary_large_image">
 <meta name="twitter:image" content="https://pool.lazarus-xbt.xyz/static/og-pool.png">
-<meta name="twitter:title" content="Lazarus Pool — BLAKE2b Bitcoin (XBT / BTCB2) mining pool for Siacoin ASICs">
+<meta name="twitter:title" content="BTCB2 (XBT) Mining Pool for Sia ASICs | Lazarus Pool">
 <meta name="twitter:description" content="BLAKE2b Bitcoin (XBT / BTCB2) mining pool — the BIP-110 fork. Siacoin ASICs welcome. TIDES + DATUM subsidy. stratum+tcp://stratum.lazarus-xbt.xyz:23334">
 <script type="application/ld+json">
 {"@context":"https://schema.org","@graph":[
   {"@type": "Organization", "@id": "https://lazarus-xbt.xyz/#org", "name": "Lazarus Pool", "alternateName": ["Lazarus", "Lazarus Pool XBT"], "url": "https://lazarus-xbt.xyz/", "logo": "https://pool.lazarus-xbt.xyz/static/favicon-512.png", "description": "Non-custodial Bitcoin mining pool on BLAKE2b proof of work (XBT / BTCB2), paid in the coinbase, with DATUM gateway support.", "sameAs": ["https://pool.lazarus-xbt.xyz/", "https://x.com/LazarusPoolXBT", "https://www.youtube.com/@LazarusPoolXBT", "https://github.com/AwokenLazarus/Bitcoin", "https://discord.gg/fD33dJXnzz"]},
   {"@type":"WebSite","@id":"https://pool.lazarus-xbt.xyz/#website","publisher":{"@id":"https://lazarus-xbt.xyz/#org"},"name":"Lazarus Pool","url":"https://pool.lazarus-xbt.xyz/","description":"Mining pool for Bitcoin (XBT / BTCB2) on BLAKE2b. Any Siacoin ASIC works.","inLanguage":["en","zh-CN"]},
+  {"@type":"WebPage","@id":"https://pool.lazarus-xbt.xyz/#webpage","url":"https://pool.lazarus-xbt.xyz/","name":"BTCB2 (XBT) Mining Pool for Sia ASICs | Lazarus Pool","isPartOf":{"@id":"https://pool.lazarus-xbt.xyz/#website"},"about":{"@id":"https://pool.lazarus-xbt.xyz/#service"},"publisher":{"@id":"https://lazarus-xbt.xyz/#org"},"inLanguage":"en"},
+  {"@type":"Service","@id":"https://pool.lazarus-xbt.xyz/#service","name":"Lazarus Pool","serviceType":"Bitcoin mining pool","description":"Non-custodial mining pool for Bitcoin on BLAKE2b proof of work (tickers XBT, BTCB2). Every payout is an output of the block's coinbase via TIDES; DATUM gateways supported.","provider":{"@id":"https://lazarus-xbt.xyz/#org"},"areaServed":"Worldwide","audience":{"@type":"Audience","audienceType":"Owners of Sia-family BLAKE2b ASICs: Goldshell SC Lite, SC Box, SC Box II, SC5 Pro, iBeLink BM-S3, Antminer A3"},"url":"https://pool.lazarus-xbt.xyz/"},
   {"@type":"FAQPage","mainEntity":[
     {"@type":"Question","name":"Can I mine Bitcoin XBT (BTCB2) with a Siacoin ASIC?","acceptedAnswer":{"@type":"Answer","text":"Yes. Bitcoin XBT / BTCB2 uses BLAKE2b, the same algorithm Siacoin ASICs were built for. Goldshell SC-series, iBeLink BM-S3 / BM-S3+, Antminer A3 and other BLAKE2b-Sia boxes work on stock firmware. SHA-256 Bitcoin miners (S19, S21, Whatsminer) cannot mine this chain."}},
     {"@type":"Question","name":"How do I connect a miner to Lazarus Pool?","acceptedAnswer":{"@type":"Answer","text":"Point the miner at stratum+tcp://stratum.lazarus-xbt.xyz:23334. Username is your payout address (bc1…). Password is x. Algorithm is BLAKE2b, not SHA-256d."}},
@@ -145,7 +147,7 @@
     <div class="wrap hero-grid">
       <div class="hero-copy">
         <p class="eyebrow"><span data-i18n="hero.eyebrow">Bitcoin (XBT / BTCB2) · BLAKE2b · DATUM · TIDES · </span><i>Proverbs 11:1</i></p>
-        <h1 id="hero-title" data-i18n-html="hero.title">Mine Bitcoin (XBT).<br><em>Get paid in the block itself.</em><br>Earn extra for Decentralizing the network.</h1>
+        <h1 id="hero-title" data-i18n-html="hero.title">The Bitcoin mining pool for Sia ASICs.<br><em>Get paid in the block itself.</em><br>Earn extra for Decentralizing the network.</h1>
         <p class="hero-lede" data-i18n-html="hero.lede">No pool balance, no withdrawals, direct to you on chain. Any Siacoin BLAKE2b ASIC works. Build your own blocks with DATUM: pay <span>0%</span> and collect a share of the public stratum’s fee on every block the pool finds.</p>
         <p class="hero-firsts" data-i18n-html="hero.firsts">The first pool anywhere to put its <b>stratum hashrate behind a DATUM subsidy</b>, paying miners to decentralize the network instead of charging them for it.</p>
         <div class="hero-actions">
