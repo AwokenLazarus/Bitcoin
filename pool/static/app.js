@@ -53,8 +53,17 @@
     return target ? "me" : "home";
   }
 
+  // A keyword page carries only its article and the sections it is about (server.py _SEO_KEEP).
+  // A view it does not carry, asked for by a link built in the browser (an address, a nav tab),
+  // lives on the homepage, so go there with the same hash rather than show an empty view.
+  const homeURL = pagePath === "/" ? null : (/^\/zh(\/|$)/.test(location.pathname) ? "/zh/" : "/");
+
   function show(view, opts) {
     if (!VIEWS[view]) view = "home";
+    if (homeURL && view !== articleView && !VIEWS[view].some((id) => $(id))) {
+      location.assign(homeURL + location.hash);
+      return;
+    }
     const changed = view !== current;
     current = view;
     root.dataset.view = view;
@@ -378,6 +387,33 @@
     if (e.target.closest("[data-palette]")) { e.preventDefault(); openPalette(); }
   });
 
+  // ------------------------------------------------------------ ask AI (under the hero buttons)
+  // Each assistant opens a new chat with a question about the pool already typed in. The question
+  // is askai.prompt in the dictionary, so /zh/ asks in Chinese and points at the Chinese page. It
+  // carries the live DATUM bonus the hero chip shows (#live-bonus, filled by pool.js), and is
+  // rebuilt whenever that number or the language changes. The hrefs in the HTML are the English
+  // fallback for a browser without JS.
+  const ASK_AI = {
+    chatgpt: "https://chatgpt.com/?prompt=",
+    claude: "https://claude.ai/new?q=",
+    grok: "https://grok.com/?q=",
+  };
+  function askLinks() {
+    const I = window.LZ_I18N;
+    if (!I) return;
+    const bonus = ($("live-bonus")?.textContent || "").trim();
+    const live = /^\+\d/.test(bonus);
+    const bonusLine = live ? I.t("askai.bonusLive", { bonus }) : I.t("askai.bonusUnknown");
+    const prompt = I.t("askai.prompt", { bonusLine });
+    if (!prompt || prompt === "askai.prompt") return;
+    for (const a of document.querySelectorAll("a[data-ask-ai]")) {
+      const base = ASK_AI[a.dataset.askAi];
+      if (base) a.href = base + encodeURIComponent(prompt);
+    }
+  }
+  document.addEventListener("lz:i18n", askLinks);
+  if ($("live-bonus")) new MutationObserver(askLinks).observe($("live-bonus"), { childList: true, characterData: true, subtree: true });
+
   // ------------------------------------------------------------ boot
   root.classList.add("app");
   // Thumbs get the bottom tab bar; a mouse keeps the header tabs however narrow the window is.
@@ -390,6 +426,7 @@
     scroller(document.querySelector(".subnav .wrap"));
     reveal(document.querySelector(".nav.views"), "a.is-active");
     watchBumps();
+    askLinks();
   };
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", ready); else ready();
   window.LZ_APP = { show, toast, openPalette };
