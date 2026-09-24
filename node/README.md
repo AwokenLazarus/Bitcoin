@@ -195,9 +195,17 @@ across a stop/start to see names on blocks indexed before it.
 
 Each slice of the pie on `/graphs/mining/pools` (and the 1w luck pie on `/mining`) is one pool's blocks in the chosen window. Pools that
 speak DATUM hand template building to their miners' own gateways, and every such block names the
-gateway that built it, so a slice can be read as the gateways behind it. `theme.js` draws that: inside
-a slice, one arc band per gateway tag, ordered smallest to largest outward so the biggest gateway is on
-the rim, and the pool's untagged blocks -- its own stratum -- as the innermost band.
+gateway that built it, so a slice can be read as the gateways behind it. `theme.js` draws that the way
+mempool.guide does (its pool-ranking component, 3.4-dev, read 2026-09-24): inside a slice, a ring for
+each of the top eight gateway tags, one *Other miners* ring for the rest and one *Built by the pool*
+ring, sorted smallest first from the hole outward, each ring's **area** in proportion to its blocks.
+
+*Built by the pool* is the pool's blocks with no gateway tag, or with a secondary tag naming the pool
+itself (`AlphaPool/AlphaPool`, `DATUM-AP/DATUM-AP`; rule `f47db50`). mempool.guide lists such a tag as a
+miner of that name instead, so for AlphaPool its *Built by the pool* ring is empty and a ring named
+*AlphaPool* holds those blocks. Its tooltip figure is `untagged / blocks` of one pool-tags.json window
+entry, so it is exact for the selected window; `/lazarus/pool-tags.json` is fetched live from the node
+by the Pages worker (60 s edge cache), not copied at build time.
 
 Band sizes are **blocks per coinbase secondary tag**, never per-gateway hashrate: that is the one metric
 any mempool instance can compute for any pool, so the same drawing works for `DATUM miners`, `CONVOY`
@@ -242,11 +250,9 @@ instead of removing it. The overlay is sized from the chart SVG's own width, not
 `clientWidth`, because at 110% or 150% zoom those differ and the highlight ring would trace a pixel off
 its band. `window.__lazarusTheme.bands.log` keeps the last dozen state changes with timestamps.
 
-Band thickness is proportional to the tag's share of the pool, plus a floor of a few pixels so a
-one-block gateway is still visible; gateways under 1% of the pool share a single *N smaller gateways*
-band just outside the stratum band, and slices narrower than 3 degrees get no bands at all. Colours are
-the slice's own colour stepped in OKLCH lightness, the stratum band keeping the slice's colour exactly,
-so a pool with gateways reads as its own slice with rings on it.
+Colours are the slice's own colour stepped in HSL lightness from 0.58 (innermost) to 0.84 (rim), as
+mempool.guide steps them. While the overlay owns the pie, the hidden stock chart's own tooltip is
+suppressed: it hit-tests the pointer regardless and covered the band figures.
 
 A band is only a few pixels tall, so hovering one does more than raise a tooltip: the band brightens
 inside a brass ring, every other pool fades back (its bands here, its sector in the chart underneath),

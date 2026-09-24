@@ -664,6 +664,7 @@ svg.lz-bands rect.lz-band-chip { fill: var(--lz-bg-raised); stroke: var(--lz-lin
   pointer-events: none;
 }
 .lz-band-tip[data-shown] { display: block; }
+app-pool-ranking .lz-overlaid > div[style*="z-index: 9999999"] { display: none !important; }
 .lz-band-tip b { display: block; color: var(--lz-brass); font-weight: 600; }
 .lz-band-tip span { display: block; font-family: var(--lz-mono); font-size: 0.72rem; color: var(--lz-muted); }
 .lz-band-tip .lz-band-sub { color: var(--lz-faint); }

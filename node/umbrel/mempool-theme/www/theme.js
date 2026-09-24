@@ -1155,6 +1155,8 @@
     undimAll();
     var stale = document.querySelectorAll('svg.lz-bands, .lz-band-tip, .lz-bands-note');
     for (var i = 0; i < stale.length; i++) stale[i].remove();
+    var owned = document.querySelectorAll('.lz-overlaid');
+    for (var o = 0; o < owned.length; o++) owned[o].classList.remove('lz-overlaid');
     var hidden = document.querySelectorAll('svg[data-lz-stock="hidden"]');
     for (var h = 0; h < hidden.length; h++) {
       hidden[h].style.opacity = '';
@@ -1383,6 +1385,9 @@
 
     mount.appendChild(ov);
     pinOverlay(ov, svg);
+    // The hidden chart still hit-tests the pointer and raises its own tooltip, on top of ours
+    // (z-index 9999999) and covering the band figures; the overlay's slice tooltip says the same.
+    host.classList.add('lz-overlaid');
 
     var tip = bandTip(mount);
     var hot = null;
