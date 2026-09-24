@@ -980,7 +980,7 @@
   var TAGS_URL = '/lazarus/pool-tags.json';
   var SVGNS = 'http://www.w3.org/2000/svg';
   var PIE_START = 270;        // twelve o'clock in SVG angles, where the pie's first slice begins
-  var BUILD = '15';
+  var BUILD = '16';
   var bandInfo = (self.__lazarusTheme || {}).bands = { state: 'idle', log: [] };
   function bandState(st) {
     if (bandInfo.state !== st) {
@@ -1167,12 +1167,24 @@
   /* Retropex/mempool pool-ranking pie (AGPL-3.0): every pool is a slice (no share
    * threshold), DATUM miners are bands in the wedge, hashrate tooltips are TH/s.
    * Stock v3.3.1 still folds small pools into Other and has no miner series, so
-   * this draws that pie ourselves and hides the stock SVG. Geometry matches
-   * frontend/src/app/components/pool-ranking/pool-ranking.component.ts at e56a2c6. */
+   * this draws that pie ourselves and hides the stock SVG. Geometry matches the
+   * pool-ranking component mempool.guide serves (3.4-dev 974427967, read 2026-09-24):
+   * the top MAX_MINER_BANDS miners, one "Other miners" band for the rest and one "Built by
+   * the pool" band, all sorted smallest first from the hole outward, each ring's area in
+   * proportion to its blocks, lightness stepped from BAND_DARKEST (inner) to BAND_LIGHTEST.
+   *
+   * One difference, on purpose: mempool.guide lists a secondary tag that names the pool
+   * itself (AlphaPool/AlphaPool, DATUM-AP/DATUM-AP) as a miner of that name. Here it is the
+   * pool's own block (rule f47db50, pools-sync.py secondary_tag), so it lands in "Built by the
+   * pool" beside the untagged ones: that band is exactly the blocks no gateway operator built.
+   *
+   * Every count and percentage in a slice's bands comes from one pool-tags.json window entry,
+   * whose blocks = untagged + tagged by construction, so "Built by the pool" is
+   * untagged / blocks for the selected window, exactly. The slice's angle is the pools API's
+   * share; if the two were written a few minutes apart the bands still fill the slice. */
   var POOL_COLORS = ['#dbb565','#e47164','#65c98c','#e5974c','#c586b7','#7aa3c8',
     '#a9ab54','#c26576','#63b4b8','#d2764a','#9bba7d','#a08dc3','#68b5a6','#937636','#a34a40','#4b6d8a'];
   var MAX_MINER_BANDS = 8;
-  var MIN_BAND_DEPTH = 0.08;
   var BAND_LIGHTEST = 0.84;
   var BAND_DARKEST = 0.58;
   var MIN_LABEL_DEG = 8;
@@ -1207,36 +1219,42 @@
       return (n < 16 ? '0' : '') + Math.max(0, Math.min(255, n)).toString(16);
     }).join('');
   }
+  // A slice's bands from its pool-tags.json window entry ({blocks, untagged, tags}); see above.
+  // inner/outer are cumulative block shares of the pool, 0 at the hole and 1 at the rim.
   function retropexSliceBands(pool, entry, poolColor, a0, span) {
     var tags = (entry && entry.tags) || {};
     var miners = Object.keys(tags).map(function (n) { return { name: n, blockCount: tags[n] }; });
     miners.sort(function (a, b) { return b.blockCount - a.blockCount || (a.name < b.name ? -1 : 1); });
-    if (!miners.length || !pool.blockCount || span <= 0) return [];
+    var minerBlockCount = miners.reduce(function (s, m) { return s + m.blockCount; }, 0);
+    var poolBlocks = entry ? Number(entry.untagged) || 0 : 0;
+    var total = poolBlocks + minerBlockCount;
+    if (!miners.length || !total || span <= 0) return [];
     var shown = miners.slice(0, MAX_MINER_BANDS);
     var shownBlocks = shown.reduce(function (s, m) { return s + m.blockCount; }, 0);
-    var minerBlockCount = miners.reduce(function (s, m) { return s + m.blockCount; }, 0);
-    var otherMinerBlocks = Math.max(0, minerBlockCount - shownBlocks);
-    var poolBlocks = Math.max(0, pool.blockCount - shownBlocks - otherMinerBlocks);
-    var ordered = [];
+    var otherMinerBlocks = minerBlockCount - shownBlocks;
+    var ordered = shown.map(function (m) { return { name: m.name, blockCount: m.blockCount, kind: 'gateway' }; });
+    if (otherMinerBlocks > 0) ordered.push({ name: 'Other miners', blockCount: otherMinerBlocks, kind: 'folded', count: miners.length - shown.length });
     if (poolBlocks > 0) ordered.push({ name: 'Built by the pool', blockCount: poolBlocks, kind: 'stratum' });
-    if (otherMinerBlocks > 0) ordered.push({ name: 'Other miners', blockCount: otherMinerBlocks, kind: 'folded' });
-    shown.slice().reverse().forEach(function (m) { ordered.push({ name: m.name, blockCount: m.blockCount, kind: 'gateway' }); });
-    var totalBlocks = ordered.reduce(function (s, b) { return s + b.blockCount; }, 0);
-    if (!totalBlocks) return [];
-    var floor = Math.min(MIN_BAND_DEPTH, 0.5 / ordered.length);
-    var toShare = 1 - floor * ordered.length;
+    // Smallest innermost, as mempool.guide sorts them; a stable sort keeps ties in the order above.
+    ordered = ordered.map(function (b, i) { b.i = i; return b; })
+      .sort(function (a, b) { return a.blockCount - b.blockCount || a.i - b.i; });
     var depth = 0;
     return ordered.map(function (band, i) {
       var inner = depth;
-      depth += floor + toShare * band.blockCount / totalBlocks;
+      depth += band.blockCount / total;
       return {
-        name: band.name, kind: band.kind, blocks: band.blockCount,
+        name: band.name, kind: band.kind, blocks: band.blockCount, poolBlocks: total, folded: band.count || 0,
         poolName: pool.name, slug: pool.slug, own: pool.slug === POOL_SLUG,
-        poolShare: (100 * band.blockCount / pool.blockCount),
+        poolShare: (100 * band.blockCount / total),
         color: retropexBandColor(poolColor, BAND_DARKEST + (i / Math.max(ordered.length - 1, 1)) * (BAND_LIGHTEST - BAND_DARKEST)),
-        a0: a0, span: span, inner: inner, outer: depth
+        a0: a0, span: span, inner: inner, outer: i === ordered.length - 1 ? 1 : depth
       };
     });
+  }
+  // Ring radius for a cumulative share: equal shares get equal areas, not equal depths, so a
+  // band's size on screen is its blocks (mempool.guide's minerBandsSeries).
+  function bandRadius(r0, r1, share) {
+    return Math.sqrt(r0 * r0 + share * (r1 * r1 - r0 * r0));
   }
 
   function drawBands() {
@@ -1289,6 +1307,7 @@
     var cx = vw / 2, cy = vh / 2;
     var r0pie = ring[0] * unit, r1pie = ring[1] * unit;
     var netHs = windowHashrate(api, win);
+    var tagAge = Math.max(0, Date.now() / 1000 - (Number(tagDoc.generated) || 0));
     var ownSlice = null;
     pools.forEach(function (p) { if (p.slug === POOL_SLUG && wdoc.pools[POOL_SLUG]) ownSlice = p; });
     if (ownSlice) cachedJson('gws', POOL + '/api/gateways', 60000, { mode: 'cors' });
@@ -1329,8 +1348,8 @@
       bands.forEach(function (b) {
         b.windowBlocks = totalBlocks;
         b.netHs = netHs;
-        b.r0 = r0pie + b.inner * (r1pie - r0pie);
-        b.r1 = r0pie + b.outer * (r1pie - r0pie);
+        b.r0 = bandRadius(r0pie, r1pie, b.inner);
+        b.r1 = bandRadius(r0pie, r1pie, b.outer);
         b.sector = { angle: a0, span: span };
         var path = document.createElementNS(SVGNS, 'path');
         path.setAttribute('d', bandSectorPath(cx, cy, b.r0, b.r1, a0, span));
@@ -1374,9 +1393,12 @@
     }
     function bandTipHtml(b) {
       var hs = b.netHs > 0 && b.windowBlocks > 0 ? fmtTh(b.netHs * b.blocks / b.windowBlocks) : '';
-      var lines = ['<b>' + esc(b.name) + '</b>',
-        '<span>' + esc(b.poolName) + ' · ' + pct(b.poolShare) + '</span>',
-        '<span>' + b.blocks + ' block' + (b.blocks === 1 ? '' : 's') + (hs ? ' · est. ' + hs : '') + '</span>'];
+      // Exact: both counts come from the same window entry, and the share is their quotient.
+      var lines = ['<b>' + esc(b.name) + (b.folded ? ' (' + b.folded + ')' : '') + '</b>',
+        '<span>' + esc(b.poolName) + ' · ' + b.poolShare.toFixed(2) + '%</span>',
+        '<span>' + b.blocks + ' of ' + b.poolBlocks + ' block' + (b.poolBlocks === 1 ? '' : 's') + ' · ' + win + (hs ? ' · est. ' + hs : '') + '</span>'];
+      if (b.kind === 'stratum') lines.push('<span>no gateway tag, or its own name as the tag</span>');
+      if (tagAge > 600) lines.push('<span>counts as of ' + Math.round(tagAge / 60) + ' min ago</span>');
       if (b.own) {
         var live = b.kind === 'stratum' ? primeAgg(function (g) { return !!g.own; })
           : b.kind === 'gateway' ? primeTag(b.name) : null;
@@ -1450,7 +1472,8 @@
         wrap.insertBefore(note, host.nextSibling);
       }
       note.innerHTML = '<b>Pool hashrate pie</b> after <a href="' + RETROPEX + '" target="_blank" rel="noopener">Retropex/mempool</a>: every pool is a slice (no Other-fold), ' +
-        'DATUM miners are the outer bands (largest on the rim), the inner band is blocks the pool built itself. ' +
+        'rings inside a slice are the blocks each DATUM gateway built, smallest at the centre and each ring\'s area in proportion to its blocks; ' +
+        '<i>Built by the pool</i> is its blocks with no gateway tag or its own name as the tag. ' +
         'Hashrate is block-share \u00d7 estimated network hashrate, in TH/s.';
     }
     bandState('ok');
