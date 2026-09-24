@@ -97,7 +97,10 @@
     scope.querySelectorAll("[data-i18n-aria]").forEach((el) => {
       el.setAttribute("aria-label", t(el.getAttribute("data-i18n-aria")));
     });
-    const titleEl = document.querySelector("title[data-i18n]");
+    // Only the <head> title names the page. The keyword pages drop its data-i18n hook, and an
+    // unscoped lookup then finds the payout donut's SVG <title data-i18n> instead, retitling every
+    // one of them "Share of the coinbase by payout address" once this runs (Google indexes that).
+    const titleEl = document.head.querySelector("title[data-i18n]");
     if (titleEl) {
       const page = titleEl.getAttribute("data-i18n");
       if (page) document.title = t(page);
