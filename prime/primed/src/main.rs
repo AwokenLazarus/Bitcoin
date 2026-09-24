@@ -284,7 +284,7 @@ fn run(cfg: Config) -> i32 {
         coinbaser_base: Mutex::new(None),
         gateway_payouts: Mutex::new(Shared::load_gateway_payouts(&cfg.data_dir)),
         parents: Default::default(),
-        faults: Default::default(),
+        faults: crate::validity::Faults::with_ttl(cfg.quarantine_max_hours.saturating_mul(3600)),
         cfg,
     });
     log::info!("pool pubkey {}", shared.pool.public_hex());

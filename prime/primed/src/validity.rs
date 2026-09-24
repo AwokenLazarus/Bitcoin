@@ -18,6 +18,7 @@
 //! (`getblocktemplate` proposal mode) or of a block built from it.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -204,24 +205,62 @@ struct PendingFail {
 }
 
 /// Faulted gateways by whole signing key (hex). Kept across reconnects; a restart forgets them,
-/// and the next template check finds them again.
-#[derive(Debug, Default)]
+/// and the next template check finds them again. A live fault also expires after
+/// `quarantine-max-hours` (see [`Faults::with_ttl`]) so an upgraded gateway mining empty
+/// templates, or one that never answers job validation, is not stuck until Prime restarts.
+#[derive(Debug)]
 pub struct Faults {
     by_key: Mutex<HashMap<String, Fault>>,
     pending: Mutex<HashMap<String, PendingFail>>,
+    /// 0 means no expiry (tests). Production sets `quarantine-max-hours` in seconds.
+    ttl_secs: AtomicU64,
+}
+
+impl Default for Faults {
+    fn default() -> Self {
+        Self {
+            by_key: Mutex::new(HashMap::new()),
+            pending: Mutex::new(HashMap::new()),
+            ttl_secs: AtomicU64::new(0),
+        }
+    }
 }
 
 impl Faults {
+    pub fn with_ttl(ttl_secs: u64) -> Self {
+        Self { ttl_secs: AtomicU64::new(ttl_secs), ..Self::default() }
+    }
+
+    fn ttl(&self) -> u64 {
+        match self.ttl_secs.load(Ordering::Relaxed) {
+            0 => u64::MAX,
+            s => s,
+        }
+    }
+
     pub fn get(&self, key: &str) -> Option<Fault> {
-        self.by_key.lock().unwrap_or_else(|e| e.into_inner()).get(key).cloned()
+        self.get_at(key, now(), self.ttl())
+    }
+
+    pub fn get_at(&self, key: &str, at: u64, ttl_secs: u64) -> Option<Fault> {
+        let mut m = self.by_key.lock().unwrap_or_else(|e| e.into_inner());
+        if m.get(key).is_some_and(|f| ttl_secs < u64::MAX && at.saturating_sub(f.since_ts) >= ttl_secs) {
+            m.remove(key);
+            return None;
+        }
+        m.get(key).cloned()
     }
 
     /// Mark `key`; true if it was not marked before.
     pub fn set(&self, key: &str, reason: &str, height: u32, found_by: &'static str) -> bool {
+        self.set_at(key, reason, height, found_by, now())
+    }
+
+    fn set_at(&self, key: &str, reason: &str, height: u32, found_by: &'static str, at: u64) -> bool {
         self.pending.lock().unwrap_or_else(|e| e.into_inner()).remove(key);
         let mut m = self.by_key.lock().unwrap_or_else(|e| e.into_inner());
         let new = !m.contains_key(key);
-        m.insert(key.to_string(), Fault { reason: reason.to_string(), height, since_ts: now(), found_by });
+        m.insert(key.to_string(), Fault { reason: reason.to_string(), height, since_ts: at, found_by });
         new
     }
 
@@ -255,11 +294,25 @@ impl Faults {
     }
 
     pub fn all(&self) -> Vec<(String, Fault)> {
-        let m = self.by_key.lock().unwrap_or_else(|e| e.into_inner());
+        self.all_at(now(), self.ttl())
+    }
+
+    pub fn all_at(&self, at: u64, ttl_secs: u64) -> Vec<(String, Fault)> {
+        let mut m = self.by_key.lock().unwrap_or_else(|e| e.into_inner());
+        if ttl_secs < u64::MAX {
+            m.retain(|_, f| at.saturating_sub(f.since_ts) < ttl_secs);
+        }
         let mut v: Vec<_> = m.iter().map(|(k, f)| (k.clone(), f.clone())).collect();
         v.sort_by(|a, b| a.0.cmp(&b.0));
         v
     }
+}
+
+/// A stored quarantine whose `until` has passed: the gateway is admitted again, and any
+/// leftover template fault from that incident should be dropped so an upgraded operator
+/// mining empty templates is credited without waiting for a passing check or a restart.
+pub fn quarantine_has_lapsed(until: u64, at: u64) -> bool {
+    until <= at
 }
 
 #[cfg(test)]
@@ -360,5 +413,31 @@ mod tests {
         assert!(f.clear("k").is_none(), "pending is not yet a fault");
         assert!(!f.note_fail("k", "bad-txns-inputs-missingorspent", 2, 101, "template check"));
         assert!(f.get("k").is_none(), "a cleared first slip starts the count over");
+    }
+
+    #[test]
+    fn a_fault_expires_after_its_ttl() {
+        let f = Faults::with_ttl(86_400);
+        f.set_at("k", "bad-txns-premature-spend-of-coinbase", 973553, "block", 1_000);
+        assert!(f.get_at("k", 1_000 + 86_400 - 1, 86_400).is_some());
+        assert!(f.get_at("k", 1_000 + 86_400, 86_400).is_none());
+        assert!(f.get("k").is_none(), "an expired fault is dropped, not just hidden");
+        f.set_at("old", "bad-txns-premature-spend-of-coinbase", 1, "block", 1);
+        f.set_at("new", "bad-txns-premature-spend-of-coinbase", 2, "block", 100_000);
+        let live = f.all_at(100_000, 86_400);
+        assert_eq!(live.iter().map(|(k, _)| k.as_str()).collect::<Vec<_>>(), vec!["new"]);
+    }
+
+    #[test]
+    fn connecting_after_quarantine_lapses_clears_the_fault() {
+        assert!(quarantine_has_lapsed(1_000, 1_000));
+        assert!(quarantine_has_lapsed(1_000, 1_001));
+        assert!(!quarantine_has_lapsed(1_001, 1_000));
+        let f = Faults::default();
+        f.set("k", "bad-txns-premature-spend-of-coinbase", 973553, "block");
+        if quarantine_has_lapsed(1_000, 3_600) {
+            assert!(f.clear("k").is_some());
+        }
+        assert!(f.get("k").is_none());
     }
 }

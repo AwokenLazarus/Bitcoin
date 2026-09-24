@@ -553,6 +553,14 @@ impl Shared {
         q.get(&key).filter(|entry| entry.until > now()).cloned()
     }
 
+    /// True when this key has a stored quarantine whose window has run out. The gateway is
+    /// admitted again; a leftover template fault from the same incident should be dropped.
+    pub fn quarantine_lapsed(&self, key_hex: &str) -> bool {
+        let key = key_hex.to_ascii_lowercase();
+        let q = self.quarantine.lock().unwrap_or_else(|e| e.into_inner());
+        q.get(&key).is_some_and(|e| crate::validity::quarantine_has_lapsed(e.until, now()))
+    }
+
     /// Refuse this gateway: `quarantine_minutes` doubled per strike, capped at
     /// `quarantine_max_hours`. Returns the seconds it is refused for, or None when the feature
     /// is off.

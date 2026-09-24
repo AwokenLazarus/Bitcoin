@@ -462,6 +462,17 @@ pub async fn run(shared: Arc<Shared>, mut stream: TcpStream, remote: SocketAddr)
             "gateway refused: its node built a block this chain rejected. Upgrade Bitcoin Knots to a build that has the              rule (29.4.2 or later) and reconnect — the refusal lifts on its own and an upgraded gateway is taken back              straight away",
         ));
     }
+    // Quarantine lapsed: the operator had time to upgrade. Drop a leftover template fault so
+    // empty or unanswered templates are not punished until a passing check or a restart.
+    if shared.quarantine_lapsed(&gateway_key) {
+        if let Some(f) = shared.faults.clear(&gateway_key) {
+            log::info!(
+                "[{id}] {remote} gateway={gateway_hex}: quarantine lapsed; dropping template fault from height {} ({})",
+                f.height,
+                f.reason
+            );
+        }
+    }
     let known_script = shared.lookup_gateway_script(&gateway_key);
     let fee_path = if house_stratum(&shared.cfg, remote, &gateway_key) { "stratum" } else { "datum" };
     log::info!(
