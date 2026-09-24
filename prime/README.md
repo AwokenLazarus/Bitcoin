@@ -396,6 +396,8 @@ scripts/regtest-e2e.sh convoy               # or fte | iohzrd | startos: real C 
 MINER_CMD='...' scripts/regtest-divergence.sh fte   # two nodes with different mempools and tips
 ```
 
+The regtest scripts start test miners through `scripts/lib-miner.sh`, which runs each one under `timeout` (a hard cap of `MINER_MAX_SECS`, default 1800) in its own process group, and kills that whole group on exit, failure, Ctrl-C or a closed terminal. `cpu-miner.py` forks worker processes, so killing only its PID leaves them running. Never start a miner by hand without `timeout`, and after any run check `python3 ~/lazarus-regtest/killminer.py` prints `killed nothing` (it kills leftovers by exact argv; `pgrep -f` would match the shell running the check).
+
 `replay_e2e` starts a `primed`, speaks DATUM to it as a gateway would, grinds one genuine
 diff-1 share (~2^32 BLAKE2b hashes, 10–60 s across all cores) and replays it fourteen ways —
 job section flipped in an unread field, bare, on another slot, after a reconnect, from another

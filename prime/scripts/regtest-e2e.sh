@@ -75,8 +75,10 @@ MINE_SECS="${MINE_SECS:-120}"
 mkdir -p "$WORKDIR"
 GW_DIR="$WORKDIR/gw-$LINEAGE"
 PIDS=()
+. "$(dirname "$0")/lib-miner.sh"
 cleanup() {
-  for p in "${PIDS[@]:-}"; do [ -n "$p" ] && kill "$p" 2>/dev/null || true; done
+  for p in "${PIDS[@]:-}"; do [ -n "$p" ] && kill_miner "$p"; done
+  reap_miners
 }
 trap cleanup EXIT
 
@@ -201,7 +203,7 @@ echo "PASS: handshake, configure, coinbaser"
 
 if [ -n "${MINER_CMD:-}" ]; then
   say "mining for ${MINE_SECS}s with: $MINER_CMD"
-  bash -c "$MINER_CMD" > "$WORKDIR/miner-$LINEAGE.log" 2>&1 &
+  run_miner "$WORKDIR/miner-$LINEAGE.log" bash -c "exec $MINER_CMD"
   PIDS+=($!)
   sleep "$MINE_SECS"
   S=$(curl -fs "http://127.0.0.1:$STATS_PORT/stats.json")

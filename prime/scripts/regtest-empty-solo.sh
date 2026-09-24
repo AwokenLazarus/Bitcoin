@@ -55,11 +55,13 @@ PIDS=()
 MINER_PID=""
 PRIME_PID=""
 GW_PID=""
+. "$(dirname "$0")/lib-miner.sh"
 cleanup() {
-  [ -n "${MINER_PID:-}" ] && kill "$MINER_PID" 2>/dev/null || true
+  kill_miner "${MINER_PID:-}"
   [ -n "${PRIME_PID:-}" ] && kill "$PRIME_PID" 2>/dev/null || true
   [ -n "${GW_PID:-}" ] && kill "$GW_PID" 2>/dev/null || true
   for p in "${PIDS[@]:-}"; do [ -n "$p" ] && kill "$p" 2>/dev/null || true; done
+  reap_miners
 }
 trap cleanup EXIT
 
@@ -178,7 +180,7 @@ EOF
 }
 
 start_miner() {
-  [ -n "${MINER_PID:-}" ] && kill "$MINER_PID" 2>/dev/null || true
+  kill_miner "${MINER_PID:-}"
   local grind="$HERE/target/release/stratum-grind"
   # extra args (e.g. --skip-empty) go to stratum-grind only
   local extra=()
@@ -186,22 +188,19 @@ start_miner() {
     extra+=("$@")
   fi
   if [ -n "${MINER_CMD:-}" ]; then
-    bash -c "$MINER_CMD" > "$WORKDIR/miner.log" 2>&1 &
+    run_miner "$WORKDIR/miner.log" bash -c "exec $MINER_CMD"
   elif [ -x "$grind" ]; then
-    "$grind" --host 127.0.0.1 --port "$STRATUM_PORT" --user "$GATEWAY" "${extra[@]}" \
-      > "$WORKDIR/miner.log" 2>&1 &
+    run_miner "$WORKDIR/miner.log" "$grind" --host 127.0.0.1 --port "$STRATUM_PORT" --user "$GATEWAY" "${extra[@]}"
   elif [ "${USE_GPU:-0}" = 1 ] && [ -f "$GPU_MINER" ]; then
-    python3 "$GPU_MINER" --host 127.0.0.1 --port "$STRATUM_PORT" --user "$GATEWAY" \
-      > "$WORKDIR/miner.log" 2>&1 &
+    run_miner "$WORKDIR/miner.log" python3 "$GPU_MINER" --host 127.0.0.1 --port "$STRATUM_PORT" --user "$GATEWAY"
   else
     [ -f "$CPU_MINER" ] || fail "no cpu miner at $CPU_MINER (set MINER_CMD)"
-    python3 "$CPU_MINER" --host 127.0.0.1 --port "$STRATUM_PORT" --user "$GATEWAY" \
-      > "$WORKDIR/miner.log" 2>&1 &
+    run_miner "$WORKDIR/miner.log" python3 "$CPU_MINER" --host 127.0.0.1 --port "$STRATUM_PORT" --user "$GATEWAY"
   fi
   MINER_PID=$!
 }
 
-stop_miner() { [ -n "${MINER_PID:-}" ] && kill "$MINER_PID" 2>/dev/null || true; MINER_PID=""; }
+stop_miner() { kill_miner "${MINER_PID:-}"; MINER_PID=""; }
 
 wait_client() {
   say "waiting for gateway session"

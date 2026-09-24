@@ -73,8 +73,10 @@ B="$BITCOIN_BIN/bitcoin-cli -regtest -datadir=$B_DIR -conf=$B_DIR/bitcoin.conf"
 
 mkdir -p "$WORKDIR" "$B_DIR"
 PIDS=()
+. "$(dirname "$0")/lib-miner.sh"
 cleanup() {
-  for p in "${PIDS[@]:-}"; do [ -n "$p" ] && { kill -CONT "$p" 2>/dev/null; kill "$p" 2>/dev/null; } || true; done
+  for p in "${PIDS[@]:-}"; do [ -n "$p" ] && kill_miner "$p"; done
+  reap_miners
   $B stop >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
@@ -235,7 +237,7 @@ for _ in $(seq 1 60); do
 done
 
 say "mine through the gateway until A accepts block $HEIGHT"
-bash -c "exec $MINER_CMD" > "$WORKDIR/miner.log" 2>&1 &
+run_miner "$WORKDIR/miner.log" bash -c "exec $MINER_CMD"
 PIDS+=($!)
 wait_block "$HEIGHT" || fail "no block within ${BLOCK_WAIT}s; see $WORKDIR/miner.log"
 sleep 2
@@ -258,16 +260,16 @@ echo "PASS: pool node accepted a block built from the gateway node's template"
 
 say "gateway node one block behind: competing block, reorg, orphan label clears"
 MINER_PID=${PIDS[-1]}
-kill -STOP "$MINER_PID"
+kill -STOP -- -"$MINER_PID"
 sleep 2
 TIP=$(count "$A")
 $A generatetoaddress 1 "$($AW getnewaddress "" bech32)" >/dev/null
 [ "$(count "$A")" = $((TIP+1)) ] && [ "$(count "$B")" = "$TIP" ] || fail "could not put A one block ahead"
 MARK=$(wc -l < "$WORKDIR/primed.log")
 sleep 3
-kill -CONT "$MINER_PID"
+kill -CONT -- -"$MINER_PID"
 for _ in $(seq 1 $((BLOCK_WAIT*10))); do
-  tail -n +"$MARK" "$WORKDIR/primed.log" | grep -q "inconclusive" && { kill -STOP "$MINER_PID"; break; }
+  tail -n +"$MARK" "$WORKDIR/primed.log" | grep -q "inconclusive" && { kill -STOP -- -"$MINER_PID"; break; }
   sleep 0.1
 done
 tail -n +"$MARK" "$WORKDIR/primed.log" | grep -q "inconclusive" || fail "no competing block within grace; see $WORKDIR/primed.log"
@@ -279,7 +281,7 @@ for _ in $(seq 1 60); do
 done
 tail -n +"$MARK" "$WORKDIR/primed.log" | grep -q "$COMP.*is not in the main chain" || fail "confirm pass never labelled the competing block"
 echo "labelled orphan while A's own block was the tip"
-kill -CONT "$MINER_PID"
+kill -CONT -- -"$MINER_PID"
 for _ in $(seq 1 $((BLOCK_WAIT+60))); do
   tail -n +"$MARK" "$WORKDIR/primed.log" | grep -q "$COMP at $((TIP+1)) is back in the main chain" && break
   sleep 1
