@@ -23,6 +23,15 @@
 /faq/*
   Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'
 
+/key/app
+  X-Content-Type-Options: nosniff
+
+/key/downloads/*
+  X-Content-Type-Options: nosniff
+
+/key/*
+  Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'
+
 /404.html
   Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'
 
@@ -33,4 +42,14 @@
   Cache-Control: public, max-age=604800
 
 /map/*
-  Content-Security-Policy: default-src 'self'; script-src 'self' https://cdn.jsdelivr.net 'sha256-ZY0zVEg2M4wPxnt4QiDvLtHVUMbx0sKmowGs+LArZnk='; style-src 'self' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data: blob:; connect-src 'self'; worker-src 'self' blob:; frame-ancestors 'none'; base-uri 'none'; form-action 'none'
+  Content-Security-Policy: default-src 'self'; script-src 'self' 'sha256-vlGx9AvjSJDahRHjiKwqKUG7BedPk8gKirI6r9RF/rI='; style-src 'self' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data: blob:; connect-src 'self'; worker-src 'self' blob:; frame-ancestors 'none'; base-uri 'none'; form-action 'none'
+
+# three.js is versioned by folder and the page's own files by ?v=, so they can be held a while.
+/map/vendor/*
+  Cache-Control: public, max-age=604800, immutable
+
+/map/app.js
+  Cache-Control: public, max-age=604800
+
+/map/style.css
+  Cache-Control: public, max-age=604800

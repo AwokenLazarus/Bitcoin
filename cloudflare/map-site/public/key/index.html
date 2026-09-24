@@ -1,0 +1,242 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Lazarus Key · a Bitkey wallet for XBT</title>
+<meta name="description" content="Lazarus Key is a fork of Block's Bitkey app that runs on Bitcoin BLAKE2b (XBT). Hardware-signed, replay-protected, and able to talk to nothing but your own node.">
+<link rel="canonical" href="https://lazarus-xbt.xyz/key/">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="Lazarus · Bitcoin BLAKE2b">
+<meta property="og:title" content="Lazarus Key · a Bitkey wallet for XBT">
+<meta property="og:description" content="A fork of Block's Bitkey app that runs on Bitcoin BLAKE2b (XBT). Hardware-signed, replay-protected, and able to talk to nothing but your own node.">
+<meta property="og:url" content="https://lazarus-xbt.xyz/key/">
+<meta name="twitter:card" content="summary">
+<meta name="theme-color" content="#1a1712">
+<link rel="icon" href="data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A//www.w3.org/2000/svg%22%20viewBox%3D%220%200%2020.36%2032%22%3E%3Crect%20width%3D%2220.36%22%20height%3D%2232%22%20fill%3D%22none%22/%3E%3Cpath%20fill%3D%22%23e8b85f%22%20d%3D%22M15.96%204.16C15.96%202.91%2015.56%202.02%2014.61%201.56C14.14%201.33%2013.51%201.21%2012.71%201.21H9.61L9.69%200H13.65C14.77%200%2015.67%200.18%2016.36%200.55C17.04%200.91%2017.54%201.4%2017.86%202.01C18.17%202.63%2018.33%203.32%2018.33%204.07C18.33%204.84%2018.17%205.55%2017.84%206.2C17.52%206.84%2017.01%207.36%2016.32%207.75C15.63%208.13%2015.3%208.33%2014.01%208.33H9.69L9.61%207.12H13.4C14.39%207.12%2015.19%206.66%2015.63%205.78C15.85%205.35%2015.96%204.81%2015.96%204.16ZM11.57%200%2011.57%2010.83V30.94L13.18%2031.55V32H7.2V31.55L8.8%2030.94V10.83V1.06L7.2%200.45V0ZM9.8%2020.31%203.89%2027.07%206.01%2027.79V28.32H0V27.79L2.08%2027.07L9.02%2019.39L9.97%2018.7L15.18%2012.61L13.05%2011.89V11.36H19.07V11.89L16.99%2012.61L10.77%2019.61ZM14.05%2027.07%209.04%2020.79%208.6%2020.39%202.34%2012.63%200.3%2011.89V11.36H8.93V11.89L6.61%2012.61L10.91%2018.05L11.38%2018.5L18.32%2027.04L20.36%2027.79V28.32H11.73V27.79Z%22/%3E%3C/svg%3E">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&family=Newsreader:ital,wght@0,400;0,500;1,400&display=swap">
+<link rel="stylesheet" href="/assets/hub.css?v=3">
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+<header class="site-header">
+  <div class="topbar wrap">
+    <a class="wordmark" href="/"><svg class="chi" viewBox="0 0 20.36 32" aria-hidden="true"><path d="M15.96 4.16C15.96 2.91 15.56 2.02 14.61 1.56C14.14 1.33 13.51 1.21 12.71 1.21H9.61L9.69 0H13.65C14.77 0 15.67 0.18 16.36 0.55C17.04 0.91 17.54 1.4 17.86 2.01C18.17 2.63 18.33 3.32 18.33 4.07C18.33 4.84 18.17 5.55 17.84 6.2C17.52 6.84 17.01 7.36 16.32 7.75C15.63 8.13 15.3 8.33 14.01 8.33H9.69L9.61 7.12H13.4C14.39 7.12 15.19 6.66 15.63 5.78C15.85 5.35 15.96 4.81 15.96 4.16ZM11.57 0 11.57 10.83V30.94L13.18 31.55V32H7.2V31.55L8.8 30.94V10.83V1.06L7.2 0.45V0ZM9.8 20.31 3.89 27.07 6.01 27.79V28.32H0V27.79L2.08 27.07L9.02 19.39L9.97 18.7L15.18 12.61L13.05 11.89V11.36H19.07V11.89L16.99 12.61L10.77 19.61ZM14.05 27.07 9.04 20.79 8.6 20.39 2.34 12.63 0.3 11.89V11.36H8.93V11.89L6.61 12.61L10.91 18.05L11.38 18.5L18.32 27.04L20.36 27.79V28.32H11.73V27.79Z"/></svg>Lazarus <em>XBT</em></a>
+    <button class="nav-toggle" type="button" aria-expanded="false" aria-controls="site-nav">Menu</button>
+    <nav class="site-nav" id="site-nav" aria-label="Main">
+      <a href="/learn/">The chain</a><a href="/ecosystem/">Ecosystem</a><a href="/map/">Galaxy map</a><a href="/key/" aria-current="page">Lazarus Key</a><a href="/faq/">FAQ</a>
+      <a class="btn small" href="https://pool.lazarus-xbt.xyz" rel="noopener">Lazarus Pool</a>
+    </nav>
+  </div>
+</header>
+<main id="main">
+
+<section class="hero wrap">
+  <p class="kicker">Wallet</p>
+  <h1>Lazarus Key</h1>
+  <p class="lede">A hardware wallet app for Bitcoin BLAKE2b. It is Block's <a href="https://bitkey.world" rel="noopener">Bitkey</a> app, opened up and pointed at XBT: the same Bitkey device in your hand, the same keys, signing on the chain this network actually runs.</p>
+  <div class="btn-row">
+    <a class="btn" href="/key/app">Download the app</a>
+    <a class="btn ghost" href="#start">How to set it up</a>
+    <a class="btn ghost" href="https://bitkey.world" rel="noopener">Buy a Bitkey</a>
+    <a class="btn ghost" href="https://github.com/AwokenLazarus/lazarus-key" rel="noopener">Source</a>
+  </div>
+  <p class="note faint">Work in progress. Not built, endorsed or supported by Block, Inc. Read the <a href="#disclaimer">disclaimer</a> before you put money on it.</p>
+</section>
+
+<section class="section wrap">
+  <div class="section-head" data-reveal><p class="kicker">Why</p><h2>Why a hardware wallet for XBT</h2></div>
+  <div data-reveal>
+    <p>XBT shares Bitcoin's history, which is what makes it valuable and what makes it dangerous. The key that controls an address on Bitcoin controls the same address here, so a wallet that does not understand both chains can cost you coins on the one you were not thinking about.</p>
+    <p>Lazarus Key takes the wallet Block built — two-of-three signing, a hardware device that has to approve every spend, a paper kit that gets you back in if the phone dies — and makes all of it work on BLAKE2b. Your spending key never leaves the Bitkey. Nothing is signed without a tap.</p>
+  </div>
+</section>
+
+<section class="section inset">
+ <div class="wrap">
+  <div class="section-head" data-reveal><p class="kicker">Features</p><h2>What it does</h2></div>
+  <div class="grid three" data-reveal>
+    <article class="card"><h3>Hardware signing</h3><p>Every send is signed by your Bitkey over NFC. The app holds one key, the device holds another, and neither can move your money alone.</p></article>
+    <article class="card"><h3>Replay protection</h3><p>Sends are signed with a unified sighash that SHA-256 Bitcoin rejects. A transaction made here cannot be replayed onto the other chain against your pre-fork coins.</p></article>
+    <article class="card"><h3>Your node, not ours</h3><p>On first launch it asks for your own Electrum server. The Lazarus Pool server is offered only if you say you have none, and you can change it whenever you like.</p></article>
+    <article class="card"><h3>Nothing reported</h3><p>No crash reporting, no usage analytics, no firmware telemetry. Your wallet addresses are never registered with anyone. What the app knows stays on the phone.</p></article>
+    <article class="card"><h3>Long maturity, handled</h3><p>Mined coins need 6,480 confirmations until block 979,920. The balance counts them separately so you always know what is spendable now.</p></article>
+    <article class="card"><h3>Emergency Exit Kit</h3><p>The same paper kit as upstream. It restores your wallet on a new phone with no server, no account and nobody's permission.</p></article>
+    <article class="card"><h3>XBT prices</h3><p>Rates and the price chart come from a market that actually trades XBT, not from a Bitcoin price feed.</p></article>
+    <article class="card"><h3>Biometric lock</h3><p>Fingerprint or face unlock on the app, plus a fingerprint on the Bitkey itself before it will sign.</p></article>
+    <article class="card"><h3>Recovery, if you want it</h3><p>Block's cloud backup, recovery contacts and inheritance can be switched on. Off by default, and off means off.</p></article>
+  </div>
+ </div>
+</section>
+
+<section class="section wrap" id="privacy">
+  <div class="section-head" data-reveal><p class="kicker">Your choice</p><h2>Two ways to run it</h2></div>
+  <div data-reveal>
+    <p>A Bitkey wallet is protected by three keys: one on your phone, one on the device, and one held by Block. That third key is why a brand-new wallet has to be created through their servers once. What happens after that is up to you.</p>
+    <div class="table-wrap"><table>
+      <thead><tr><th>&nbsp;</th><th>Default</th><th>Block account on</th></tr></thead>
+      <tbody>
+        <tr><td>Reads the chain from</td><td>your node</td><td>your node</td></tr>
+        <tr><td>Signing</td><td>app + Bitkey</td><td>app + Bitkey</td></tr>
+        <tr><td>Talks to Block</td><td>never</td><td>to sign in and recover</td></tr>
+        <tr><td>Cloud backup, recovery contacts, inheritance</td><td>no</td><td>yes</td></tr>
+        <tr><td>Wallet addresses sent to Block</td><td>never</td><td>never</td></tr>
+        <tr><td>Usage or crash reports</td><td>never</td><td>never</td></tr>
+        <tr><td>If you lose the phone</td><td>Emergency Exit Kit</td><td>kit or recovery</td></tr>
+      </tbody>
+    </table></div>
+    <p class="note">The switch lives in Settings, and it can be turned off again. While it is off, your Emergency Exit Kit is the only way back into your money, so keep it somewhere safe and dry.</p>
+  </div>
+</section>
+
+<section class="section inset" id="start">
+ <div class="wrap">
+  <div class="section-head" data-reveal><p class="kicker">Setup</p><h2>Getting started</h2></div>
+  <div data-reveal>
+    <h3>You will need</h3>
+    <p>An Android phone with NFC, and a <a href="https://bitkey.world" rel="noopener">Bitkey hardware device</a>. Bitkey is sold by Block at <a href="https://bitkey.world" rel="noopener">bitkey.world</a>; Lazarus does not sell hardware and earns nothing from it. Ideally, also your own Bitcoin Knots node with an XBT-aware Electrum server.</p>
+
+    <h3>If you already have a Bitkey wallet</h3>
+    <ol class="steps">
+      <li>In the official Bitkey app, find your <strong>Emergency Exit Kit</strong> — the PDF saved to your cloud drive when you set the wallet up.</li>
+      <li>Install Lazarus Key and choose <strong>I already have a wallet</strong>, then <strong>Import using Emergency Exit Kit</strong>.</li>
+      <li>Enter the backup code from the kit and tap your Bitkey when asked. Your balance appears once the wallet syncs.</li>
+    </ol>
+    <div class="callout warn"><p><strong>Move your XBT first.</strong> A coin that existed before block 961,640 sits at the same address on both chains. Spending it in the official Bitkey app produces a signature that can be replayed here. Send your XBT with Lazarus Key first — that splits the coins — and then use either app freely.</p></div>
+
+    <h3>If your Bitkey is new</h3>
+    <ol class="steps">
+      <li>Install Lazarus Key and choose <strong>Set up a new wallet</strong>. It will explain that creating the third key needs Block's servers once.</li>
+      <li>Tap your Bitkey to create its keys and finish setup.</li>
+      <li>Save your Emergency Exit Kit somewhere safe. Print it.</li>
+      <li>If you want the app to stop talking to Block, turn off <strong>Block account</strong> in Settings.</li>
+    </ol>
+  </div>
+ </div>
+</section>
+
+<section class="section wrap" id="node">
+  <div class="section-head" data-reveal><p class="kicker">Decentralisation</p><h2>Run your own node</h2></div>
+  <div data-reveal>
+    <p>A wallet has to ask someone what the chain says. Whoever answers sees every address you ask about and decides what your wallet believes. On a young network, a handful of servers answering for everybody is how a chain quietly ends up under somebody's thumb.</p>
+    <p>Lazarus Key asks for your server on first launch for that reason. You need Bitcoin Knots 29.4.2 or later with an Electrum server that understands 164-byte headers — electrs or Fulcrum, built for this chain — and then point the app at <code>ssl://your-host:50002</code>. The <a href="/learn/">chain page</a> has the node setup.</p>
+    <p>If you do not have one yet, the app will use <code>electrum.lazarus-xbt.xyz</code> and tell you plainly what that means. It is a starting point, not a destination.</p>
+  </div>
+</section>
+
+<section class="section inset" id="download">
+ <div class="wrap">
+  <div class="section-head" data-reveal><p class="kicker">Download</p><h2>Get the app</h2></div>
+  <div data-reveal>
+    <p>Android only, installed by sideloading. It carries its own application id, so it sits happily next to the official Bitkey app if you use both. An iOS build is not possible: Apple does not allow sideloading, and this is not in the App Store.</p>
+
+    <div class="btn-row"><a class="btn" href="/key/app">Download lazarus-key-27.apk</a><span class="note faint">154 MB · Android 8.0 or later · NFC required</span></div>
+
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Build</th><th>SHA-256</th></tr></thead>
+        <tbody>
+          <tr><td><a href="/key/downloads/lazarus-key-27.apk">27</a> <span class="note faint">(23 Sep 2026)</span></td><td class="mono">57e639ecd60fa24b19db9d84cd9f5cb53f61c162ffa6475a2fca5749e4828e46</td></tr>
+          <tr><td><a href="/key/downloads/lazarus-key-25.apk">25</a> <span class="note faint">(23 Sep 2026)</span></td><td class="mono">3d3a951abab359c85ce9b3dbc348028b898d58ef58800aca66c2293fbe0effa5</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="callout warn"><p><strong>Check the file before you install it.</strong> An APK that does not match the checksum above is not this app, and a wallet app you cannot verify is one you should not put keys into.</p></div>
+
+    <pre><code>sha256sum lazarus-key-27.apk</code></pre>
+
+    <h3>Installing</h3>
+    <ol class="steps">
+      <li>Download the APK to your phone and compare its checksum with the value above.</li>
+      <li>Open it. Android will ask whether to allow installs from your browser or file manager — this is what sideloading means, and it is worth understanding before you agree.</li>
+      <li>Open Lazarus Key and follow <a href="#start">the setup steps</a>.</li>
+    </ol>
+
+    <p class="note">Every build is signed with the same key, so later versions install over earlier ones and keep your wallet. A build signed with a different key will refuse to install over this one — which is the protection working, not a fault.</p>
+  </div>
+ </div>
+</section>
+
+<section class="section wrap" id="faq">
+  <div class="section-head" data-reveal><p class="kicker">FAQ</p><h2>Questions</h2></div>
+  <div data-reveal>
+    <details class="faq"><summary>Does this work with the Bitkey I already own?</summary><div class="answer"><p>Yes. It is the same device, the same keys and the same Emergency Exit Kit. Nothing on the hardware is changed or reflashed, and the official Bitkey app keeps working for your bitcoin.</p></div></details>
+    <details class="faq"><summary>Can I use both apps at once?</summary><div class="answer"><p>Yes, and many people will: the official app for bitcoin, Lazarus Key for XBT. They install side by side. Move your XBT with Lazarus Key first so the coins on the two chains are no longer the same coins.</p></div></details>
+    <details class="faq"><summary>Is Block involved in this?</summary><div class="answer"><p>No. Bitkey's source is published under the MIT licence, which is what allows a fork, but Block did not build, review or endorse this and cannot support it. Do not contact them about it.</p></div></details>
+    <details class="faq"><summary>Does the app send anything to Block?</summary><div class="answer"><p>By default, one thing: a check for Bitkey firmware updates, which sends your device's serial and firmware version, because that is where firmware is published. Crash reporting, usage analytics and firmware telemetry have all been removed. Your wallet addresses are never sent anywhere.</p></div></details>
+    <details class="faq"><summary>What happens if Lazarus disappears?</summary><div class="answer"><p>Your money is unaffected. It lives on the chain, the spending keys are on your phone and your Bitkey, and the Emergency Exit Kit restores the wallet without any server of ours. Point the app at your own node and nothing of ours is in the path at all.</p></div></details>
+    <details class="faq"><summary>Why can I not buy or sell in the app?</summary><div class="answer"><p>Those buttons go to Block's partners, who deal in SHA-256 bitcoin. A purchase would arrive on the other chain, at an address this wallet can see but not spend from. They are switched off on purpose.</p></div></details>
+    <details class="faq"><summary>Why can I not spend without my Bitkey?</summary><div class="answer"><p>Spending limits without hardware rely on Block's servers co-signing, and their signature is for the wrong chain — XBT nodes reject it. Every send here needs a tap.</p></div></details>
+    <details class="faq"><summary>Some of my balance says "maturing".</summary><div class="answer"><p>Mined coins cannot be spent until they mature. Until block 979,920 that is 6,480 confirmations rather than 100, so freshly mined XBT shows separately until it is ready.</p></div></details>
+    <details class="faq"><summary>Is the source available?</summary><div class="answer"><p>Yes, all of it: <a href="https://github.com/AwokenLazarus/lazarus-key" rel="noopener">github.com/AwokenLazarus/lazarus-key</a>, under the MIT licence. The upstream app it is forked from is <a href="https://github.com/proto-at-block/bitkey" rel="noopener">proto-at-block/bitkey</a>, published by Block under the same licence. <code>XBT.md</code> in the repository is the record of what was changed and why, and <code>NOTICE.md</code> covers the licence, the trademarks and the absence of any warranty.</p></div></details>
+  </div>
+</section>
+
+<section class="section wrap" id="source">
+  <div class="section-head" data-reveal><p class="kicker">Source</p><h2>Read it before you trust it</h2></div>
+  <div data-reveal>
+    <p>A wallet you cannot inspect is a wallet you are taking on faith. Every line of this one is published at <a href="https://github.com/AwokenLazarus/lazarus-key" rel="noopener">github.com/AwokenLazarus/lazarus-key</a>, including the changes that make it work on XBT and the ones that stop it reporting anything to anybody.</p>
+    <p>It is a fork of <a href="https://github.com/proto-at-block/bitkey" rel="noopener">Bitkey</a>, which Block publishes under the MIT licence — the reason this fork can exist at all. That licence and Block's copyright are kept as they are; the changes here are offered under the same terms. <code>XBT.md</code> lists what differs from upstream, and <code>NOTICE.md</code> covers licensing, trademarks and warranty.</p>
+    <div class="btn-row"><a class="btn ghost" href="https://github.com/AwokenLazarus/lazarus-key" rel="noopener">View the source</a><a class="btn ghost" href="https://github.com/AwokenLazarus/lazarus-key/blob/main/XBT.md" rel="noopener">What was changed</a></div>
+  </div>
+</section>
+
+<section class="section inset" id="disclaimer">
+ <div class="wrap" data-reveal>
+  <div class="section-head"><p class="kicker">Read this</p><h2>Disclaimer</h2></div>
+  <p><strong>Not supported by Block.</strong> Lazarus Key is an independent fork of Block, Inc.'s Bitkey app, made under the MIT licence. It is not built, endorsed, reviewed or supported by Block. "Bitkey" and "Block" are their trademarks, used here only to say which hardware this works with. Do not ask them for help with this app, and do not expect their support to cover it.</p>
+  <p><strong>Work in progress.</strong> This software is young and under active development. It has not been independently audited. It can contain mistakes that lose money. Test with a small amount first, and keep your Emergency Exit Kit printed and safe.</p>
+  <p><strong>Your coins are your responsibility.</strong> Lazarus is not responsible for lost or stolen funds, however they are lost: a bug, a mistake, a lost phone, a lost kit, a forgotten passphrase, a stolen device, a wrong address, a chain reorganisation, or anything else. No warranty of any kind is given. Nobody here can move, freeze, refund or recover your money — which is the point of self-custody, and the price of it.</p>
+  <p class="note faint">Nothing on this page is financial advice.</p>
+ </div>
+</section>
+</main>
+<footer class="site-footer">
+  <div class="wrap footer-grid">
+    <div>
+      <a class="wordmark" href="/"><svg class="chi" viewBox="0 0 20.36 32" aria-hidden="true"><path d="M15.96 4.16C15.96 2.91 15.56 2.02 14.61 1.56C14.14 1.33 13.51 1.21 12.71 1.21H9.61L9.69 0H13.65C14.77 0 15.67 0.18 16.36 0.55C17.04 0.91 17.54 1.4 17.86 2.01C18.17 2.63 18.33 3.32 18.33 4.07C18.33 4.84 18.17 5.55 17.84 6.2C17.52 6.84 17.01 7.36 16.32 7.75C15.63 8.13 15.3 8.33 14.01 8.33H9.69L9.61 7.12H13.4C14.39 7.12 15.19 6.66 15.63 5.78C15.85 5.35 15.96 4.81 15.96 4.16ZM11.57 0 11.57 10.83V30.94L13.18 31.55V32H7.2V31.55L8.8 30.94V10.83V1.06L7.2 0.45V0ZM9.8 20.31 3.89 27.07 6.01 27.79V28.32H0V27.79L2.08 27.07L9.02 19.39L9.97 18.7L15.18 12.61L13.05 11.89V11.36H19.07V11.89L16.99 12.61L10.77 19.61ZM14.05 27.07 9.04 20.79 8.6 20.39 2.34 12.63 0.3 11.89V11.36H8.93V11.89L6.61 12.61L10.91 18.05L11.38 18.5L18.32 27.04L20.36 27.79V28.32H11.73V27.79Z"/></svg>Lazarus <em>XBT</em></a>
+      <p class="note" style="margin-top:.8rem;max-width:22rem">A hub for Bitcoin on BLAKE2b proof of work: the chain, the pools, the software and the people building on it.</p>
+      <p class="note faint"><i>Proverbs 11:1</i> — a just weight is his delight.</p>
+    </div>
+    <div class="footer-col">
+      <p class="category">Network</p>
+      <a href="/learn/">What XBT is</a>
+      <a href="/learn/#softfork">Soft fork status</a>
+      <a href="https://mempool.lazarus-xbt.xyz" rel="noopener">Block explorer</a>
+      <a href="/map/">Galaxy map</a>
+      <a href="/ecosystem/#pools">Pool directory</a>
+    </div>
+    <div class="footer-col">
+      <p class="category">Mine</p>
+      <a href="https://pool.lazarus-xbt.xyz" rel="noopener">Lazarus Pool</a>
+      <a href="https://pool.lazarus-xbt.xyz#connect" rel="noopener">Connect a miner</a>
+      <a href="https://pool.lazarus-xbt.xyz#learn" rel="noopener">How the pool works</a>
+      <a href="/ecosystem/#pools">Other pools</a>
+    </div>
+    <div class="footer-col">
+      <p class="category">Build</p>
+      <a href="https://github.com/AwokenLazarus/Bitcoin" rel="noopener">Source on GitHub</a>
+      <a href="https://github.com/AwokenLazarus/lazarus-key" rel="noopener">Lazarus Key source</a>
+      <a href="/key/">Lazarus Key wallet</a>
+      <a href="/ecosystem/#software">Software</a>
+      <a href="https://mcp.lazarus-xbt.xyz" rel="noopener">MCP server</a>
+      <a href="https://mempool.lazarus-xbt.xyz/api" rel="noopener">Explorer API</a>
+    </div>
+    <div class="footer-col">
+      <p class="category">Community</p>
+      <a href="https://discord.gg/fD33dJXnzz" rel="noopener">Discord</a>
+      <a href="https://x.com/Awoken_Lazarus" rel="noopener">X</a>
+      <a href="/faq/">FAQ</a>
+    </div>
+  </div>
+  <div class="wrap footer-bottom">
+    <span>Lazarus · Bitcoin BLAKE2b (XBT). Public data, no accounts, no custody.</span>
+    <span class="live">live</span>
+  </div>
+</footer>
+<script src="/assets/hub.js?v=2" defer></script>
+</body>
+</html>

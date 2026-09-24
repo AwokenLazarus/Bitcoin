@@ -8,6 +8,8 @@
   "routes": [{ "pattern": "lazarus-xbt.xyz", "custom_domain": true }],
   "assets": { "directory": "./public", "binding": "ASSETS", "not_found_handling": "none", "run_worker_first": false },
   "kv_namespaces": [{ "binding": "GALAXY", "id": "8242de880afd41f79e03b586eb16e227" }],
+  // Lazarus Key app builds: too large for Workers assets, so they are served from R2.
+  "r2_buckets": [{ "binding": "DOWNLOADS", "bucket_name": "lazarus-key-downloads" }],
   "triggers": { "crons": ["*/5 * * * *"] },
   "observability": { "enabled": true, "head_sampling_rate": 0.1 }
 }
