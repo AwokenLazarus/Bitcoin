@@ -27,9 +27,17 @@ const isDefaultTag = (t) => DEFAULT_SECONDARY.has(String(t || "").trim().toLower
 // is its Imperial outpost, sized by that share. A wallet is "recurring" when it is paid by at
 // least a fifth of the pool's few-output coinbases (and three of them): that is the pool's own.
 const MIN_EVIDENCE = 1;
-// Where the operator's knowledge overrides the chain, it says so on the map. Keep this short.
+// A pool that passes the test and still builds some blocks itself is mixed: a Rebel system with
+// gateway planets and an Imperial outpost for its own stratum. Neither side is a verdict; each is
+// sized by its blocks. Pool-built = no gateway tag, or a secondary tag naming the pool itself
+// (see planetOf), the same rule the explorer's pie uses for its "Built by the pool" band.
+// Where the operator's knowledge overrides the chain, it says so on the map. Keep this short. A
+// verdict with a `type` overrides the allegiance test; one with only a `note` is shown beside it.
 export const OPERATOR_VERDICT = {
-  AlphaPool: { type: "stratum", note: "Lazarus operator's verdict: known bad actor. Its small DATUM-AP product passes the chain test; 95% of its blocks pay the pool's own wallet." },
+  // Was type "stratum" while DATUM-AP was its only DATUM product. Since 22 Sep 2026 (~20:18 UTC)
+  // its blocks carry gateway operators' tags (973724 = AlphaPool/The Mothership), so the chain
+  // decides: a mixed pool (Mike, 2026-09-24: "don't flip it to pure DATUM").
+  AlphaPool: { note: "Lazarus operator's verdict: known bad actor. Mixed pool since 22 Sep 2026: DATUM gateways plus its own stratum, each sized by its blocks." },
 };
 const WINDOW_MIN_BLOCKS = 10;
 
@@ -235,13 +243,16 @@ export function buildGalaxy(records, { now = Math.floor(Date.now() / 1000), laza
     const win = recent.length >= WINDOW_MIN_BLOCKS ? recent : g.rows;
     const pct = (f) => Math.round((1000 * win.filter(f).length) / win.length) / 10;
     const faction = { window: win === recent ? "7d" : "all", blocks: win.length,
+      datumBlocks: win.filter(isDatum).length, poolBuiltBlocks: win.filter((r) => !isDatum(r)).length,
       coinbasePaidPct: pct(paysMiners), datumPct: pct(isDatum), poolBuiltPct: pct((r) => !isDatum(r)),
       paysMinersEver: paidAll >= MIN_EVIDENCE, datumEver: datumAll >= MIN_EVIDENCE };
     let type;
     if (g.generic) type = "independent";
     else if (!POOL_LINKS[g.name] && medOut <= 3) type = named.size >= 3 ? "cluster" : "independent"; // not a known pool and no split: an operator's own node (or a software default shared by many)
     else type = faction.paysMinersEver && faction.datumEver ? "datum" : "stratum";      // a pool: the capability test
-    if (!g.generic && OPERATOR_VERDICT[g.name]) { type = OPERATOR_VERDICT[g.name].type; faction.operatorNote = OPERATOR_VERDICT[g.name].note; }
+    const verdict = !g.generic && OPERATOR_VERDICT[g.name];
+    if (verdict) { if (verdict.type) type = verdict.type; faction.operatorNote = verdict.note; }
+    faction.mixed = type === "datum" && faction.datumBlocks > 0 && faction.poolBuiltBlocks > 0;
     g.faction = faction;
     // One miner, one world. A solo miner whose primary tag is their own name on some blocks and a
     // software default on others used to land in two systems of the same name, splitting their

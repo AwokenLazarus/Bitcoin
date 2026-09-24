@@ -13,6 +13,11 @@ Pools are solar systems, DATUM gateways are planets, every flash is a block.
 - **Galactic Empire** (red, Death Stars): stratum-only pools that build every template themselves.
 - **Outer Rim** (green): solo miners on their own node and gateway.
 
+A pool that takes DATUM and still builds some blocks itself is **mixed** (Lazarus, AlphaPool since
+22 Sep 2026): a Rebel system whose gateway planets and Imperial outpost (its own stratum) are each
+sized by their blocks. Pool-built means no gateway tag, or a secondary tag naming the pool itself
+(`AlphaPool/AlphaPool`, `DATUM-AP/DATUM-AP`); the explorer's "Built by the pool" band uses the same rule.
+
 Everything is inferred from public chain data. A DATUM gateway writes its coinbase scriptSig as
 height push, then `<primary tag> 0x0F <secondary tag> 0x00` (`datum_coinbaser.c`): the primary
 tag names the pool, the secondary names the gateway. `src/galaxy.js` holds the rules (tag

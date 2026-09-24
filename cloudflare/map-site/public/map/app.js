@@ -878,7 +878,9 @@ function fillSystem(box, s) {
   box.replaceChildren();
   box.append(el("div", "t-kind", s.type === "datum" || s.type === "stratum" ? "Star system" : "Independent world"));
   box.append(el("div", "t-name", s.name));
-  box.append(el("div", "t-sub", `${TYPE_LABEL[s.type][0]} · ${TYPE_LABEL[s.type][1]}`));
+  // A mixed pool is both: gateway planets and an outpost, each sized by its blocks (galaxy.js).
+  const mixed = s.faction && s.faction.mixed;
+  box.append(el("div", "t-sub", mixed ? `${TYPE_LABEL.datum[0]} · mixed: DATUM gateways and its own public stratum` : `${TYPE_LABEL[s.type][0]} · ${TYPE_LABEL[s.type][1]}`));
   const dl = el("dl", "kv");
   kv(dl, "Blocks", `${n(s.blocks)} since the fork · ${n(s.blocks7d)} this week`);
   kv(dl, "Share (7d)", `${s.share7d}% of blocks`);
@@ -895,8 +897,9 @@ function factionRows(dl, s) {
   sec(dl, "Allegiance test");
   kv(dl, "Pays miners", f.paysMinersEver ? "yes: in the coinbase (TIDES split or straight to the finder)" : "not seen: blocks pay the pool's own wallet", f.paysMinersEver ? "live-on" : "live-off");
   kv(dl, "Takes DATUM", f.datumEver ? "yes: miners' gateways build blocks here" : "not seen", f.datumEver ? "live-on" : "live-off");
-  kv(dl, f.window === "7d" ? "Last 7 days" : "All blocks", `${f.datumPct}% built by DATUM gateways · ${f.coinbasePaidPct}% paid to miners in the coinbase`);
-  if (f.poolBuiltPct > 0) kv(dl, "Imperial outpost", `${f.poolBuiltPct}% of blocks come from the pool's own templates — the stratum endpoint in this system`);
+  const of = (k) => (f[k] != null ? ` (${n(f[k])} of ${n(f.blocks)})` : "");
+  kv(dl, f.window === "7d" ? "Last 7 days" : "All blocks", `${f.datumPct}% built by DATUM gateways${of("datumBlocks")} · ${f.coinbasePaidPct}% paid to miners in the coinbase`);
+  if (f.poolBuiltPct > 0) kv(dl, "Imperial outpost", `${f.poolBuiltPct}% of blocks${of("poolBuiltBlocks")} come from the pool's own templates — the stratum endpoint in this system`);
   if (f.operatorNote) kv(dl, "Verdict", f.operatorNote, "live-off");
 }
 // Who found a block, as a system and (where there is one) the gateway or endpoint inside it.
