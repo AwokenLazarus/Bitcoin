@@ -199,7 +199,7 @@ index 2a88477..7a43fec 100644
 +        return false;
 +      }
 +      separators++;
-+    } else if (b < 0x20 || b > 0x7e) {
++    } else if (b < 0x20 || b === 0x7f) {
 +      return false;
 +    }
 +  }

@@ -65,7 +65,7 @@ function isDATUMCoinbase(coinbaseRaw) {
             }
             separators++;
         }
-        else if (b < 0x20 || b > 0x7e) {
+        else if (b < 0x20 || b === 0x7f) {
             return false;
         }
     }

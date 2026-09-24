@@ -477,7 +477,7 @@ def is_datum_coinbase(raw):
             if k == 0 or k == len(tags) - 2:      # both tags must be non-empty
                 return False
             separators += 1
-        elif byte < 0x20 or byte > 0x7E:
+        elif byte < 0x20 or byte == 0x7F:     # UTF-8 names (emoji) are names too
             return False
     return separators == 1
 

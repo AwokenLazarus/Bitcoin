@@ -17,7 +17,7 @@ mempool's backend already parses it (`parseDATUMTemplateCreator`) and the fronte
 `minerNames[1]` on the block bar, the block page and transaction pages -- but the backend only runs the
 parser when `pool.name === 'OCEAN'`. The patch replaces that name check with a structural one:
 
-* `isDATUMCoinbase(coinbaseRaw)`: exactly one `0x0F` separator, printable ASCII either side, a
+* `isDATUMCoinbase(coinbaseRaw)`: exactly one `0x0F` separator, no control bytes either side (UTF-8 names such as `💰Pirate Lounge 🏴‍☠️` count, as they do upstream for OCEAN), a
   terminating NUL, and a pooled unique-id push (`> 3` bytes). Solo DATUM blocks are deliberately left
   alone: their secondary tag is the miner's own free text (slogans, mottos), not a template creator.
 * `parseTemplateCreator(poolName, coinbaseRaw)`: OCEAN and DMND behave exactly as before; any other
