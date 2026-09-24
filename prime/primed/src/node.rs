@@ -286,20 +286,6 @@ fn settle_confirmed(shared: &Shared, hash: &str) {
 /// header was fine. Treating those as an orphan would hand back carry that a real block paid
 /// out. `duplicate` and `inconclusive` mean the node already has it, and `rejected: ...` is a
 /// failure to ask. Anything not listed here waits for `confirm_blocks`, as it always did.
-/// Whether a `submitblock` verdict means the gateway's node built a template its own chain
-/// would not accept — an outdated node, not a race or a Prime assembly slip.
-///
-/// Kept to rules a current node could not have broken by accident. `bad-txns-premature-spend-of-
-/// coinbase` is the Knots #419 long coinbase maturity: a node that knows the rule will not put
-/// such a spend in a template, so seeing one says the gateway is behind. The block is lost to
-/// everyone in the window, not only to the gateway that found it, which is why the gateway is
-/// then refused rather than warned.
-pub fn says_outdated_node(outcome: &str) -> bool {
-    // The node answers with the reject reason alone, but a build that appends its detail
-    // ("…, tried to spend coinbase at depth 102") must read the same.
-    outcome.trim().starts_with("bad-txns-premature-spend-of-coinbase")
-}
-
 pub fn says_invalid(outcome: &str) -> bool {
     matches!(
         outcome,
@@ -312,6 +298,20 @@ pub fn says_invalid(outcome: &str) -> bool {
             | "time-too-new"
             | "duplicate-invalid"
     )
+}
+
+/// Whether a `submitblock` verdict means the gateway's node built a template its own chain
+/// would not accept — an outdated node, not a race or a Prime assembly slip.
+///
+/// Kept to rules a current node could not have broken by accident. `bad-txns-premature-spend-of-
+/// coinbase` is the Knots #419 long coinbase maturity: a node that knows the rule will not put
+/// such a spend in a template, so seeing one says the gateway is behind. The block is lost to
+/// everyone in the window, not only to the gateway that found it, which is why the gateway is
+/// then refused rather than warned.
+pub fn says_outdated_node(outcome: &str) -> bool {
+    // The node answers with the reject reason alone, but a build that appends its detail
+    // ("…, tried to spend coinbase at depth 102") must read the same.
+    outcome.trim().starts_with("bad-txns-premature-spend-of-coinbase")
 }
 
 /// Label a recorded block as orphaned, once. Orphans stay unsettled so `confirm_blocks` keeps
@@ -428,7 +428,7 @@ mod difficulty_tests {
 
 #[cfg(test)]
 mod outdated_tests {
-    use super::says_outdated_node;
+    use super::{says_invalid, says_outdated_node};
 
     #[test]
     fn premature_coinbase_spend_indicts_the_gateways_node() {
@@ -456,5 +456,15 @@ mod outdated_tests {
         ] {
             assert!(!says_outdated_node(o), "{o:?} must not quarantine a gateway");
         }
+    }
+
+    #[test]
+    fn outdated_and_invalid_are_different_verdicts() {
+        // The two fns sit next to each other; swapping their bodies with their docs would
+        // orphan a real block or quarantine an honest gateway.
+        assert!(says_outdated_node("bad-txns-premature-spend-of-coinbase"));
+        assert!(!says_invalid("bad-txns-premature-spend-of-coinbase"));
+        assert!(says_invalid("high-hash"));
+        assert!(!says_outdated_node("high-hash"));
     }
 }
