@@ -166,7 +166,23 @@ pub async fn parent_verdict(shared: &Shared, prev_le: &Hash) -> ParentVerdict {
 /// parent, the coinbase or the merkle root can come from how Prime put the block together, or
 /// from a race, and must not cost an honest gateway its credit.
 pub fn template_fault(reason: &str) -> bool {
+    let reason = reason.trim();
     reason.starts_with("bad-txns-") || reason == "bad-blk-sigops"
+}
+
+/// The one template reason that cannot be a Prime assembly slip. A node that knows Knots #419
+/// will not put a premature coinbase spend in a template, so seeing it is enough to fault the
+/// gateway at once. Any other [`template_fault`] needs two consecutive failing checks on
+/// different jobs — `assemble_block` can report `bad-txns-inputs-missingorspent` from a
+/// partial or mis-ordered job-validation reply, and that must not refuse an honest gateway.
+pub fn faults_at_once(reason: &str) -> bool {
+    reason.trim().starts_with("bad-txns-premature-spend-of-coinbase")
+}
+
+/// Distinguishes one job from another for [`Faults::note_fail`]. Same slot at the same height
+/// is the same job (a recheck of a Prime assembly slip must not count as the second strike).
+pub fn job_token(job_id: u8, height: u32) -> u32 {
+    ((u32::from(job_id)) << 24) | (height & 0x00ff_ffff)
 }
 
 /// A gateway whose template our node found invalid; its shares are refused until a later
@@ -180,11 +196,19 @@ pub struct Fault {
     pub found_by: &'static str,
 }
 
+/// A first failing check that is not enough to fault the gateway on its own.
+#[derive(Clone, Debug)]
+struct PendingFail {
+    /// Opaque job token from the caller (height and slot); the confirming check must differ.
+    job: u32,
+}
+
 /// Faulted gateways by whole signing key (hex). Kept across reconnects; a restart forgets them,
 /// and the next template check finds them again.
 #[derive(Debug, Default)]
 pub struct Faults {
     by_key: Mutex<HashMap<String, Fault>>,
+    pending: Mutex<HashMap<String, PendingFail>>,
 }
 
 impl Faults {
@@ -194,13 +218,39 @@ impl Faults {
 
     /// Mark `key`; true if it was not marked before.
     pub fn set(&self, key: &str, reason: &str, height: u32, found_by: &'static str) -> bool {
+        self.pending.lock().unwrap_or_else(|e| e.into_inner()).remove(key);
         let mut m = self.by_key.lock().unwrap_or_else(|e| e.into_inner());
         let new = !m.contains_key(key);
         m.insert(key.to_string(), Fault { reason: reason.to_string(), height, since_ts: now(), found_by });
         new
     }
 
+    /// Record a failed template check or found-block verdict.
+    ///
+    /// [`faults_at_once`] reasons mark the gateway immediately. Any other [`template_fault`]
+    /// waits for a second consecutive failure on a different `job`. Returns true if this call
+    /// newly faults the gateway.
+    pub fn note_fail(&self, key: &str, reason: &str, job: u32, height: u32, found_by: &'static str) -> bool {
+        if self.get(key).is_some() || faults_at_once(reason) {
+            return self.set(key, reason, height, found_by);
+        }
+        let mut pending = self.pending.lock().unwrap_or_else(|e| e.into_inner());
+        match pending.get(key) {
+            Some(prev) if prev.job != job => {
+                pending.remove(key);
+                drop(pending);
+                self.set(key, reason, height, found_by)
+            }
+            Some(_) => false,
+            None => {
+                pending.insert(key.to_string(), PendingFail { job });
+                false
+            }
+        }
+    }
+
     pub fn clear(&self, key: &str) -> Option<Fault> {
+        self.pending.lock().unwrap_or_else(|e| e.into_inner()).remove(key);
         self.by_key.lock().unwrap_or_else(|e| e.into_inner()).remove(key)
     }
 
@@ -279,5 +329,36 @@ mod tests {
         assert_eq!(f.get("k").unwrap().height, 973554);
         assert!(f.clear("k").is_some());
         assert!(f.get("k").is_none());
+    }
+
+    #[test]
+    fn a_premature_coinbase_spend_faults_at_once() {
+        let f = Faults::default();
+        assert!(faults_at_once("bad-txns-premature-spend-of-coinbase"));
+        assert!(faults_at_once("bad-txns-premature-spend-of-coinbase, tried to spend coinbase at depth 102"));
+        assert!(!faults_at_once("bad-txns-inputs-missingorspent"));
+        assert!(!faults_at_once("bad-blk-sigops"));
+        assert!(f.note_fail("k", "bad-txns-premature-spend-of-coinbase", 1, 973553, "template check"));
+        assert_eq!(f.get("k").unwrap().height, 973553);
+    }
+
+    #[test]
+    fn a_prime_assembly_slip_needs_two_different_jobs() {
+        let f = Faults::default();
+        assert!(!f.note_fail("k", "bad-txns-inputs-missingorspent", 1, 100, "template check"));
+        assert!(f.get("k").is_none(), "one slip must not refuse an honest gateway");
+        assert!(!f.note_fail("k", "bad-txns-inputs-missingorspent", 1, 100, "template check"));
+        assert!(f.get("k").is_none(), "the same job again is still one slip");
+        assert!(f.note_fail("k", "bad-blk-sigops", 2, 101, "template check"));
+        assert_eq!(f.get("k").unwrap().reason, "bad-blk-sigops");
+    }
+
+    #[test]
+    fn a_passing_check_forgets_the_first_slip() {
+        let f = Faults::default();
+        assert!(!f.note_fail("k", "bad-txns-inputs-missingorspent", 1, 100, "template check"));
+        assert!(f.clear("k").is_none(), "pending is not yet a fault");
+        assert!(!f.note_fail("k", "bad-txns-inputs-missingorspent", 2, 101, "template check"));
+        assert!(f.get("k").is_none(), "a cleared first slip starts the count over");
     }
 }

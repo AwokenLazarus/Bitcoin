@@ -1542,6 +1542,7 @@ impl Session {
         let hex_block = hex::encode(&block);
         let shared = self.shared.clone();
         let (id, gw, key, height) = (self.id, self.gateway_hex.clone(), self.gateway_key_hex(), c.share.height);
+        let job = validity::job_token(c.submit.job_id, height);
         tokio::spawn(async move {
             shared.totals.add(&shared.totals.template_checks, 1);
             let verdict = shared
@@ -1555,7 +1556,7 @@ impl Session {
                 }
                 Ok(serde_json::Value::String(reason)) if validity::template_fault(&reason) => {
                     shared.totals.add(&shared.totals.template_checks_failed, 1);
-                    mark_faulted(&shared, id, &gw, &key, &reason, height, "template check");
+                    mark_faulted(&shared, id, &gw, &key, &reason, job, height, "template check");
                 }
                 Ok(other) => log::debug!("[{id}] {gw}: template check at height {height} inconclusive: {other}"),
                 Err(e) => log::debug!("[{id}] {gw}: template check at height {height} could not run: {e}"),
@@ -1852,6 +1853,7 @@ impl Session {
         let id = self.id;
         let (gw, key, house) = (self.gateway_hex.clone(), self.gateway_key_hex(), self.is_house_stratum());
         let share_height = pending.share.height;
+        let job = validity::job_token(pending.submit.job_id, share_height);
         tokio::spawn(async move {
             let outcome = match shared.rpc.submitblock(&hex_block).await {
                 Ok(serde_json::Value::Null) => "accepted".to_string(),
@@ -1868,7 +1870,7 @@ impl Session {
             let outdated = node::says_outdated_node(&outcome);
             if !house {
                 if validity::template_fault(&outcome) {
-                    mark_faulted(&shared, id, &gw, &key, &outcome, share_height, "found block");
+                    mark_faulted(&shared, id, &gw, &key, &outcome, job, share_height, "found block");
                 } else if outcome == "accepted" {
                     clear_fault(&shared, id, &gw, &key, share_height, "found a block our node accepted");
                 }
@@ -1901,11 +1903,25 @@ impl Session {
 }
 
 /// Stop crediting a gateway whose template our node found invalid; see `validity::Faults`.
-fn mark_faulted(shared: &Shared, id: u64, gw: &str, key: &str, reason: &str, height: u32, found_by: &'static str) {
-    if shared.faults.set(key, reason, height, found_by) {
+fn mark_faulted(
+    shared: &Shared,
+    id: u64,
+    gw: &str,
+    key: &str,
+    reason: &str,
+    job: u32,
+    height: u32,
+    found_by: &'static str,
+) {
+    if shared.faults.note_fail(key, reason, job, height, found_by) {
         log::warn!(
             "[{id}] {gw}: our node finds its template invalid at height {height} ({reason}, from a {found_by}). Its node builds blocks the network rejects, most likely because it has not upgraded to the long coinbase maturity rules (Bitcoin Knots 29.4.2, from block 973,440). Its shares are refused, not credited, until a template of its passes."
         );
+    } else if shared.faults.get(key).is_none() {
+        log::info!(
+            "[{id}] {gw}: template at height {height} failed ({reason}, from a {found_by}); waiting for a second failing check on a different job before refusing its work"
+        );
+        return;
     }
     let label = format!("{reason} at {height}");
     shared.client_update(id, |c| c.template_fault = Some(label));
