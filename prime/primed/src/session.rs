@@ -77,6 +77,9 @@ const MAX_MONEY: u64 = 2_100_000_000_000_000;
 /// transactions of a found block need the protocol's full `MAX_CMD_LEN`, and those are asked
 /// for. Every open session can make Prime buffer one frame, so this is what 256 of them cost.
 const MAX_IDLE_FRAME: usize = 192 * 1024;
+/// Handshake refusal when [`Shared::quarantined`] is live. Shown only in Prime's log
+/// (`SessionError::Bad`); the 14-space holes were a lost "#419" and a broken line wrap.
+const OUTDATED_NODE_REFUSAL: &str = "gateway refused: its node built a block this chain rejected. Upgrade Bitcoin Knots to a build that has the #419 rule (29.4.2 or later) and reconnect — the refusal lifts on its own and an upgraded gateway is taken back straight away";
 /// How long after a block candidate a session may still send a full-size frame.
 const BLOCK_REPLY_WINDOW: Duration = Duration::from_secs(1800);
 /// Blocks past the one it was issued for that a coinbaser is still honoured; see `issued_for`.
@@ -458,9 +461,7 @@ pub async fn run(shared: Arc<Shared>, mut stream: TcpStream, remote: SocketAddr)
             q.strikes,
             q.until.saturating_sub(crate::state::now()) / 60
         );
-        return Err(SessionError::Bad(
-            "gateway refused: its node built a block this chain rejected. Upgrade Bitcoin Knots to a build that has the              rule (29.4.2 or later) and reconnect — the refusal lifts on its own and an upgraded gateway is taken back              straight away",
-        ));
+        return Err(SessionError::Bad(OUTDATED_NODE_REFUSAL));
     }
     // Quarantine lapsed: the operator had time to upgrade. Drop a leftover template fault so
     // empty or unanswered templates are not punished until a passing check or a restart.
@@ -2230,6 +2231,14 @@ mod tests {
     #[test]
     fn the_slow_warning_leaves_room_before_a_gateway_gives_up() {
         assert!(COINBASER_SLOW < STOCK_COINBASER_DEADLINE);
+    }
+
+    #[test]
+    fn the_refusal_names_the_419_rule_and_has_no_gap() {
+        assert!(OUTDATED_NODE_REFUSAL.contains("#419"), "{OUTDATED_NODE_REFUSAL}");
+        assert!(OUTDATED_NODE_REFUSAL.contains("29.4.2"));
+        assert!(OUTDATED_NODE_REFUSAL.contains("taken back straight away"));
+        assert!(!OUTDATED_NODE_REFUSAL.contains("  "), "no run of spaces: {OUTDATED_NODE_REFUSAL:?}");
     }
 
     /// Who is trusted as the pool's own gateway is decided on the whole key when the whole key
