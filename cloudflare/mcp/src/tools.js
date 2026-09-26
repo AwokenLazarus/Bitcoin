@@ -34,7 +34,7 @@ export const TOOLS = [
           note: "TIDES pays every address in a rolling window of recent work; a new miner's share grows until the window has turned over once" },
         estimate: { xbt_per_day: xbt(m.est_btc_day), xbt_per_week: xbt(m.est_btc_week) },
         totals: { paid_xbt: xbt(m.paid_btc), maturing_xbt: xbt(m.immature_btc), maturing_blocks: m.immature_blocks, carried_xbt: xbt(m.carry_btc), datum_bonus_earned_xbt: xbt(m.rebate_btc), min_coinbase_output_xbt: xbt(m.min_payout_btc),
-          note: "Payouts are outputs of the found block's own coinbase. Coinbase outputs normally spend after 100 confirmations, but the temporary Knots #419 rule makes a newly mined coin wait 6,480 confirmations (about 35 days) and nodes will not relay a spend below that. 'carried' is earned value too small for an output yet; it is added to a later coinbase once it passes the pool's minimum output." },
+          note: "Payouts are outputs of the found block's own coinbase. Coinbase outputs normally spend after 100 confirmations, but the temporary Knots #419 rule makes a newly mined coin wait 6,480 confirmations (about 45 days at 10-minute blocks) and nodes will not relay a spend below that. 'carried' is earned value too small for an output yet; it is added to a later coinbase once it passes the pool's minimum output." },
         if_on_datum: m.fee_path === "datum" ? null : { xbt_per_day: xbt(m.est_datum_btc_day), of_which_bonus_xbt_per_day: xbt(m.est_bonus_btc_day), uplift_percent: pct(m.datum_uplift_percent, 2) },
         shares: { accepted_work: m.shares_lifetime, rejected: m.shares_rej, note: "accepted_work is difficulty-weighted (a share at difficulty 16384 counts 16384), not a count of shares" },
         first_seen: iso(m.first_seen), last_seen: iso(m.last_seen),
@@ -250,7 +250,7 @@ export const TOOLS = [
     async run({ address, txs }, ctx) {
       const a = await chain(ctx, "/api/address/" + address, 20), c = a.chain_stats || {}, m = a.mempool_stats || {};
       const out = { address, balance_xbt: xbt(((c.funded_txo_sum || 0) - (c.spent_txo_sum || 0)) / 1e8), received_xbt: xbt((c.funded_txo_sum || 0) / 1e8), spent_xbt: xbt((c.spent_txo_sum || 0) / 1e8), transactions: c.tx_count,
-        unconfirmed: { transactions: m.tx_count || 0, net_sats: (m.funded_txo_sum || 0) - (m.spent_txo_sum || 0) }, note: "Balance includes coinbase outputs that are still maturing. Under the temporary Knots #419 rule a newly mined coin needs 6,480 confirmations before it can be spent or relayed, so mined balances stay locked for about 35 days.", explorer: `${EXPLORER}/address/${address}` };
+        unconfirmed: { transactions: m.tx_count || 0, net_sats: (m.funded_txo_sum || 0) - (m.spent_txo_sum || 0) }, note: "Balance includes coinbase outputs that are still maturing. Under the temporary Knots #419 rule a newly mined coin needs 6,480 confirmations before it can be spent or relayed, so mined balances stay locked for about 45 days.", explorer: `${EXPLORER}/address/${address}` };
       if (txs > 0) {
         const list = await chain(ctx, `/api/address/${address}/txs`, 20);
         out.recent = (list || []).slice(0, txs).map((t) => { const inn = t.vout.filter((o) => o.scriptpubkey_address === address).reduce((s, o) => s + o.value, 0), outt = t.vin.filter((i) => i.prevout?.scriptpubkey_address === address).reduce((s, i) => s + (i.prevout?.value || 0), 0);
