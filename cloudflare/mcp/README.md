@@ -11,13 +11,36 @@ credentials and sees nothing a browser cannot.
 
 | File | What |
 | --- | --- |
-| `src/index.js` | MCP protocol (initialize, tools/list, tools/call, ping), landing page, CORS |
-| `src/tools.js` | the 15 tools and `upstream()`, the single cached door to the pool and explorer |
+| `src/index.js` | MCP protocol (initialize, tools/list, tools/call, ping), request limits, rate gating, landing page, CORS |
+| `src/tools.js` | the 15 original tools (overview, workers, payouts, gateways, pool, chain lookups, docs) |
+| `src/audit.js` | payout audit: `miner_audit`, `miner_immature`, `miner_makegoods`, `verify_payout`, `lazarus_faq` |
+| `src/faq.js` | the versioned, public-safe knowledge base behind `lazarus_faq` (no operator internals) |
+| `src/upstream.js` | `upstream()`, the single cached door to the pool and explorer; `PublicError`; shared helpers |
+| `src/address.js` | strict mainnet address validation (bech32 / bech32m / base58check checksums) |
 | `src/limiter.js` | exact rate limits in a Durable Object; the numbers are in `RULES` |
+| `test/run.mjs` | offline tests against recorded public-API fixtures: `node test/run.mjs` |
 
-Limits: 30 tool calls/min per client IP, 8/min for per-address lookups, 240 upstream fetches/min
-for everyone together. Upstream answers are kept in the edge cache (8 s for live pool figures up
-to an hour for docs and block hashes), so most calls never reach the hub.
+## Security
+
+- **Read-only.** Every tool only GETs the public pool and explorer APIs through `upstream()`; no
+  secrets, no bindings but the `LIMITER` Durable Object, `workers_dev` and `preview_urls` off.
+- **Validate first.** Arguments are checked before any limiter unit is spent or anything is fetched.
+  Addresses must decode with a valid checksum as mainnet P2PKH/P2SH (base58check), P2WPKH/P2WSH
+  (bech32) or P2TR (bech32m); heights are integers from 961,640 (the first BLAKE2b block).
+- **Request limits.** POST with `Content-Type: application/json` only (415 otherwise); body ≤ 64 KB,
+  counted while reading so a chunked body is capped too; batches of 1–10 messages with at most 3
+  tool calls, run one after another; ids must be strings or numbers.
+- **Rate limits** (`RULES`, exact, per minute): 30 tool calls per client IP (IPv6 per /64); 8
+  per-address units per client IP (`miner_audit` and `verify_payout` cost 2); 20 units per payout
+  address across all clients; 240 upstream fetches for everyone. A tool's whole fan-out must fit the
+  remaining upstream budget before it starts, and `upstream()` refuses any read beyond the tool's
+  declared `fanout`. A limiter fault fails open (the server stays up).
+- **Output.** Answers over 60,000 characters are refused; lists are capped by `limit` arguments.
+- **Errors** carry only messages written for clients (`PublicError`); anything else is reported
+  generically, so no upstream host, body or stack trace leaks.
+
+Upstream answers are kept in the edge cache (8 s for live pool figures up to an hour for docs and
+block hashes), so most calls never reach the hub.
 
 Deploy: `wrangler deploy` here (needs `wrangler login`). Test a tool:
 

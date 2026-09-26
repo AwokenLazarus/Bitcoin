@@ -15,17 +15,21 @@ export class Limiter extends DurableObject {
     this.windows = new Map(); // rule name -> { slot, used }
   }
 
-  /** rules: [{ name, limit, period_s }]. All pass and are counted, or the first one over is reported and nothing is counted. */
+  /**
+   * rules: [{ name, limit, period_s, cost?, need? }]. `cost` (default 1) is what the call counts;
+   * `need` (default `cost`) is the room that must be left, so `cost: 0, need: n` checks for headroom
+   * without spending any. All pass and are counted, or the first one short is reported and nothing is counted.
+   */
   take(rules) {
     const now = Date.now() / 1000;
     for (const r of rules) {
-      const slot = Math.floor(now / r.period_s), w = this.windows.get(r.name);
-      if (w && w.slot === slot && w.used >= r.limit) return { ok: false, rule: r.name, retry_s: Math.ceil((slot + 1) * r.period_s - now) };
+      const slot = Math.floor(now / r.period_s), w = this.windows.get(r.name), used = w && w.slot === slot ? w.used : 0;
+      if (used + (r.need ?? r.cost ?? 1) > r.limit) return { ok: false, rule: r.name, retry_s: Math.ceil((slot + 1) * r.period_s - now) };
     }
     for (const r of rules) {
-      const slot = Math.floor(now / r.period_s), w = this.windows.get(r.name);
-      if (w && w.slot === slot) w.used++;
-      else this.windows.set(r.name, { slot, used: 1 });
+      const slot = Math.floor(now / r.period_s), w = this.windows.get(r.name), cost = r.cost ?? 1;
+      if (w && w.slot === slot) w.used += cost;
+      else this.windows.set(r.name, { slot, used: cost });
     }
     return { ok: true };
   }
@@ -33,7 +37,8 @@ export class Limiter extends DurableObject {
 
 export const RULES = {
   client: { name: "client", limit: 30, period_s: 60 }, // every tool call, per client IP
-  heavy: { name: "heavy", limit: 8, period_s: 60 }, // per-address lookups, per client IP
+  heavy: { name: "heavy", limit: 8, period_s: 60 }, // per-address lookup units, per client IP (audit / verify cost 2)
+  address: { name: "address", limit: 20, period_s: 60 }, // lookups of one payout address, all clients together
   origin: { name: "origin", limit: 240, period_s: 60 }, // upstream fetches, all clients together
 };
 
