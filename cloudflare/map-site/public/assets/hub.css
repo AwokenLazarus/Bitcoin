@@ -186,6 +186,7 @@ a.card:hover { border-color: var(--brass-dim); transform: translateY(-2px); back
 .card h3 { display: flex; align-items: center; gap: 0.55rem; margin-bottom: 0.5rem; color: var(--ink); flex-wrap: wrap; }
 .card > .endpoint, .card > .more { margin-top: auto; }
 .card > .endpoint + .more { margin-top: 0.9rem; }
+.card > .more + .more { margin-top: 0.35rem; }
 .card p { color: var(--muted); font-size: 0.97rem; margin-bottom: 0; }
 .card .tag { white-space: nowrap; font: 600 0.65rem/1 var(--sans); letter-spacing: 0.12em; text-transform: uppercase; color: var(--brass-dim); border: 1px solid var(--line-strong); border-radius: 999px; padding: 0.25rem 0.5rem; }
 .card .more { display: inline-block; margin-top: 0.9rem; font-weight: 600; font-size: 0.92rem; color: var(--brass); }

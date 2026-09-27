@@ -170,7 +170,7 @@
       <dt>BLAKE2b</dt><dd>The hash function this chain's proof of work uses instead of SHA-256. <a href="/blake2b/">BLAKE2b vs SHA-256</a>.</dd>
       <dt>Coinbase</dt><dd>The first transaction in a block, which creates the reward. Pools here pay miners inside it, so a payout and a block are the same event.</dd>
       <dt>DATUM</dt><dd>A protocol where the miner's node builds the block template and the pool only sets the payout split.</dd>
-      <dt>Gateway</dt><dd>The DATUM software a miner runs beside their node; their own miners connect to it.</dd>
+      <dt>Gateway</dt><dd>The DATUM software a miner runs beside their node; their own miners connect to it. Either a C <code>datum_gateway</code> fork or <code>ratum-gateway</code>, a Rust rewrite that reads the same config (<a href="https://pool.lazarus-xbt.xyz/ratum" rel="noopener">guide</a>).</dd>
       <dt>Prime</dt><dd>The pool-side server a gateway talks to; each pool runs its own.</dd>
       <dt>TIDES</dt><dd>A payout scheme built on a rolling window of accepted work, paid in each block's coinbase.</dd>
       <dt>Window share</dt><dd>Your fraction of the work in the current window — what the next block would pay you, which is not the same as your hashrate.</dd>
