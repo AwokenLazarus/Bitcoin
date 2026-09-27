@@ -3355,6 +3355,21 @@ def _is_own_gateway(client):
     return str(client.get("user_agent") or "").startswith(OWN_GATEWAY_UA_PREFIX)
 
 
+def _gateway_software(ua):
+    """Which gateway program a DATUM user agent names, and its version: "ratum-gateway/0.1.28/f0569180c986"
+    is Ratum (iohzrd's Rust gateway and its forks), "lazarus-gateway/0.1" ours, and anything of the stock
+    "v0.4.1-beta[+flavor]/<git hash>" form the C datum_gateway, whichever fork built it. The generation
+    field is the wire protocol, not the program: Ratum speaks the Convoy generation too."""
+    ua = str(ua or "")
+    m = re.match(r"(ratum-gateway|lazarus-gateway)/([0-9][\w.-]*)", ua, re.I)
+    if m:
+        return {"name": m.group(1).lower(), "version": m.group(2)}
+    m = re.match(r"v?(\d+\.\d+[\w.-]*?)(?:\+[\w.-]+)?(?:/|$)", ua)
+    if m:
+        return {"name": "datum_gateway", "version": m.group(1)}
+    return {"name": "", "version": ""}
+
+
 def _gateway_row(c):
     ua = str(c.get("user_agent") or "")
     tag = str(c.get("secondary_tag") or c.get("name") or "").strip()[:40]
@@ -3362,6 +3377,7 @@ def _gateway_row(c):
         "id": c.get("id"),
         "gateway": c.get("gateway"),
         "user_agent": ua,
+        "software": _gateway_software(ua),
         "generation": c.get("generation"),
         # The pool's own public stratum connects to Prime like anyone else's gateway.
         "own": _is_own_gateway(c),

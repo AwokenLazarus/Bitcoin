@@ -568,6 +568,7 @@ window.LZ_I18N_DICTS["zh-CN"] = {
     "lazGw": "Lazarus 网关",
     "convoyGw": "CONVOY datum_gateway",
     "datumGw": "DATUM 网关",
+    "ratumGw": "Ratum 网关",
     "keyTitle": "网关签名公钥（前 16 位十六进制）",
     "tickConnected": "已连接",
     "tickRemote": "远程在算",

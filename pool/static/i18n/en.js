@@ -568,6 +568,7 @@ window.LZ_I18N_DICTS["en"] = {
     "lazGw": "Lazarus gateway",
     "convoyGw": "CONVOY datum_gateway",
     "datumGw": "DATUM gateway",
+    "ratumGw": "Ratum gateway",
     "keyTitle": "Gateway signing key (first 16 hex)",
     "tickConnected": "Connected",
     "tickRemote": "Remote hashing",

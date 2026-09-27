@@ -1035,6 +1035,13 @@
     const clientLabel = (g) => {
       const ua = String(g.user_agent || "");
       if (g.own) return `<div>${t("gws.lazGw")}</div><div class="faint">${esc(ua.split("/")[1] || "")}</div>`;
+      // ratum-gateway (iohzrd's Rust gateway and its forks) sends "ratum-gateway/<version>/<commit>". It
+      // speaks the Convoy generation, so without this it read as a CONVOY datum_gateway.
+      const ratum = ua.match(/^ratum-gateway\/(\d+\.\d+[\w.-]*)(?:\/([0-9a-f]{7,}|unknown)(-dirty)?)?/i);
+      if (ratum) {
+        const bits = [ratum[1], ratum[2] && ratum[2] !== "unknown" ? ratum[2].slice(0, 7) + (ratum[3] || "") : ""].filter(Boolean);
+        return `<div>${t("gws.ratumGw")}</div><div class="faint" title="${esc(ua)}">${esc(bits.join(" · "))}</div>`;
+      }
       const gen = String(g.generation || "").toLowerCase();
       const family = gen === "convoy" ? t("gws.convoyGw") : t("gws.datumGw");
       const ver = (ua.match(/v?(\d+\.\d+[\w.-]*?)(?=[+/]|$)/) || [])[1] || "";
