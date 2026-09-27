@@ -120,6 +120,7 @@ struct Job {
     sia_prev: Hash,
     ntime: [u8; 8],
     coinb1: Vec<u8>,
+    coinb2: Vec<u8>,
     target: Hash,
 }
 
@@ -156,9 +157,7 @@ fn parse_notify(v: &Value) -> Option<Job> {
     let id = p.first()?.as_str()?.to_string();
     let prev = hex::decode(p.get(1)?.as_str()?).ok()?;
     let coinb1 = hex::decode(p.get(2)?.as_str()?).ok()?;
-    if coinb1.len() != 39 {
-        return None;
-    }
+    let coinb2 = hex::decode(p.get(3).and_then(|c| c.as_str()).unwrap_or("")).ok()?;
     let ntime_hex = p.get(7)?.as_str()?;
     let mut ntime = [0u8; 8];
     if ntime_hex.len() == 16 {
@@ -174,7 +173,7 @@ fn parse_notify(v: &Value) -> Option<Job> {
     }
     prev_arr.copy_from_slice(&prev);
     let sia_prev = if prev_arr[..6] == [0; 6] { prev_arr } else { pow::sia_prevhash(&prev_arr) };
-    Some(Job { id, sia_prev, ntime, coinb1, target: pow::share_target_le(0).unwrap() })
+    Some(Job { id, sia_prev, ntime, coinb1, coinb2, target: pow::share_target_le(0).unwrap() })
 }
 
 fn send(w: &mut TcpStream, v: Value) {
@@ -202,7 +201,7 @@ fn worker(
     let mut en1 = SUB_EN1.lock().unwrap().clone().unwrap_or_default();
     let mut en2 = [0u8; 8];
     en2[..8].copy_from_slice(&(idx.wrapping_mul(0x9E37_79B9_7F4A_7C15)).to_le_bytes());
-    let mut root = root_for(&job.coinb1, &en1, &en2);
+    let mut root = root_for(&job.coinb1, &en1, &en2, &job.coinb2);
     let mut nonce = idx;
     loop {
         if stop.load(Ordering::Relaxed) {
@@ -214,7 +213,7 @@ fn worker(
                     job = j;
                     nonce = idx;
                     en1 = SUB_EN1.lock().unwrap().clone().unwrap_or_default();
-                    root = root_for(&job.coinb1, &en1, &en2);
+                    root = root_for(&job.coinb1, &en1, &en2, &job.coinb2);
                 }
             }
         }
@@ -231,14 +230,35 @@ fn worker(
     }
 }
 
-fn root_for(coinb1: &[u8], en1: &[u8], en2: &[u8; 8]) -> Hash {
-    let mut extra = [0u8; 12];
-    let mut buf = en1.to_vec();
-    buf.extend_from_slice(en2);
-    let n = buf.len().min(12);
-    extra[..n].copy_from_slice(&buf[..n]);
-    let mut leaf = [0u8; 52];
-    leaf[1..40].copy_from_slice(coinb1);
-    leaf[40..].copy_from_slice(&extra);
+/// The Sia merkle leaf is `0x00 || coinb1 || extranonce1 || extranonce2 || coinb2`, hashed
+/// whole. The C gateways send a 39-byte coinb1 (`00 00 00 || H2 || 00 00 00 00`) and a 4-byte
+/// extranonce1; ratum-gateway sends a 35-byte coinb1 and carries the four zero bytes at the
+/// front of an 8-byte extranonce1. Both come to the same 52 bytes, so hash what the job says.
+fn root_for(coinb1: &[u8], en1: &[u8], en2: &[u8; 8], coinb2: &[u8]) -> Hash {
+    let mut leaf = Vec::with_capacity(1 + coinb1.len() + en1.len() + en2.len() + coinb2.len());
+    leaf.push(0);
+    leaf.extend_from_slice(coinb1);
+    leaf.extend_from_slice(en1);
+    leaf.extend_from_slice(en2);
+    leaf.extend_from_slice(coinb2);
     pow::blake2b256(&leaf)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn c_and_ratum_job_layouts_hash_the_same_leaf() {
+        let h2 = [7u8; 32];
+        let en2 = [9u8; 8];
+        // C gateway: coinb1 = sia_coinb1(H2) (39 bytes), extranonce1 = 4 bytes.
+        let c = root_for(&pow::sia_coinb1(&h2), &[1, 2, 3, 4], &en2, &[]);
+        // ratum-gateway: coinb1 = 00 00 00 || H2 (35 bytes), extranonce1 = 00 00 00 00 || 4 bytes.
+        let mut r1 = vec![0u8; 3];
+        r1.extend_from_slice(&h2);
+        let r = root_for(&r1, &[0, 0, 0, 0, 1, 2, 3, 4], &en2, &[]);
+        assert_eq!(c, r);
+        assert_eq!(c, pow::work_root(&h2, &[1, 2, 3, 4, 9, 9, 9, 9, 9, 9, 9, 9]));
+    }
 }
