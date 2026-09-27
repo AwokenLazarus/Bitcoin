@@ -1,0 +1,1686 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: michael moore <mrmoore27@pm.me>
+Date: Sat, 26 Sep 2026 00:33:48 +0000
+Subject: [PATCH 1/4] prime, lazarus-gateway: find gateways that can't carry
+ NTA attestations before activation
+
+Stock datum_gateway v0.4.1 stops reading a coinbaser at the first script over
+64 bytes (datum_coinbaser.c:795) and says nothing, so after XBT-NTA activation
+it would keep the payees, drop the 70-byte attestations and mine bad-nta-count
+blocks (SOV-007). SOV-011:
+
+- Capability flag: a gateway that keeps 70-byte outputs sends "nta-v1\0" in
+  its hello right after the header key seed, where stock sends one rand()
+  byte repeated (datum_protocol.c:1028-1033) that every server skips.
+  lazarus-gateway and the split-only C patch send it.
+- Probe: from nta-height - nta-probe-window (2016), one coinbaser per
+  non-advertising gateway per nta-probe-every-secs (3600) ends with a
+  zero-value 70-byte NTA-shaped OP_RETURN. The first full-split share on it
+  decides: kept, ready; dropped, nta-unready. It pays nobody and share
+  classification skips zero-value OP_RETURNs, so payouts do not change.
+  After activation the attestations themselves are the probe.
+- Policy (nta-unready-policy): refuse (default) sends a DATUM server
+  message (proto cmd 7, logged at INFO by stock) and mining sub-command
+  0x4e (unknown to stock, logged at WARN "Perhaps you need to upgrade"),
+  then closes. An upgraded gateway that advertises is served at once.
+  pool-only serves pool-only coinbasers and says why that cannot work: the
+  pool's own output needs its 70-byte attestation too.
+- /nta.json "readiness": gateways and share of the last hour's work that
+  are ready / nta-unready / unknown, and blocks until activation.
+- datum_wire::coinbaser::stock_v041_parse, and lazarus-gateway's
+  LAZARUS_GATEWAY_EMULATE_STOCK_V041=1 demo hook, play stock's parser.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ prime/primed/src/config.rs              |  51 +++
+ prime/primed/src/main.rs                |   3 +
+ prime/primed/src/readiness.rs           | 540 ++++++++++++++++++++++++
+ prime/primed/src/session.rs             | 197 ++++++++-
+ prime/primed/src/state.rs               |  16 +
+ prime/primed/src/stats.rs               |  17 +-
+ prime/primed/tests/common/mod.rs        |  64 ++-
+ prime/primed/tests/nta_readiness_e2e.rs | 273 ++++++++++++
+ prime/wire/src/coinbaser.rs             |  72 +++-
+ prime/wire/src/handshake.rs             |  45 ++
+ prime/wire/src/nta.rs                   |  24 ++
+ 11 files changed, 1282 insertions(+), 20 deletions(-)
+ create mode 100644 prime/primed/src/readiness.rs
+ create mode 100644 prime/primed/tests/nta_readiness_e2e.rs
+
+diff --git a/prime/primed/src/config.rs b/prime/primed/src/config.rs
+index 5357574..23e3c2e 100644
+--- a/prime/primed/src/config.rs
++++ b/prime/primed/src/config.rs
+@@ -199,6 +199,22 @@ pub struct Config {
+     /// "patched-out" Prime, whose un-attested blocks nodes refuse).
+     #[serde(default)]
+     pub nta_disabled: bool,
++    /// SOV-011: probe gateways that do not advertise `nta-v1` from `nta-height` minus this many
++    /// blocks until activation: one coinbaser per gateway per `nta-probe-every-secs` gets a
++    /// zero-value 70-byte NTA-shaped output at the end, and the next share on it says whether
++    /// the gateway kept it. 0 turns probing off.
++    #[serde(default = "d_nta_probe_window")]
++    pub nta_probe_window: u32,
++    #[serde(default = "d_nta_probe_every_secs")]
++    pub nta_probe_every_secs: u64,
++    /// SOV-011: what an `nta-unready` gateway gets once NTA is active. `refuse` (default): no
++    /// work; the session is told why (a DATUM server message and an unknown sub-command, both
++    /// in a stock gateway's log) and closed. `pool-only`: served coinbasers paying the pool
++    /// alone. That does not work, and is here only to say so: the pool's own output needs its
++    /// 70-byte attestation too, which that gateway drops like any other, so every block it
++    /// finds is still invalid.
++    #[serde(default = "d_nta_unready_policy")]
++    pub nta_unready_policy: String,
+     /// W8: seconds after a canary is registered (`POST /sovereignty/canary`) that the gateway's
+     /// newest job is fetched with `request_full_block` to see whether it holds the canary. Checked
+     /// on the session's 5 s tick.
+@@ -301,6 +317,15 @@ fn d_sov_canary_check_gap_secs() -> u64 {
+     300
+ }
+ 
++fn d_nta_probe_window() -> u32 {
++    2016
++}
++fn d_nta_probe_every_secs() -> u64 {
++    3600
++}
++fn d_nta_unready_policy() -> String {
++    "refuse".into()
++}
+ fn d_sov_recompute_secs() -> u64 {
+     300
+ }
+@@ -400,6 +425,13 @@ impl Config {
+         if c.sovereignty_cap_per_gateway_bps > 10_000 {
+             return Err("sovereignty-cap-per-gateway-bps cannot exceed 10000".into());
+         }
++        match c.nta_unready_policy.as_str() {
++            "refuse" | "pool-only" => {}
++            other => return Err(format!("nta-unready-policy must be refuse or pool-only, not {other:?}")),
++        }
++        if c.nta_probe_every_secs == 0 {
++            return Err("nta-probe-every-secs must be at least 1".into());
++        }
+         match c.stock_full_pool_only.as_str() {
+             "owe" | "gateway-solo" => {}
+             other => return Err(format!("stock-full-pool-only must be owe or gateway-solo, not {other:?}")),
+@@ -546,6 +578,25 @@ require-split-gateway = true
+         std::fs::remove_dir_all(&dir).unwrap();
+     }
+ 
++    #[test]
++    fn nta_readiness_knobs_default_to_a_2016_block_hourly_probe_and_refuse() {
++        let dir = std::env::temp_dir().join(format!("primed-cfg-nta-{}", std::process::id()));
++        std::fs::create_dir_all(&dir).unwrap();
++        let p = dir.join("prime.toml");
++        let base = LEGACY.replace("/home/umbrel/blake2b/lazarus-prime", dir.to_str().unwrap());
++        let load = |extra: &str| {
++            std::fs::write(&p, format!("{base}\n{extra}\n")).unwrap();
++            Config::load(&p)
++        };
++        let c = load("").unwrap();
++        assert_eq!((c.nta_probe_window, c.nta_probe_every_secs, c.nta_unready_policy.as_str()), (2016, 3600, "refuse"));
++        let c = load("nta-unready-policy = \"pool-only\"\nnta-probe-window = 0\nnta-probe-every-secs = 20").unwrap();
++        assert_eq!((c.nta_probe_window, c.nta_probe_every_secs, c.nta_unready_policy.as_str()), (0, 20, "pool-only"));
++        assert!(load("nta-unready-policy = \"allow\"").unwrap_err().contains("nta-unready-policy"));
++        assert!(load("nta-probe-every-secs = 0").unwrap_err().contains("nta-probe-every-secs"));
++        std::fs::remove_dir_all(&dir).unwrap();
++    }
++
+     #[test]
+     fn unknown_keys_are_still_errors() {
+         let dir = std::env::temp_dir().join(format!("primed-cfg-u-{}", std::process::id()));
+diff --git a/prime/primed/src/main.rs b/prime/primed/src/main.rs
+index 0895616..fe6da7d 100644
+--- a/prime/primed/src/main.rs
++++ b/prime/primed/src/main.rs
+@@ -10,6 +10,7 @@ mod enrol;
+ mod node;
+ mod nta;
+ mod payouts;
++mod readiness;
+ mod rpc;
+ mod session;
+ mod solo;
+@@ -316,6 +317,7 @@ fn run(cfg: Config) -> i32 {
+         sovereignty: crate::sovereignty::Sovereignty::from_config(&cfg),
+         nta_pool,
+         nta: Mutex::new(Default::default()),
++        readiness: Mutex::new(Default::default()),
+         cfg,
+     });
+     log::info!("pool pubkey {}", shared.pool.public_hex());
+@@ -572,6 +574,7 @@ pub fn test_shared(dir: &std::path::Path, extra: &str) -> Shared {
+         sovereignty: crate::sovereignty::Sovereignty::from_config(&cfg),
+         nta_pool: None,
+         nta: Mutex::new(Default::default()),
++        readiness: Mutex::new(Default::default()),
+         cfg,
+     }
+ }
+diff --git a/prime/primed/src/readiness.rs b/prime/primed/src/readiness.rs
+new file mode 100644
+index 0000000..baebb8d
+--- /dev/null
++++ b/prime/primed/src/readiness.rs
+@@ -0,0 +1,540 @@
++//! XBT-NTA activation safety (SOV-011): which gateways can carry attestations.
++//!
++//! After `nta-height` every value-bearing coinbase output needs a 70-byte attestation output.
++//! Stock DATUM v0.4.1 stops reading a coinbaser at the first script over 64 bytes
++//! (`datum_coinbaser.c:795`) and says nothing, so it would keep the payees, drop the
++//! attestations and mine `bad-nta-count` blocks. Prime finds such gateways before that:
++//!
++//! * **Advertised.** A gateway that can carry them says `nta-v1` in its hello
++//!   ([`datum_wire::handshake::NTA_V1_MARKER`]): ready.
++//! * **Probed.** From `nta-height − nta-probe-window`, one coinbaser per gateway per
++//!   `nta-probe-every-secs` ends with a zero-value 70-byte NTA-shaped output
++//!   ([`datum_wire::nta::probe_script`]). The first share on that coinbaser that pays every
++//!   issued payee decides: probe there, ready; probe gone, `nta-unready`. A share on a smaller
++//!   coinbase (a stock size class keeps a prefix of the list) says nothing and is not counted.
++//! * **Watched.** After activation the attestations are the probe: a full-split share whose
++//!   coinbase lacks one the coinbaser listed marks the gateway unready.
++//!
++//! The probe pays nobody and changes no payee, and share classification skips zero-value
++//! OP_RETURNs, so it costs a gateway nothing whichever way it goes.
++//!
++//! The book is keyed by the gateway's `gateway=` hex (the first 8 bytes of its identity key,
++//! what the logs and `/stats.json` show) and outlives sessions, so a gateway found unready
++//! stays so across reconnects until it advertises or passes a probe.
++
++use std::collections::{HashMap, VecDeque};
++
++use datum_wire::coinbase::Coinbase;
++use datum_wire::coinbaser::Output;
++use serde_json::{json, Value};
++
++/// Work older than this is not in a gateway's rate.
++pub const RATE_WINDOW_SECS: u64 = 3600;
++/// Gateways not seen for this long are left out of the metric (kept in the book).
++const SEEN_WITHIN_SECS: u64 = 24 * 3600;
++/// Entries the book keeps; the least recently seen goes first.
++const MAX_ENTRIES: usize = 4096;
++/// Rate samples one gateway keeps (a share is ~ one per second per gateway at most).
++const MAX_SAMPLES: usize = 8192;
++
++#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
++pub enum Status {
++    Unknown,
++    Ready,
++    Unready,
++}
++
++impl Status {
++    pub fn as_str(self) -> &'static str {
++        match self {
++            Status::Unknown => "unknown",
++            Status::Ready => "ready",
++            Status::Unready => "nta-unready",
++        }
++    }
++}
++
++/// What the status rests on.
++#[derive(Clone, Copy, Debug, PartialEq, Eq)]
++pub enum Evidence {
++    None,
++    /// `nta-v1` in its hello.
++    Advertised,
++    /// A probe output was in the coinbase of a full-split share.
++    ProbeKept,
++    /// A full-split share on a probe coinbaser had no probe output.
++    ProbeDropped,
++    /// After activation: a full-split share had every attestation its coinbaser listed.
++    AttestationsKept,
++    /// After activation: a full-split share lacked an attestation its coinbaser listed.
++    AttestationsDropped,
++}
++
++impl Evidence {
++    pub fn as_str(self) -> &'static str {
++        match self {
++            Evidence::None => "none",
++            Evidence::Advertised => "advertised nta-v1",
++            Evidence::ProbeKept => "probe kept",
++            Evidence::ProbeDropped => "probe dropped",
++            Evidence::AttestationsKept => "attestations kept",
++            Evidence::AttestationsDropped => "attestations dropped",
++        }
++    }
++}
++
++#[derive(Debug)]
++pub struct Entry {
++    pub status: Status,
++    pub evidence: Evidence,
++    pub user_agent: String,
++    pub advertised: bool,
++    pub since: u64,
++    pub last_seen: u64,
++    /// When the last probe coinbaser went out, and for which height.
++    pub last_probe: u64,
++    pub last_probe_height: u32,
++    pub probes_sent: u64,
++    pub probes_kept: u64,
++    pub probes_dropped: u64,
++    /// Sessions refused (or served pool-only) because of this status.
++    pub refusals: u64,
++    samples: VecDeque<(u64, u64)>,
++}
++
++impl Entry {
++    fn new(now: u64) -> Self {
++        Entry {
++            status: Status::Unknown,
++            evidence: Evidence::None,
++            user_agent: String::new(),
++            advertised: false,
++            since: now,
++            last_seen: now,
++            last_probe: 0,
++            last_probe_height: 0,
++            probes_sent: 0,
++            probes_kept: 0,
++            probes_dropped: 0,
++            refusals: 0,
++            samples: VecDeque::new(),
++        }
++    }
++
++    fn set(&mut self, status: Status, evidence: Evidence, now: u64) -> bool {
++        let changed = self.status != status;
++        if changed {
++            self.since = now;
++        }
++        self.status = status;
++        self.evidence = evidence;
++        changed
++    }
++
++    /// Credited work in the last [`RATE_WINDOW_SECS`], in difficulty-1 units.
++    pub fn recent_work(&self, now: u64) -> u64 {
++        let from = now.saturating_sub(RATE_WINDOW_SECS);
++        self.samples.iter().filter(|(t, _)| *t >= from).map(|(_, w)| *w).sum()
++    }
++}
++
++/// Where the chain stands against activation, for the metric.
++#[derive(Clone, Copy, Debug)]
++pub struct Chain {
++    pub nta_height: u32,
++    pub probe_window: u32,
++    /// Height of the next block (node tip + 1), if Prime's node has answered.
++    pub next_height: Option<u32>,
++}
++
++impl Chain {
++    pub fn active(&self) -> bool {
++        self.next_height.is_some_and(|h| h >= self.nta_height)
++    }
++
++    /// Next height is in `[nta-height − window, nta-height)`.
++    pub fn probing(&self) -> bool {
++        self.probe_window > 0
++            && self.next_height.is_some_and(|h| h < self.nta_height && h + self.probe_window >= self.nta_height)
++    }
++}
++
++#[derive(Debug, Default)]
++pub struct Book {
++    map: HashMap<String, Entry>,
++}
++
++impl Book {
++    fn entry(&mut self, gw: &str, now: u64) -> &mut Entry {
++        if !self.map.contains_key(gw) && self.map.len() >= MAX_ENTRIES {
++            if let Some(oldest) = self.map.iter().min_by_key(|(_, e)| e.last_seen).map(|(k, _)| k.clone()) {
++                self.map.remove(&oldest);
++            }
++        }
++        let e = self.map.entry(gw.to_string()).or_insert_with(|| Entry::new(now));
++        e.last_seen = e.last_seen.max(now);
++        e
++    }
++
++    pub fn get(&self, gw: &str) -> Option<&Entry> {
++        self.map.get(gw)
++    }
++
++    pub fn status(&self, gw: &str) -> Status {
++        self.map.get(gw).map_or(Status::Unknown, |e| e.status)
++    }
++
++    /// A hello. `nta-v1` makes the gateway ready. A gateway that stops advertising (a
++    /// downgrade) loses what the advertisement gave it; a probe or attestation verdict stands.
++    pub fn note_hello(&mut self, gw: &str, user_agent: &str, nta_v1: bool, now: u64) -> Status {
++        let e = self.entry(gw, now);
++        e.user_agent = user_agent.chars().take(128).collect();
++        e.advertised = nta_v1;
++        if nta_v1 {
++            e.set(Status::Ready, Evidence::Advertised, now);
++        } else if e.evidence == Evidence::Advertised {
++            e.set(Status::Unknown, Evidence::None, now);
++        }
++        e.status
++    }
++
++    /// Whether the next coinbaser for `gw` should carry a probe: probing, not advertised, and
++    /// none sent in the last `every` seconds.
++    pub fn probe_due(&self, gw: &str, chain: &Chain, every: u64, now: u64) -> bool {
++        if !chain.probing() {
++            return false;
++        }
++        match self.map.get(gw) {
++            Some(e) => !e.advertised && (e.probes_sent == 0 || now.saturating_sub(e.last_probe) >= every),
++            None => true,
++        }
++    }
++
++    pub fn note_probe_sent(&mut self, gw: &str, height: u32, now: u64) {
++        let e = self.entry(gw, now);
++        e.last_probe = now;
++        e.last_probe_height = height;
++        e.probes_sent += 1;
++    }
++
++    /// A full-split share on a probe coinbaser. Returns the status if it changed.
++    pub fn note_probe_verdict(&mut self, gw: &str, kept: bool, now: u64) -> Option<Status> {
++        let e = self.entry(gw, now);
++        let changed = if kept {
++            e.probes_kept += 1;
++            e.set(Status::Ready, Evidence::ProbeKept, now)
++        } else {
++            e.probes_dropped += 1;
++            e.set(Status::Unready, Evidence::ProbeDropped, now)
++        };
++        changed.then_some(e.status)
++    }
++
++    /// A full-split share on an attested coinbaser, after activation. An advertised gateway
++    /// that drops them has lied or broken; the coinbase outranks the hello.
++    pub fn note_attestation_verdict(&mut self, gw: &str, kept: bool, now: u64) -> Option<Status> {
++        let e = self.entry(gw, now);
++        let changed = if kept {
++            if e.evidence == Evidence::Advertised {
++                return None;
++            }
++            e.set(Status::Ready, Evidence::AttestationsKept, now)
++        } else {
++            e.set(Status::Unready, Evidence::AttestationsDropped, now)
++        };
++        changed.then_some(e.status)
++    }
++
++    pub fn note_refusal(&mut self, gw: &str, now: u64) {
++        self.entry(gw, now).refusals += 1;
++    }
++
++    /// Credited work from `gw`, for its share of the rate.
++    pub fn note_work(&mut self, gw: &str, work: u64, now: u64) {
++        let e = self.entry(gw, now);
++        match e.samples.back_mut() {
++            Some((t, w)) if *t == now => *w = w.saturating_add(work),
++            _ => e.samples.push_back((now, work)),
++        }
++        let from = now.saturating_sub(RATE_WINDOW_SECS);
++        while e.samples.front().is_some_and(|(t, _)| *t < from) || e.samples.len() > MAX_SAMPLES {
++            e.samples.pop_front();
++        }
++    }
++
++    /// The readiness metric: gateways and share of recent work that are ready, unready or
++    /// unknown, and how far activation is. `gateways` counts those seen in the last day;
++    /// `hashrate_share` weighs them by credited work in the last hour.
++    pub fn stats_json(&self, chain: &Chain, policy: &str, probe_every: u64, now: u64) -> Value {
++        let seen: Vec<(&String, &Entry)> =
++            self.map.iter().filter(|(_, e)| now.saturating_sub(e.last_seen) <= SEEN_WITHIN_SECS).collect();
++        let mut count = HashMap::new();
++        let mut work = HashMap::new();
++        for (_, e) in &seen {
++            *count.entry(e.status).or_insert(0u64) += 1;
++            *work.entry(e.status).or_insert(0u64) += e.recent_work(now);
++        }
++        let total: u64 = work.values().sum();
++        let share = |s: Status| -> Value {
++            if total == 0 {
++                Value::Null
++            } else {
++                json!(((work.get(&s).copied().unwrap_or(0) as f64 / total as f64) * 10_000.0).round() / 10_000.0)
++            }
++        };
++        let n = |s: Status| count.get(&s).copied().unwrap_or(0);
++        let mut list: Vec<(&String, &Entry)> = seen;
++        list.sort_by(|a, b| b.1.recent_work(now).cmp(&a.1.recent_work(now)).then(a.0.cmp(b.0)));
++        let list: Vec<Value> = list
++            .into_iter()
++            .map(|(gw, e)| {
++                json!({
++                    "gateway": gw,
++                    "status": e.status.as_str(),
++                    "evidence": e.evidence.as_str(),
++                    "advertised": e.advertised,
++                    "user_agent": e.user_agent,
++                    "since": e.since,
++                    "last_seen": e.last_seen,
++                    "work_1h": e.recent_work(now),
++                    "probes": {"sent": e.probes_sent, "kept": e.probes_kept, "dropped": e.probes_dropped,
++                               "last": e.last_probe, "last_height": e.last_probe_height},
++                    "refusals": e.refusals,
++                })
++            })
++            .collect();
++        json!({
++            "nta_height": chain.nta_height,
++            "next_height": chain.next_height,
++            "blocks_until_activation": chain.next_height.map(|h| chain.nta_height.saturating_sub(h)),
++            "active": chain.active(),
++            "probing": chain.probing(),
++            "probe_from": chain.nta_height.saturating_sub(chain.probe_window),
++            "probe_window": chain.probe_window,
++            "probe_every_secs": probe_every,
++            "unready_policy": policy,
++            "gateways": {"ready": n(Status::Ready), "unready": n(Status::Unready), "unknown": n(Status::Unknown)},
++            "hashrate_share": {"ready": share(Status::Ready), "unready": share(Status::Unready), "unknown": share(Status::Unknown)},
++            "work_1h": total,
++            "list": list,
++        })
++    }
++}
++
++/// Whether a coinbase has an output paying `script` (the probe, an attestation).
++pub fn has_output(cb: &Coinbase, script: &[u8]) -> bool {
++    cb.outputs.iter().any(|o| o.script == script)
++}
++
++/// Whether `cb` kept every attestation the coinbaser `issued` listed; `None` if it listed none.
++pub fn attestations_kept(issued: &[Output], cb: &Coinbase) -> Option<bool> {
++    let mut atts = issued.iter().filter(|o| o.sats == 0 && datum_wire::nta::is_attestation(&o.script)).peekable();
++    atts.peek()?;
++    Some(atts.all(|o| has_output(cb, &o.script)))
++}
++
++/// Why an `nta-unready` gateway gets no work, as its operator reads it: a stock gateway logs it
++/// as "DATUM Server message: …" (`datum_protocol.c:1251`) and again under the unknown mining
++/// command warning. One line, no run of spaces.
++pub fn refusal_text(nta_height: u32, evidence: Evidence) -> String {
++    let seen = match evidence {
++        Evidence::AttestationsDropped => "its coinbases dropped the XBT-NTA attestations Prime sent",
++        _ => "it dropped the 70-byte XBT-NTA probe output Prime sent",
++    };
++    format!(
++        "Prime refuses this gateway from block {nta_height}: {seen}. Stock datum_gateway v0.4.1 stops reading a coinbaser at the first script over 64 bytes (datum_coinbaser.c:795), so every block it builds after XBT-NTA activation is invalid. Upgrade to lazarus-gateway or a datum_gateway with the Lazarus split-only patch (it advertises nta-v1) and reconnect: an upgraded gateway is served straight away"
++    )
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    const CHAIN: Chain = Chain { nta_height: 3000, probe_window: 2016, next_height: Some(900) };
++
++    #[test]
++    fn probing_runs_from_the_window_to_activation_only() {
++        let at = |h| Chain { next_height: Some(h), ..CHAIN };
++        assert!(!at(983).probing());
++        assert!(at(984).probing() && at(2999).probing());
++        assert!(!at(3000).probing() && at(3000).active());
++        assert!(!Chain { next_height: None, ..CHAIN }.probing());
++        assert!(!Chain { probe_window: 0, ..at(2999) }.probing());
++        // a window wider than the chain: from genesis
++        assert!(Chain { nta_height: 100, probe_window: 2016, next_height: Some(1) }.probing());
++    }
++
++    #[test]
++    fn an_advertiser_is_never_probed_and_a_silent_gateway_is_probed_hourly() {
++        let c = Chain { next_height: Some(2500), ..CHAIN };
++        let mut b = Book::default();
++        assert_eq!(b.note_hello("aa", "lazarus-gateway/0.1", true, 10), Status::Ready);
++        assert!(!b.probe_due("aa", &c, 3600, 10));
++        assert_eq!(b.note_hello("bb", "v0.4.1-beta/x", false, 10), Status::Unknown);
++        assert!(b.probe_due("bb", &c, 3600, 10));
++        assert!(b.probe_due("never-seen", &c, 3600, 10));
++        b.note_probe_sent("bb", 2500, 10);
++        assert!(!b.probe_due("bb", &c, 3600, 3609));
++        assert!(b.probe_due("bb", &c, 3600, 3610));
++        // not before the window
++        assert!(!b.probe_due("bb", &CHAIN, 3600, 99_999));
++    }
++
++    #[test]
++    fn verdicts_move_status_and_an_upgrade_or_a_downgrade_is_seen_at_hello() {
++        let mut b = Book::default();
++        b.note_hello("bb", "stock", false, 1);
++        assert_eq!(b.note_probe_verdict("bb", false, 2), Some(Status::Unready));
++        assert_eq!(b.get("bb").unwrap().evidence, Evidence::ProbeDropped);
++        // a reconnect without the flag does not clear the verdict
++        assert_eq!(b.note_hello("bb", "stock", false, 3), Status::Unready);
++        // an upgraded gateway advertises and is ready at once
++        assert_eq!(b.note_hello("bb", "lazarus-gateway/0.1", true, 4), Status::Ready);
++        // and one that goes back to a build without the flag is unknown again, not ready
++        assert_eq!(b.note_hello("bb", "stock", false, 5), Status::Unknown);
++        assert_eq!(b.note_probe_verdict("bb", true, 6), Some(Status::Ready));
++        assert_eq!(b.note_probe_verdict("bb", true, 7), None);
++        assert_eq!(b.get("bb").unwrap().probes_kept, 2);
++        // after activation the coinbase outranks the hello
++        b.note_hello("cc", "liar", true, 8);
++        assert_eq!(b.note_attestation_verdict("cc", true, 9), None);
++        assert_eq!(b.get("cc").unwrap().evidence, Evidence::Advertised);
++        assert_eq!(b.note_attestation_verdict("cc", false, 10), Some(Status::Unready));
++        assert_eq!(b.status("cc"), Status::Unready);
++    }
++
++    #[test]
++    fn the_metric_weighs_by_recent_work_and_counts_blocks_to_activation() {
++        let mut b = Book::default();
++        let now = 100_000;
++        b.note_hello("r", "lazarus-gateway/0.1", true, now);
++        b.note_hello("u", "stock", false, now);
++        b.note_probe_verdict("u", false, now);
++        b.note_hello("k", "stock", false, now);
++        b.note_work("r", 600, now - 10);
++        b.note_work("u", 300, now - 5);
++        b.note_work("k", 100, now - 1);
++        // outside the hour: not counted
++        b.note_work("u", 1_000_000, now - RATE_WINDOW_SECS - 10);
++        b.note_work("u", 0, now);
++        let v = b.stats_json(&Chain { next_height: Some(2990), ..CHAIN }, "refuse", 3600, now);
++        assert_eq!(v["blocks_until_activation"], 10);
++        assert_eq!(v["gateways"], json!({"ready": 1, "unready": 1, "unknown": 1}));
++        assert_eq!(v["hashrate_share"], json!({"ready": 0.6, "unready": 0.3, "unknown": 0.1}));
++        assert_eq!(v["list"][0]["gateway"], "r");
++        assert_eq!(v["probing"], true);
++        let v = b.stats_json(&Chain { next_height: Some(3001), ..CHAIN }, "refuse", 3600, now);
++        assert_eq!((v["blocks_until_activation"].as_u64(), v["active"].as_bool()), (Some(0), Some(true)));
++        // a gateway not seen for a day drops out of the metric
++        let v = b.stats_json(&CHAIN, "refuse", 3600, now + SEEN_WITHIN_SECS + 1);
++        assert_eq!(v["gateways"], json!({"ready": 0, "unready": 0, "unknown": 0}));
++        assert_eq!(v["hashrate_share"]["ready"], Value::Null);
++    }
++
++    use datum_wire::coinbase::{self, TxOut};
++    use datum_wire::coinbaser::{decode_v2, encode_v2, stock_v041_parse};
++    use datum_wire::verify::{classify_coinbase, CoinbaseKind, Policy};
++
++    const VALUE: u64 = 1_000_000;
++
++    fn p2tr(n: u8) -> Vec<u8> {
++        datum_wire::nta::p2tr(&[n; 32])
++    }
++
++    /// The coinbase a gateway builds from what it kept of `list`: every output as listed, the
++    /// remainder (none: the list sums to the value) to the pool, and a witness commitment.
++    fn gateway_coinbase(kept: &[Output]) -> Coinbase {
++        let mut outs: Vec<TxOut> = kept.iter().map(|o| TxOut { value: o.sats, script: o.script.clone() }).collect();
++        let mut wc = vec![0x6a, 0x24, 0xaa, 0x21, 0xa9, 0xed];
++        wc.extend_from_slice(&[0x76; 32]);
++        outs.push(TxOut { value: 0, script: wc });
++        let (raw, _, _) = coinbase::build(3000, b"Lazarus", &outs, 0);
++        coinbase::parse(&raw).unwrap()
++    }
++
++    fn classify(cb: &Coinbase, issued: &[Output], pool: &[u8]) -> CoinbaseKind {
++        let p = Policy {
++            pool_script: pool,
++            issued: Some(issued),
++            tolerance: 0,
++            now: 0,
++            min_pot: 0,
++            gateway_script: None,
++            empty_solo_fee_bps: 0,
++            trusted_target: false,
++            uncommitted_pot: 20,
++        };
++        classify_coinbase(cb, &p, false, 3, false)
++    }
++
++    #[test]
++    fn a_stock_gateway_drops_the_probe_and_nothing_else_so_the_share_is_a_full_split_without_it() {
++        let pool = p2tr(9);
++        let split = vec![
++            Output { sats: 600_000, script: p2tr(1) },
++            Output { sats: 300_000, script: p2tr(2) },
++            Output { sats: 100_000, script: pool.clone() },
++        ];
++        let probe = datum_wire::nta::probe_script(&[0x42; 64]);
++        let mut probed = split.clone();
++        probed.push(Output { sats: 0, script: probe.clone() });
++        let wire = encode_v2(5, &probed);
++
++        // stock v0.4.1: payees kept, probe gone, and the share still pays every payee in full
++        let (_, stock) = stock_v041_parse(&wire, VALUE);
++        assert_eq!(stock, split);
++        let cb = gateway_coinbase(&stock);
++        assert_eq!(classify(&cb, &probed, &pool), CoinbaseKind::Split);
++        assert!(!has_output(&cb, &probe));
++
++        // a gateway that keeps 70-byte scripts: the probe is there, and the verdict is ready
++        let (_, kept) = decode_v2(&wire).unwrap();
++        let cb_ready = gateway_coinbase(&kept);
++        assert_eq!(classify(&cb_ready, &probed, &pool), CoinbaseKind::Split);
++        assert!(has_output(&cb_ready, &probe));
++
++        // the probe changes no payout: same kind and same amount to every payee as without it
++        let cb_plain = gateway_coinbase(&split);
++        assert_eq!(classify(&cb_plain, &split, &pool), CoinbaseKind::Split);
++        for o in &split {
++            assert_eq!(cb_ready.paid_to(&o.script), cb_plain.paid_to(&o.script));
++            assert_eq!(cb.paid_to(&o.script), cb_plain.paid_to(&o.script));
++        }
++        assert_eq!(cb_ready.total_output_value(), cb_plain.total_output_value());
++
++        // a stock size class keeps a prefix: a Partial share, which is not a verdict
++        let prefix = gateway_coinbase(&stock[..1]);
++        assert!(matches!(classify(&prefix, &probed, &pool), CoinbaseKind::Partial(1)));
++    }
++
++    #[test]
++    fn after_activation_the_attestations_are_the_probe() {
++        let pool = p2tr(9);
++        let att = |n: u8| Output { sats: 0, script: datum_wire::nta::attestation_script(&[n; 64]) };
++        let issued = vec![
++            Output { sats: 700_000, script: p2tr(1) },
++            Output { sats: 300_000, script: pool.clone() },
++            att(1),
++            att(2),
++        ];
++        let (_, stock) = stock_v041_parse(&encode_v2(1, &issued), VALUE);
++        assert_eq!(stock, issued[..2].to_vec());
++        let cb = gateway_coinbase(&stock);
++        assert_eq!(classify(&cb, &issued, &pool), CoinbaseKind::Split);
++        assert_eq!(attestations_kept(&issued, &cb), Some(false));
++        assert_eq!(attestations_kept(&issued, &gateway_coinbase(&issued)), Some(true));
++        // a coinbaser without attestations says nothing
++        assert_eq!(attestations_kept(&issued[..2], &cb), None);
++    }
++
++    #[test]
++    fn the_refusal_names_the_cause_and_the_fix_on_one_line() {
++        let t = refusal_text(3000, Evidence::ProbeDropped);
++        assert!(t.contains("block 3000") && t.contains("datum_coinbaser.c:795") && t.contains("nta-v1"));
++        assert!(t.contains("probe"));
++        assert!(refusal_text(3000, Evidence::AttestationsDropped).contains("attestations Prime sent"));
++        assert!(!t.contains("  ") && !t.contains('\n'));
++        // fits the 511-byte MOTD-sized buffers a stock gateway prints from
++        assert!(t.len() < 511, "{}", t.len());
++    }
++}
+diff --git a/prime/primed/src/session.rs b/prime/primed/src/session.rs
+index a2b4376..787861e 100644
+--- a/prime/primed/src/session.rs
++++ b/prime/primed/src/session.rs
+@@ -27,6 +27,7 @@ use tokio::time::{interval, MissedTickBehavior};
+ use crate::address::{self};
+ use crate::config::Config;
+ use crate::node;
++use crate::readiness::{self, Evidence, Status};
+ use crate::state::{now, ClientInfo, JobCheck, Seen, Shared};
+ 
+ /// `gateway_key` is the gateway's whole identity key in hex, so a configured full key is
+@@ -78,6 +79,11 @@ const MAX_MONEY: u64 = 2_100_000_000_000_000;
+ /// transactions of a found block need the protocol's full `MAX_CMD_LEN`, and those are asked
+ /// for. Every open session can make Prime buffer one frame, so this is what 256 of them cost.
+ const MAX_IDLE_FRAME: usize = 192 * 1024;
++/// How long a refused session is given to read why before the socket closes. Closing with its
++/// shares still unread would reset the connection and could lose the message.
++const REFUSAL_LINGER: Duration = Duration::from_secs(2);
++/// Text of a probe output's first bytes, so one found in a block explains itself.
++const PROBE_TAG: &[u8] = b"XBT-NTA probe (SOV-011)";
+ /// How long after a block candidate a session may still send a full-size frame.
+ const BLOCK_REPLY_WINDOW: Duration = Duration::from_secs(1800);
+ /// Blocks past the one it was issued for that a coinbaser is still honoured; see `issued_for`.
+@@ -377,6 +383,10 @@ struct Session {
+     newest_slot: Option<u8>,
+     /// A canary check waiting on the gateway's transactions (W8), and when it was asked.
+     canary_check: Option<(CheckedJob, Instant)>,
++    /// SOV-011: the coinbaser id whose last output is an NTA probe, and that output's script,
++    /// until a full-split share on it says whether the gateway kept it.
++    nta_probe: Option<(u8, Vec<u8>)>,
++    nta_pool_only_warned: bool,
+ }
+ 
+ /// Which of the two gateway-side faults produced a pool-only coinbase, read off the share rather
+@@ -451,13 +461,21 @@ pub async fn run(shared: Arc<Shared>, mut stream: TcpStream, remote: SocketAddr)
+ 
+     let gateway_hex = hex::encode(&hello.identity_sign_pk[..8]);
+     let gateway_key = hex::encode(hello.identity_sign_pk);
++    // SOV-011: what this gateway can carry, as its hello says (and what Prime found before).
++    let nta_status = shared
++        .nta_chain()
++        .map(|_| shared.readiness.lock().unwrap().note_hello(&gateway_hex, &hello.user_agent, hello.nta_v1, now()));
+     let known_script = shared.lookup_gateway_script(&gateway_key);
+     let fee_path = if house_stratum(&shared.cfg, remote, &gateway_key) { "stratum" } else { "datum" };
+     log::info!(
+-        "[{id}] {remote} hello ua={:?} gateway={gateway_hex} gen={:?} fee={fee_path}{}",
++        "[{id}] {remote} hello ua={:?} gateway={gateway_hex} gen={:?} fee={fee_path}{}{}",
+         hello.user_agent,
+         hello.generation,
+-        if hello.resume_token.is_some() { " (asked to resume; declined)" } else { "" }
++        if hello.resume_token.is_some() { " (asked to resume; declined)" } else { "" },
++        match nta_status {
++            Some(st) => format!(" nta-v1={} nta={}", hello.nta_v1, st.as_str()),
++            None => String::new(),
++        }
+     );
+     // Shown as a client once it has proved it holds the session key (`Session::establish`). A
+     // hello can be replayed by anyone who saw one, and re-sealed to us by any other pool its
+@@ -528,6 +546,8 @@ pub async fn run(shared: Arc<Shared>, mut stream: TcpStream, remote: SocketAddr)
+         job_seen: vec![0.0; mining::MAX_JOB_SLOTS],
+         newest_slot: None,
+         canary_check: None,
++        nta_probe: None,
++        nta_pool_only_warned: false,
+         row: Some(row),
+     };
+     s.serve().await
+@@ -559,6 +579,8 @@ impl Session {
+     }
+ 
+     async fn serve(&mut self) -> Result<(), SessionError> {
++        // SOV-011: an `nta-unready` gateway gets no work once NTA is active, not even a configure.
++        self.nta_gate().await?;
+         self.send_configure().await?;
+         // Ask the gateway to rebuild its templates right now.
+         //
+@@ -621,6 +643,8 @@ impl Session {
+                     }
+                 }
+                 n = notify.recv() => {
++                    // A new tip may be the activation height.
++                    self.nta_gate().await?;
+                     match n {
+                         // A find (nonzero id): next work is empty on a new tip — solo.
+                         // Node tip (0) or lagged: solo only if this tip has no split yet.
+@@ -655,6 +679,7 @@ impl Session {
+                         !v.is_empty()
+                     });
+                     self.maybe_check_canaries().await?;
++                    self.nta_gate().await?;
+                 }
+                 _ = async {
+                     if let Some(at) = restore {
+@@ -902,6 +927,146 @@ impl Session {
+         Ok(())
+     }
+ 
++    // --- XBT-NTA readiness (SOV-011) ----------------------------------------------------
++
++    /// Once NTA is active, close an `nta-unready` gateway's session under `refuse` (see
++    /// [`Self::refuse_unready`]). Anything else passes.
++    async fn nta_gate(&mut self) -> Result<(), SessionError> {
++        let Some(chain) = self.shared.nta_chain() else { return Ok(()) };
++        if !chain.active() || self.shared.cfg.nta_unready_policy != "refuse" {
++            return Ok(());
++        }
++        let evidence = match self.shared.readiness.lock().unwrap().get(&self.gateway_hex) {
++            Some(e) if e.status == Status::Unready => e.evidence,
++            _ => return Ok(()),
++        };
++        self.refuse_unready(chain.nta_height, evidence).await
++    }
++
++    /// Tell the gateway why it gets no work, in the two places a stock v0.4.1 logs a server's
++    /// words, then close. A DATUM server message (proto cmd 7) is logged at INFO as "DATUM
++    /// Server message: …" (`datum_protocol.c:1249-1252`); mining sub-command `0x4e`, unknown to
++    /// it, is logged at WARN as "Received unknown mining command 4E from DATUM Server. Perhaps
++    /// you need to upgrade this DATUM Gateway?" (:964-966). Neither ends its session, so Prime
++    /// does. With `datum_pooled_mining_only` (its default) a gateway with no Prime session stops
++    /// serving its miners, which the operator sees.
++    async fn refuse_unready(&mut self, nta_height: u32, evidence: Evidence) -> Result<(), SessionError> {
++        let text = readiness::refusal_text(nta_height, evidence);
++        log::warn!(
++            "[{}] {} gateway={} ua={:?} refused: nta-unready ({}). It cannot carry XBT-NTA attestations, so every block it built from {nta_height} would be invalid; no work is sent to it (nta-unready-policy = refuse). It is served again once it reconnects advertising nta-v1.",
++            self.id,
++            self.remote,
++            self.gateway_hex,
++            self.hello.user_agent,
++            evidence.as_str(),
++        );
++        self.shared.readiness.lock().unwrap().note_refusal(&self.gateway_hex, now());
++        let mut line = text.clone().into_bytes();
++        line.push(0);
++        let payload = self.channel.encrypt(&line);
++        let mut h = Header::new(cmd::INFO, payload.len());
++        h.channel = true;
++        write_frame(&mut self.stream, &h, &payload, &mut self.send_keys).await?;
++        self.send_mining(&datum_wire::nta::unready_notice(&text), false).await?;
++        let _ = self.stream.flush().await;
++        let _ = self.stream.shutdown().await;
++        // Read (and drop) whatever it still sends until it closes or the linger runs out.
++        let mut sink = [0u8; 4096];
++        let _ = tokio::time::timeout(REFUSAL_LINGER, async {
++            while matches!(self.stream.read(&mut sink).await, Ok(n) if n > 0) {}
++        })
++        .await;
++        Err(SessionError::Bad("nta-unready: the gateway cannot carry XBT-NTA attestations"))
++    }
++
++    /// A probe for this coinbaser, if one is due: before activation, for a gateway that did not
++    /// advertise `nta-v1`, at most once per gateway per `nta-probe-every-secs`.
++    fn maybe_probe(&mut self, coinbaser_id: u8) -> Option<Vec<u8>> {
++        let chain = self.shared.nta_chain()?;
++        if self.hello.nta_v1 {
++            return None;
++        }
++        let (every, ts) = (self.shared.cfg.nta_probe_every_secs, now());
++        let mut book = self.shared.readiness.lock().unwrap();
++        if !book.probe_due(&self.gateway_hex, &chain, every, ts) {
++            return None;
++        }
++        let mut payload = [0u8; 64];
++        payload[..PROBE_TAG.len()].copy_from_slice(PROBE_TAG);
++        OsRng.fill_bytes(&mut payload[32..]);
++        let script = datum_wire::nta::probe_script(&payload);
++        let height = chain.next_height.unwrap_or(0);
++        book.note_probe_sent(&self.gateway_hex, height, ts);
++        drop(book);
++        log::info!(
++            "[{}] {} NTA probe on coinbaser #{coinbaser_id} for height {height}: a 70-byte zero-value output at the end ({} blocks to activation)",
++            self.id,
++            self.gateway_hex,
++            chain.nta_height.saturating_sub(height),
++        );
++        self.nta_probe = Some((coinbaser_id, script.clone()));
++        Some(script)
++    }
++
++    /// What a full-split share says about this gateway: whether it kept the probe its coinbaser
++    /// ended with, or (after activation) every attestation its coinbaser listed. Only a share
++    /// that pays every issued payee counts: a smaller coinbase dropped outputs by design.
++    /// Returns true if the gateway was just found unready.
++    fn judge_nta(&mut self, coinbaser_id: u8, v: &VerifiedShare, issued: Option<&[Output]>) -> bool {
++        if !matches!(v.coinbase_kind, CoinbaseKind::Split) {
++            return false;
++        }
++        let Some(chain) = self.shared.nta_chain() else { return false };
++        let ts = now();
++        if let Some((id, script)) = &self.nta_probe {
++            if *id == coinbaser_id {
++                let kept = readiness::has_output(&v.coinbase, script);
++                self.nta_probe = None;
++                let changed = self.shared.readiness.lock().unwrap().note_probe_verdict(&self.gateway_hex, kept, ts);
++                if kept {
++                    log::info!(
++                        "[{}] {} NTA probe kept: coinbaser #{coinbaser_id}'s 70-byte output is in its coinbase; ready",
++                        self.id,
++                        self.gateway_hex
++                    );
++                } else {
++                    log::warn!(
++                        "[{}] {} ua={:?} NTA probe DROPPED: coinbaser #{coinbaser_id} ended with a 70-byte output and its coinbase has every payee but not that. It truncates coinbasers at scripts over 64 bytes (stock datum_gateway v0.4.1, datum_coinbaser.c:795): nta-unready. From block {} it {} (nta-unready-policy = {}).",
++                        self.id,
++                        self.gateway_hex,
++                        self.hello.user_agent,
++                        chain.nta_height,
++                        if self.shared.cfg.nta_unready_policy == "refuse" { "gets no work" } else { "is served pool-only coinbasers, whose blocks are invalid all the same" },
++                        self.shared.cfg.nta_unready_policy,
++                    );
++                }
++                return !kept && changed.is_some();
++            }
++        }
++        if !chain.active() {
++            return false;
++        }
++        let Some(kept) = readiness::attestations_kept(issued.unwrap_or(&[]), &v.coinbase) else { return false };
++        let changed = self.shared.readiness.lock().unwrap().note_attestation_verdict(&self.gateway_hex, kept, ts);
++        if changed.is_some() {
++            if kept {
++                log::info!(
++                    "[{}] {} kept every NTA attestation on coinbaser #{coinbaser_id}: ready",
++                    self.id,
++                    self.gateway_hex
++                );
++            } else {
++                log::warn!(
++                    "[{}] {} ua={:?} dropped the NTA attestations of coinbaser #{coinbaser_id} from a coinbase paying every payee: its blocks are invalid; nta-unready",
++                    self.id,
++                    self.gateway_hex,
++                    self.hello.user_agent
++                );
++            }
++        }
++        !kept && changed.is_some()
++    }
++
+     // --- LZT1 over DATUM (SOV-P-002 W7) --------------------------------------------------
+ 
+     /// Keep a `0x5A` attestation for its (job, variant) until the first share on that coinbase.
+@@ -1078,7 +1243,22 @@ impl Session {
+             },
+             _ => None,
+         };
++        // SOV-011 `pool-only`: an unready gateway is paid nothing but the pool's output. It
++        // drops that output's attestation like any other, so this changes who is carried, not
++        // whether its blocks are valid; see `nta-unready-policy`.
++        let pool_only = nta.is_some()
++            && self.shared.cfg.nta_unready_policy == "pool-only"
++            && self.shared.readiness.lock().unwrap().status(&self.gateway_hex) == Status::Unready;
++        if pool_only && !self.nta_pool_only_warned {
++            self.nta_pool_only_warned = true;
++            log::warn!(
++                "[{}] {} is nta-unready and nta-unready-policy = pool-only: serving coinbasers that pay only the pool. They still need the pool's 70-byte attestation, which this gateway drops, so every block it finds is invalid; use refuse",
++                self.id,
++                self.gateway_hex
++            );
++        }
+         let payable = match (nta, self.shared.nta_pool.as_ref()) {
++            (Some(_), Some(pool)) if pool_only => Some(std::iter::once(pool.script()).collect()),
+             (Some(t), Some(pool)) => Some(self.shared.nta.lock().unwrap().payable(t, pool)),
+             _ => None,
+         };
+@@ -1124,6 +1304,12 @@ impl Session {
+                 ),
+             }
+         }
++        if nta.is_none() {
++            // SOV-011: last of all, so a gateway that truncates keeps every payee.
++            if let Some(script) = self.maybe_probe(id) {
++                outputs.push(Output { sats: 0, script });
++            }
++        }
+         let encoded = coinbaser::encode_v2(id, &outputs);
+         self.send_coinbaser_reply(value, &encoded, prev_hash).await?;
+ 
+@@ -1481,6 +1667,10 @@ impl Session {
+         if !credited {
+             return self.reject(&s, mining::REJECT_BAD_USERNAME).await;
+         }
++        let nta_unready = self.judge_nta(coinbaser_id, &v, issued_outputs.as_deref());
++        if v.work > 0 && self.shared.nta_chain().is_some() {
++            self.shared.readiness.lock().unwrap().note_work(&self.gateway_hex, v.work, ts);
++        }
+         if self.shared.sovereignty.on() && !self.lzt1.is_empty() {
+             self.decide_lzt1(s.job_id, JobSlot::coinbase_id_for(&s), &v.coinbase);
+         }
+@@ -1564,6 +1754,9 @@ impl Session {
+             });
+         }
+         self.send_mining(&mining::share_receipt(status, 0, s.nonce32, s.target_pot, s.job_id), false).await?;
++        if nta_unready {
++            self.nta_gate().await?;
++        }
+ 
+         if !v.target_committed {
+             self.note_uncommitted_share();
+diff --git a/prime/primed/src/state.rs b/prime/primed/src/state.rs
+index 129feb0..3b4ceb3 100644
+--- a/prime/primed/src/state.rs
++++ b/prime/primed/src/state.rs
+@@ -431,6 +431,8 @@ pub struct Shared {
+     /// rnd/sov-002: the pool payout key when `nta-height` is set, and the attestation book.
+     pub nta_pool: Option<datum_wire::nta::Signer>,
+     pub nta: Mutex<crate::nta::Book>,
++    /// SOV-011: which gateways can carry attestations (advertised, probed, watched).
++    pub readiness: Mutex<crate::readiness::Book>,
+ }
+ 
+ /// What Prime last learned as a gateway's own payout, persisted in `gateway-scripts.json`.
+@@ -444,6 +446,20 @@ pub struct GatewayPayout {
+ const MAX_REMEMBERED_GATEWAYS: usize = 4096;
+ 
+ impl Shared {
++    /// SOV-011: activation height, probe window and the node's next height, when `nta-height`
++    /// is set and this Prime builds attested coinbasers.
++    pub fn nta_chain(&self) -> Option<crate::readiness::Chain> {
++        let h = self.cfg.nta_height?;
++        if self.nta_pool.is_none() || self.cfg.nta_disabled {
++            return None;
++        }
++        Some(crate::readiness::Chain {
++            nta_height: h,
++            probe_window: self.cfg.nta_probe_window,
++            next_height: self.tip_snapshot().map(|t| t.height + 1),
++        })
++    }
++
+     pub fn client_update(&self, id: u64, f: impl FnOnce(&mut ClientInfo)) {
+         if let Some(c) = self.clients.lock().unwrap().get_mut(&id) {
+             f(c);
+diff --git a/prime/primed/src/stats.rs b/prime/primed/src/stats.rs
+index 8c44d5e..b9c2581 100644
+--- a/prime/primed/src/stats.rs
++++ b/prime/primed/src/stats.rs
+@@ -405,12 +405,17 @@ pub async fn serve(shared: Arc<Shared>) {
+                 ("GET", "/healthz") => ("200 OK", "text/plain", plain("ok\n")),
+                 // Only with `nta-height` set, so a Prime without NTA serves the old routes.
+                 ("GET", "/nta.json" | "/nta") if shared.cfg.nta_height.is_some() => {
+-                    let body = shared
+-                        .nta
+-                        .lock()
+-                        .unwrap()
+-                        .stats_json(shared.cfg.nta_height, shared.nta_pool.as_ref())
+-                        .to_string();
++                    let mut v = shared.nta.lock().unwrap().stats_json(shared.cfg.nta_height, shared.nta_pool.as_ref());
++                    // SOV-011: the activation readiness metric.
++                    if let Some(chain) = shared.nta_chain() {
++                        v["readiness"] = shared.readiness.lock().unwrap().stats_json(
++                            &chain,
++                            &shared.cfg.nta_unready_policy,
++                            shared.cfg.nta_probe_every_secs,
++                            crate::state::now(),
++                        );
++                    }
++                    let body = v.to_string();
+                     ("200 OK", "application/json", Arc::new(body))
+                 }
+                 // `sovereignty-mode = "off"`: these routes do not exist (the 404 below).
+diff --git a/prime/primed/tests/common/mod.rs b/prime/primed/tests/common/mod.rs
+index 2632afc..2c7cd2b 100644
+--- a/prime/primed/tests/common/mod.rs
++++ b/prime/primed/tests/common/mod.rs
+@@ -49,6 +49,17 @@ pub fn start_primed(pool: &Identity, node: &str) -> (Primed, u16) {
+ 
+ /// [`start_primed`], with a chance to put files in the data directory before the Prime opens it.
+ pub fn start_primed_seeded(pool: &Identity, node: &str, seed: impl FnOnce(&std::path::Path)) -> (Primed, u16) {
++    start_primed_paying(pool, POOL_ADDRESS, node, seed)
++}
++
++/// [`start_primed_seeded`] with another `payout-address` (NTA needs a P2TR one). `@DATA_DIR@`
++/// in `node` is the data directory.
++pub fn start_primed_paying(
++    pool: &Identity,
++    payout_address: &str,
++    node: &str,
++    seed: impl FnOnce(&std::path::Path),
++) -> (Primed, u16) {
+     let dir = std::env::temp_dir().join(format!("primed-replay-{}-{}", std::process::id(), free_port()));
+     std::fs::create_dir_all(&dir).unwrap();
+     seed(&dir);
+@@ -60,12 +71,13 @@ pub fn start_primed_seeded(pool: &Identity, node: &str, seed: impl FnOnce(&std::
+ listen = "127.0.0.1:{listen}"
+ stats-listen = "127.0.0.1:{stats}"
+ data-dir = "{dir}"
+-payout-address = "{POOL_ADDRESS}"
++payout-address = "{payout_address}"
+ fee-bps = 50
+ min-diff = 1
+ {node}
+ "#,
+-        dir = dir.display()
++        dir = dir.display(),
++        node = node.replace("@DATA_DIR@", &dir.display().to_string()),
+     );
+     let cfg_path = dir.join("prime.toml");
+     std::fs::write(&cfg_path, cfg).unwrap();
+@@ -124,12 +136,21 @@ pub struct Gateway {
+ 
+ impl Gateway {
+     pub fn connect(port: u16, pool: &Identity, identity: &Identity) -> Gateway {
++        let mut g = Gateway::open(port, pool, identity, &[0u8; 16]);
++        // configure arrives first; consume it so the channel nonces stay in step
++        let cfg = g.next_mining();
++        assert_eq!(cfg[0], mining::SUB_CONFIGURE, "first mining message is the configure");
++        g
++    }
++
++    /// Hello (with `pad` after the seed, where capability markers go) and the server's reply;
++    /// nothing read after that.
++    pub fn open(port: u16, pool: &Identity, identity: &Identity, pad: &[u8]) -> Gateway {
+         let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
+         stream.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+         let session = Identity::generate();
+         let seed = 0x0badc0deu32;
+-        let hello =
+-            handshake::build_client_hello(&pool.box_pk(), identity, &session, "replay-test/0.1", seed, &[0u8; 16]);
++        let hello = handshake::build_client_hello(&pool.box_pk(), identity, &session, "replay-test/0.1", seed, pad);
+         let mut initial = KeyStream(CLIENT_INITIAL_KEY);
+         let mut h = Header::new(cmd::HELLO, hello.len());
+         h.sealed = true;
+@@ -150,11 +171,30 @@ impl Gateway {
+         assert_eq!(motd, "Lazarus");
+         let (recv_nonce, send_nonce) = crypto::session_nonces(seed, &session.sign_pk());
+         let channel = Channel::new(session.precompute(&srv_box), send_nonce, recv_nonce);
+-        let mut g = Gateway { stream, send_keys, recv_keys, channel };
+-        // configure arrives first; consume it so the channel nonces stay in step
+-        let cfg = g.next_mining();
+-        assert_eq!(cfg[0], mining::SUB_CONFIGURE, "first mining message is the configure");
+-        g
++        Gateway { stream, send_keys, recv_keys, channel }
++    }
++
++    /// Every frame until the server closes the connection: `(cmd, decrypted body)`, keepalives
++    /// (empty INFO frames) left out.
++    pub fn frames_until_closed(&mut self) -> Vec<(u8, Vec<u8>)> {
++        let mut out = Vec::new();
++        loop {
++            let mut hb = [0u8; Header::SIZE];
++            if self.stream.read_exact(&mut hb).is_err() {
++                return out;
++            }
++            let h = Header::decode(hb, &mut self.recv_keys).unwrap();
++            let mut payload = vec![0u8; h.len as usize];
++            if h.len > 0 && self.stream.read_exact(&mut payload).is_err() {
++                return out;
++            }
++            if h.len == 0 {
++                continue;
++            }
++            let body = if h.channel { self.channel.decrypt_in_place(&mut payload).unwrap().to_vec() } else { payload };
++            let body = if h.signed { body[..body.len() - crypto::SIG].to_vec() } else { body };
++            out.push((h.cmd, body));
++        }
+     }
+ 
+     pub fn send_mining(&mut self, plain: &[u8]) {
+@@ -204,7 +244,11 @@ impl Gateway {
+     }
+ 
+     /// [`Gateway::request_coinbaser`], returning the outputs the Prime issued as well.
+-    pub fn request_coinbaser_outputs(&mut self, value: u64, prev_hash: &Hash) -> (u8, Vec<datum_wire::coinbaser::Output>) {
++    pub fn request_coinbaser_outputs(
++        &mut self,
++        value: u64,
++        prev_hash: &Hash,
++    ) -> (u8, Vec<datum_wire::coinbaser::Output>) {
+         let mut m = vec![mining::SUB_COINBASER_REQUEST];
+         m.extend_from_slice(&value.to_le_bytes());
+         m.extend_from_slice(prev_hash);
+diff --git a/prime/primed/tests/nta_readiness_e2e.rs b/prime/primed/tests/nta_readiness_e2e.rs
+new file mode 100644
+index 0000000..5318f6a
+--- /dev/null
++++ b/prime/primed/tests/nta_readiness_e2e.rs
+@@ -0,0 +1,273 @@
++//! End-to-end (SOV-011): XBT-NTA activation safety against a real `primed` and a stand-in node.
++//! A gateway that advertises `nta-v1` is ready; one that does not is probed with a 70-byte
++//! output before activation, never after, at most once an hour; `/nta.json` carries the
++//! readiness metric; and after activation an `nta-unready` gateway is told why and closed.
++//!
++//! The last test needs an accepted share, which is a diff-1 grind (~4.3 GH of BLAKE2b), so it
++//! is ignored by default:
++//!
++//!     cargo test --release -p primed --test nta_readiness_e2e -- --ignored --nocapture
++
++mod common;
++
++use std::io::{Read, Write};
++use std::net::TcpStream;
++use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
++
++use common::*;
++use datum_wire::coinbase::{self, TxOut};
++use datum_wire::coinbaser::Output;
++use datum_wire::crypto::Identity;
++use datum_wire::handshake::NTA_V1_MARKER;
++use datum_wire::mining::{self, Blake2bSection, CoinbaseSection, JobSection, PowSubmit};
++use datum_wire::nta::{self, Signer};
++use datum_wire::pow::{self, Hash};
++
++const BITS: u32 = 0x1903_a30c;
++const TIP: Hash = [0x42; 32];
++
++fn unix_now() -> u32 {
++    SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as u32
++}
++
++fn pool_signer() -> Signer {
++    let mut sk = [0u8; 32];
++    sk[31] = 7;
++    Signer::from_secret(&sk).unwrap()
++}
++
++fn p2tr_address(key: &[u8; 32]) -> String {
++    bech32::segwit::encode(bech32::hrp::BC, bech32::segwit::VERSION_1, key).unwrap()
++}
++
++/// A node whose next block is `HEIGHT`, and a Prime building attested coinbasers from
++/// `nta_height`, probing from `window` blocks before it.
++fn start(nta_height: u32, window: u32, extra: &str) -> (MockNode, Primed, u16, Identity) {
++    let node = MockNode::start(Chain {
++        height: HEIGHT - 1,
++        tip: node_hex(&TIP),
++        parent: node_hex(&[0x41; 32]),
++        bits: BITS,
++        next_bits: Some(BITS),
++    });
++    let pool = Identity::generate();
++    let payout = p2tr_address(&pool_signer().key());
++    let cfg = format!(
++        "{}\nhouse-loopback = false\nnta-height = {nta_height}\nnta-probe-window = {window}\nnta-pool-key-file = \"@DATA_DIR@/nta.key\"\n{extra}",
++        node.config(0.2)
++    );
++    let mut sk = [0u8; 32];
++    sk[31] = 7;
++    let (primed, port) =
++        start_primed_paying(&pool, &payout, &cfg, |dir| std::fs::write(dir.join("nta.key"), hex::encode(sk)).unwrap());
++    wait_for_tip(&primed);
++    (node, primed, port, pool)
++}
++
++fn wait_for_tip(p: &Primed) {
++    let deadline = Instant::now() + Duration::from_secs(10);
++    while stats(p)["node"]["height"].as_u64().unwrap_or(0) == 0 {
++        assert!(Instant::now() < deadline, "primed never read the node's tip: {}", stats(p));
++        std::thread::sleep(Duration::from_millis(100));
++    }
++}
++
++fn nta_json(p: &Primed) -> serde_json::Value {
++    let mut s = TcpStream::connect(("127.0.0.1", p.stats)).unwrap();
++    s.write_all(b"GET /nta.json HTTP/1.0\r\n\r\n").unwrap();
++    let mut buf = Vec::new();
++    s.read_to_end(&mut buf).unwrap();
++    let text = String::from_utf8_lossy(&buf);
++    serde_json::from_str(text.split("\r\n\r\n").nth(1).unwrap()).unwrap()
++}
++
++fn row<'a>(v: &'a serde_json::Value, gateway: &Identity) -> &'a serde_json::Value {
++    let gw = hex::encode(&gateway.sign_pk()[..8]);
++    v["readiness"]["list"].as_array().unwrap().iter().find(|r| r["gateway"] == gw.as_str()).expect("gateway row")
++}
++
++fn advertising() -> Vec<u8> {
++    let mut pad = NTA_V1_MARKER.to_vec();
++    pad.extend_from_slice(&[0x33; 9]);
++    pad
++}
++
++fn connect(port: u16, pool: &Identity, g: &Identity, pad: &[u8]) -> Gateway {
++    let mut gw = Gateway::open(port, pool, g, pad);
++    assert_eq!(gw.next_mining()[0], mining::SUB_CONFIGURE, "served: configure first");
++    gw
++}
++
++fn is_probe(o: &Output) -> bool {
++    o.sats == 0 && nta::is_attestation(&o.script) && o.script[6..].starts_with(b"XBT-NTA probe")
++}
++
++#[test]
++fn before_activation_only_a_gateway_that_does_not_advertise_is_probed_and_only_hourly() {
++    // next block HEIGHT; activation 5 blocks on, inside the default 2016-block window
++    let (_node, primed, port, pool) = start(HEIGHT + 5, 2016, "");
++    let (a, s) = (Identity::generate(), Identity::generate());
++    let mut ga = connect(port, &pool, &a, &advertising());
++    let mut gs = connect(port, &pool, &s, &[0x99; 16]);
++
++    let (_, plain) = ga.request_coinbaser_outputs(VALUE, &TIP);
++    assert!(!plain.iter().any(is_probe), "an advertiser is not probed: {plain:?}");
++    let (id, probed) = gs.request_coinbaser_outputs(VALUE, &TIP);
++    assert!(id > 0);
++    // the probe is the last output, 70 bytes, zero value; everything before it is the same split
++    let last = probed.last().unwrap();
++    assert!(is_probe(last) && last.script.len() == 70, "{probed:?}");
++    assert_eq!(&probed[..probed.len() - 1], &plain[..], "the probe changes no payee");
++    assert_eq!(probed.iter().map(|o| o.sats).sum::<u64>(), VALUE);
++    // once an hour: the next coinbaser (a fresh one, for another value) has none
++    let (_, again) = gs.request_coinbaser_outputs(VALUE - 1000, &TIP);
++    assert!(!again.iter().any(is_probe), "{again:?}");
++
++    let v = nta_json(&primed);
++    let r = &v["readiness"];
++    assert_eq!(r["blocks_until_activation"], 5, "{v}");
++    assert_eq!((r["probing"].as_bool(), r["active"].as_bool()), (Some(true), Some(false)), "{v}");
++    assert_eq!(r["gateways"], serde_json::json!({"ready": 1, "unready": 0, "unknown": 1}), "{v}");
++    assert_eq!(r["unready_policy"], "refuse");
++    assert_eq!(row(&v, &a)["evidence"], "advertised nta-v1");
++    assert_eq!(row(&v, &s)["status"], "unknown");
++    assert_eq!(row(&v, &s)["probes"]["sent"], 1);
++    assert_eq!(row(&v, &s)["probes"]["last_height"], HEIGHT);
++    let log = std::fs::read_to_string(primed.dir.join("primed.err")).unwrap_or_default();
++    assert!(log.contains("nta-v1=true nta=ready"), "{log}");
++    assert!(log.contains("NTA probe on coinbaser"), "{log}");
++}
++
++#[test]
++fn no_probe_before_the_window_and_none_when_probing_is_off() {
++    let (_node, primed, port, pool) = start(HEIGHT + 2016 + 1, 2016, "");
++    let mut gs = connect(port, &pool, &Identity::generate(), &[]);
++    let (_, outs) = gs.request_coinbaser_outputs(VALUE, &TIP);
++    assert!(!outs.iter().any(is_probe), "{outs:?}");
++    assert_eq!(nta_json(&primed)["readiness"]["probing"], false);
++
++    let (_node, _primed, port, pool) = start(HEIGHT + 5, 0, "");
++    let mut gs = connect(port, &pool, &Identity::generate(), &[]);
++    let (_, outs) = gs.request_coinbaser_outputs(VALUE, &TIP);
++    assert!(!outs.iter().any(is_probe), "{outs:?}");
++}
++
++#[test]
++fn after_activation_a_gateway_not_known_to_be_unready_is_served_and_never_probed() {
++    // the next block is the activation height
++    let (_node, primed, port, pool) = start(HEIGHT, 2016, "");
++    let mut gs = connect(port, &pool, &Identity::generate(), &[0x10; 20]);
++    let (_, outs) = gs.request_coinbaser_outputs(VALUE, &TIP);
++    assert!(!outs.iter().any(is_probe), "{outs:?}");
++    // attested: the pool's attestation follows its output
++    assert!(outs.iter().any(|o| o.sats == 0 && nta::is_attestation(&o.script)), "{outs:?}");
++    let r = &nta_json(&primed)["readiness"];
++    assert_eq!((r["active"].as_bool(), r["blocks_until_activation"].as_u64()), (Some(true), Some(0)));
++    assert_eq!(r["gateways"]["unknown"], 1);
++}
++
++/// A share paying `script` the whole `VALUE`, on the tip, ground to diff 1. The coinbaser id is
++/// not in the header, so the caller fills it in once one is issued.
++fn ground_share(script: &[u8]) -> PowSubmit {
++    let mut wc = vec![0x6a, 0x24, 0xaa, 0x21, 0xa9, 0xed];
++    wc.extend_from_slice(&[0x76; 32]);
++    let outs = vec![TxOut { value: VALUE, script: script.to_vec() }, TxOut { value: 0, script: wc }];
++    let (cb, tidx, split_at) = coinbase::build(HEIGHT, b"Lazarus", &outs, 0);
++    let txs: Vec<Hash> = (0..3u64)
++        .map(|i| {
++            let mut a = [0u8; 32];
++            a[..8].copy_from_slice(&(i + 1).to_le_bytes());
++            a
++        })
++        .collect();
++    let mut s = PowSubmit {
++        job_id: 1,
++        coinbase_id: 0,
++        flags: mining::FLAG_BLAKE2B,
++        target_pot: 0,
++        ntime32: 0,
++        nonce32: 0,
++        version: 0xa000_0000,
++        extranonce: [0x0b, 0x10, 0xc0, 0xde, 1, 2, 3, 4, 5, 6, 7, 8],
++        username: "bc1qminer.rig".into(),
++        reserved: [0; 4],
++        blake2b: Some(Blake2bSection { ntime: [0; 8], nonce: [0; 8] }),
++        time_on_wire: Some(unix_now()),
++        job: Some(JobSection {
++            prev_hash: TIP,
++            target_byte_index: tidx as u16,
++            nbits: BITS.to_le_bytes(),
++            coinbaser_id: 0,
++            height: HEIGHT,
++            coinbase_value: VALUE,
++            txn_count: txs.len() as u32,
++            txn_total_weight: 0,
++            txn_total_size: 0,
++            txn_total_sigops: 0,
++            merkle_branches: pow::merkle_branches_for_coinbase(&txs),
++        }),
++        coinbase: Some(CoinbaseSection {
++            coinbase_id: 0,
++            coinb1: cb[..split_at].to_vec(),
++            coinb2: cb[split_at + coinbase::EXTRANONCE_SLOT..].to_vec(),
++        }),
++    };
++    grind_diff1(&mut s);
++    s
++}
++
++#[test]
++#[ignore]
++fn a_gateway_that_drops_the_probe_is_unready_then_refused_at_activation_until_it_advertises() {
++    // Ground first: nothing is connected, so no session idles out meanwhile. The coinbase is
++    // what a stock gateway builds from a probe coinbaser on an empty window: the pool's output
++    // (all the split has), no probe.
++    let pool_script = pool_signer().script();
++    let mut share = ground_share(&pool_script);
++
++    let (node, primed, port, pool) = start(HEIGHT + 1, 2016, "nta-probe-every-secs = 3600");
++    let s = Identity::generate();
++    let mut gs = connect(port, &pool, &s, &[0x5a; 30]);
++    let (id, outs) = gs.request_coinbaser_outputs(VALUE, &TIP);
++    assert!(is_probe(outs.last().unwrap()), "{outs:?}");
++    assert_eq!(outs[..outs.len() - 1], [Output { sats: VALUE, script: pool_script.clone() }]);
++    share.job.as_mut().unwrap().coinbaser_id = id;
++    // Accepted in full: dropping a zero-value OP_RETURN costs the gateway nothing.
++    assert_eq!(gs.submit(&share).0, mining::ACCEPTED);
++    let v = nta_json(&primed);
++    assert_eq!(row(&v, &s)["status"], "nta-unready", "{v}");
++    assert_eq!(row(&v, &s)["evidence"], "probe dropped");
++    assert_eq!(v["readiness"]["hashrate_share"]["unready"], 1.0, "{v}");
++    let log = std::fs::read_to_string(primed.dir.join("primed.err")).unwrap_or_default();
++    assert!(log.contains("NTA probe DROPPED"), "{log}");
++
++    // Activation: the next tip makes the next block HEIGHT + 1 = nta-height.
++    *node.chain.lock().unwrap() =
++        Chain { height: HEIGHT, tip: node_hex(&[0x43; 32]), parent: node_hex(&TIP), bits: BITS, next_bits: Some(BITS) };
++    let frames = gs.frames_until_closed();
++    let info = frames.iter().find(|(c, _)| *c == datum_wire::cmd::INFO).expect("a server message");
++    let text = String::from_utf8_lossy(&info.1);
++    assert!(text.contains("datum_coinbaser.c:795") && text.contains("nta-v1"), "{text}");
++    assert!(text.ends_with('\0'), "NUL-terminated for the C side's %s");
++    assert!(
++        frames.iter().any(|(c, b)| *c == datum_wire::cmd::MINING && b[0] == nta::SUB_NTA_UNREADY),
++        "and the unknown sub-command a stock gateway logs at WARN: {frames:?}"
++    );
++    assert!(!frames.iter().any(|(c, b)| *c == datum_wire::cmd::MINING && b[0] == mining::SUB_COINBASER_REPLY));
++
++    // Reconnecting as it was: refused before any configure.
++    let mut again = Gateway::open(port, &pool, &s, &[0x5a; 30]);
++    let frames = again.frames_until_closed();
++    assert!(
++        frames.iter().all(|(c, b)| !(*c == datum_wire::cmd::MINING && b[0] == mining::SUB_CONFIGURE)),
++        "{frames:?}"
++    );
++    assert!(frames.iter().any(|(c, _)| *c == datum_wire::cmd::INFO));
++    // Upgraded (advertises nta-v1): served straight away.
++    let _served = connect(port, &pool, &s, &advertising());
++    let v = nta_json(&primed);
++    assert_eq!(row(&v, &s)["status"], "ready");
++    assert!(row(&v, &s)["refusals"].as_u64().unwrap() >= 2, "{v}");
++    let log = std::fs::read_to_string(primed.dir.join("primed.err")).unwrap_or_default();
++    assert!(log.contains("refused: nta-unready (probe dropped)"), "{log}");
++}
+diff --git a/prime/wire/src/coinbaser.rs b/prime/wire/src/coinbaser.rs
+index 4da24ae..766b6ed 100644
+--- a/prime/wire/src/coinbaser.rs
++++ b/prime/wire/src/coinbaser.rs
+@@ -9,8 +9,10 @@
+ //! coinbase value, and pays whatever is left to the pool address it was configured with.
+ //! The gateway accepts at most 512 entries and one script may be at most 64 bytes. The one
+ //! exception is an XBT-NTA attestation output (70 bytes, [`crate::nta`]), which only a
+-//! signing-capable gateway (lazarus-gateway rnd/sov-002) parses; a stock gateway refuses the
+-//! whole list, so Prime sends them only after `nta` activation.
++//! gateway that advertises `nta-v1` (lazarus-gateway, the split-only patch) keeps. A stock
++//! v0.4.1 gateway does not refuse the list: it stops reading at the first script over 64 bytes
++//! and keeps what came before, without a word ([`stock_v041_parse`]). Prime sends attestations
++//! only from `nta` activation, and probes for gateways that would drop them before that.
+ 
+ use crate::{Cursor, Error, Result};
+ 
+@@ -70,10 +72,76 @@ pub fn decode_v2(bytes: &[u8]) -> Result<(u8, Vec<Output>)> {
+     Ok((id, out))
+ }
+ 
++/// What stock `datum_gateway` v0.4.1 keeps of a coinbaser v2 list: `datum_coinbaser_v2_parse`
++/// (`datum_coinbaser.c:760-815`, OCEAN `5b06123`), line for line. It stops, silently, at the
++/// first output whose value would take the running total past `coinbase_value` or whose script
++/// is shorter than 2 or longer than 64 bytes (:795), and after 512 outputs; what came before is
++/// kept. Under 9 bytes it keeps nothing. For tests and demos that play a stock gateway.
++pub fn stock_v041_parse(bytes: &[u8], coinbase_value: u64) -> (u8, Vec<Output>) {
++    if bytes.len() < 9 {
++        return (0, Vec::new());
++    }
++    let id = bytes[0];
++    let mut i = 1;
++    let mut tally = 0u64;
++    let mut out = Vec::new();
++    // `while (cidx < cblen)`: a truncated tail reads past the buffer in C; here it ends the list.
++    while i < bytes.len() {
++        let Some(v) = bytes.get(i..i + 8) else { break };
++        let value = u64::from_le_bytes(v.try_into().unwrap());
++        i += 8;
++        if value.saturating_add(tally) > coinbase_value {
++            break;
++        }
++        let Some(&slen) = bytes.get(i) else { break };
++        i += 1;
++        let slen = usize::from(slen);
++        if !(MIN_SCRIPT..=MAX_SCRIPT).contains(&slen) {
++            break;
++        }
++        let Some(script) = bytes.get(i..i + slen) else { break };
++        i += slen;
++        tally += value;
++        out.push(Output { sats: value, script: script.to_vec() });
++        if out.len() >= MAX_OUTPUTS {
++            break;
++        }
++    }
++    (id, out)
++}
++
+ #[cfg(test)]
+ mod tests {
+     use super::*;
+ 
++    #[test]
++    fn stock_v041_keeps_the_payees_and_drops_everything_from_the_first_long_script() {
++        let pay = |n: u8, sats| Output { sats, script: vec![0x51, 0x20, n, n, n] };
++        let att = Output { sats: 0, script: crate::nta::attestation_script(&[7; 64]) };
++        let list = vec![pay(1, 600), pay(2, 300), pay(3, 100), att.clone(), pay(4, 0)];
++        let enc = encode_v2(9, &list);
++        // the 70-byte output and everything after it are gone; nothing is refused
++        assert_eq!(stock_v041_parse(&enc, 1_000), (9, list[..3].to_vec()));
++        // value over the template: stops there too
++        assert_eq!(stock_v041_parse(&enc, 950), (9, list[..2].to_vec()));
++        // a list of only short scripts is kept whole
++        let short = encode_v2(2, &list[..3]);
++        assert_eq!(stock_v041_parse(&short, 1_000).1, list[..3].to_vec());
++        // under 9 bytes: nothing
++        assert_eq!(stock_v041_parse(&[1, 2, 3], 1_000), (0, vec![]));
++        // a 65-byte script stops it exactly as a 70-byte one does
++        // (built by hand: encode_v2 will not write a 65-byte script)
++        let mut long = encode_v2(3, &[pay(1, 1)]);
++        long.extend_from_slice(&0u64.to_le_bytes());
++        long.push(65);
++        long.extend_from_slice(&[0x6a; 65]);
++        long.extend_from_slice(&encode_v2(0, &[pay(2, 1)])[1..]);
++        assert_eq!(stock_v041_parse(&long, 10).1, vec![pay(1, 1)]);
++        // 512 at most
++        let many: Vec<Output> = (0..600).map(|i| pay((i % 250) as u8, 1)).collect();
++        assert_eq!(stock_v041_parse(&encode_v2(4, &many), u64::MAX).1.len(), 512);
++    }
++
+     #[test]
+     fn round_trip() {
+         let outs = vec![
+diff --git a/prime/wire/src/handshake.rs b/prime/wire/src/handshake.rs
+index 7f73d02..1436559 100644
+--- a/prime/wire/src/handshake.rs
++++ b/prime/wire/src/handshake.rs
+@@ -19,6 +19,14 @@
+ //! * **Convoy lineage** — the pad begins with `"DRS\x01"`, a resume flag byte, and when
+ //!   the flag is set a 40-byte resume token from a previous session.
+ //!
++//! **Capabilities (SOV-011).** A gateway that can carry XBT-NTA attestations (70-byte
++//! coinbaser scripts) says so with [`NTA_V1_MARKER`] (`"nta-v1\0"`) right after the seed, or
++//! after the Convoy extension when there is one. Stock v0.4.1 never sends it: its pad is one
++//! `rand()` byte repeated 1–200 times (`datum_protocol_send_hello`, `datum_protocol.c:1028`
++//! "TODO: maybe tack on other useful data here", then `memset(&hello_msg[i], rand(), j)` at
++//! :1031–1033). The pad is filler to every server, so a Prime that does not know the marker
++//! (or OCEAN's) reads past it exactly as it reads past random bytes.
++//!
+ //! **Server reply** (cmd 2, `sealed | signed`), sealed to the client's *session* box key,
+ //! signed by the pool's long-term signing key:
+ //!
+@@ -37,6 +45,8 @@ pub const MAX_USER_AGENT: usize = 512;
+ pub const MAX_MOTD: usize = 511;
+ pub const RESUME_TOKEN: usize = 40;
+ const RESUME_MARKER: &[u8; 4] = b"DRS\x01";
++/// "This gateway carries 70-byte XBT-NTA attestation outputs": see the module docs.
++pub const NTA_V1_MARKER: &[u8; 7] = b"nta-v1\0";
+ 
+ /// Which configuration layout the client parses.
+ #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+@@ -61,6 +71,8 @@ pub struct ClientHello {
+     pub generation: Generation,
+     /// A Convoy client asking to continue an earlier session.
+     pub resume_token: Option<[u8; RESUME_TOKEN]>,
++    /// Advertised [`NTA_V1_MARKER`]: it keeps coinbaser scripts of 70 bytes.
++    pub nta_v1: bool,
+ }
+ 
+ /// Hello UAs that never publish empty/tiny or size-class-truncated coinbases while pooled.
+@@ -102,6 +114,7 @@ pub fn parse_client_hello(pool: &Identity, sealed: &[u8]) -> Result<ClientHello>
+             resume_token = Some(c.array::<RESUME_TOKEN>()?);
+         }
+     }
++    let nta_v1 = body[c.pos..].starts_with(NTA_V1_MARKER);
+     Ok(ClientHello {
+         identity_sign_pk,
+         identity_box_pk,
+@@ -111,6 +124,7 @@ pub fn parse_client_hello(pool: &Identity, sealed: &[u8]) -> Result<ClientHello>
+         seed,
+         generation,
+         resume_token,
++        nta_v1,
+     })
+ }
+ 
+@@ -206,6 +220,7 @@ mod tests {
+         assert_eq!(h.seed, 0x0102_0304);
+         assert_eq!(h.generation, Generation::Ocean);
+         assert_eq!(h.resume_token, None);
++        assert!(!h.nta_v1);
+ 
+         // Convoy lineage: marker, then no token; then a token
+         let mut ext = convoy_hello_extension(None);
+@@ -228,6 +243,36 @@ mod tests {
+         assert_eq!(motd, "Lazarus");
+     }
+ 
++    #[test]
++    fn nta_v1_is_read_after_the_seed_or_the_convoy_extension_and_never_from_a_stock_pad() {
++        let pool = Identity::generate();
++        let gw = Identity::generate();
++        let hello = |pad: &[u8]| parse_client_hello(&pool, &build_client_hello(&pool.box_pk(), &gw, &gw, "ua", 7, pad));
++        let mut pad = NTA_V1_MARKER.to_vec();
++        pad.extend_from_slice(&[0x5a; 20]);
++        let h = hello(&pad).unwrap();
++        assert!(h.nta_v1);
++        assert_eq!(h.generation, Generation::Ocean);
++        // after a Convoy resume token
++        let mut ext = convoy_hello_extension(Some(&[1; RESUME_TOKEN]));
++        ext.extend_from_slice(NTA_V1_MARKER);
++        let h = hello(&ext).unwrap();
++        assert!(h.nta_v1 && h.generation == Generation::Convoy && h.resume_token.is_some());
++        // stock v0.4.1: one rand() byte, 1..=200 times; and no pad at all
++        for b in 0..=255u8 {
++            for n in [1, 7, 200] {
++                assert!(!hello(&vec![b; n]).unwrap().nta_v1);
++            }
++        }
++        assert!(!hello(&[]).unwrap().nta_v1);
++        // the marker anywhere but at the start of the pad is not an advertisement
++        let mut late = vec![0u8; 3];
++        late.extend_from_slice(NTA_V1_MARKER);
++        assert!(!hello(&late).unwrap().nta_v1);
++        // cut short
++        assert!(!hello(&NTA_V1_MARKER[..6]).unwrap().nta_v1);
++    }
++
+     #[test]
+     fn split_gateway_ua() {
+         assert!(is_split_gateway("lazarus-gateway/0.1"));
+diff --git a/prime/wire/src/nta.rs b/prime/wire/src/nta.rs
+index a1fd177..597d1ee 100644
+--- a/prime/wire/src/nta.rs
++++ b/prime/wire/src/nta.rs
+@@ -31,6 +31,30 @@ pub const SCRIPT_LEN: usize = PREFIX.len() + 64;
+ /// which ignore it, so a signing gateway still works against them.
+ pub const SUB_NTA_ATTEST: u8 = 0x4e;
+ pub const ATTEST_VERSION: u8 = 1;
++/// Prime → gateway (SOV-011): "this gateway cannot carry attestations, so no work is sent from
++/// here", then the reason as text. The same code as [`SUB_NTA_ATTEST`] in the other direction.
++/// Stock v0.4.1 does not know it: `datum_protocol_mining_cmd5` logs "Received unknown mining
++/// command 4E from DATUM Server. Perhaps you need to upgrade this DATUM Gateway?" at WARN
++/// (`datum_protocol.c:964-966`) and returns 0, which does not end the session (only a
++/// negative return does, :1833). Prime closes it.
++pub const SUB_NTA_UNREADY: u8 = 0x4e;
++
++/// The [`SUB_NTA_UNREADY`] mining payload: the code, the text, a NUL.
++pub fn unready_notice(text: &str) -> Vec<u8> {
++    let mut m = Vec::with_capacity(text.len() + 2);
++    m.push(SUB_NTA_UNREADY);
++    m.extend_from_slice(text.as_bytes());
++    m.push(0);
++    m
++}
++
++/// A probe output (SOV-011): the 70-byte attestation shape with `payload` where the signature
++/// goes. Zero value, OP_RETURN: valid in any block before activation, pays nobody, and a
++/// gateway that keeps it will keep a real attestation too. After activation Knots checks every
++/// NTA-shaped output against a payee, so Prime sends probes only before.
++pub fn probe_script(payload: &[u8; 64]) -> Vec<u8> {
++    attestation_script(payload)
++}
+ 
+ /// `OP_1 <K>`: the only payee shape NTA allows.
+ pub fn p2tr(key: &[u8; 32]) -> Vec<u8> {
+-- 
+2.43.0
+

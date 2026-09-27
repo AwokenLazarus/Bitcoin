@@ -1,0 +1,113 @@
+From 61b07b8ad58081726da6b6c8fd3d431c058b7082 Mon Sep 17 00:00:00 2001
+From: michael moore <mrmoore27@pm.me>
+Date: Sat, 26 Sep 2026 00:23:14 +0000
+Subject: [PATCH 3/3] xbt-nta: cap distinct coinbase payees at 512
+ (bad-nta-too-many)
+
+MAX_NTA_PAYEES = 512 (the research draft's MAX_ATTESTATIONS). A 513th distinct
+value-bearing payee is bad-nta-too-many, checked while payees are collected and
+before any BIP340 verification, so a block costs at most 512 verifications
+(~0.4 s single-threaded at the ~8,000-payee block-size bound, ~26 ms at 512) and
+the payee de-duplication stays bounded.
+
+A separate reason, not bad-nta-count: count means an attestation is missing or
+spare (add or drop one); over the cap every attestation can be present and
+valid, and the builder must drop payees instead. Reject reasons aren't consensus.
+
+feature_xbt_nta.py: 513 validly attested payees rejected; 513 payees with junk
+signatures rejected with the same reason (no signature checked); 512 distinct
+payees plus a repeated one accepted by both nodes. SOV-014, local only.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/validation.cpp                 | 13 ++++++++++++-
+ test/functional/feature_xbt_nta.py | 25 +++++++++++++++++++++++++
+ 2 files changed, 37 insertions(+), 1 deletion(-)
+
+diff --git a/src/validation.cpp b/src/validation.cpp
+index 22ef2ac..56792b4 100644
+--- a/src/validation.cpp
++++ b/src/validation.cpp
+@@ -4836,9 +4836,14 @@ static bool ContextualCheckBlockHeaderVolatile(const CBlockHeader& block, BlockV
+  *  transaction and inclusion list need an attestation sidecar (vtxa) and P2P, and
+  *  are not part of this variant. The attestation output is 70 bytes, within the
+  *  83-byte RDTS OP_RETURN limit.
++ *
++ *  At most MAX_NTA_PAYEES distinct payees per block (bad-nta-too-many). Checked while
++ *  collecting payees, before any signature is verified, so a block costs at most
++ *  MAX_NTA_PAYEES BIP340 verifications (the payee de-duplication stays bounded too).
+  */
+ static constexpr std::array<unsigned char, 6> NTA_ATTESTATION_PREFIX{OP_RETURN, 68, 'N', 'T', 'A', 0x02};
+ static constexpr size_t NTA_ATTESTATION_SCRIPT_SIZE{NTA_ATTESTATION_PREFIX.size() + 64};
++static constexpr size_t MAX_NTA_PAYEES{512};
+ 
+ static uint256 NtaAttestationHash(const CScript& payee, int height, uint32_t nbits, const uint256& prev)
+ {
+@@ -4875,7 +4880,13 @@ static bool CheckNodeTemplateAttestations(const CBlock& block, int height, Block
+         if (!XOnlyPubKey{Span{spk}.subspan(2)}.IsFullyValid()) {
+             return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-nta-payee-key", "coinbase payee key is not on the curve");
+         }
+-        if (std::find(payees.begin(), payees.end(), spk) == payees.end()) payees.push_back(spk);
++        if (std::find(payees.begin(), payees.end(), spk) == payees.end()) {
++            if (payees.size() == MAX_NTA_PAYEES) {
++                return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-nta-too-many",
++                                     strprintf("more than %u distinct coinbase payees", MAX_NTA_PAYEES));
++            }
++            payees.push_back(spk);
++        }
+     }
+     if (sigs.size() != payees.size()) {
+         return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-nta-count",
+diff --git a/test/functional/feature_xbt_nta.py b/test/functional/feature_xbt_nta.py
+index 999b0f5..012671e 100755
+--- a/test/functional/feature_xbt_nta.py
++++ b/test/functional/feature_xbt_nta.py
+@@ -48,6 +48,7 @@ if os.getenv("NTA_PORT_BASE"):
+ BLAKE2B_HEIGHT = 101
+ NTA_HEIGHT = 120
+ NTA_PREFIX = bytes([0x4e, 0x54, 0x41, 0x02])  # "NTA" 0x02
++MAX_NTA_PAYEES = 512  # validation.cpp; one more distinct payee is bad-nta-too-many
+ SECP_P = 2**256 - 2**32 - 977
+ 
+ 
+@@ -100,6 +101,17 @@ class Tmpl:
+         return b
+ 
+ 
++def cap_payees(n: int):
++    """n distinct payees for the cap cases: [(script, seckey)], deterministic."""
++    return [(p2tr(pk), sk) for sk, pk in (keypair(b"cap/%d" % i) for i in range(n))]
++
++
++def cap_outputs(t, payees, *, value=COIN // 100):
++    """Every payee paid and attested in order; the first payee is paid twice (one attestation)."""
++    pay = [(script, value) for script, _ in payees] + [(payees[0][0], value)]
++    return pay + [(att_script(t.sign(script, sk)), 0) for script, sk in payees]
++
++
+ def not_on_curve_key() -> bytes:
+     x = 1
+     while pow((x ** 3 + 7) % SECP_P, (SECP_P - 1) // 2, SECP_P) == 1:
+@@ -218,6 +230,19 @@ class XbtNtaTest(BitcoinTestFramework):
+         t = Tmpl(enf)
+         self.accept(t.block([(CScript([OP_RETURN, b"hello"]), 0), (p2tr(bob), 0)]))
+ 
++        self.log.info(f"Payee cap: {MAX_NTA_PAYEES} distinct signed payees are valid, one more is bad-nta-too-many")
++        payees = cap_payees(MAX_NTA_PAYEES + 1)
++        t = Tmpl(enf)
++        # Over the cap every attestation is valid, so the cap alone rejects the block.
++        self.reject(t.block(cap_outputs(t, payees)), "bad-nta-too-many")
++        # The cap is checked before any signature, so an over-cap block with bad signatures
++        # gets the same verdict: the node never pays for the verification.
++        junk = [(script, 1) for script, _ in payees] + [(att_script(b"\x00" * 64), 0)] * len(payees)
++        self.reject(t.block(junk), "bad-nta-too-many")
++        at_cap = t.block(cap_outputs(t, payees[:MAX_NTA_PAYEES]))
++        assert_equal(len(at_cap.vtx[0].vout), 2 * MAX_NTA_PAYEES + 1)
++        self.accept(at_cap)
++
+         self.log.info("getblocktemplate still works after activation; a generate* block is refused")
+         # The pool or gateway replaces the template's placeholder coinbase with payee-signed
+         # outputs (XBT-071), so the template must not fail on it. The built-in miner can't sign.
+-- 
+2.43.0
+

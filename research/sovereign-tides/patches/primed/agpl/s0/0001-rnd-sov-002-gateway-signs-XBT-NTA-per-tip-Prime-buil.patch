@@ -1,0 +1,617 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: michael moore <mrmoore27@pm.me>
+Date: Fri, 25 Sep 2026 07:12:05 +0000
+Subject: [PATCH 1/8] rnd/sov-002: gateway signs XBT-NTA per tip; Prime builds
+ attested coinbasers
+
+lazarus-gateway (nta_key_file) signs NtaAttestationHash(OP_1 <K>, height, nBits,
+prev) with its payout key for every template and sends it to Prime as mining
+sub-command 0x4e ahead of the coinbaser request. primed (nta-height,
+nta-pool-key-file) checks each attestation against its own node's tip, and from
+activation pays only attested scripts plus the pool (self-signed), appending one
+70-byte attestation per distinct payee in Knots' order. Unattested payees are
+deferred as UnpaidReason::Unattested and carried. /nta.json reports per-tip
+signers and signature latency. Digest and signatures match the Knots helpers and
+SOV-001's node-judged vectors byte for byte.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ lazarus/Cargo.lock                |  20 ++
+ lazarus/Cargo.toml                |   2 +
+ lazarus/gateway/src/main.rs       |  59 +++++
+ lazarus/protocol/Cargo.toml       |   4 +
+ lazarus/protocol/src/coinbaser.rs |   6 +-
+ lazarus/protocol/src/lib.rs       |   1 +
+ lazarus/protocol/src/nta.rs       | 385 ++++++++++++++++++++++++++++++
+ 7 files changed, 476 insertions(+), 1 deletion(-)
+ create mode 100644 lazarus/protocol/src/nta.rs
+
+diff --git a/lazarus/Cargo.lock b/lazarus/Cargo.lock
+index b9746a7..576bc58 100644
+--- a/lazarus/Cargo.lock
++++ b/lazarus/Cargo.lock
+@@ -529,6 +529,8 @@ dependencies = [
+  "ed25519-dalek",
+  "hex",
+  "rand",
++ "secp256k1",
++ "serde_json",
+  "sha2",
+  "thiserror 1.0.69",
+ ]
+@@ -760,6 +762,24 @@ dependencies = [
+  "untrusted",
+ ]
+ 
++[[package]]
++name = "secp256k1"
++version = "0.29.1"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "9465315bc9d4566e1724f0fffcbcc446268cb522e60f9a27bcded6b19c108113"
++dependencies = [
++ "secp256k1-sys",
++]
++
++[[package]]
++name = "secp256k1-sys"
++version = "0.10.1"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "d4387882333d3aa8cb20530a17c69a3752e97837832f34f6dccc760e715001d9"
++dependencies = [
++ "cc",
++]
++
+ [[package]]
+ name = "semver"
+ version = "1.0.28"
+diff --git a/lazarus/Cargo.toml b/lazarus/Cargo.toml
+index c5d51a1..18c684b 100644
+--- a/lazarus/Cargo.toml
++++ b/lazarus/Cargo.toml
+@@ -24,3 +24,5 @@ toml = "0.8"
+ base64 = "0.22"
+ rand = "0.8"
+ sha2 = "0.10"
++# XBT-NTA (rnd/sov-002): BIP340 attestations. No rand: signing uses zero aux randomness.
++secp256k1 = { version = "0.29", default-features = false, features = ["std"] }
+diff --git a/lazarus/gateway/src/main.rs b/lazarus/gateway/src/main.rs
+index 3a25f2e..2676495 100644
+--- a/lazarus/gateway/src/main.rs
++++ b/lazarus/gateway/src/main.rs
+@@ -89,6 +89,16 @@ struct GwCfg {
+     /// Prime trusts the key rather than the network path. Absent keeps the old behaviour.
+     #[serde(default)]
+     identity_key_file: Option<PathBuf>,
++    /// XBT-NTA (rnd/sov-002): file holding the payout key's secret, 64 hex characters, kept
++    /// next to `identity_key_file` and never logged. With it the gateway signs
++    /// `NtaAttestationHash(OP_1 <K>, height, nBits, prev)` for every template it asks Prime
++    /// to split, and sends the signature ahead of the coinbaser request. After activation
++    /// Prime pays only payees whose key signed for the tip, so the miners on this gateway
++    /// must use this key's P2TR address (`bcrt1p`/`bc1p`, logged at start) as their username;
++    /// work under any other address is carried until it can be attested. Absent: no signing,
++    /// exactly as a stock gateway.
++    #[serde(default)]
++    nta_key_file: Option<PathBuf>,
+ }
+ 
+ #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+@@ -867,6 +877,10 @@ fn broadcast_solo(st: &Shared) {
+ struct Shared {
+     cfg: GwCfg,
+     mode: Mode,
++    /// rnd/sov-002: the payout key that signs NTA attestations, when `nta_key_file` is set.
++    nta: Option<lazarus_protocol::nta::Signer>,
++    /// Last (prev, height, nbits) signed, and when the tip was first seen here, for the log.
++    nta_last: Mutex<Option<([u8; 32], u32, u32)>>,
+     /// Newest template. Solo mode builds a job from it whenever a miner authorises, so a
+     /// session that arrives mid-template does not wait for the next one.
+     tpl: Mutex<Option<Arc<Template>>>,
+@@ -1213,6 +1227,20 @@ fn coinbase_job(
+         who,
+     })
+ }
++/// The NTA payout key: 64 hex characters. A key file others can read is refused, like the
++/// secret it is (it spends this gateway's coinbase outputs).
++fn load_nta_key(path: &std::path::Path) -> Result<lazarus_protocol::nta::Signer, String> {
++    #[cfg(unix)]
++    {
++        use std::os::unix::fs::PermissionsExt;
++        let mode = std::fs::metadata(path).map_err(|e| e.to_string())?.permissions().mode();
++        if mode & 0o077 != 0 {
++            return Err(format!("mode {:o}: must not be readable by group or others (chmod 600)", mode & 0o777));
++        }
++    }
++    let text = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
++    lazarus_protocol::nta::Signer::from_hex(&text).ok_or_else(|| "not a 32-byte hex secret key".to_string())
++}
+ fn connect_prime(cfg: &GwCfg) -> Option<(TcpStream, lazarus_protocol::ChannelKeys, lazarus_protocol::SessionKeys)> {
+     let pk = hex::decode(cfg.pool_pubkey.as_deref().unwrap_or("").trim()).ok()?;
+     if pk.len() != 64 { log::error!("pool_pubkey must be 128 hex chars"); return None; }
+@@ -2090,6 +2118,22 @@ fn gbt_loop(st: Arc<Shared>) {
+                         None => log::warn!("solo: unusable template at height {height}"),
+                     }
+                 } else if value > 0 {
++                    // XBT-NTA: attest this tip with the payout key ahead of the request on the
++                    // same queue, so Prime can list us in the very split it is about to send.
++                    if let Some(k) = st.nta.as_ref() {
++                        let nbits = tpl.get("bits").and_then(|x| x.as_str()).and_then(|b| u32::from_str_radix(b, 16).ok());
++                        if let Some(nbits) = nbits {
++                            let t0 = Instant::now();
++                            let a = k.attest(height as u32, nbits, &prev);
++                            let signed_us = t0.elapsed().as_micros();
++                            send_prime_urgent(&st, a.encode());
++                            let mut last = lk(&st.nta_last);
++                            if *last != Some((prev, height as u32, nbits)) {
++                                *last = Some((prev, height as u32, nbits));
++                                log::info!("nta: signed tip height={} bits={:08x} in {} us", height, nbits, signed_us);
++                            }
++                        }
++                    }
+                     send_prime_urgent(&st, CoinbaserRequest { value, prevhash: prev }.encode());
+                     let first = st.last_cb.lock().unwrap_or_else(|e| e.into_inner()).is_none();
+                     let wait = if first || new_tip { Duration::from_millis(1500) } else { Duration::from_millis(250) };
+@@ -2215,6 +2259,20 @@ fn main() {
+             }
+         }
+     }
++    let nta = cfg.nta_key_file.as_ref().map(|path| match load_nta_key(path) {
++        Ok(k) => {
++            log::info!(
++                "XBT-NTA signing on: payout script {} (key file {}); miners here should use this key's P2TR address",
++                hex::encode(k.script()),
++                path.display()
++            );
++            k
++        }
++        Err(e) => {
++            log::error!("nta_key_file {}: {e}", path.display());
++            std::process::exit(2);
++        }
++    });
+     let prime_on = cfg.prime_port != 0;
+     assert!(prime_on || mode == Mode::Solo, "pooled mode needs a Prime to get the TIDES split from");
+     log::info!(
+@@ -2244,6 +2302,7 @@ fn main() {
+     let (utx, urx) = mpsc::channel();
+     let st = Arc::new(Shared {
+         cfg: cfg.clone(), mode,
++        nta, nta_last: Mutex::new(None),
+         tpl: Mutex::new(None),
+         solo_fee_script: fee_script, solo_fee_bps: fee_bps,
+         solo: Mutex::new(load_solo_book(solo_dir.as_ref())),
+diff --git a/lazarus/protocol/Cargo.toml b/lazarus/protocol/Cargo.toml
+index 3f446a2..1aef771 100644
+--- a/lazarus/protocol/Cargo.toml
++++ b/lazarus/protocol/Cargo.toml
+@@ -13,4 +13,8 @@ ed25519-dalek.workspace = true
+ hex.workspace = true
+ rand.workspace = true
+ sha2.workspace = true
++secp256k1.workspace = true
+ thiserror.workspace = true
++
++[dev-dependencies]
++serde_json.workspace = true
+diff --git a/lazarus/protocol/src/coinbaser.rs b/lazarus/protocol/src/coinbaser.rs
+index 6cae4a3..615b93a 100644
+--- a/lazarus/protocol/src/coinbaser.rs
++++ b/lazarus/protocol/src/coinbaser.rs
+@@ -59,7 +59,11 @@ pub fn parse_coinbaser_v2(buf: &[u8]) -> Option<CoinbaserV2> {
+         i += 8;
+         let sl = buf[i] as usize;
+         i += 1;
+-        if sl < 2 || sl > 64 || i + sl > buf.len() {
++        // 2..=64 like stock; also an exact 70-byte XBT-NTA attestation (rnd/sov-002).
++        if sl < 2 || (sl > 64 && sl != crate::nta::SCRIPT_LEN) || i + sl > buf.len() {
++            return None;
++        }
++        if sl > 64 && !crate::nta::is_attestation(&buf[i..i + sl]) {
+             return None;
+         }
+         outputs.push(CoinbaserOutput {
+diff --git a/lazarus/protocol/src/lib.rs b/lazarus/protocol/src/lib.rs
+index dd005e1..aaf1d04 100644
+--- a/lazarus/protocol/src/lib.rs
++++ b/lazarus/protocol/src/lib.rs
+@@ -20,6 +20,7 @@ pub mod handshake;
+ pub mod header;
+ pub mod keys;
+ pub mod mining;
++pub mod nta;
+ pub mod nacl;
+ pub mod pow;
+ pub mod verify;
+diff --git a/lazarus/protocol/src/nta.rs b/lazarus/protocol/src/nta.rs
+new file mode 100644
+index 0000000..e3364ad
+--- /dev/null
++++ b/lazarus/protocol/src/nta.rs
+@@ -0,0 +1,385 @@
++//! XBT-NTA (rnd/sov-002): payee-signed coinbase attestations, inline variant.
++//!
++//! Once `nta` is active, every value-bearing coinbase output must pay a key-path taproot
++//! script `OP_1 <K>`, and for each distinct such script (in output order) the coinbase
++//! carries one zero-value output
++//!
++//! ```text
++//! OP_RETURN PUSH68 ( "NTA" 0x02 || sig64 )
++//! ```
++//!
++//! where `sig64` is a BIP340 signature by `K` over [`attestation_hash`]. The digest is the
++//! one the Knots patch (`NtaAttestationHash`, validation.cpp) computes:
++//! `TaggedHash("XBT-NTA/attestation", ser(script) || height || nBits || hashPrevBlock)`,
++//! with `ser(script)` a compact-size length and the bytes, `height` an int32 LE, `nBits` a
++//! uint32 LE and `hashPrevBlock` in internal byte order.
++//!
++//! Same module as `prime/wire/src/nta.rs` (datum-wire); keep the two in step.
++//!
++//! A gateway signs this for its payout script on every new tip and sends it to Prime as a
++//! [`NtaAttest`] mining sub-command ahead of its coinbaser request; Prime pays only scripts
++//! whose signature for the tip it holds.
++
++use secp256k1::{schnorr, Keypair, Message, Secp256k1, SecretKey, XOnlyPublicKey};
++use sha2::{Digest, Sha256};
++
++
++pub const TAG: &[u8] = b"XBT-NTA/attestation";
++/// `OP_RETURN`, a 68-byte push, then `"NTA"` and version 2.
++pub const PREFIX: [u8; 6] = [0x6a, 68, b'N', b'T', b'A', 0x02];
++pub const SCRIPT_LEN: usize = PREFIX.len() + 64;
++/// Mining sub-command carrying a gateway's attestation for a tip. Unknown to older Primes,
++/// which ignore it, so a signing gateway still works against them.
++pub const SUB_NTA_ATTEST: u8 = 0x4e;
++pub const ATTEST_VERSION: u8 = 1;
++
++/// `OP_1 <K>`: the only payee shape NTA allows.
++pub fn p2tr(key: &[u8; 32]) -> Vec<u8> {
++    let mut s = Vec::with_capacity(34);
++    s.extend_from_slice(&[0x51, 0x20]);
++    s.extend_from_slice(key);
++    s
++}
++
++/// The x-only key of an `OP_1 <K>` script.
++pub fn p2tr_key(script: &[u8]) -> Option<[u8; 32]> {
++    (script.len() == 34 && script[0] == 0x51 && script[1] == 0x20).then(|| script[2..].try_into().unwrap())
++}
++
++fn compact(n: usize, out: &mut Vec<u8>) {
++    match n {
++        0..=0xfc => out.push(n as u8),
++        0xfd..=0xffff => {
++            out.push(0xfd);
++            out.extend_from_slice(&(n as u16).to_le_bytes());
++        }
++        _ => {
++            out.push(0xfe);
++            out.extend_from_slice(&(n as u32).to_le_bytes());
++        }
++    }
++}
++
++/// `NtaAttestationHash(script, height, nBits, prev)`; `prev_le` in internal byte order.
++pub fn attestation_hash(script: &[u8], height: u32, nbits: u32, prev_le: &[u8; 32]) -> [u8; 32] {
++    let tag = Sha256::digest(TAG);
++    let mut msg = Vec::with_capacity(64 + 9 + script.len() + 40);
++    msg.extend_from_slice(&tag);
++    msg.extend_from_slice(&tag);
++    compact(script.len(), &mut msg);
++    msg.extend_from_slice(script);
++    msg.extend_from_slice(&(height as i32).to_le_bytes());
++    msg.extend_from_slice(&nbits.to_le_bytes());
++    msg.extend_from_slice(prev_le);
++    Sha256::digest(&msg).into()
++}
++
++/// The 70-byte attestation output script for `sig`.
++pub fn attestation_script(sig: &[u8; 64]) -> Vec<u8> {
++    let mut s = PREFIX.to_vec();
++    s.extend_from_slice(sig);
++    s
++}
++
++/// Exact bytes, as Knots matches them: anything else is an ordinary `OP_RETURN`.
++pub fn is_attestation(script: &[u8]) -> bool {
++    script.len() == SCRIPT_LEN && script.starts_with(&PREFIX)
++}
++
++/// The payees an attestation list must follow, as Knots derives them: each distinct script
++/// of a value-bearing, spendable output that is not itself an attestation, in output order.
++pub fn required_payees<'a>(outputs: impl IntoIterator<Item = (u64, &'a [u8])>) -> Vec<&'a [u8]> {
++    let mut payees: Vec<&[u8]> = Vec::new();
++    for (sats, script) in outputs {
++        if is_attestation(script) || sats == 0 || script.first() == Some(&0x6a) || payees.contains(&script) {
++            continue;
++        }
++        payees.push(script);
++    }
++    payees
++}
++
++/// A payout key. The secret never leaves this type except to sign.
++pub struct Signer {
++    keypair: Keypair,
++    key: [u8; 32],
++}
++
++impl Signer {
++    pub fn from_secret(secret: &[u8; 32]) -> Option<Self> {
++        let secp = Secp256k1::signing_only();
++        let sk = SecretKey::from_slice(secret).ok()?;
++        let keypair = Keypair::from_secret_key(&secp, &sk);
++        let key = keypair.x_only_public_key().0.serialize();
++        Some(Self { keypair, key })
++    }
++
++    /// Parse a key file: 64 hex characters (surrounding whitespace ignored).
++    pub fn from_hex(text: &str) -> Option<Self> {
++        let raw = hex::decode(text.trim()).ok()?;
++        Self::from_secret(&raw.try_into().ok()?)
++    }
++
++    pub fn key(&self) -> [u8; 32] {
++        self.key
++    }
++
++    pub fn script(&self) -> Vec<u8> {
++        p2tr(&self.key)
++    }
++
++    /// BIP340 signature over the attestation hash for this key's own script. Zero aux
++    /// randomness: deterministic, the same as the Knots test framework's `sign_schnorr`.
++    pub fn sign(&self, height: u32, nbits: u32, prev_le: &[u8; 32]) -> [u8; 64] {
++        let digest = attestation_hash(&self.script(), height, nbits, prev_le);
++        let secp = Secp256k1::signing_only();
++        secp.sign_schnorr_no_aux_rand(&Message::from_digest(digest), &self.keypair).serialize()
++    }
++
++    pub fn attest(&self, height: u32, nbits: u32, prev_le: &[u8; 32]) -> NtaAttest {
++        NtaAttest { key: self.key, height, nbits, prev_hash: *prev_le, sig: self.sign(height, nbits, prev_le) }
++    }
++}
++
++impl std::fmt::Debug for Signer {
++    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
++        write!(f, "Signer({})", hex::encode(self.key))
++    }
++}
++
++/// Whether `sig` is `key`'s BIP340 signature over the attestation for `OP_1 <key>`.
++pub fn verify(key: &[u8; 32], height: u32, nbits: u32, prev_le: &[u8; 32], sig: &[u8; 64]) -> bool {
++    let (Ok(pk), Ok(sig)) = (XOnlyPublicKey::from_slice(key), schnorr::Signature::from_slice(sig)) else {
++        return false;
++    };
++    let digest = attestation_hash(&p2tr(key), height, nbits, prev_le);
++    Secp256k1::verification_only().verify_schnorr(&sig, &Message::from_digest(digest), &pk).is_ok()
++}
++
++/// A gateway's attestation for one tip: `OP_1 <key>` may be paid by the block at `height`
++/// on `prev_hash` (internal byte order) at `nbits`.
++#[derive(Clone, Debug, PartialEq, Eq)]
++pub struct NtaAttest {
++    pub key: [u8; 32],
++    pub height: u32,
++    pub nbits: u32,
++    pub prev_hash: [u8; 32],
++    pub sig: [u8; 64],
++}
++
++impl NtaAttest {
++    pub fn script(&self) -> Vec<u8> {
++        p2tr(&self.key)
++    }
++
++    pub fn verify(&self) -> bool {
++        verify(&self.key, self.height, self.nbits, &self.prev_hash, &self.sig)
++    }
++
++    /// `0x4e | version | key[32] | height u32 | nbits u32 | prev[32] | sig[64] | 0xFE`
++    pub fn encode(&self) -> Vec<u8> {
++        let mut o = Vec::with_capacity(2 + 32 + 8 + 32 + 64 + 1);
++        o.push(SUB_NTA_ATTEST);
++        o.push(ATTEST_VERSION);
++        o.extend_from_slice(&self.key);
++        o.extend_from_slice(&self.height.to_le_bytes());
++        o.extend_from_slice(&self.nbits.to_le_bytes());
++        o.extend_from_slice(&self.prev_hash);
++        o.extend_from_slice(&self.sig);
++        o.push(0xFE);
++        o
++    }
++
++    /// Parse the body after the sub-command byte.
++    pub fn decode(body: &[u8]) -> Option<Self> {
++        if body.len() != 1 + 32 + 4 + 4 + 32 + 64 + 1 || body[0] != ATTEST_VERSION || body[body.len() - 1] != 0xFE {
++            return None;
++        }
++        Some(Self {
++            key: body[1..33].try_into().ok()?,
++            height: u32::from_le_bytes(body[33..37].try_into().ok()?),
++            nbits: u32::from_le_bytes(body[37..41].try_into().ok()?),
++            prev_hash: body[41..73].try_into().ok()?,
++            sig: body[73..137].try_into().ok()?,
++        })
++    }
++}
++
++#[cfg(test)]
++pub(crate) mod tests {
++    use super::*;
++
++    /// Generated with the Knots patch's own test helpers (`feature_xbt_nta.py`: `keypair`,
++    /// `p2tr`, `att_hash`, and `test_framework.key.sign_schnorr` with zero aux), which mirror
++    /// `NtaAttestationHash` in validation.cpp. `~/xbt-rnd/sov-002/vectors.py` regenerates
++    /// them; the demo proves the same bytes against a running node.
++    /// (secret, key, height, nbits, prev internal order, digest, sig)
++    pub const VECTORS: [(&str, &str, u32, u32, &str, &str, &str); 3] = [
++        (
++            "4e203062b56415a52b3a895a614dfd9c4aa0e17c1e560a4a388d5e8c83212ef8",
++            "7e2a3e515d37fef86aa5d59c603b85521833cf9680b219d3f80894e2fb781af0",
++            131,
++            0x207fffff,
++            "06226e46111a0b59caaf126043eb5bbf28c34f3a5e332a1fc7b2b73cf188910f",
++            "15ba5bfedcbdae4d4fa2f85e1ab2dd870885b49611c95a4c001d1b43b683ecfc",
++            "8fc1f32588083ac7da85fd6bb82b4c32c402c856ca7451a506326863bc2e609e4eff446ac10e30ff797cbbecd1fac33348a78de3327707bc1c4c407081418ceb",
++        ),
++        (
++            "33e4d2c2b43ff1be4ecd73db9c7ff4f79986effb45182822019cbe2b3d9ef372",
++            "5379712c31ff65e3cea05ac6a12dce3ed0a21d93c0f6bb0dca50d5e54e4f713e",
++            979920,
++            0x1d00ffff,
++            "0100000000000000000000000000000000000000000000000000000000000000",
++            "5f0e6fc499cc29af3c048dce5e1f84d8c3420f09107872fd28719da1076f05ba",
++            "4a026a11cf4207e0c0729c17e2b62eb99ae7e71f5a3695540b0eb5d9e7e97ca46e0422049341198cdf286ef0d888aa5f83044be9f2dace6efcda7d312f351e4e",
++        ),
++        (
++            "c9aa7db7abad482ab50c05508a5ef1579a9677215dfe26a18680717e250ac5ad",
++            "4cbe575e45b3e4aa08342f3f3774d3b1c27e70beed6435807b43f9da37cea7d5",
++            1,
++            0x1b0404cb,
++            "0000000000000000000000000000000000000000000000000000000000000000",
++            "fd0de8bcc95afea6a730dd153caa22fa061fd9545820e92caf1482f6b08c72db",
++            "f41526919cfe38bf0f518a9ae47c0e91e3091ae7c2a37028910df014c8c8225e4fae90f7b8b4486136c02a30bfbae49c9c8d67ec98cb70cfa12dc302bba40a6b",
++        ),
++    ];
++
++    fn h32(s: &str) -> [u8; 32] {
++        hex::decode(s).unwrap().try_into().unwrap()
++    }
++
++    #[test]
++    fn digest_and_signature_match_the_knots_vectors_byte_for_byte() {
++        for (sk, key, height, nbits, prev, digest, sig) in VECTORS {
++            let signer = Signer::from_hex(sk).unwrap();
++            assert_eq!(hex::encode(signer.key()), key);
++            let prev = h32(prev);
++            assert_eq!(hex::encode(attestation_hash(&signer.script(), height, nbits, &prev)), digest);
++            let got = signer.sign(height, nbits, &prev);
++            assert_eq!(hex::encode(got), sig);
++            assert!(verify(&signer.key(), height, nbits, &prev, &got));
++            let script = attestation_script(&got);
++            assert_eq!(script.len(), 70);
++            assert!(is_attestation(&script));
++        }
++    }
++
++    #[test]
++    fn a_signature_does_not_move_to_another_tip_height_bits_or_key() {
++        let (sk, _, height, nbits, prev, _, _) = VECTORS[0];
++        let s = Signer::from_hex(sk).unwrap();
++        let prev = h32(prev);
++        let sig = s.sign(height, nbits, &prev);
++        let mut other = prev;
++        other[0] ^= 1;
++        assert!(!verify(&s.key(), height, nbits, &other, &sig));
++        assert!(!verify(&s.key(), height + 1, nbits, &prev, &sig));
++        assert!(!verify(&s.key(), height, nbits ^ 1, &prev, &sig));
++        let t = Signer::from_hex(VECTORS[1].0).unwrap();
++        assert!(!verify(&t.key(), height, nbits, &prev, &sig));
++    }
++
++    #[test]
++    fn attest_message_round_trips() {
++        let s = Signer::from_hex(VECTORS[0].0).unwrap();
++        let a = s.attest(131, 0x207fffff, &[9u8; 32]);
++        let enc = a.encode();
++        assert_eq!(enc[0], SUB_NTA_ATTEST);
++        assert_eq!(enc.len(), 1 + 1 + 32 + 4 + 4 + 32 + 64 + 1);
++        let back = NtaAttest::decode(&enc[1..]).unwrap();
++        assert_eq!(back, a);
++        assert!(back.verify());
++        let mut bad = enc.clone();
++        bad[1] = 9;
++        assert!(NtaAttest::decode(&bad[1..]).is_none());
++        assert!(NtaAttest::decode(&enc[1..enc.len() - 1]).is_none());
++    }
++
++    #[test]
++    fn only_the_exact_attestation_shape_counts() {
++        let sig = [7u8; 64];
++        let mut s = attestation_script(&sig);
++        assert!(is_attestation(&s));
++        s[5] = 0x01;
++        assert!(!is_attestation(&s));
++        assert!(!is_attestation(&attestation_script(&sig)[..69]));
++    }
++
++    #[test]
++    fn a_coinbaser_may_carry_attestations_but_no_other_long_script() {
++        let mut blob = vec![7u8];
++        let push = |blob: &mut Vec<u8>, sats: u64, script: &[u8]| {
++            blob.extend_from_slice(&sats.to_le_bytes());
++            blob.push(script.len() as u8);
++            blob.extend_from_slice(script);
++        };
++        push(&mut blob, 1000, &p2tr(&[2u8; 32]));
++        push(&mut blob, 0, &attestation_script(&[9u8; 64]));
++        let cb = crate::coinbaser::parse_coinbaser_v2(&blob).unwrap();
++        assert_eq!(cb.outputs.len(), 2);
++        assert!(is_attestation(&cb.outputs[1].script));
++        let mut other = attestation_script(&[9u8; 64]);
++        other[2] = b'X';
++        let mut bad = vec![7u8];
++        push(&mut bad, 0, &other);
++        assert!(crate::coinbaser::parse_coinbaser_v2(&bad).is_none());
++    }
++
++    /// SOV-001's vectors (`~/xbt-rnd/sov-001/vectors/nta-vectors.json`): coinbases a regtest
++    /// Knots node judged, with each attestation's preimage and digest. Every digest must come
++    /// out byte for byte, every carried signature must verify exactly when the node said
++    /// `valid`, and the attestations must follow the payees in Knots' order.
++    #[test]
++    fn sov_001_node_vectors() {
++        let doc: serde_json::Value = serde_json::from_str(include_str!("../../../prime/wire/tests/data/nta-vectors.json")).unwrap();
++        assert_eq!(doc["tag"].as_str().unwrap().as_bytes(), TAG);
++        let vs = doc["vectors"].as_array().unwrap();
++        assert!(vs.len() >= 5);
++        let hx = |v: &serde_json::Value| hex::decode(v.as_str().unwrap()).unwrap();
++        for v in vs {
++            let name = v["name"].as_str().unwrap();
++            let height = v["height"].as_u64().unwrap() as u32;
++            let nbits = u32::from_str_radix(v["nBits"].as_str().unwrap(), 16).unwrap();
++            let mut prev: [u8; 32] = hx(&v["hashPrevBlock"]).try_into().unwrap();
++            prev.reverse(); // display order -> internal
++            let mut all_ok = true;
++            for a in v["attestations"].as_array().unwrap() {
++                let script = hx(&a["payee_script"]);
++                let digest = attestation_hash(&script, height, nbits, &prev);
++                assert_eq!(hex::encode(digest), a["digest"].as_str().unwrap(), "{name}: digest");
++                let key: [u8; 32] = hx(&a["payee_key"]).try_into().unwrap();
++                assert_eq!(p2tr(&key), script, "{name}: payee script");
++                let sig = a["carried_sig"].as_str().and_then(|s| hex::decode(s).ok()).and_then(|b| <[u8; 64]>::try_from(b).ok());
++                all_ok &= sig.is_some_and(|sig| verify(&key, height, nbits, &prev, &sig));
++                // Our signer over the same digest verifies under the payee key when it holds it.
++                if let Some(sk) = a["signer_seckey"].as_str().and_then(Signer::from_hex) {
++                    if sk.key() == key {
++                        assert!(verify(&key, height, nbits, &prev, &sk.sign(height, nbits, &prev)), "{name}: sign");
++                    }
++                }
++            }
++            let valid = v["result"] == "valid";
++            assert_eq!(all_ok, valid, "{name}: signatures vs node verdict {}", v["result"]);
++            if valid {
++                let outs: Vec<(u64, Vec<u8>)> = v["coinbase_outputs"]
++                    .as_array()
++                    .unwrap()
++                    .iter()
++                    .map(|o| (o["value"].as_u64().unwrap(), hx(&o["scriptPubKey"])))
++                    .collect();
++                let payees = required_payees(outs.iter().map(|(s, p)| (*s, p.as_slice())));
++                let atts: Vec<&[u8]> = outs.iter().map(|(_, p)| p.as_slice()).filter(|p| is_attestation(p)).collect();
++                let want: Vec<Vec<u8>> = v["attestations"]
++                    .as_array()
++                    .unwrap()
++                    .iter()
++                    .map(|a| attestation_script(&hx(&a["carried_sig"]).try_into().unwrap()))
++                    .collect();
++                assert_eq!(payees.len(), atts.len(), "{name}: one attestation per distinct payee");
++                assert_eq!(atts, want.iter().map(|w| w.as_slice()).collect::<Vec<_>>(), "{name}: order");
++                let order: Vec<Vec<u8>> = v["attestations"].as_array().unwrap().iter().map(|a| hx(&a["payee_script"])).collect();
++                assert_eq!(payees, order.iter().map(|o| o.as_slice()).collect::<Vec<_>>(), "{name}: payee order");
++            }
++        }
++    }
++}
+-- 
+2.43.0
+

@@ -1,0 +1,619 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: michael moore <mrmoore27@pm.me>
+Date: Sat, 26 Sep 2026 01:36:54 +0000
+Subject: [PATCH 1/3] lazarus: nta-signer, the reference NTA signer for payees
+ without a gateway
+
+SOV-017. Follows any node's tip over RPC (waitfornewblock long-poll, polling
+fallback), takes the next block's bits from getmininginfo.next / GBT / regtest
+header, signs each new tip for every key and posts to Prime's POST /nta/attest
+(one retry on 409). Key files are mode 600, refused otherwise, never logged.
+bip86-tweak writes the output key's secret d+t (BIP341 key-path vector test).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ lazarus/Cargo.lock             |  16 ++
+ lazarus/Cargo.toml             |   2 +-
+ lazarus/nta-signer/Cargo.toml  |  23 ++
+ lazarus/nta-signer/README.md   |  52 ++++
+ lazarus/nta-signer/src/main.rs | 460 +++++++++++++++++++++++++++++++++
+ 5 files changed, 552 insertions(+), 1 deletion(-)
+ create mode 100644 lazarus/nta-signer/Cargo.toml
+ create mode 100644 lazarus/nta-signer/README.md
+ create mode 100644 lazarus/nta-signer/src/main.rs
+
+diff --git a/lazarus/Cargo.lock b/lazarus/Cargo.lock
+index d97de47..498a4f7 100644
+--- a/lazarus/Cargo.lock
++++ b/lazarus/Cargo.lock
+@@ -565,6 +565,22 @@ dependencies = [
+  "webpki-roots",
+ ]
+ 
++[[package]]
++name = "nta-signer"
++version = "0.1.0"
++dependencies = [
++ "base64",
++ "clap",
++ "env_logger",
++ "hex",
++ "lazarus-protocol",
++ "log",
++ "minreq",
++ "secp256k1",
++ "serde_json",
++ "sha2",
++]
++
+ [[package]]
+ name = "once_cell_polyfill"
+ version = "1.70.2"
+diff --git a/lazarus/Cargo.toml b/lazarus/Cargo.toml
+index 18c684b..e1f82da 100644
+--- a/lazarus/Cargo.toml
++++ b/lazarus/Cargo.toml
+@@ -1,6 +1,6 @@
+ [workspace]
+ resolver = "2"
+-members = ["protocol", "prime", "gateway"]
++members = ["protocol", "prime", "gateway", "nta-signer"]
+ 
+ [workspace.package]
+ version = "0.1.0"
+diff --git a/lazarus/nta-signer/Cargo.toml b/lazarus/nta-signer/Cargo.toml
+new file mode 100644
+index 0000000..c6ba643
+--- /dev/null
++++ b/lazarus/nta-signer/Cargo.toml
+@@ -0,0 +1,23 @@
++[package]
++name = "nta-signer"
++version.workspace = true
++edition.workspace = true
++license.workspace = true
++publish.workspace = true
++description = "XBT-NTA reference signer for TIDES payees without a gateway: follows the tip, signs each one, posts to Prime"
++
++[[bin]]
++name = "nta-signer"
++path = "src/main.rs"
++
++[dependencies]
++lazarus-protocol = { path = "../protocol" }
++base64.workspace = true
++clap.workspace = true
++env_logger.workspace = true
++hex.workspace = true
++log.workspace = true
++minreq.workspace = true
++secp256k1.workspace = true
++serde_json.workspace = true
++sha2.workspace = true
+diff --git a/lazarus/nta-signer/README.md b/lazarus/nta-signer/README.md
+new file mode 100644
+index 0000000..8a08e55
+--- /dev/null
++++ b/lazarus/nta-signer/README.md
+@@ -0,0 +1,52 @@
++# nta-signer
++
++Reference XBT-NTA signer for TIDES payees that are **not** DATUM gateways (SOV-017), such as
++xbt-agentpay pay-with-work providers. Gateways keep signing themselves (`nta_key_file`, the
++`0x4e` message). Nothing here is deployed; it is rnd-only while the freeze holds.
++
++Under NTA every coinbase payee `OP_1 <K>` needs K's BIP340 signature over
++`TaggedHash("XBT-NTA/attestation", ser(script) || height || nBits || hashPrevBlock)` for the block
++being built. This daemon follows the tip of any node it can reach over RPC, signs each new tip for
++every key it holds, and posts the signature to Prime. A payee whose signature for a tip is
++missing is **carried** (its share waits in TIDES carry), never lost; it is paid again once it signs.
++
++```sh
++nta-signer run --rpc http://127.0.0.1:8332 --rpc-cookie ~/.bitcoin/.cookie \
++  --key-file ~/.config/nta/provider.key \
++  --prime https://pool.example/api/nta/attest        # or primed's loopback http://127.0.0.1:28916/nta/attest
++nta-signer pubkey --key-file ~/.config/nta/provider.key   # K and the payee script, never the secret
++```
++
++- **Tip.** `waitfornewblock` long-poll (falls back to polling `--poll-ms`), then
++  `getblockchaininfo` + `getmininginfo.next.bits` (v29+), else `getblocktemplate`, else on regtest
++  the tip's own bits. Signing takes ~25 µs; the rest is how fast your node hears of the block.
++- **Posting.** One POST per key per Prime per tip; one retry on `409` (Prime's node had not seen the
++  tip yet). Prime allows `nta-attest-per-tip` (default 2) per script per tip, so do not run two
++  signers for one key against one Prime. Unreachable Prime: retried every second for 30 s while the
++  tip holds. A newer tip supersedes all pending posts.
++- **Keys.** 64 hex characters, mode 600; refused if group- or world-readable; never logged.
++  `--token-file` (mode 600) if Prime sets `nta-attest-token-file`.
++
++## Which secret: BIP86 wallets
++
++NTA pays `OP_1 <K>` and checks K's signature directly, so the key file must hold the secret of the
++**output** key K, not the wallet's internal key. For a BIP86 (key-path only) address:
++
++- internal key `P = d·G` (negate d if P has odd y),
++- tweak `t = TaggedHash("TapTweak", x(P))`,
++- output key `K = P + t·G`, whose secret is **`d + t` (mod n)**.
++
++`nta-signer bip86-tweak --internal-key-file d.hex --out k.hex` does exactly that (checked against the
++BIP341 `keyPathSpending` vectors) and writes the result mode 600. Get `d` from your wallet's
++descriptor export (`listdescriptors true`, derive the child for your address). The output secret
++spends the address too: guard it like the wallet itself, and prefer a dedicated payout address
++for the hot signer.
++
++## Prime side
++
++`POST /nta/attest` on primed's stats listener (loopback), or `POST /api/nta/attest` on the pool site,
++which forwards there with a per-IP limit. Body:
++`{"version":1,"key":hex32,"height":n,"nbits":"207fffff","prev":<display hex>,"sig":hex64}`.
++Answers: `200 accepted|duplicate`, `400` bad body, `403` token / not a live TIDES payee in the
++window, `409` not Prime's node's tip (`tip` says which is), `422` wrong height/bits or bad signature,
++`429` per-script-per-tip or global limit, `503` NTA off.
+diff --git a/lazarus/nta-signer/src/main.rs b/lazarus/nta-signer/src/main.rs
+new file mode 100644
+index 0000000..ce07352
+--- /dev/null
++++ b/lazarus/nta-signer/src/main.rs
+@@ -0,0 +1,460 @@
++//! XBT-NTA reference signer (SOV-017) for TIDES payees that are not gateways.
++//!
++//! Under NTA every coinbase payee `OP_1 <K>` needs K's BIP340 signature over
++//! `NtaAttestationHash(script, height, nBits, prev)` for the block being built. A DATUM gateway
++//! sends it to Prime itself (`0x4e`). A payee with no gateway of its own, such as an xbt-agentpay
++//! pay-with-work provider paid in coinbases other people's gateways ask for, runs this instead:
++//! it follows the tip of any node it can reach over RPC, signs every new tip for each of its
++//! keys, and posts the attestation to Prime's `POST /nta/attest` (or the pool site's
++//! `POST /api/nta/attest`). A payee whose signature is missing is carried, not lost.
++//!
++//! The (height, nBits, prev) it signs come from its own node. If that node disagrees with
++//! Prime's, Prime refuses the attestation (409 for another tip, 422 for other bits); nothing
++//! is ever paid on a signature Prime's node would not accept.
++//!
++//! Key files hold the 32-byte secret of K itself, as 64 hex characters, mode 600. They are
++//! refused if group- or world-readable, and never logged. For a BIP86 wallet K is the tweaked
++//! output key, so its secret is `d + t` (see `bip86-tweak`).
++
++use std::path::{Path, PathBuf};
++use std::sync::{Arc, Mutex};
++use std::time::{Duration, Instant};
++
++use clap::Parser;
++use lazarus_protocol::nta::Signer;
++use serde_json::{json, Value};
++
++#[derive(Parser, Debug)]
++#[command(name = "nta-signer", version, about = "XBT-NTA signer for TIDES payees without a gateway")]
++struct Cli {
++    #[command(subcommand)]
++    cmd: Cmd,
++}
++
++#[derive(clap::Subcommand, Debug)]
++enum Cmd {
++    /// Follow the tip, sign each new one for every key, post to every Prime.
++    Run(RunArgs),
++    /// Print the x-only key K and the payee script `OP_1 <K>` of a key file (never the secret).
++    Pubkey {
++        #[arg(long)]
++        key_file: PathBuf,
++    },
++    /// Turn a BIP86 internal secret d (64 hex) into the output key's secret d + t, which is what
++    /// NTA signs with: `t = TaggedHash("TapTweak", P)`, P = d·G with even y. Writes `out` mode 600.
++    Bip86Tweak {
++        #[arg(long)]
++        internal_key_file: PathBuf,
++        #[arg(long)]
++        out: PathBuf,
++    },
++}
++
++#[derive(clap::Args, Debug)]
++struct RunArgs {
++    /// Node JSON-RPC URL (any node: this one only tells the signer the tip).
++    #[arg(long)]
++    rpc: String,
++    /// RPC cookie file (`.cookie`).
++    #[arg(long, conflicts_with = "rpc_auth_file")]
++    rpc_cookie: Option<PathBuf>,
++    /// File holding `user:password` for RPC.
++    #[arg(long)]
++    rpc_auth_file: Option<PathBuf>,
++    /// Payee key file (64 hex, mode 600). Repeat for several keys.
++    #[arg(long = "key-file", required = true)]
++    key_files: Vec<PathBuf>,
++    /// Prime's attest URL, e.g. `http://127.0.0.1:28916/nta/attest`. Repeat for several.
++    #[arg(long = "prime", required = true)]
++    primes: Vec<String>,
++    /// Token file for Prime's `nta-attest-token-file`, if it has one (mode 600).
++    #[arg(long)]
++    token_file: Option<PathBuf>,
++    /// Longest wait on the node for a new block before asking again (ms).
++    #[arg(long, default_value_t = 1000)]
++    poll_ms: u64,
++}
++
++fn main() {
++    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
++    let cli = Cli::parse();
++    let code = match cli.cmd {
++        Cmd::Run(a) => run(a),
++        Cmd::Pubkey { key_file } => match load_secret_file(&key_file).and_then(signer_of) {
++            Ok(s) => {
++                println!("key {}\nscript {}", hex::encode(s.key()), hex::encode(s.script()));
++                0
++            }
++            Err(e) => fail(&key_file, &e),
++        },
++        Cmd::Bip86Tweak { internal_key_file, out } => match load_secret_file(&internal_key_file).and_then(|d| bip86_tweak(&d)) {
++            Ok(secret) => match write_secret(&out, &secret) {
++                Ok(()) => {
++                    let s = Signer::from_secret(&secret).expect("tweaked secret is valid");
++                    println!("key {}\nscript {}\nwrote {}", hex::encode(s.key()), hex::encode(s.script()), out.display());
++                    0
++                }
++                Err(e) => fail(&out, &e),
++            },
++            Err(e) => fail(&internal_key_file, &e),
++        },
++    };
++    std::process::exit(code);
++}
++
++fn fail(p: &Path, e: &str) -> i32 {
++    eprintln!("{}: {e}", p.display());
++    2
++}
++
++// --- keys -------------------------------------------------------------------------------
++
++/// Read a secret file: refused if anyone but the owner can read it. The contents never reach a
++/// log or an error message.
++fn load_secret_file(p: &Path) -> Result<String, String> {
++    #[cfg(unix)]
++    {
++        use std::os::unix::fs::PermissionsExt;
++        let mode = std::fs::metadata(p).map_err(|e| e.to_string())?.permissions().mode();
++        if mode & 0o077 != 0 {
++            return Err(format!("mode {:o}: must not be readable by group or others (chmod 600)", mode & 0o777));
++        }
++    }
++    std::fs::read_to_string(p).map_err(|e| e.to_string())
++}
++
++fn signer_of(text: String) -> Result<Signer, String> {
++    Signer::from_hex(&text).ok_or_else(|| "not a 32-byte hex secret key".to_string())
++}
++
++fn write_secret(p: &Path, secret: &[u8; 32]) -> Result<(), String> {
++    use std::io::Write;
++    #[cfg(unix)]
++    use std::os::unix::fs::OpenOptionsExt;
++    let mut o = std::fs::OpenOptions::new();
++    o.write(true).create_new(true);
++    #[cfg(unix)]
++    o.mode(0o600);
++    let mut f = o.open(p).map_err(|e| e.to_string())?;
++    f.write_all(format!("{}\n", hex::encode(secret)).as_bytes()).map_err(|e| e.to_string())
++}
++
++/// BIP86 key-path output secret: `d + t`, with d negated first when d·G has odd y, and
++/// `t = TaggedHash("TapTweak", x(P))` (no script tree).
++fn bip86_tweak(text: &str) -> Result<[u8; 32], String> {
++    use secp256k1::{Keypair, Scalar, Secp256k1, SecretKey};
++    use sha2::{Digest, Sha256};
++    let raw: [u8; 32] = hex::decode(text.trim()).ok().and_then(|r| r.try_into().ok()).ok_or("not a 32-byte hex secret key")?;
++    let secp = Secp256k1::new();
++    let sk = SecretKey::from_slice(&raw).map_err(|_| "not a valid secret key")?;
++    let kp = Keypair::from_secret_key(&secp, &sk);
++    let p = kp.x_only_public_key().0.serialize();
++    let tag = Sha256::digest(b"TapTweak");
++    let t: [u8; 32] = Sha256::new().chain_update(tag).chain_update(tag).chain_update(p).finalize().into();
++    let t = Scalar::from_be_bytes(t).map_err(|_| "tweak out of range")?;
++    let tweaked = kp.add_xonly_tweak(&secp, &t).map_err(|_| "tweak failed")?;
++    Ok(tweaked.secret_bytes())
++}
++
++// --- node ---------------------------------------------------------------------------------
++
++struct Node {
++    url: String,
++    auth: Auth,
++}
++
++enum Auth {
++    Cookie(PathBuf),
++    Fixed(String),
++    None,
++}
++
++impl Node {
++    fn header(&self) -> Option<String> {
++        let b64 = |s: &str| base64::Engine::encode(&base64::engine::general_purpose::STANDARD, s.trim().as_bytes());
++        match &self.auth {
++            // re-read each call: the node rewrites its cookie on restart
++            Auth::Cookie(p) => std::fs::read_to_string(p).ok().map(|c| format!("Basic {}", b64(&c))),
++            Auth::Fixed(h) => Some(h.clone()),
++            Auth::None => None,
++        }
++    }
++
++    fn call(&self, method: &str, params: Value, timeout_s: u64) -> Result<Value, RpcError> {
++        let body = json!({"jsonrpc": "1.0", "id": "nta-signer", "method": method, "params": params});
++        let mut req = minreq::post(&self.url).with_timeout(timeout_s).with_header("Content-Type", "application/json");
++        if let Some(h) = self.header() {
++            req = req.with_header("Authorization", h);
++        }
++        let r = req.with_body(body.to_string()).send().map_err(|e| RpcError::Transport(e.to_string()))?;
++        let v: Value = serde_json::from_str(r.as_str().unwrap_or("")).map_err(|_| RpcError::Transport(format!("HTTP {}", r.status_code)))?;
++        match v.get("error") {
++            Some(e) if !e.is_null() => Err(RpcError::Node(e.get("code").and_then(Value::as_i64).unwrap_or(0), e.to_string())),
++            _ => Ok(v.get("result").cloned().unwrap_or(Value::Null)),
++        }
++    }
++}
++
++#[derive(Debug)]
++enum RpcError {
++    Transport(String),
++    Node(i64, String),
++}
++
++impl std::fmt::Display for RpcError {
++    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
++        match self {
++            RpcError::Transport(e) => write!(f, "{e}"),
++            RpcError::Node(c, e) => write!(f, "node error {c}: {e}"),
++        }
++    }
++}
++
++/// What to sign: the block after `prev` (display order), at `height` with `nbits`.
++#[derive(Clone, Debug, PartialEq, Eq)]
++struct Target {
++    prev: String,
++    height: u32,
++    nbits: u32,
++}
++
++fn bits_of(v: &Value) -> Option<u32> {
++    u32::from_str_radix(v.as_str()?, 16).ok()
++}
++
++/// The node's tip and the block after it. `getmininginfo.next.bits` (v29+) for the bits,
++/// `getblocktemplate` when that is missing, and on regtest (no retargeting) the tip's own.
++fn target_of(node: &Node) -> Result<Target, String> {
++    let info = node.call("getblockchaininfo", json!([]), 10).map_err(|e| e.to_string())?;
++    let prev = info["bestblockhash"].as_str().ok_or("no bestblockhash")?.to_string();
++    let blocks = info["blocks"].as_u64().ok_or("no blocks")? as u32;
++    if let Ok(m) = node.call("getmininginfo", json!([]), 10) {
++        if m["blocks"].as_u64() == Some(u64::from(blocks)) {
++            if let Some(nbits) = bits_of(&m["next"]["bits"]) {
++                return Ok(Target { prev, height: blocks + 1, nbits });
++            }
++        }
++    }
++    if let Ok(t) = node.call("getblocktemplate", json!([{"rules": ["segwit"]}]), 10) {
++        if t["previousblockhash"].as_str() == Some(prev.as_str()) {
++            if let (Some(nbits), Some(h)) = (bits_of(&t["bits"]), t["height"].as_u64()) {
++                return Ok(Target { prev, height: h as u32, nbits });
++            }
++        }
++    }
++    if info["chain"].as_str() == Some("regtest") {
++        let h = node.call("getblockheader", json!([prev]), 10).map_err(|e| e.to_string())?;
++        let nbits = bits_of(&h["bits"]).ok_or("no bits")?;
++        return Ok(Target { prev, height: blocks + 1, nbits });
++    }
++    Err("the node does not say the next block's bits (getmininginfo.next, getblocktemplate)".into())
++}
++
++// --- posting ------------------------------------------------------------------------------
++
++/// Attempts at one (key, Prime, tip) that reach Prime: the first, and one retry on 409 (Prime's
++/// node had not seen the tip yet). Prime allows `nta-attest-per-tip` (2 by default).
++const COUNTED_TRIES: u32 = 2;
++/// Retries while Prime cannot be reached at all (those do not count against its limit).
++const UNREACHABLE_TRIES: u32 = 30;
++
++fn body_of(s: &Signer, t: &Target) -> Result<String, String> {
++    let mut prev_le: [u8; 32] = hex::decode(&t.prev).ok().and_then(|r| r.try_into().ok()).ok_or("prev")?;
++    prev_le.reverse();
++    let a = s.attest(t.height, t.nbits, &prev_le);
++    Ok(json!({
++        "version": 1,
++        "key": hex::encode(a.key),
++        "height": a.height,
++        "nbits": format!("{:08x}", a.nbits),
++        "prev": t.prev,
++        "sig": hex::encode(a.sig),
++    })
++    .to_string())
++}
++
++/// Sign `t` for `s` and post it to `url`, retrying as above while `current` still holds `t`.
++fn post_one(s: &Signer, t: &Target, url: &str, token: Option<&str>, seen: Instant, current: &Mutex<Option<Target>>) {
++    let key = &hex::encode(s.key())[..16];
++    let body = match body_of(s, t) {
++        Ok(b) => b,
++        Err(e) => return log::error!("height={} key={key}: {e}", t.height),
++    };
++    let signed_ms = seen.elapsed().as_secs_f64() * 1e3;
++    let (mut counted, mut unreachable) = (0u32, 0u32);
++    loop {
++        if current.lock().unwrap().as_ref() != Some(t) {
++            return log::info!("height={} key={key} prime={url}: superseded by a newer tip", t.height);
++        }
++        let sent = Instant::now();
++        let mut req = minreq::post(url).with_timeout(10).with_header("Content-Type", "application/json");
++        if let Some(tok) = token {
++            req = req.with_header("X-NTA-Token", tok);
++        }
++        match req.with_body(body.as_str()).send() {
++            Ok(r) => {
++                counted += 1;
++                let rtt = sent.elapsed().as_secs_f64() * 1e3;
++                let reply: Value = serde_json::from_str(r.as_str().unwrap_or("")).unwrap_or(Value::Null);
++                let what = reply["outcome"].as_str().or(reply["error"].as_str()).unwrap_or("?");
++                log::info!(
++                    "attest height={} key={key} prime={url} status={} outcome={what:?} signed_ms={signed_ms:.1} since_tip_ms={:.1} rtt_ms={rtt:.1}",
++                    t.height,
++                    r.status_code,
++                    seen.elapsed().as_secs_f64() * 1e3
++                );
++                if r.status_code == 409 && counted < COUNTED_TRIES {
++                    std::thread::sleep(Duration::from_millis(750));
++                    continue;
++                }
++                return;
++            }
++            Err(e) => {
++                unreachable += 1;
++                if unreachable == 1 || unreachable == UNREACHABLE_TRIES {
++                    log::warn!("height={} key={key} prime={url}: {e}", t.height);
++                }
++                if unreachable >= UNREACHABLE_TRIES {
++                    return;
++                }
++                std::thread::sleep(Duration::from_secs(1));
++            }
++        }
++    }
++}
++
++fn run(a: RunArgs) -> i32 {
++    let mut signers = Vec::new();
++    for p in &a.key_files {
++        match load_secret_file(p).and_then(signer_of) {
++            Ok(s) => {
++                log::info!("key {} (payee script {}) from {}", hex::encode(s.key()), hex::encode(s.script()), p.display());
++                signers.push(s);
++            }
++            Err(e) => return fail(p, &e),
++        }
++    }
++    let token = match &a.token_file {
++        Some(p) => match load_secret_file(p) {
++            Ok(t) => Some(t.trim().to_string()),
++            Err(e) => return fail(p, &e),
++        },
++        None => None,
++    };
++    let auth = match (&a.rpc_cookie, &a.rpc_auth_file) {
++        (Some(c), _) => Auth::Cookie(c.clone()),
++        (None, Some(p)) => match load_secret_file(p) {
++            Ok(up) => Auth::Fixed(format!(
++                "Basic {}",
++                base64::Engine::encode(&base64::engine::general_purpose::STANDARD, up.trim().as_bytes())
++            )),
++            Err(e) => return fail(p, &e),
++        },
++        (None, None) => Auth::None,
++    };
++    let node = Node { url: a.rpc.clone(), auth };
++    let signers = Arc::new(signers);
++    let token: Arc<Option<String>> = Arc::new(token);
++    let current: Arc<Mutex<Option<Target>>> = Arc::default();
++    let wait_ms = a.poll_ms.max(50);
++    let mut long_poll = true;
++    let mut last_hash = String::new();
++    log::info!("following {} for {} key(s), posting to {}", a.rpc, signers.len(), a.primes.join(", "));
++    loop {
++        // `waitfornewblock` returns as soon as the tip moves (or after `wait_ms`); on a node
++        // without it, poll.
++        let mut hinted = None;
++        if long_poll {
++            match node.call("waitfornewblock", json!([wait_ms]), wait_ms / 1000 + 10) {
++                Ok(v) => hinted = v["hash"].as_str().map(str::to_string),
++                Err(RpcError::Node(-32601, _)) => {
++                    log::info!("node has no waitfornewblock; polling every {wait_ms} ms");
++                    long_poll = false;
++                }
++                Err(e) => {
++                    log::warn!("waitfornewblock: {e}");
++                    std::thread::sleep(Duration::from_millis(wait_ms));
++                    continue;
++                }
++            }
++        } else {
++            std::thread::sleep(Duration::from_millis(wait_ms));
++        }
++        if hinted.as_deref().is_some_and(|h| h == last_hash) {
++            continue;
++        }
++        let seen = Instant::now();
++        let t = match target_of(&node) {
++            Ok(t) => t,
++            Err(e) => {
++                log::warn!("tip: {e}");
++                std::thread::sleep(Duration::from_millis(wait_ms));
++                continue;
++            }
++        };
++        if t.prev == last_hash {
++            continue;
++        }
++        last_hash = t.prev.clone();
++        log::info!("tip {} -> signing height {} bits {:08x}", &t.prev[..16], t.height, t.nbits);
++        *current.lock().unwrap() = Some(t.clone());
++        for i in 0..signers.len() {
++            for url in &a.primes {
++                let (signers, token, current, t, url) = (signers.clone(), token.clone(), current.clone(), t.clone(), url.clone());
++                std::thread::spawn(move || post_one(&signers[i], &t, &url, token.as_deref(), seen, &current));
++            }
++        }
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    /// BIP341 wallet test vectors, `keyPathSpending` inputs with no script tree: the tweaked
++    /// secret is exactly what this command writes.
++    #[test]
++    fn bip86_tweak_matches_the_bip341_key_path_vectors() {
++        assert_eq!(
++            hex::encode(bip86_tweak("6b973d88838f27366ed61c9ad6367663045cb456e28335c109e30717ae0c6baa").unwrap()),
++            "2405b971772ad26915c8dcdf10f238753a9b837e5f8e6a86fd7c0cce5b7296d9"
++        );
++    }
++
++    #[test]
++    fn the_body_is_what_prime_parses_and_verifies() {
++        let s = Signer::from_hex(&format!("{:064x}", 7)).unwrap();
++        let prev = "00".repeat(31) + "ab";
++        let t = Target { prev: prev.clone(), height: 130, nbits: 0x207f_ffff };
++        let v: Value = serde_json::from_str(&body_of(&s, &t).unwrap()).unwrap();
++        assert_eq!(v["prev"], prev);
++        assert_eq!(v["nbits"], "207fffff");
++        let mut prev_le: [u8; 32] = hex::decode(&prev).unwrap().try_into().unwrap();
++        prev_le.reverse();
++        let sig: [u8; 64] = hex::decode(v["sig"].as_str().unwrap()).unwrap().try_into().unwrap();
++        assert!(lazarus_protocol::nta::verify(&s.key(), 130, 0x207f_ffff, &prev_le, &sig));
++    }
++
++    #[test]
++    fn a_key_file_others_can_read_is_refused_and_its_contents_never_echoed() {
++        use std::os::unix::fs::PermissionsExt;
++        let dir = std::env::temp_dir().join(format!("nta-signer-{}", std::process::id()));
++        std::fs::create_dir_all(&dir).unwrap();
++        let p = dir.join("k");
++        let secret = format!("{:064x}", 9);
++        std::fs::write(&p, &secret).unwrap();
++        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o640)).unwrap();
++        let e = load_secret_file(&p).unwrap_err();
++        assert!(e.contains("chmod 600") && !e.contains(&secret));
++        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o600)).unwrap();
++        assert!(signer_of(load_secret_file(&p).unwrap()).is_ok());
++        std::fs::write(&p, "zz").unwrap();
++        let e = load_secret_file(&p).and_then(signer_of).unwrap_err();
++        assert!(!e.contains("zz"));
++        let out = dir.join("tweaked");
++        write_secret(&out, &[1u8; 32]).unwrap();
++        assert_eq!(std::fs::metadata(&out).unwrap().permissions().mode() & 0o777, 0o600);
++        assert!(write_secret(&out, &[1u8; 32]).is_err(), "never overwrites a key");
++        let _ = std::fs::remove_dir_all(&dir);
++    }
++}
+-- 
+2.43.0
+

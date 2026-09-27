@@ -1,0 +1,910 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: michael moore <mrmoore27@pm.me>
+Date: Sat, 26 Sep 2026 00:29:19 +0000
+Subject: [PATCH 1/2] prime, tides: foreign canaries cluster gateways on one
+ template source (SOV-015)
+
+An own canary's twin C' can also go to other gateways' registered nodes. Primed
+records a foreign canary for each such target (POST /sovereignty/canary
+"foreign": [G2, ...]) and schedules the target's check too. A target whose
+checked job carries C shares a template source with the canary's gateway.
+
+entropy: CanaryKind::Foreign, per-source SourceTally, shared_sources (single
+linkage on due >= CANARY_MIN, hits >= 3, rate >= 0.25) and
+apply_shared_sources: independence / n across the cluster and reason
+shared-template-source, without setting flagged. Tests: honest gateways with
+relay jitter never cluster (20 seeds), three on one node are one cluster,
+mixed farms, late twins would cluster honest gateways.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ prime/primed/src/sovereignty.rs       | 192 +++++++++----
+ prime/primed/src/stats.rs             |  23 +-
+ prime/primed/tests/sovereignty_e2e.rs |  15 +-
+ prime/tides/src/entropy.rs            | 398 ++++++++++++++++++++++++--
+ prime/tides/src/lib.rs                |   2 +-
+ 5 files changed, 546 insertions(+), 84 deletions(-)
+
+diff --git a/prime/primed/src/sovereignty.rs b/prime/primed/src/sovereignty.rs
+index fa3f56f..4126e82 100644
+--- a/prime/primed/src/sovereignty.rs
++++ b/prime/primed/src/sovereignty.rs
+@@ -288,6 +288,8 @@ pub struct Report {
+     pub compute_ms: u64,
+     pub rows: BTreeMap<String, Features>,
+     pub clusters: Vec<Vec<String>>,
++    /// SOV-015: gateways that carry each other's own canaries (one template source).
++    pub shared_sources: Vec<Vec<String>>,
+     pub pool_cluster: HashSet<String>,
+     pub score: PoolScore,
+     independence_ppm: HashMap<String, u32>,
+@@ -351,6 +353,8 @@ fn compute(inp: &Inputs) -> Report {
+         let checks: Vec<&Check> = inp.checks.get(name).map(|v| v.iter().map(|a| &**a).collect()).unwrap_or_default();
+         rows.insert(name.clone(), entropy::features_checked(&refs, &view, &canaries, &checks));
+     }
++    // SOV-015: one template source behind several gateways splits one builder's independence
++    let shared_sources = entropy::apply_shared_sources(&mut rows);
+     let named: Vec<(String, Vec<&Prepared>)> =
+         inp.tracks.iter().map(|(n, v)| (n.clone(), v.iter().map(|a| &**a).collect())).collect();
+     let clusters = entropy::clusters_prepared(&named);
+@@ -380,6 +384,7 @@ fn compute(inp: &Inputs) -> Report {
+         computed_at: inp.at,
+         rows,
+         clusters,
++        shared_sources,
+         pool_cluster,
+         score: pool_score,
+         independence_ppm,
+@@ -406,51 +411,54 @@ fn render(inp: &Inputs, r: &Report) -> Value {
+         .iter()
+         .map(|(n, f)| {
+             let key = inp.keys.get(n);
+-            (
+-                n,
+-                json!({
+-                    "snapshots": f.snapshots,
+-                    "compared": f.compared,
+-                    "identical": f.identical,
+-                    "branch_sim": f.branch_sim,
+-                    "jaccard": f.jaccard,
+-                    "lead": f.lead,
+-                    "tip_lead": f.tip_lead,
+-                    "lockstep": f.lockstep,
+-                    "switch_lag": f.switch_lag,
+-                    "incl_lag": f.incl_lag,
+-                    "canaries": f.canaries,
+-                    "canaries_due": f.canaries_due,
+-                    "canary_hits": f.canary_hits,
+-                    "canary_rate": f.canary_rate,
+-                    "shared_due": f.shared_due,
+-                    "shared_hits": f.shared_hits,
+-                    "shared_rate": f.shared_rate,
+-                    "decoys_due": f.decoys_due,
+-                    "decoys_carried": f.decoys_carried,
+-                    "decoy_rate": f.decoy_rate,
+-                    "canary_pool_leaks": f.canary_pool_leaks,
+-                    "canary_source": f.canary_source,
+-                    "checks": f.checks,
+-                    "evidence": f.evidence,
+-                    "flagged": f.flagged,
+-                    "flag_reasons": f.flag_reasons,
+-                    "subset": f.subset,
+-                    "follower": f.follower,
+-                    "independence": f.independence,
+-                    "insufficient": f.insufficient,
+-                    "independence_ppm": entropy::independence_ppm(f),
+-                    "weight": r.weights.get(n).copied().unwrap_or(0.0),
+-                    "pool_clustered": pool_clustered(r.pool_cluster.contains(n), f),
+-                    "in_pool_cluster": r.pool_cluster.contains(n),
+-                    "blocks": gw_blocks.get(n.as_str()).copied().unwrap_or(0),
+-                    "house": key.is_some_and(|k| k.house),
+-                    "registered": key.is_some_and(|k| k.active()),
+-                    "registration": key.map_or(0, |k| k.version),
+-                    "status": key.map_or("unregistered", |k| k.status.as_str()),
+-                    "bound": key.is_some_and(|k| k.bound()),
+-                }),
+-            )
++            let mut row = json!({
++                "snapshots": f.snapshots,
++                "compared": f.compared,
++                "identical": f.identical,
++                "branch_sim": f.branch_sim,
++                "jaccard": f.jaccard,
++                "lead": f.lead,
++                "tip_lead": f.tip_lead,
++                "lockstep": f.lockstep,
++                "switch_lag": f.switch_lag,
++                "incl_lag": f.incl_lag,
++                "canaries": f.canaries,
++                "canaries_due": f.canaries_due,
++                "canary_hits": f.canary_hits,
++                "canary_rate": f.canary_rate,
++                "shared_due": f.shared_due,
++                "shared_hits": f.shared_hits,
++                "shared_rate": f.shared_rate,
++                "decoys_due": f.decoys_due,
++                "decoys_carried": f.decoys_carried,
++                "decoy_rate": f.decoy_rate,
++                "canary_pool_leaks": f.canary_pool_leaks,
++                "canary_source": f.canary_source,
++                "checks": f.checks,
++                "evidence": f.evidence,
++                "flagged": f.flagged,
++                "flag_reasons": f.flag_reasons,
++                "subset": f.subset,
++                "follower": f.follower,
++                "independence": f.independence,
++                "insufficient": f.insufficient,
++                "independence_ppm": entropy::independence_ppm(f),
++                "weight": r.weights.get(n).copied().unwrap_or(0.0),
++                "pool_clustered": pool_clustered(r.pool_cluster.contains(n), f),
++                "in_pool_cluster": r.pool_cluster.contains(n),
++                "blocks": gw_blocks.get(n.as_str()).copied().unwrap_or(0),
++                "house": key.is_some_and(|k| k.house),
++                "registered": key.is_some_and(|k| k.active()),
++                "registration": key.map_or(0, |k| k.version),
++                "status": key.map_or("unregistered", |k| k.status.as_str()),
++                "bound": key.is_some_and(|k| k.bound()),
++            });
++            // SOV-015 (outside the macro: json! runs out of recursion on one more field)
++            row["foreign_due"] = json!(f.foreign_due);
++            row["foreign_hits"] = json!(f.foreign_hits);
++            row["foreign"] = json!(f.foreign);
++            row["shared_source"] = json!(f.shared_source);
++            (n, row)
+         })
+         .collect();
+     let s = &r.score;
+@@ -498,6 +506,7 @@ fn render(inp: &Inputs, r: &Report) -> Value {
+         },
+         "gateways": gateways,
+         "clusters": r.clusters,
++        "shared_sources": r.shared_sources,
+         "flagged": r.rows.iter().filter(|(_, f)| f.flagged).map(|(n, _)| n).collect::<Vec<_>>(),
+         "registrations": registrations(&inp.keys),
+         "demo": inp.demo,
+@@ -1245,6 +1254,28 @@ impl Engine {
+     /// Shared canaries and decoys bear on every gateway, so `gateway` is ignored.
+     pub fn note_canary(&mut self, gateway: &str, canary: Canary) {
+         let key = if canary.kind == CanaryKind::Own { gateway.to_ascii_lowercase() } else { ALL.to_string() };
++        self.push_canary(key, canary);
++    }
++
++    /// SOV-015: `gateway`'s own canary `canary` had its twin C′ delivered to the nodes of
++    /// `targets` too (the sidecar's `foreign` fan-out). Each target gets a foreign canary: an
++    /// honest one never carries C, one that shares `gateway`'s template source does. Targets that
++    /// are `gateway` itself, or repeated, are skipped. Returns the targets recorded.
++    pub fn note_foreign(&mut self, gateway: &str, canary: &Canary, targets: &[String]) -> Vec<String> {
++        let from = gateway.to_ascii_lowercase();
++        let mut done: Vec<String> = Vec::new();
++        for t in targets {
++            let t = t.to_ascii_lowercase();
++            if t == from || t == ALL || done.contains(&t) {
++                continue;
++            }
++            self.push_canary(t.clone(), Canary::foreign(canary.t, canary.txid.clone(), from.clone()));
++            done.push(t);
++        }
++        done
++    }
++
++    fn push_canary(&mut self, key: String, canary: Canary) {
+         let seen = now();
+         if !self.canaries.contains_key(&key) && key != ALL && self.canaries.len() > MAX_KEYS {
+             let lru = self
+@@ -1272,12 +1303,14 @@ impl Engine {
+     /// file has that txid (evicted, or placed before a restart).
+     pub fn note_canary_mined(&mut self, txid: &str, height: u64, t: f64) -> bool {
+         let txid = txid.to_ascii_lowercase();
+-        let Some(c) = self.canaries.values_mut().flat_map(|l| l.list.iter_mut()).find(|c| c.txid == txid) else {
+-            return false;
+-        };
+-        *c = c.clone().mined_at(height, t);
+-        self.dirty = true;
+-        true
++        // the own canary and its foreign copies (SOV-015) all settle together
++        let mut known = false;
++        for c in self.canaries.values_mut().flat_map(|l| l.list.iter_mut()).filter(|c| c.txid == txid) {
++            *c = c.clone().mined_at(height, t);
++            known = true;
++        }
++        self.dirty |= known;
++        known
+     }
+ 
+     /// A live session's job: prev + merkle branches, under [`Engine::track_name`]. The branch
+@@ -1666,6 +1699,12 @@ impl Engine {
+         self.current().clusters.clone()
+     }
+ 
++    /// SOV-015: gateways that carry each other's own canaries (one template source).
++    #[cfg(test)]
++    pub fn shared_sources(&mut self) -> Vec<Vec<String>> {
++        self.current().shared_sources.clone()
++    }
++
+     #[cfg(test)]
+     pub fn flagged(&mut self) -> Vec<String> {
+         self.current().rows.iter().filter(|(_, f)| f.flagged).map(|(n, _)| n.clone()).collect()
+@@ -2361,6 +2400,57 @@ mod tests {
+         assert_eq!((f.canaries_due, f.canary_hits, f.shared_due), (0, 0, 0), "{f:?}");
+     }
+ 
++    /// SOV-015: three gateways on one node carry each other's own canaries (each one's twin went
++    /// to the others' registered nodes, which forward to that same node, too late); an honest
++    /// gateway's node holds the twins and carries only its own. One cluster, independence ÷ 3,
++    /// nobody flagged; the public row says why.
++    #[test]
++    fn a_shared_template_source_is_one_cluster_and_splits_independence() {
++        let mut e = engine();
++        let gws = ["t1", "t2", "t3", "honest"];
++        let c = |k: u64, i: u64| format!("{:064x}", 0xf000 + k * 10 + i);
++        for k in 0..12u64 {
++            let t0 = k as f64 * 300.0;
++            for (i, g) in gws.iter().enumerate() {
++                let others: Vec<String> = gws.iter().filter(|o| *o != g).map(|o| o.to_uppercase()).collect();
++                let canary = Canary::new(t0 + i as f64, c(k, i as u64));
++                // targets are matched case-blind; the source itself and repeats are skipped
++                let mut targets = others.clone();
++                targets.push(g.to_string());
++                targets.push(others[0].clone());
++                assert_eq!(e.note_foreign(g, &canary, &targets), others.iter().map(|o| o.to_lowercase()).collect::<Vec<_>>());
++                e.note_canary(g, canary);
++            }
++            let on_t: Vec<String> = (0..3).map(|i| c(k, i)).collect();
++            for g in ["t1", "t2", "t3"] {
++                e.note_check_demo(g, t0 + 45.0, &on_t);
++            }
++            e.note_check_demo("honest", t0 + 45.0, &[c(k, 3)]);
++        }
++        let rows = e.detector_rows();
++        assert_eq!(e.shared_sources(), vec![vec!["t1".to_string(), "t2".into(), "t3".into()]]);
++        for g in ["t1", "t2", "t3"] {
++            let f = &rows[g];
++            assert_eq!((f.canaries_due, f.canary_hits, f.foreign_due, f.foreign_hits), (12, 12, 36, 24), "{g}");
++            assert_eq!(f.flag_reasons, vec!["shared-template-source"]);
++            assert!(!f.flagged);
++            assert_eq!(e.independence_of(g), 333_000, "{g}");
++        }
++        assert_eq!((rows["honest"].foreign_due, rows["honest"].foreign_hits), (36, 0));
++        assert_eq!(e.independence_of("honest"), 1_000_000);
++        assert!(e.flagged().is_empty());
++        let body = e.current().body.clone();
++        assert_eq!(body["shared_sources"], json!([["t1", "t2", "t3"]]));
++        assert_eq!(body["gateways"]["t1"]["shared_source"], json!(["t2", "t3"]));
++        assert_eq!(body["gateways"]["t1"]["foreign"]["t2"], json!({"due": 12, "hits": 12}));
++        assert_eq!(body["gateways"]["honest"]["foreign"]["t1"], json!({"due": 12, "hits": 0}));
++        assert!((body["gateways"]["t1"]["weight"].as_f64().unwrap() - 0.333).abs() < 1e-9);
++        // a block settles every copy of a canary at once: t1's k=0 canary is then due nowhere
++        assert!(e.note_canary_mined(&c(0, 0), 1, 5.0));
++        let rows = e.detector_rows();
++        assert_eq!((rows["t1"].canaries_due, rows["t2"].foreign["t1"].due, rows["honest"].foreign["t1"].due), (11, 11, 11));
++    }
++
+     /// W8: checks are the canary evidence, bounded per key, and kept under the gateway's track
+     /// name (registered G); the house stratum is never checked.
+     #[test]
+diff --git a/prime/primed/src/stats.rs b/prime/primed/src/stats.rs
+index 8c44d5e..1973cc8 100644
+--- a/prime/primed/src/stats.rs
++++ b/prime/primed/src/stats.rs
+@@ -572,12 +572,31 @@ fn ingest(shared: &Shared, path: &str, body: &str) -> Result<Value, String> {
+             // when it was delivered, on this host's clock; never later than now
+             let now_f = crate::sovereignty::now_f64();
+             let t = v["t"].as_f64().unwrap_or(now_f).min(now_f);
++            // SOV-015: the gateways whose nodes also got this own canary's twin C′
++            let foreign: Vec<String> = match (&v["foreign"], kind) {
++                (Value::Null, _) => Vec::new(),
++                (Value::Array(a), tides::CanaryKind::Own) => a
++                    .iter()
++                    .map(|x| x.as_str().map(str::to_string).ok_or("foreign: gateway strings"))
++                    .collect::<Result<_, _>>()?,
++                (Value::Array(_), _) => return Err("foreign: own canaries only".into()),
++                _ => return Err("foreign: an array".into()),
++            };
+             let canary = tides::Canary { kind, ..tides::Canary::new(t, txid.to_ascii_lowercase()) };
+-            shared.sovereignty.engine().note_canary(&gw, canary);
++            let targets = {
++                let mut e = shared.sovereignty.engine();
++                let targets = e.note_foreign(&gw, &canary, &foreign);
++                e.note_canary(&gw, canary);
++                targets
++            };
+             if kind == tides::CanaryKind::Own {
+                 shared.sovereignty.schedule_check(&gw, t);
++                // a foreign canary is judged by the target's checks, like its own
++                for g in &targets {
++                    shared.sovereignty.schedule_check(g, t);
++                }
+             }
+-            Ok(json!({"ok": true}))
++            Ok(json!({"ok": true, "foreign": targets.len()}))
+         }
+         // SOV-012: the sidecar saw one of a canary's txs confirm (C or C′ of an own canary, D,
+         // or Q). A canary a block settles before its first due check is then not due.
+diff --git a/prime/primed/tests/sovereignty_e2e.rs b/prime/primed/tests/sovereignty_e2e.rs
+index c4897b1..f2c9495 100644
+--- a/prime/primed/tests/sovereignty_e2e.rs
++++ b/prime/primed/tests/sovereignty_e2e.rs
+@@ -256,7 +256,20 @@ fn mode_observe_serves_an_unpublished_report() {
+     assert_eq!(r["ok"], true, "{r}");
+     let r = post(p.stats, "/sovereignty/canary", &json!({"txid": hex32(8), "kind": "decoy"}));
+     assert_eq!(r["ok"], true, "{r}");
+-    for bad in [json!({"txid": hex32(9)}), json!({"gateway": g_hex, "txid": "zz"}), json!({"txid": hex32(9), "kind": "x"})] {
++    // SOV-015: an own canary's twin fan-out; the source and repeats are not targets
++    let others = [hex32(0x31), hex32(0x32)];
++    let fan = json!({"gateway": g_hex, "txid": hex32(10), "kind": "own", "foreign": [others[0], others[1], g_hex, others[0]]});
++    let r = post(p.stats, "/sovereignty/canary", &fan);
++    assert_eq!((r["ok"].as_bool(), r["foreign"].as_u64()), (Some(true), Some(2)), "{r}");
++    for bad in [
++        json!({"txid": hex32(9)}),
++        json!({"gateway": g_hex, "txid": "zz"}),
++        json!({"txid": hex32(9), "kind": "x"}),
++        json!({"txid": hex32(9), "kind": "foreign", "gateway": g_hex}),
++        json!({"txid": hex32(9), "kind": "decoy", "foreign": [others[0]]}),
++        json!({"gateway": g_hex, "txid": hex32(9), "foreign": others[0]}),
++        json!({"gateway": g_hex, "txid": hex32(9), "foreign": [1]}),
++    ] {
+         let r = post(p.stats, "/sovereignty/canary", &bad);
+         assert!(r.get("error").is_some(), "{bad} → {r}");
+     }
+diff --git a/prime/tides/src/entropy.rs b/prime/tides/src/entropy.rs
+index 3e121ed..f03e292 100644
+--- a/prime/tides/src/entropy.rs
++++ b/prime/tides/src/entropy.rs
+@@ -22,6 +22,13 @@
+ //!   it came from the pool's. A hybrid that merges its own node's mempool into the pool's
+ //!   template carries it.
+ //!
++//! * **Foreign canaries** (SOV-015; cluster only). An own canary C for gateway G whose twin C′ was
++//!   also delivered, right after C, to the registered nodes of other gateways. Those nodes hold C′
++//!   and reject C when it relays in, so an honest G2 never templates C. A G2 whose template carries
++//!   C builds from a source that got C, and so shares it with G's node. Gateways that carry each
++//!   other's canaries are one *shared-template-source* cluster ([`shared_sources`]): independence
++//!   is split `1/n` across it, and nobody is flagged for it.
++//!
+ //! Together these corner a hybrid (pool template + its own node's mempool). Own canaries force it
+ //! to take its node's side of a conflict. Decoys force it to drop what its node lacks (T ⊆ L).
+ //! Shared canaries force it to keep what its node has, even where the pool left it out (T ⊇ L).
+@@ -90,6 +97,15 @@ pub const CANARY_FLAG: f64 = 0.25;
+ /// Share of due decoys a gateway may carry before it is flagged. An honest node never has a
+ /// decoy, so any carried decoy is suspect; the bar leaves room for a misconfigured relay floor.
+ pub const DECOY_FLAG: f64 = 0.25;
++/// SOV-015: share of the foreign canaries from one source gateway G (judged, ≥ `CANARY_MIN`)
++/// that gateway G2 may carry before G2 and G count as one template source. An honest G2's node
++/// holds the twin C′ before C can relay in, so its rate is the relay-race rate (measured ≈ 0).
++/// A gateway on G's source carries G's canary exactly when G hits its own, so a shared source
++/// can push this under the bar only by pushing G's own hit rate there too.
++pub const FOREIGN_FLAG: f64 = 0.25;
++/// Foreign hits one source must reach besides the rate, so a couple of relay-race losses at
++/// low due never join two honest gateways.
++pub const FOREIGN_MIN_HITS: usize = 3;
+ 
+ /// Which node Prime handed a canary to, and so what an honest gateway does with it.
+ #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+@@ -102,6 +118,10 @@ pub enum CanaryKind {
+     Shared,
+     /// Pool node only, under the relay floor, in its template: no gateway may carry it.
+     Decoy,
++    /// SOV-015: another gateway's own canary C, whose twin C′ went to this gateway's node: no
++    /// gateway with a template of its own carries it; one on the source gateway's node does.
++    /// Primed makes these from an own canary's fan-out; the sidecar never posts one.
++    Foreign,
+ }
+ 
+ impl CanaryKind {
+@@ -121,6 +141,9 @@ pub struct Canary {
+     pub t: f64,
+     pub txid: String,
+     pub kind: CanaryKind,
++    /// SOV-015: for a [`CanaryKind::Foreign`] canary, the gateway whose own canary it is.
++    #[serde(skip_serializing_if = "Option::is_none")]
++    pub from: Option<String>,
+     /// SOV-012: when the block that settled it (C, C′, D or Q confirmed) was mined, as the
+     /// sidecar reported it. Template checks of jobs first seen after this say nothing about
+     /// the gateway, so they do not judge the canary.
+@@ -137,7 +160,7 @@ pub struct Mined {
+ 
+ impl Canary {
+     pub fn new(t: f64, txid: impl Into<String>) -> Self {
+-        Canary { t, txid: txid.into(), kind: CanaryKind::Own, mined: None }
++        Canary { t, txid: txid.into(), kind: CanaryKind::Own, from: None, mined: None }
+     }
+ 
+     /// The same canary, settled by a block at `height` with header time `t`.
+@@ -152,6 +175,11 @@ impl Canary {
+     pub fn decoy(t: f64, txid: impl Into<String>) -> Self {
+         Canary { kind: CanaryKind::Decoy, ..Canary::new(t, txid) }
+     }
++
++    /// SOV-015: `from`'s own canary `txid`, whose twin went to this gateway's node at `t`.
++    pub fn foreign(t: f64, txid: impl Into<String>, from: impl Into<String>) -> Self {
++        Canary { kind: CanaryKind::Foreign, from: Some(from.into()), ..Canary::new(t, txid) }
++    }
+ }
+ 
+ /// One template snapshot, as Prime would log it from a DATUM job (or the pool node poll).
+@@ -240,6 +268,13 @@ pub struct Features {
+     pub decoys_due: usize,
+     pub decoys_carried: usize,
+     pub decoy_rate: Option<f64>,
++    /// SOV-015: foreign canaries judged and carried, over all sources, and per source gateway.
++    pub foreign_due: usize,
++    pub foreign_hits: usize,
++    pub foreign: std::collections::BTreeMap<String, SourceTally>,
++    /// SOV-015: the other gateways of this one's shared-template-source cluster (empty if none),
++    /// filled in by [`apply_shared_sources`].
++    pub shared_source: Vec<String>,
+     /// Own and shared canaries a pool template carried (should stay 0: the pool node never
+     /// templates them).
+     pub canary_pool_leaks: usize,
+@@ -249,7 +284,8 @@ pub struct Features {
+     /// Template checks on file for this gateway (0 on the snapshot path).
+     pub checks: usize,
+     /// Why the gateway is flagged: `own-canaries-missed`, `shared-canaries-missed`,
+-    /// `decoys-carried`.
++    /// `decoys-carried`. SOV-015: also `shared-template-source`, which splits independence
++    /// across the cluster and does **not** set `flagged` (see [`apply_shared_sources`]).
+     pub flag_reasons: Vec<&'static str>,
+     /// `canary`, `timing` or `none`: which rule set `independence`.
+     pub evidence: &'static str,
+@@ -258,6 +294,13 @@ pub struct Features {
+     pub flagged: bool,
+ }
+ 
++/// Foreign canaries from one source gateway: judged, and carried.
++#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
++pub struct SourceTally {
++    pub due: usize,
++    pub hits: usize,
++}
++
+ fn dsha(b: &[u8]) -> [u8; 32] {
+     use sha2::{Digest, Sha256};
+     let first = Sha256::digest(b);
+@@ -642,13 +685,13 @@ fn features_inner(gw: &[&Prepared], pool: &PoolView, canaries: &[&Canary], check
+     let subset = if subn > 0 { sub / subn as f64 } else { 0.0 };
+     let follower = subset * (1.0 - (lead / LEAD_REF).min(1.0));
+ 
+-    let (tally, leaks) = match checks {
++    let Tally { kinds: tally, leaks, foreign } = match checks {
+         None => tally_snapshots(&gw, pool, canaries),
+         Some(checks) => tally_checks(checks, pool, canaries),
+     };
+     let rate = |(due, hits): (usize, usize)| (due > 0).then(|| hits as f64 / due as f64);
+     let judged = |(due, hits): (usize, usize)| (due >= CANARY_MIN).then(|| hits as f64 / due as f64);
+-    let [own, shared, decoy] = tally;
++    let [own, shared, decoy, far] = tally;
+     let carry: Vec<f64> = [judged(own), judged(shared)].into_iter().flatten().collect();
+     let mut reasons = Vec::new();
+     if judged(own).is_some_and(|r| r < CANARY_FLAG) {
+@@ -701,6 +744,10 @@ fn features_inner(gw: &[&Prepared], pool: &PoolView, canaries: &[&Canary], check
+         decoys_due: decoy.0,
+         decoys_carried: decoy.1,
+         decoy_rate: rate(decoy),
++        foreign_due: far.0,
++        foreign_hits: far.1,
++        foreign,
++        shared_source: Vec::new(),
+         canary_pool_leaks: leaks,
+         canary_source: if checks.is_some() { "checks" } else { "snapshots" },
+         checks: checks.map_or(0, <[&Check]>::len),
+@@ -712,8 +759,33 @@ fn features_inner(gw: &[&Prepared], pool: &PoolView, canaries: &[&Canary], check
+     }
+ }
+ 
+-/// `[own, shared, decoy]` as `(due, hits)`, and own/shared leaks into pool snapshots.
+-type Tally = ([(usize, usize); 3], usize);
++/// `[own, shared, decoy, foreign]` as `(due, hits)`, own/shared leaks into pool snapshots, and
++/// foreign canaries by source gateway.
++#[derive(Default)]
++struct Tally {
++    kinds: [(usize, usize); 4],
++    leaks: usize,
++    foreign: std::collections::BTreeMap<String, SourceTally>,
++}
++
++impl Tally {
++    fn judge(&mut self, c: &Canary, hit: bool) {
++        let (d, h) = &mut self.kinds[c.kind as usize];
++        *d += 1;
++        *h += usize::from(hit);
++        if let (CanaryKind::Foreign, Some(from)) = (c.kind, &c.from) {
++            let s = self.foreign.entry(from.clone()).or_default();
++            s.due += 1;
++            s.hits += usize::from(hit);
++        }
++    }
++}
++
++/// A pool template holding an own or shared canary is a leak (a foreign canary is a copy of an
++/// own one, so it is not counted twice).
++fn leaks_into_pool(c: &Canary) -> bool {
++    matches!(c.kind, CanaryKind::Own | CanaryKind::Shared)
++}
+ 
+ /// Canary hits read from job snapshots: a canary is due once the gateway has sent a template
+ /// `CANARY_DUE` s after its delivery, and a hit if a template of the gateway's carried it within
+@@ -722,28 +794,23 @@ fn tally_snapshots(gw: &[&Prepared], pool: &PoolView, canaries: &[&Canary]) -> T
+     let last_gw = gw.last().map(|s| s.t).unwrap_or(f64::NEG_INFINITY);
+     let wanted: FpSet = canaries.iter().map(|c| fp(&c.txid)).collect();
+     let gw_occ = occurrences(gw, Some(&wanted));
+-    let mut tally = [(0usize, 0usize); 3];
+-    let mut leaks = 0usize;
++    let mut tally = Tally::default();
+     for c in canaries {
+         let id = fp(&c.txid);
+         let pool_at = first_between(pool.occ.get(&id), c.t - WINDOW, f64::INFINITY);
+-        if pool_at.is_some() && c.kind != CanaryKind::Decoy {
+-            leaks += 1;
++        if pool_at.is_some() && leaks_into_pool(c) {
++            tally.leaks += 1;
+         }
+         if c.t + CANARY_DUE > last_gw {
+             continue;
+         }
+-        let (due, hits) = &mut tally[c.kind as usize];
+-        *due += 1;
+-        if let Some(at) = first_between(gw_occ.get(&id), c.t, c.t + CANARY_WINDOW) {
+-            // a decoy counts however it got there; a must-carry canary only if the pool's
+-            // template cannot have been the source
+-            if c.kind == CanaryKind::Decoy || pool_at.is_none_or(|pt| at < pt - LEAD_MARGIN) {
+-                *hits += 1;
+-            }
+-        }
++        // a decoy counts however it got there; a must-carry (or foreign) canary only if the
++        // pool's template cannot have been the source
++        let hit = first_between(gw_occ.get(&id), c.t, c.t + CANARY_WINDOW)
++            .is_some_and(|at| c.kind == CanaryKind::Decoy || pool_at.is_none_or(|pt| at < pt - LEAD_MARGIN));
++        tally.judge(c, hit);
+     }
+-    (tally, leaks)
++    tally
+ }
+ 
+ /// Canary hits read from template checks (W8): a canary is due when a check's job was first
+@@ -757,13 +824,12 @@ fn tally_snapshots(gw: &[&Prepared], pool: &PoolView, canaries: &[&Canary]) -> T
+ fn tally_checks(checks: &[&Check], pool: &PoolView, canaries: &[&Canary]) -> Tally {
+     let mut checks: Vec<&Check> = checks.to_vec();
+     checks.sort_by(|a, b| a.t.partial_cmp(&b.t).unwrap_or(std::cmp::Ordering::Equal));
+-    let mut tally = [(0usize, 0usize); 3];
+-    let mut leaks = 0usize;
++    let mut tally = Tally::default();
+     for c in canaries {
+         let id = fp(&c.txid);
+         let pool_at = first_between(pool.occ.get(&id), c.t - WINDOW, f64::INFINITY);
+-        if pool_at.is_some() && c.kind != CanaryKind::Decoy {
+-            leaks += 1;
++        if pool_at.is_some() && leaks_into_pool(c) {
++            tally.leaks += 1;
+         }
+         let (from, to) = (c.t + CANARY_DUE, c.t + CHECK_WINDOW);
+         let mined = c.mined.map_or(f64::INFINITY, |m| m.t);
+@@ -781,12 +847,78 @@ fn tally_checks(checks: &[&Check], pool: &PoolView, canaries: &[&Canary]) -> Tal
+             }
+         }
+         if due {
+-            let (d, h) = &mut tally[c.kind as usize];
+-            *d += 1;
+-            *h += usize::from(hit);
++            tally.judge(c, hit);
+         }
+     }
+-    (tally, leaks)
++    tally
++}
++
++/// SOV-015: does `row` (gateway G2) carry enough of source `from`'s foreign canaries to share a
++/// template source with it?
++pub fn carries_foreign(row: &Features, from: &str) -> bool {
++    row.foreign.get(from).is_some_and(|s| {
++        s.due >= CANARY_MIN && s.hits >= FOREIGN_MIN_HITS && s.hits as f64 / s.due as f64 >= FOREIGN_FLAG
++    })
++}
++
++/// SOV-015: shared-template-source clusters. G2 and G are joined when G2 [`carries_foreign`]
++/// G's canaries (either direction is enough: a source serving both carries both ways, but one
++/// gateway on it may be judged less often). Single linkage, clusters of two or more, members
++/// sorted, largest first. A source gateway with no row of its own still joins its cluster.
++pub fn shared_sources(rows: &std::collections::BTreeMap<String, Features>) -> Vec<Vec<String>> {
++    use std::collections::BTreeMap;
++    fn root(parent: &mut BTreeMap<String, String>, x: &str) -> String {
++        let mut r = x.to_string();
++        while let Some(p) = parent.get(&r).filter(|p| **p != r).cloned() {
++            r = p;
++        }
++        parent.insert(x.to_string(), r.clone());
++        r
++    }
++    let mut parent: BTreeMap<String, String> = BTreeMap::new();
++    for (g2, row) in rows {
++        for from in row.foreign.keys() {
++            if from != g2 && carries_foreign(row, from) {
++                let (a, b) = (root(&mut parent, g2), root(&mut parent, from));
++                if a != b {
++                    parent.insert(a, b);
++                }
++            }
++        }
++    }
++    let names: Vec<String> = parent.keys().cloned().collect();
++    let mut groups: BTreeMap<String, Vec<String>> = BTreeMap::new();
++    for n in names {
++        let r = root(&mut parent, &n);
++        groups.entry(r).or_default().push(n);
++    }
++    let mut out: Vec<Vec<String>> = groups.into_values().filter(|g| g.len() > 1).collect();
++    for g in &mut out {
++        g.sort();
++    }
++    out.sort_by(|a, b| b.len().cmp(&a.len()).then_with(|| a.cmp(b)));
++    out
++}
++
++/// SOV-015: fold [`shared_sources`] into the rows: each member of an `n`-gateway cluster keeps
++/// `independence / n` (so the cluster as a whole weighs what one builder does), lists the others
++/// in `shared_source`, and gets the reason `shared-template-source`. `flagged` is untouched: a
++/// shared source is not fake DATUM, it is one builder counted `n` times. Returns the clusters.
++pub fn apply_shared_sources(rows: &mut std::collections::BTreeMap<String, Features>) -> Vec<Vec<String>> {
++    let clusters = shared_sources(rows);
++    for c in &clusters {
++        let n = c.len() as f64;
++        for g in c {
++            if let Some(f) = rows.get_mut(g) {
++                f.shared_source = c.iter().filter(|o| *o != g).cloned().collect();
++                if !f.flag_reasons.contains(&"shared-template-source") {
++                    f.flag_reasons.push("shared-template-source");
++                }
++                f.independence = ((f.independence / n).clamp(0.0, 1.0) * 1000.0).round() / 1000.0;
++            }
++        }
++    }
++    clusters
+ }
+ 
+ /// Share of `a`'s snapshots whose branches equal one of `b`'s (same parent, within window).
+@@ -1027,7 +1159,8 @@ pub mod reference {
+         // [own, shared, decoy]: (due, hits)
+         let mut tally = [(0usize, 0usize); 3];
+         let mut leaks = 0usize;
+-        for c in canaries {
++        // the oracle predates foreign canaries (SOV-015) and ignores them
++        for c in canaries.iter().filter(|c| c.kind != CanaryKind::Foreign) {
+             let pool_at = first_with(&pool, &c.txid, c.t - WINDOW, f64::INFINITY);
+             if pool_at.is_some() && c.kind != CanaryKind::Decoy {
+                 leaks += 1;
+@@ -1100,6 +1233,10 @@ pub mod reference {
+             decoys_due: decoy.0,
+             decoys_carried: decoy.1,
+             decoy_rate: rate(decoy),
++            foreign_due: 0,
++            foreign_hits: 0,
++            foreign: Default::default(),
++            shared_source: Vec::new(),
+             canary_pool_leaks: leaks,
+             canary_source: "snapshots",
+             checks: 0,
+@@ -1834,4 +1971,207 @@ mod tests {
+         assert!(f.identical > 0.9, "{}", f.identical);
+         assert_eq!(f.independence, 0.0);
+     }
++
++    // ---- SOV-015: foreign canaries --------------------------------------------------------
++
++    /// A small relay world for foreign canaries (SOV-015). `node[g]` is the node gateway `g` registered and
++    /// builds from (gateways on one shared node have the same entry). Every round, for each
++    /// gateway G in turn: C goes to G's node, then C′ to every other gateway's node `lag` s later.
++    /// G's node relays C to each other node after a trickle (exp, mean `trickle` s) plus a round
++    /// trip; a node holds whichever of C/C′ reached it first (a shared node gets C first). With
++    /// probability `mined` a block settles the canary before its first due check. Each gateway's
++    /// job is checked 45 s into the round. Returns each gateway's canaries (own + foreign) and
++    /// checks.
++    struct Relay {
++        node: Vec<usize>,
++        rounds: usize,
++        lag: (f64, f64),
++        trickle: f64,
++        mined: f64,
++        seed: u64,
++    }
++
++    type Evidence = (Vec<Canary>, Vec<Check>);
++
++    impl Relay {
++        fn run(&self) -> Vec<Evidence> {
++            let mut s = self.seed;
++            let mut u = move || {
++                s = s.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1_442_695_040_888_963_407);
++                ((s >> 11) as f64) / ((1u64 << 53) as f64)
++            };
++            let n = self.node.len();
++            let mut out: Vec<Evidence> = (0..n).map(|_| (Vec::new(), Vec::new())).collect();
++            for r in 0..self.rounds {
++                let t0 = r as f64 * 600.0;
++                // what each node holds at the check: canary txids (C of some gateway)
++                let nodes = self.node.iter().max().map_or(0, |m| m + 1);
++                let mut holds: Vec<Vec<String>> = vec![Vec::new(); nodes];
++                for g in 0..n {
++                    let t = t0 + g as f64 * 0.02;
++                    let c = hex32(0xC0_0000 + (r * n + g) as u64);
++                    let early = u() < self.mined;
++                    let settle = |k: Canary| if early { k.mined_at(r as u64, t + 5.0) } else { k };
++                    out[g].0.push(settle(Canary::new(t, c.clone())));
++                    let home = self.node[g];
++                    // G's own node holds C (it got it first)
++                    if !holds[home].contains(&c) {
++                        holds[home].push(c.clone());
++                    }
++                    for g2 in (0..n).filter(|&x| x != g) {
++                        let there = self.node[g2];
++                        if there != home {
++                            // C′ direct after `lag`; C by relay after trickle + rtt
++                            let lag = self.lag.0 + u() * (self.lag.1 - self.lag.0);
++                            let relay = -self.trickle * (1.0 - u()).ln() + 0.01 + u() * 0.09;
++                            if relay < lag && !holds[there].contains(&c) {
++                                holds[there].push(c.clone());
++                            }
++                        }
++                        out[g2].0.push(settle(Canary::foreign(t, c.clone(), format!("g{g}"))));
++                    }
++                }
++                for g in 0..n {
++                    let mut txids: Vec<String> = (0..5).map(|k| hex32(7_000 + (r * 5 + k) as u64)).collect();
++                    txids.extend(holds[self.node[g]].iter().cloned());
++                    out[g].1.push(Check::new(t0 + 45.0, &txids));
++                }
++            }
++            out
++        }
++
++        fn rows(&self) -> std::collections::BTreeMap<String, Features> {
++            let pool: Vec<Prepared> = Vec::new();
++            let view = PoolView::new(&pool);
++            self.run()
++                .iter()
++                .enumerate()
++                .map(|(g, (cs, ks))| {
++                    let cs: Vec<&Canary> = cs.iter().collect();
++                    let ks: Vec<&Check> = ks.iter().collect();
++                    (format!("g{g}"), features_checked(&[], &view, &cs, &ks))
++                })
++                .collect()
++        }
++    }
++
++    fn relay(node: Vec<usize>, seed: u64) -> Relay {
++        // loopback-to-LAN twin lag 0.5-20 ms, trickle 2 s (outbound), 5% mined before due
++        Relay { node, rounds: 30, lag: (0.0005, 0.02), trickle: 2.0, mined: 0.05, seed }
++    }
++
++    #[test]
++    fn honest_gateways_with_relay_jitter_never_cluster() {
++        for seed in 1..=20 {
++            let w = relay((0..6).collect(), seed);
++            let mut rows = w.rows();
++            let cl = apply_shared_sources(&mut rows);
++            assert!(cl.is_empty(), "seed {seed}: {cl:?}");
++            for (g, f) in &rows {
++                assert!(f.foreign_due >= 100, "{g} {}", f.foreign_due);
++                // the race is lost rarely if ever at these lags; far under the bar either way
++                assert!(
++                    (f.foreign_hits as f64) < 0.05 * f.foreign_due as f64,
++                    "{g} {}/{}",
++                    f.foreign_hits,
++                    f.foreign_due
++                );
++                assert!(!f.flagged && f.shared_source.is_empty() && f.independence == 1.0, "{g} {f:?}");
++            }
++        }
++    }
++
++    #[test]
++    fn three_gateways_on_one_third_party_node_are_one_cluster() {
++        // g0, g1 honest; g2, g3, g4 all build from node 9 (the third party T)
++        let w = relay(vec![0, 1, 9, 9, 9], 7);
++        let mut rows = w.rows();
++        let cl = apply_shared_sources(&mut rows);
++        assert_eq!(cl, vec![vec!["g2".to_string(), "g3".into(), "g4".into()]]);
++        for g in ["g2", "g3", "g4"] {
++            let f = &rows[g];
++            assert_eq!(f.flag_reasons, vec!["shared-template-source"], "{g}");
++            assert!(!f.flagged, "a shared source is not fake DATUM");
++            assert_eq!(f.canary_rate, Some(1.0), "each carries its own canaries");
++            assert!((f.independence - 0.333).abs() < 1e-9, "{g} {}", f.independence);
++            assert_eq!(f.shared_source.len(), 2);
++            // every canary of the other two that was judged was carried
++            for from in ["g2", "g3", "g4"].iter().filter(|x| *x != &g) {
++                let s = f.foreign[*from];
++                assert_eq!(s.hits, s.due, "{g} <- {from}");
++            }
++        }
++        for g in ["g0", "g1"] {
++            assert!(rows[g].shared_source.is_empty() && rows[g].independence == 1.0, "{g}");
++            assert_eq!(rows[g].foreign_hits, 0, "{g}");
++        }
++    }
++
++    #[test]
++    fn mixed_honest_two_farms_and_a_pair_on_one_node() {
++        // g0-g2 honest, g3-g5 on T, g6-g7 on U (two gateways one operator), g8 honest
++        let w = relay(vec![0, 1, 2, 10, 10, 10, 11, 11, 8], 11);
++        let mut rows = w.rows();
++        let cl = apply_shared_sources(&mut rows);
++        assert_eq!(cl, vec![vec!["g3".to_string(), "g4".into(), "g5".into()], vec!["g6".to_string(), "g7".into()]]);
++        assert!((rows["g6"].independence - 0.5).abs() < 1e-9);
++        for g in ["g0", "g1", "g2", "g8"] {
++            assert!(rows[g].shared_source.is_empty(), "{g}");
++        }
++    }
++
++    #[test]
++    fn late_twins_lose_the_relay_race_and_would_cluster_honest_gateways() {
++        // why the sidecar sends C′ right behind C and reports only twins acked in time: at a
++        // 3-8 s lag, honest nodes get C by relay first about as often as not
++        let w = Relay { lag: (3.0, 8.0), ..relay((0..4).collect(), 3) };
++        let mut rows = w.rows();
++        let hits: usize = rows.values().map(|f| f.foreign_hits).sum();
++        let due: usize = rows.values().map(|f| f.foreign_due).sum();
++        assert!(hits as f64 > 0.5 * due as f64, "{hits}/{due}");
++        assert!(!apply_shared_sources(&mut rows).is_empty());
++    }
++
++    #[test]
++    fn foreign_evidence_needs_due_hits_and_rate() {
++        let mut f = features_checked(&[], &PoolView::new(&[]), &[], &[]);
++        let set = |f: &mut Features, due, hits| {
++            f.foreign.insert("g".into(), SourceTally { due, hits });
++        };
++        set(&mut f, 9, 9);
++        assert!(!carries_foreign(&f, "g"), "under CANARY_MIN due");
++        set(&mut f, 10, 2);
++        assert!(!carries_foreign(&f, "g"), "under FOREIGN_MIN_HITS");
++        set(&mut f, 40, 9);
++        assert!(!carries_foreign(&f, "g"), "under FOREIGN_FLAG");
++        set(&mut f, 40, 10);
++        assert!(carries_foreign(&f, "g"));
++        // one direction joins, and a source with no row of its own is still a member
++        let mut rows = std::collections::BTreeMap::new();
++        rows.insert("h".to_string(), f);
++        let cl = apply_shared_sources(&mut rows);
++        assert_eq!(cl, vec![vec!["g".to_string(), "h".into()]]);
++        assert_eq!(rows["h"].shared_source, vec!["g"]);
++    }
++
++    #[test]
++    fn foreign_canaries_never_flag_leak_or_move_the_own_tally() {
++        let own = Canary::new(0.0, hex32(1));
++        let far = Canary::foreign(0.0, hex32(2), "g");
++        let pool = vec![Prepared::from_parts(1.0, "p", &[hex32(1), hex32(2)])];
++        let view = PoolView::new(&pool);
++        let checks: Vec<Check> = (0..3).map(|i| Check::new(20.0 + i as f64, &[hex32(2)])).collect();
++        let ks: Vec<&Check> = checks.iter().collect();
++        let f = features_checked(&[], &view, &[&own, &far], &ks);
++        assert_eq!(f.canary_pool_leaks, 1, "the own canary leaked; its foreign copy is not counted again");
++        assert_eq!((f.canaries_due, f.canary_hits), (1, 0));
++        // the pool template had it first, so carrying it is no evidence of G's source
++        assert_eq!((f.foreign_due, f.foreign_hits), (1, 0));
++        let far2 = Canary::foreign(100.0, hex32(3), "g");
++        let checks: Vec<Check> = vec![Check::new(130.0, &[hex32(3)])];
++        let f = features_checked(&[], &view, &[&far2], &checks.iter().collect::<Vec<_>>());
++        assert_eq!((f.foreign_due, f.foreign_hits), (1, 1));
++        assert!(!f.flagged && f.flag_reasons.is_empty());
++        assert_eq!(f.foreign["g"], SourceTally { due: 1, hits: 1 });
++    }
+ }
+diff --git a/prime/tides/src/lib.rs b/prime/tides/src/lib.rs
+index 062b119..1024deb 100644
+--- a/prime/tides/src/lib.rs
++++ b/prime/tides/src/lib.rs
+@@ -37,7 +37,7 @@ pub use score::{
+     builder_weight, claim_credit, hhi_effective, nakamoto, sovereignty_score, verified_share, BlockCredit,
+     PoolScore,
+ };
+-pub use entropy::{features, features_with, independence_ppm, report, Canary, CanaryKind, Check, Mined, Snapshot};
++pub use entropy::{features, features_with, independence_ppm, report, Canary, CanaryKind, Check, Mined, Snapshot, SourceTally};
+ 
+ /// Work that arrived before dual-fee tagging. Split as DATUM (the lower fee).
+ pub const SOURCE_UNKNOWN: u8 = 0;
+-- 
+2.43.0
+

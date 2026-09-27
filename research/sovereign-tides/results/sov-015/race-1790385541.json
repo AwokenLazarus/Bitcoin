@@ -1,0 +1,52 @@
+[
+ {
+  "lag": 0.0,
+  "n": 20,
+  "a_has_c": 20,
+  "BO": 0,
+  "BI": 0,
+  "neither": 0,
+  "ack_median": 0.0005,
+  "ack_max": 0.0008
+ },
+ {
+  "lag": 0.05,
+  "n": 20,
+  "a_has_c": 20,
+  "BO": 0,
+  "BI": 0,
+  "neither": 0,
+  "ack_median": 0.0504,
+  "ack_max": 0.0505
+ },
+ {
+  "lag": 0.25,
+  "n": 20,
+  "a_has_c": 20,
+  "BO": 0,
+  "BI": 1,
+  "neither": 0,
+  "ack_median": 0.2505,
+  "ack_max": 0.2506
+ },
+ {
+  "lag": 1.0,
+  "n": 20,
+  "a_has_c": 20,
+  "BO": 0,
+  "BI": 2,
+  "neither": 0,
+  "ack_median": 1.0005,
+  "ack_max": 1.0007
+ },
+ {
+  "lag": 4.0,
+  "n": 20,
+  "a_has_c": 20,
+  "BO": 17,
+  "BI": 11,
+  "neither": 0,
+  "ack_median": 4.0005,
+  "ack_max": 4.0006
+ }
+]

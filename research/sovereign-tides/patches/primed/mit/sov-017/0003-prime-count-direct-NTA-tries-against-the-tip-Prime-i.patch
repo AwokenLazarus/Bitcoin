@@ -1,0 +1,57 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: michael moore <mrmoore27@pm.me>
+Date: Sat, 26 Sep 2026 01:40:23 +0000
+Subject: [PATCH 3/4] prime: count direct NTA tries against the tip Prime is
+ on, not the one claimed
+
+A made-up parent would each start a fresh per-tip count.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ prime/primed/src/stats.rs | 14 +++++++++-----
+ 1 file changed, 9 insertions(+), 5 deletions(-)
+
+diff --git a/prime/primed/src/stats.rs b/prime/primed/src/stats.rs
+index bd2af7f..ad84bc8 100644
+--- a/prime/primed/src/stats.rs
++++ b/prime/primed/src/stats.rs
+@@ -538,7 +538,10 @@ async fn direct_attest(shared: &Arc<Shared>, req: &str, body: &str, peer: std::n
+     };
+     let script = a.script();
+     let live = shared.coinbaser_base().scripts.values().any(|s| *s == script);
+-    if let Err(g) = shared.nta_direct.admit_script(&a.key, &a.prev_hash, live) {
++    // Counted against the tip Prime is on, not the one claimed: made-up parents would each
++    // start a fresh count.
++    let on = shared.tip_snapshot().and_then(|t| t.hash_le).unwrap_or(a.prev_hash);
++    if let Err(g) = shared.nta_direct.admit_script(&a.key, &on, live) {
+         log::debug!("NTA direct from {peer}: key {} {}", &hex::encode(a.key)[..16], g.reason());
+         return gated(g);
+     }
+@@ -794,11 +797,12 @@ mod tests {
+         // the right tip but a height the node would not build: signed, still refused
+         let (st, _) = direct_attest(&shared, req, &body(&provider, 122, prev), peer).await;
+         assert_eq!(st, "422 Unprocessable Entity");
+-        // the refused try counted: one left on this tip, then the cap holds even for a good one
+-        let (st, _) = direct_attest(&shared, req, &body(&provider, 122, prev), peer).await;
+-        assert_eq!(st, "422 Unprocessable Entity");
++        // both tries counted against the tip Prime is on, made-up parent included: the cap
++        // holds even for a good one, and a fresh made-up parent does not reset it
+         let (st, _) = direct_attest(&shared, req, &body(&provider, 121, prev), peer).await;
+         assert_eq!(st, "429 Too Many Requests");
++        let (st, _) = direct_attest(&shared, req, &body(&provider, 121, [10u8; 32]), peer).await;
++        assert_eq!(st, "429 Too Many Requests");
+         assert!(!shared.nta.lock().unwrap().payable(crate::nta::Target { prev, height: 121, nbits }, &pool).contains(&provider.script()));
+ 
+         // next tip: accepted first time, then a duplicate, then capped
+@@ -821,7 +825,7 @@ mod tests {
+         let t2 = crate::nta::Target { prev: prev2, height: 122, nbits };
+         assert!(shared.nta.lock().unwrap().payable(t2, &pool).contains(&provider.script()));
+         let direct = shared.nta_direct.stats_json();
+-        assert_eq!((direct["accepted"].as_u64(), direct["refused"].as_u64(), direct["unknown_tip"].as_u64()), (Some(1), Some(2), Some(1)));
++        assert_eq!((direct["accepted"].as_u64(), direct["refused"].as_u64(), direct["unknown_tip"].as_u64()), (Some(1), Some(1), Some(1)));
+         let _ = std::fs::remove_dir_all(&dir);
+     }
+ 
+-- 
+2.43.0
+

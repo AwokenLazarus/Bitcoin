@@ -1,0 +1,548 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: michael moore <mrmoore27@pm.me>
+Date: Fri, 25 Sep 2026 04:45:54 +0000
+Subject: [PATCH 06/27] prime: weight the sovereignty score by independence,
+ not just LZT1
+
+A proxy can sign a valid attestation, so verified-alone scored 100 while
+the fake-DATUM builder was flagged. Discount flagged, pool-clustered and
+unknown builders; publish verified_share beside the score.
+
+Co-authored-by: Cursor <cursoragent@cursor.com>
+---
+ prime/primed/src/sovereignty.rs | 180 +++++++++++++++++++++++++---
+ prime/tides/src/lib.rs          |   5 +-
+ prime/tides/src/score.rs        | 206 +++++++++++++++++++++++++++-----
+ 3 files changed, 346 insertions(+), 45 deletions(-)
+
+diff --git a/prime/primed/src/sovereignty.rs b/prime/primed/src/sovereignty.rs
+index 5173527..d6e514c 100644
+--- a/prime/primed/src/sovereignty.rs
++++ b/prime/primed/src/sovereignty.rs
+@@ -10,7 +10,7 @@
+ //! `sovereignty-demo` is on). Live sessions still record job snapshots from the job section
+ //! (prev + merkle branches) so a straight proxy is visible from Prime's own telemetry.
+ 
+-use std::collections::{BTreeMap, HashMap};
++use std::collections::{BTreeMap, HashMap, HashSet};
+ use std::path::{Path, PathBuf};
+ use std::time::{SystemTime, UNIX_EPOCH};
+ 
+@@ -21,7 +21,7 @@ use datum_wire::pow::Hash;
+ use serde::{Deserialize, Serialize};
+ use serde_json::{json, Value};
+ use tides::entropy::{self, Canary, Snapshot};
+-use tides::score::{self, PoolScore};
++use tides::score::{self, BlockCredit, PoolScore};
+ use tides::sovereignty::{self as bonus, Authored, Bonus, BonusParams, WorkTotals};
+ use tides::Window;
+ 
+@@ -72,9 +72,7 @@ pub struct Engine {
+     attested: HashMap<String, AttestedJob>,
+     authored: Vec<Authored>,
+     /// Observed blocks for the public score (demo + any LZT1-verified job).
+-    observed_blocks: u64,
+-    observed_claimed: u64,
+-    observed_verified: u64,
++    observed: Vec<BlockCredit>,
+     builder_counts: HashMap<String, u64>,
+     params: BonusParams,
+     bonus_on: bool,
+@@ -312,14 +310,9 @@ impl Engine {
+     }
+ 
+     fn observe_block(&mut self, builder: &str, claimed: bool, verified: bool) {
+-        self.observed_blocks += 1;
+-        if claimed {
+-            self.observed_claimed += 1;
+-        }
+-        if verified {
+-            self.observed_verified += 1;
+-        }
+-        *self.builder_counts.entry(builder.to_string()).or_insert(0) += 1;
++        let builder = builder.to_ascii_lowercase();
++        self.observed.push(BlockCredit { builder: builder.clone(), claimed, verified });
++        *self.builder_counts.entry(builder).or_insert(0) += 1;
+     }
+ 
+     pub fn observe(&mut self, builder: &str, claimed: bool, verified: bool) {
+@@ -378,6 +371,35 @@ impl Engine {
+             .collect()
+     }
+ 
++    /// Builders in the detector cluster that also contains `POOL`.
++    pub fn pool_cluster(&self) -> HashSet<String> {
++        self.clusters()
++            .into_iter()
++            .find(|c| c.iter().any(|n| n == "POOL"))
++            .into_iter()
++            .flatten()
++            .filter(|n| n != "POOL")
++            .collect()
++    }
++
++    /// *w(builder)* for the public score: independence, else 0 if flagged / pool-clustered / unknown.
++    #[allow(dead_code)]
++    pub fn weight_of(&self, builder: &str) -> f64 {
++        let g = if builder.eq_ignore_ascii_case("pool") {
++            "POOL".to_string()
++        } else {
++            builder.to_ascii_lowercase()
++        };
++        if g == "POOL" {
++            return 0.0;
++        }
++        let Some(snaps) = self.snapshots.get(&g) else {
++            return 0.0;
++        };
++        let f = self.features_of(&g, snaps);
++        score::builder_weight(f.independence, f.flagged, self.pool_cluster().contains(&g), f.insufficient)
++    }
++
+     pub fn work_totals(&self, w: &Window) -> WorkTotals {
+         let mut stratum = 0u64;
+         let mut datum = 0u64;
+@@ -408,15 +430,26 @@ impl Engine {
+     }
+ 
+     pub fn score(&self) -> PoolScore {
+-        let counts: Vec<u64> = self.builder_counts.values().copied().collect();
+-        score::summarize(self.observed_blocks, self.observed_claimed, self.observed_verified, &counts)
++        let clustered = self.pool_cluster();
++        let rows = self.detector_rows();
++        score::summarize(&self.observed, |builder| {
++            let Some(f) = rows.get(builder) else {
++                return 0.0;
++            };
++            score::builder_weight(f.independence, f.flagged, clustered.contains(builder), f.insufficient)
++        })
+     }
+ 
+     pub fn stats_json(&self, w: Option<&Window>) -> Value {
+         let rows = self.detector_rows();
+         let clusters = self.clusters();
+         let flagged = self.flagged();
++        let clustered = self.pool_cluster();
+         let score = self.score();
++        let mut gw_blocks: HashMap<String, u64> = HashMap::new();
++        for b in &self.observed {
++            *gw_blocks.entry(b.builder.clone()).or_insert(0) += 1;
++        }
+         let sample = w.map(|win| {
+             let b = self.sample_bonus(312_500_000, win);
+             json!({
+@@ -453,6 +486,14 @@ impl Engine {
+                     "independence": f.independence,
+                     "insufficient": f.insufficient,
+                     "independence_ppm": entropy::independence_ppm(&f),
++                    "weight": score::builder_weight(
++                        f.independence,
++                        f.flagged,
++                        clustered.contains(&n),
++                        f.insufficient,
++                    ),
++                    "pool_clustered": clustered.contains(&n),
++                    "blocks": gw_blocks.get(&n).copied().unwrap_or(0),
+                     "house": self.is_house(&n),
+                     "registered": self.lookup(&n).is_some(),
+                 }))
+@@ -472,6 +513,7 @@ impl Engine {
+                 "blocks": score.blocks,
+                 "claimed": score.claimed,
+                 "verified": score.verified,
++                "verified_share": score.verified_share,
+                 "score": score.score,
+                 "builders": score.builders,
+                 "effective_builders": score.effective_builders,
+@@ -646,7 +688,113 @@ mod tests {
+         assert_eq!(g_out, g_hex);
+         let s = e.score();
+         assert_eq!(s.verified, 1);
+-        assert!(s.score > 0.0);
++        assert_eq!(s.verified_share, 100.0);
++        assert_eq!(s.score, 0.0, "unknown independence counts 0, matching the bonus");
++    }
++
++    fn give_canary_hits(e: &mut Engine, gw: &str, n: usize) {
++        for k in 0..n as u64 {
++            let c = format!("{:064x}", 0xc000 + k + (gw.len() as u64) * 1_000);
++            e.note_canary(gw, Canary::new(k as f64, c.clone()));
++            e.note_snapshot(gw, Snapshot::new(k as f64 + 1.0, format!("{:064x}", 1), vec![c]));
++        }
++        e.note_snapshot(gw, Snapshot::new(40.0, format!("{:064x}", 1), vec![]));
++    }
++
++    fn twin_of_pool(e: &mut Engine, gw: &str, n: usize) {
++        for i in 0..n as u64 {
++            let t = i as f64;
++            let prev = format!("{i:064x}");
++            let txs = vec![format!("{:064x}", i + 100), format!("{:064x}", i + 200)];
++            e.note_snapshot("POOL", Snapshot::new(t, prev.clone(), txs.clone()));
++            e.note_snapshot(gw, Snapshot::new(t + 0.04, prev, txs));
++        }
++    }
++
++    #[test]
++    fn score_all_sovereign_is_100() {
++        let mut e = engine();
++        give_canary_hits(&mut e, "sov", 12);
++        for _ in 0..10 {
++            e.observe("sov", true, true);
++        }
++        let s = e.score();
++        assert!((s.score - 100.0).abs() < 1e-9, "{}", s.score);
++        assert_eq!(s.verified_share, 100.0);
++        assert!((e.weight_of("sov") - 1.0).abs() < 1e-9, "{}", e.weight_of("sov"));
++    }
++
++    #[test]
++    fn score_flagged_verified_builder_is_0() {
++        let mut e = engine();
++        twin_of_pool(&mut e, "proxy", 30);
++        for k in 0..12u64 {
++            let t = 30.0 + k as f64;
++            let c = format!("{:064x}", 0xc000 + k);
++            e.note_canary("proxy", Canary::new(t, c));
++        }
++        e.note_snapshot("proxy", Snapshot::new(60.0, format!("{:064x}", 999), vec![]));
++        for _ in 0..8 {
++            e.observe("proxy", true, true);
++        }
++        assert_eq!(e.flagged(), vec!["proxy".to_string()]);
++        let s = e.score();
++        assert_eq!(s.score, 0.0);
++        assert_eq!(s.verified_share, 100.0);
++        assert_eq!(e.weight_of("proxy"), 0.0);
++    }
++
++    #[test]
++    fn score_pool_clustered_builder_is_0() {
++        let mut e = engine();
++        twin_of_pool(&mut e, "twin", 30);
++        for _ in 0..6 {
++            e.observe("twin", true, true);
++        }
++        assert!(e.pool_cluster().contains("twin"), "{:?}", e.clusters());
++        // No canaries: not flagged, but clustered with the pool (and unknown/timing-zero).
++        assert!(e.flagged().is_empty());
++        assert_eq!(e.weight_of("twin"), 0.0);
++        let s = e.score();
++        assert_eq!(s.score, 0.0);
++        assert_eq!(s.verified_share, 100.0);
++    }
++
++    #[test]
++    fn score_claimed_only_is_fifty_times_w() {
++        let mut e = engine();
++        give_canary_hits(&mut e, "sov", 12);
++        for _ in 0..10 {
++            e.observe("sov", true, false);
++        }
++        let s = e.score();
++        assert!((s.score - 50.0).abs() < 1e-9, "{}", s.score);
++        assert_eq!(s.verified_share, 0.0);
++    }
++
++    #[test]
++    fn score_mixed_cases() {
++        let mut e = engine();
++        give_canary_hits(&mut e, "sov", 12);
++        twin_of_pool(&mut e, "proxy", 30);
++        for k in 0..12u64 {
++            let t = 30.0 + k as f64;
++            e.note_canary("proxy", Canary::new(t, format!("{:064x}", 0xd000 + k)));
++        }
++        e.note_snapshot("proxy", Snapshot::new(60.0, format!("{:064x}", 999), vec![]));
++        for _ in 0..4 {
++            e.observe("sov", true, true);
++            e.observe("proxy", true, true);
++        }
++        for _ in 0..2 {
++            e.observe("sov", true, false);
++        }
++        let s = e.score();
++        // 4 verified sov (w=1) + 4 verified proxy (w=0) + 2 claimed-only sov (w=1, c=½) → 50
++        assert!((s.score - 50.0).abs() < 1e-9, "{}", s.score);
++        assert_eq!(s.verified_share, 80.0);
++        assert_eq!(e.weight_of("sov"), 1.0);
++        assert_eq!(e.weight_of("proxy"), 0.0);
+     }
+ 
+     #[test]
+diff --git a/prime/tides/src/lib.rs b/prime/tides/src/lib.rs
+index 4070b41..e589804 100644
+--- a/prime/tides/src/lib.rs
++++ b/prime/tides/src/lib.rs
+@@ -33,7 +33,10 @@ pub mod score;
+ pub mod sovereignty;
+ pub mod split;
+ pub use split::{Payee, Split, SplitParams, Unpaid, UnpaidReason};
+-pub use score::{hhi_effective, nakamoto, sovereignty_score, PoolScore};
++pub use score::{
++    builder_weight, claim_credit, hhi_effective, nakamoto, sovereignty_score, verified_share, BlockCredit,
++    PoolScore,
++};
+ pub use entropy::{features, features_with, independence_ppm, report, Canary, Snapshot};
+ 
+ /// Work that arrived before dual-fee tagging. Split as DATUM (the lower fee).
+diff --git a/prime/tides/src/score.rs b/prime/tides/src/score.rs
+index 85049ed..7a4285a 100644
+--- a/prime/tides/src/score.rs
++++ b/prime/tides/src/score.rs
+@@ -1,8 +1,12 @@
+-//! Public sovereignty score: `100 × (verified + ½·(claimed − verified)) ÷ blocks`.
++//! Public sovereignty score:
++//! `score = 100 × Σ_blocks w(builder) × c(block) ÷ blocks`.
+ //!
+-//! *claimed* is gateway-built blocks (the DATUM secondary tag is unauthenticated, so a claim
+-//! counts half). *verified* is blocks with a valid LZT1 attestation by a non-house key. A
+-//! pool with no attestations maxes out at 50; only attestations reach 100.
++//! *c* is 1 if the LZT1 is verified, ½ if claimed but unverified, 0 otherwise.
++//! *w* is the builder's independence (the canary rule), **0 if flagged**, **0 if clustered
++//! with the pool** (templates identical to the pool's: same cluster as the detector), and
++//! **0 if unknown** (matching the TIDES bonus). A proxy can sign a valid LZT1, so verified
++//! alone is not sovereignty. `verified_share` is the raw `100 × verified ÷ blocks` so that
++//! number is still published.
+ 
+ #[derive(Clone, Debug, Default, PartialEq)]
+ pub struct PoolScore {
+@@ -10,20 +14,68 @@ pub struct PoolScore {
+     pub claimed: u64,
+     pub verified: u64,
+     pub score: f64,
++    /// Raw `100 × verified ÷ blocks`. Not discounted by independence.
++    pub verified_share: f64,
+     pub builders: usize,
+     pub effective_builders: f64,
+     pub top_builder_share: f64,
+     pub template_nakamoto: usize,
+ }
+ 
+-/// `100 × (verified + ½·(claimed − verified)) ÷ blocks`.
+-pub fn sovereignty_score(blocks: u64, claimed: u64, verified: u64) -> f64 {
++/// One observed block (a claimed or verified template) for the public score.
++#[derive(Clone, Debug, PartialEq, Eq)]
++pub struct BlockCredit {
++    pub builder: String,
++    pub claimed: bool,
++    pub verified: bool,
++}
++
++/// *c(block)*: 1 if the LZT1 is verified, ½ if claimed but unverified, 0 otherwise.
++pub fn claim_credit(claimed: bool, verified: bool) -> f64 {
++    if verified {
++        1.0
++    } else if claimed {
++        0.5
++    } else {
++        0.0
++    }
++}
++
++/// *w(builder)*: independence, or 0 if flagged / pool-clustered / unknown.
++pub fn builder_weight(independence: f64, flagged: bool, pool_clustered: bool, unknown: bool) -> f64 {
++    if flagged || pool_clustered || unknown {
++        0.0
++    } else {
++        independence.clamp(0.0, 1.0)
++    }
++}
++
++/// `score = 100 × Σ w(builder) × c(block) ÷ blocks`.
++pub fn sovereignty_score<'a, I, F>(blocks: I, mut weight: F) -> f64
++where
++    I: IntoIterator<Item = &'a BlockCredit>,
++    F: FnMut(&str) -> f64,
++{
++    let mut n = 0u64;
++    let mut sum = 0.0;
++    for b in blocks {
++        n += 1;
++        sum += weight(&b.builder) * claim_credit(b.claimed, b.verified);
++    }
++    if n == 0 {
++        0.0
++    } else {
++        100.0 * sum / n as f64
++    }
++}
++
++/// Raw verified fraction as a 0–100 share.
++pub fn verified_share(blocks: u64, verified: u64) -> f64 {
+     if blocks == 0 {
+-        return 0.0;
++        0.0
++    } else {
++        100.0 * verified.min(blocks) as f64 / blocks as f64
+     }
+-    let claimed = claimed.min(blocks);
+-    let verified = verified.min(claimed);
+-    100.0 * (verified as f64 + 0.5 * (claimed - verified) as f64) / blocks as f64
+ }
+ 
+ /// Fewest builders holding more than half the blocks (counts are already sorted desc).
+@@ -59,18 +111,35 @@ pub fn hhi_effective(counts: &[u64]) -> f64 {
+     }
+ }
+ 
+-pub fn summarize(blocks: u64, claimed: u64, verified: u64, builder_counts: &[u64]) -> PoolScore {
+-    let mut counts = builder_counts.to_vec();
++pub fn summarize<'a, F>(blocks: &'a [BlockCredit], mut weight: F) -> PoolScore
++where
++    F: FnMut(&str) -> f64,
++{
++    let mut claimed = 0u64;
++    let mut verified = 0u64;
++    let mut builder_counts: std::collections::HashMap<&str, u64> = std::collections::HashMap::new();
++    for b in blocks {
++        if b.claimed {
++            claimed += 1;
++        }
++        if b.verified {
++            verified += 1;
++        }
++        *builder_counts.entry(b.builder.as_str()).or_insert(0) += 1;
++    }
++    let n = blocks.len() as u64;
++    let mut counts: Vec<u64> = builder_counts.values().copied().collect();
+     counts.sort_by(|a, b| b.cmp(a));
+     let top = counts.first().copied().unwrap_or(0);
+     PoolScore {
+-        blocks,
++        blocks: n,
+         claimed,
+         verified,
+-        score: sovereignty_score(blocks, claimed, verified),
++        score: sovereignty_score(blocks, &mut weight),
++        verified_share: verified_share(n, verified),
+         builders: counts.iter().filter(|&&c| c > 0).count(),
+         effective_builders: hhi_effective(&counts),
+-        top_builder_share: if blocks == 0 { 0.0 } else { 100.0 * top as f64 / blocks as f64 },
++        top_builder_share: if n == 0 { 0.0 } else { 100.0 * top as f64 / n as f64 },
+         template_nakamoto: nakamoto(&counts),
+     }
+ }
+@@ -78,14 +147,102 @@ pub fn summarize(blocks: u64, claimed: u64, verified: u64, builder_counts: &[u64
+ #[cfg(test)]
+ mod tests {
+     use super::*;
++    use std::collections::HashMap;
++
++    fn blk(builder: &str, claimed: bool, verified: bool) -> BlockCredit {
++        BlockCredit { builder: builder.into(), claimed, verified }
++    }
++
++    fn weights(pairs: &[(&str, f64)]) -> HashMap<String, f64> {
++        pairs.iter().map(|(k, v)| ((*k).to_string(), *v)).collect()
++    }
++
++    fn score_of(blocks: &[BlockCredit], w: &HashMap<String, f64>) -> PoolScore {
++        summarize(blocks, |b| w.get(b).copied().unwrap_or(0.0))
++    }
++
++    #[test]
++    fn all_sovereign_is_100() {
++        let blocks: Vec<_> = (0..10).map(|_| blk("sov", true, true)).collect();
++        let s = score_of(&blocks, &weights(&[("sov", 1.0)]));
++        assert_eq!(s.score, 100.0);
++        assert_eq!(s.verified_share, 100.0);
++        assert_eq!(s.verified, 10);
++    }
++
++    #[test]
++    fn flagged_verified_builder_contributes_0() {
++        let blocks: Vec<_> = (0..10).map(|_| blk("fake", true, true)).collect();
++        // independence would be 0.2 if we scored it; flagged forces 0
++        assert_eq!(builder_weight(0.2, true, false, false), 0.0);
++        let s = score_of(&blocks, &weights(&[("fake", 0.0)]));
++        assert_eq!(s.score, 0.0);
++        assert_eq!(s.verified_share, 100.0, "raw verified share is not hidden");
++    }
++
++    #[test]
++    fn clustered_builder_contributes_0() {
++        assert_eq!(builder_weight(0.8, false, true, false), 0.0);
++        let blocks: Vec<_> = (0..8).map(|_| blk("twin", true, true)).collect();
++        let s = score_of(&blocks, &weights(&[("twin", 0.0)]));
++        assert_eq!(s.score, 0.0);
++        assert_eq!(s.verified_share, 100.0);
++    }
+ 
+     #[test]
+-    fn score_weights() {
+-        assert_eq!(sovereignty_score(100, 0, 0), 0.0);
+-        assert_eq!(sovereignty_score(100, 100, 0), 50.0);
+-        assert_eq!(sovereignty_score(100, 100, 100), 100.0);
+-        assert_eq!(sovereignty_score(100, 60, 20), 40.0);
+-        assert_eq!(sovereignty_score(0, 0, 0), 0.0);
++    fn claimed_only_is_fifty_times_w() {
++        let blocks: Vec<_> = (0..10).map(|_| blk("sov", true, false)).collect();
++        let s = score_of(&blocks, &weights(&[("sov", 1.0)]));
++        assert_eq!(s.score, 50.0);
++        assert_eq!(s.verified_share, 0.0);
++        let s = score_of(&blocks, &weights(&[("sov", 0.5)]));
++        assert_eq!(s.score, 25.0);
++        let s = score_of(&blocks, &weights(&[("sov", 0.0)]));
++        assert_eq!(s.score, 0.0, "unknown / zero independence earns nothing");
++    }
++
++    #[test]
++    fn mixed_cases() {
++        // 4 verified sovereign (w=1) + 4 verified fake (w=0) + 2 claimed-only honest (w=0.8)
++        let mut blocks = Vec::new();
++        blocks.extend((0..4).map(|_| blk("sov", true, true)));
++        blocks.extend((0..4).map(|_| blk("fake", true, true)));
++        blocks.extend((0..2).map(|_| blk("sov", true, false)));
++        let s = score_of(&blocks, &weights(&[("sov", 1.0), ("fake", 0.0)]));
++        // (4·1·1 + 4·0·1 + 2·1·½) / 10 × 100 = 50
++        assert!((s.score - 50.0).abs() < 1e-9, "{}", s.score);
++        assert_eq!(s.verified_share, 80.0);
++        assert_eq!(s.blocks, 10);
++        assert_eq!(s.claimed, 10);
++        assert_eq!(s.verified, 8);
++
++        // XBT-071 phase-1 mix: 3 sovereign + 2 fake, all verified, w=1 / w=0 → 60
++        let p1 = vec![
++            blk("sov", true, true),
++            blk("fake", true, true),
++            blk("sov", true, true),
++            blk("fake", true, true),
++            blk("sov", true, true),
++        ];
++        let s = score_of(&p1, &weights(&[("sov", 1.0), ("fake", 0.0)]));
++        assert!((s.score - 60.0).abs() < 1e-9, "{}", s.score);
++        assert_eq!(s.verified_share, 100.0);
++        assert_eq!(s.top_builder_share, 60.0);
++    }
++
++    #[test]
++    fn unknown_weight_is_zero() {
++        assert_eq!(builder_weight(1.0, false, false, true), 0.0);
++        assert_eq!(builder_weight(0.0, false, false, false), 0.0);
++        let blocks = vec![blk("ghost", true, true)];
++        let s = score_of(&blocks, &HashMap::new());
++        assert_eq!(s.score, 0.0);
++    }
++
++    #[test]
++    fn empty_window_is_zero() {
++        let s = score_of(&[], &HashMap::new());
++        assert_eq!(s, PoolScore::default());
+     }
+ 
+     #[test]
+@@ -95,11 +252,4 @@ mod tests {
+         assert!((hhi_effective(&[1, 1, 1, 1]) - 4.0).abs() < 1e-9);
+         assert!((hhi_effective(&[10]) - 1.0).abs() < 1e-9);
+     }
+-
+-    #[test]
+-    fn a_pool_without_attestations_caps_at_fifty() {
+-        let s = summarize(333, 238, 0, &[95, 40, 30, 20, 15, 10, 8, 7, 6, 5, 97]);
+-        assert!((s.score - 35.7).abs() < 0.1, "{}", s.score);
+-        assert!(s.template_nakamoto >= 2);
+-    }
+ }
+-- 
+2.43.0
+

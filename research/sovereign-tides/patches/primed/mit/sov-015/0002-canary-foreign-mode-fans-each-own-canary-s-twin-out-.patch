@@ -1,0 +1,72 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: michael moore <mrmoore27@pm.me>
+Date: Sat, 26 Sep 2026 00:51:49 +0000
+Subject: [PATCH 2/2] canary: foreign mode fans each own canary's twin out to
+ other gateways' nodes (SOV-015)
+
+lazarus-canary [foreign]: enabled, fanout (0 = all), order (own-ack |
+pipelined), max_lag_secs (0.05). Connections to G's node and every target are
+opened first; C goes out, then every twin at once. A target is reported
+("foreign": [...]) only if it acked C' within max_lag_secs of C being sent.
+No extra fee. xbt_p2p gains a kept-open Peer; deliver() is built on it.
+Status and ledger count twins, in-time, late and failed, with per-target lags.
+
+primed: a check scheduled within 30 s of one already due is that one. A
+round's fan-out schedules a check of every target at once, and the bounded
+queue kept dropping the soonest.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ prime/primed/src/sovereignty.rs | 19 ++++++++++++++++---
+ 1 file changed, 16 insertions(+), 3 deletions(-)
+
+diff --git a/prime/primed/src/sovereignty.rs b/prime/primed/src/sovereignty.rs
+index 4126e82..71fed0c 100644
+--- a/prime/primed/src/sovereignty.rs
++++ b/prime/primed/src/sovereignty.rs
+@@ -57,6 +57,11 @@ const MAX_ATTESTED: usize = 4_096;
+ pub const MAX_CHECKS: usize = 256;
+ /// Canary checks one gateway may have scheduled at once; more are coalesced into the last.
+ const MAX_PENDING_CHECKS: usize = 16;
++/// SOV-015: a check due within this many seconds of one already scheduled is that one. Both
++/// canaries are then judged by a check 15-75 s after them, inside `entropy::CHECK_WINDOW`. A
++/// round's foreign fan-out schedules a check of every target at once; without this the queue
++/// fills and keeps dropping the soonest check.
++const CHECK_COALESCE_SECS: f64 = 30.0;
+ const TOKEN_FILE: &str = "sovereignty.token";
+ const KEYS_FILE: &str = "sovereignty-keys.json";
+ /// Registered gateways' node addresses: private, mode 0600, never in stats or on the site.
+@@ -702,6 +707,9 @@ impl Sovereignty {
+             }
+         }
+         let q = s.due.entry(gateway.to_ascii_lowercase()).or_default();
++        if q.iter().any(|&d| (d - at).abs() <= CHECK_COALESCE_SECS) {
++            return;
++        }
+         let i = q.partition_point(|&d| d <= at);
+         q.insert(i, at);
+         while q.len() > MAX_PENDING_CHECKS {
+@@ -2357,12 +2365,17 @@ mod tests {
+         let t0 = now_f64();
+         assert!(!s.take_check(&g, t0 + 1_000.0), "nothing scheduled");
+         s.schedule_check(&g.to_ascii_uppercase(), t0);
+-        s.schedule_check(&g, t0 + 10.0);
++        // SOV-015: within CHECK_COALESCE_SECS it is the same check (a round's foreign fan-out)
++        for k in 1..=6 {
++            s.schedule_check(&g, t0 + 0.01 * k as f64);
++        }
++        s.schedule_check(&g, t0 + 40.0);
++        assert_eq!(s.schedule.lock().unwrap().due[&g].len(), 2);
+         assert!(!s.take_check(&g, t0 + 44.0), "not due before check_after");
+         assert!(!s.take_check(&"cd".repeat(32), t0 + 46.0), "another gateway has none");
+         assert!(s.take_check(&g, t0 + 46.0));
+-        // the second canary's check is due at +55, but one was just made: the gap holds it
+-        assert!(!s.take_check(&g, t0 + 56.0));
++        // the second canary's check is due at +85, but one was just made: the gap holds it
++        assert!(!s.take_check(&g, t0 + 86.0));
+         assert!(s.take_check(&g, t0 + 46.0 + 300.0));
+         assert!(!s.take_check(&g, t0 + 1_000.0), "both served");
+         // a burst is bounded, and one check answers everything due
+-- 
+2.43.0
+

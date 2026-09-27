@@ -1,0 +1,114 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: michael moore <mrmoore27@pm.me>
+Date: Sat, 26 Sep 2026 00:36:20 +0000
+Subject: [PATCH 2/4] prime: a share on any probe coinbaser still held decides,
+ not only the newest
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ prime/primed/src/session.rs | 60 ++++++++++++++++++++-----------------
+ 1 file changed, 32 insertions(+), 28 deletions(-)
+
+diff --git a/prime/primed/src/session.rs b/prime/primed/src/session.rs
+index 787861e..29e0e22 100644
+--- a/prime/primed/src/session.rs
++++ b/prime/primed/src/session.rs
+@@ -383,9 +383,10 @@ struct Session {
+     newest_slot: Option<u8>,
+     /// A canary check waiting on the gateway's transactions (W8), and when it was asked.
+     canary_check: Option<(CheckedJob, Instant)>,
+-    /// SOV-011: the coinbaser id whose last output is an NTA probe, and that output's script,
+-    /// until a full-split share on it says whether the gateway kept it.
+-    nta_probe: Option<(u8, Vec<u8>)>,
++    /// SOV-011: coinbaser ids whose last output is an NTA probe, and that output's script, until
++    /// a full-split share on one says whether the gateway kept it. As many as coinbasers kept: a
++    /// gateway may go on mining a job built from an older one.
++    nta_probes: VecDeque<(u8, Vec<u8>)>,
+     nta_pool_only_warned: bool,
+ }
+ 
+@@ -546,7 +547,7 @@ pub async fn run(shared: Arc<Shared>, mut stream: TcpStream, remote: SocketAddr)
+         job_seen: vec![0.0; mining::MAX_JOB_SLOTS],
+         newest_slot: None,
+         canary_check: None,
+-        nta_probe: None,
++        nta_probes: VecDeque::new(),
+         nta_pool_only_warned: false,
+         row: Some(row),
+     };
+@@ -1004,7 +1005,10 @@ impl Session {
+             self.gateway_hex,
+             chain.nta_height.saturating_sub(height),
+         );
+-        self.nta_probe = Some((coinbaser_id, script.clone()));
++        self.nta_probes.push_back((coinbaser_id, script.clone()));
++        while self.nta_probes.len() > COINBASERS_KEPT {
++            self.nta_probes.pop_front();
++        }
+         Some(script)
+     }
+ 
+@@ -1018,30 +1022,28 @@ impl Session {
+         }
+         let Some(chain) = self.shared.nta_chain() else { return false };
+         let ts = now();
+-        if let Some((id, script)) = &self.nta_probe {
+-            if *id == coinbaser_id {
+-                let kept = readiness::has_output(&v.coinbase, script);
+-                self.nta_probe = None;
+-                let changed = self.shared.readiness.lock().unwrap().note_probe_verdict(&self.gateway_hex, kept, ts);
+-                if kept {
+-                    log::info!(
+-                        "[{}] {} NTA probe kept: coinbaser #{coinbaser_id}'s 70-byte output is in its coinbase; ready",
+-                        self.id,
+-                        self.gateway_hex
+-                    );
+-                } else {
+-                    log::warn!(
+-                        "[{}] {} ua={:?} NTA probe DROPPED: coinbaser #{coinbaser_id} ended with a 70-byte output and its coinbase has every payee but not that. It truncates coinbasers at scripts over 64 bytes (stock datum_gateway v0.4.1, datum_coinbaser.c:795): nta-unready. From block {} it {} (nta-unready-policy = {}).",
+-                        self.id,
+-                        self.gateway_hex,
+-                        self.hello.user_agent,
+-                        chain.nta_height,
+-                        if self.shared.cfg.nta_unready_policy == "refuse" { "gets no work" } else { "is served pool-only coinbasers, whose blocks are invalid all the same" },
+-                        self.shared.cfg.nta_unready_policy,
+-                    );
+-                }
+-                return !kept && changed.is_some();
++        if let Some(script) = self.nta_probes.iter().find(|(id, _)| *id == coinbaser_id).map(|(_, s)| s.clone()) {
++            let kept = readiness::has_output(&v.coinbase, &script);
++            self.nta_probes.clear();
++            let changed = self.shared.readiness.lock().unwrap().note_probe_verdict(&self.gateway_hex, kept, ts);
++            if kept {
++                log::info!(
++                    "[{}] {} NTA probe kept: coinbaser #{coinbaser_id}'s 70-byte output is in its coinbase; ready",
++                    self.id,
++                    self.gateway_hex
++                );
++            } else {
++                log::warn!(
++                    "[{}] {} ua={:?} NTA probe DROPPED: coinbaser #{coinbaser_id} ended with a 70-byte output and its coinbase has every payee but not that. It truncates coinbasers at scripts over 64 bytes (stock datum_gateway v0.4.1, datum_coinbaser.c:795): nta-unready. From block {} it {} (nta-unready-policy = {}).",
++                    self.id,
++                    self.gateway_hex,
++                    self.hello.user_agent,
++                    chain.nta_height,
++                    if self.shared.cfg.nta_unready_policy == "refuse" { "gets no work" } else { "is served pool-only coinbasers, whose blocks are invalid all the same" },
++                    self.shared.cfg.nta_unready_policy,
++                );
+             }
++            return !kept && changed.is_some();
+         }
+         if !chain.active() {
+             return false;
+@@ -1221,6 +1223,8 @@ impl Session {
+ 
+         let id = self.next_coinbaser_id;
+         self.next_coinbaser_id = if id == 255 { 1 } else { id + 1 };
++        // An id coming round again is a new coinbaser, probe or not.
++        self.nta_probes.retain(|(p, _)| *p != id);
+ 
+         // Computed off a shared snapshot, so a reply never waits on the ledger mutex behind
+         // share crediting or the other gateways asking at the same tip change.
+-- 
+2.43.0
+

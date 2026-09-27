@@ -1,0 +1,1008 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: michael moore <mrmoore27@pm.me>
+Date: Fri, 25 Sep 2026 02:18:31 +0000
+Subject: [PATCH 02/27] prime: move the rnd/a2 sketch to the note's LZT1
+ attestation; weight the bonus by independence
+
+The 100-byte on-chain signature does not fit RDTS: Knots 29.4.2 refuses a
+coinbase OP_RETURN over 83 bytes (bad-txns-vout-script-toolarge; XBT-051
+regtest). The commitment is now the research note's 70-byte
+OP_RETURN PUSH68 "LZT1" | BLAKE2b(A) | G, with A (branches_hash,
+mempool_digest, node_tag, t_gbt, plus a payout_digest so a pool cannot
+lift A onto its own payout) and its signature carried off chain.
+
+tides::sovereignty weights authored work by the entropy detector's
+independence score and can cap any one gateway key's share of the pot;
+the excess goes back to the pool.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ prime/tides/src/sovereignty.rs                | 214 ++++++--
+ .../{xta_fixture.rs => lzt1_fixture.rs}       |  17 +-
+ prime/wire/src/authorship.rs                  | 496 +++++++++++-------
+ 3 files changed, 483 insertions(+), 244 deletions(-)
+ rename prime/wire/examples/{xta_fixture.rs => lzt1_fixture.rs} (60%)
+
+diff --git a/prime/tides/src/sovereignty.rs b/prime/tides/src/sovereignty.rs
+index 5b395c2..d578487 100644
+--- a/prime/tides/src/sovereignty.rs
++++ b/prime/tides/src/sovereignty.rs
+@@ -19,10 +19,17 @@
+ //! what keeps the incentive alive after that: unsigned DATUM work pays a small fee that goes,
+ //! whole, to signed DATUM work; the pool keeps none of it.
+ //!
+-//! **Credit.** The pot is shared pro rata by authored work and joins each identity's carry, the
+-//! way rebate credits do (reversed on orphan by the same `carry_delta`). Linear pro rata is
+-//! deliberate: splitting one operator into many identities or many gateway keys changes
+-//! nothing (up to rounding), so there is nothing to gain from Sybils.
++//! **Credit.** This is the note's "×(1+β) multiplier funded by the stratum fee", written as a
++//! pot so it can never spend more than the fee: β for a block is `pot ÷ authored work's value`.
++//! Each identity's authored work is weighted by its gateway's **independence score** (0–1, from
++//! the template-entropy detector: a gateway that tracks the pool's own template scores ~0), the
++//! pot is shared pro rata by weighted work, and each share joins the identity's carry the way
++//! rebate credits do (reversed on orphan by the same `carry_delta`). Linear pro rata is
++//! deliberate: splitting one operator into many identities or gateway keys changes nothing (up
++//! to rounding), so there is nothing to gain from Sybils. An optional **cap per gateway key**
++//! (the note's answer to one `G` shared across farms) limits any one `G` to a share of the pot;
++//! what the cap cuts goes back to the pool, not to the others, so nobody gains by pushing a rival
++//! over it.
+ //!
+ //! **No deferral.** Unlike `rebate_owed`, a pot with no authored work to credit goes back to
+ //! the pool (or, for `from_diff`, is simply not charged). An owed pot would grow while nobody
+@@ -40,6 +47,26 @@ pub struct BonusParams {
+     pub bonus_bps: u32,
+     /// Differential charged on unauthored DATUM work, all of it credited to authored work.
+     pub diff_bps: u32,
++    /// Most of the pot one gateway key's work can take, in basis points (0 = no cap).
++    pub cap_per_gateway_bps: u32,
++}
++
++/// One identity's authored work behind one gateway key.
++#[derive(Clone, Debug, PartialEq, Eq)]
++pub struct Authored {
++    pub identity: String,
++    /// The gateway key `G` (hex, or any stable id).
++    pub gateway: String,
++    pub work: u64,
++    /// The gateway's independence score from the detector, parts per million (1_000_000 = fully
++    /// independent, 0 = a copy of the pool's template).
++    pub independence_ppm: u32,
++}
++
++impl Authored {
++    fn weight(&self) -> u128 {
++        u128::from(self.work) * u128::from(self.independence_ppm.min(1_000_000))
++    }
+ }
+ 
+ impl BonusParams {
+@@ -79,24 +106,46 @@ fn share_of(value: u64, part: u64, total: u64, bps: u32) -> u64 {
+     (u128::from(value) * u128::from(part.min(total)) * u128::from(bps) / u128::from(total) / 10_000) as u64
+ }
+ 
+-/// This block's bonus. `authored` is identity → authored work in the window.
+-pub fn compute(value: u64, t: WorkTotals, p: BonusParams, authored: &[(String, u64)]) -> Bonus {
++/// This block's bonus.
++pub fn compute(value: u64, t: WorkTotals, p: BonusParams, authored: &[Authored]) -> Bonus {
+     let from_stratum = fee_for(share_of(value, t.stratum, t.total, 10_000), p.effective_bonus_bps());
+     let from_diff = share_of(value, t.unauthored_datum, t.total, p.diff_bps);
+-    let total_authored: u64 = authored.iter().map(|a| a.1).sum();
+-    if total_authored == 0 {
++    let total_weight: u128 = authored.iter().map(Authored::weight).sum();
++    if total_weight == 0 {
+         return Bonus { from_stratum, from_diff, credits: Vec::new(), to_pool: from_stratum, diff_waived: from_diff };
+     }
+     let pot = from_stratum + from_diff;
++    // Per-gateway budget: its pro-rata share, cut to the cap.
++    let mut per_gw: Vec<(&str, u128)> = Vec::new();
++    for a in authored {
++        match per_gw.iter_mut().find(|g| g.0 == a.gateway) {
++            Some(g) => g.1 += a.weight(),
++            None => per_gw.push((&a.gateway, a.weight())),
++        }
++    }
++    let cap =
++        if p.cap_per_gateway_bps == 0 { u128::from(pot) } else { u128::from(fee_for(pot, p.cap_per_gateway_bps)) };
++    let budget = |gw: &str| -> (u128, u128) {
++        let w = per_gw.iter().find(|g| g.0 == gw).map_or(0, |g| g.1);
++        ((u128::from(pot) * w / total_weight).min(cap), w)
++    };
+     let mut credited = 0u64;
+-    let credits: Vec<(String, u64)> = authored
+-        .iter()
+-        .filter_map(|(id, w)| {
+-            let c = (u128::from(pot) * u128::from(*w) / u128::from(total_authored)) as u64;
+-            credited += c;
+-            (c > 0).then(|| (id.clone(), c))
+-        })
+-        .collect();
++    let mut credits: Vec<(String, u64)> = Vec::new();
++    for a in authored {
++        let (gw_budget, gw_weight) = budget(&a.gateway);
++        if gw_weight == 0 {
++            continue;
++        }
++        let c = (gw_budget * a.weight() / gw_weight) as u64;
++        if c == 0 {
++            continue;
++        }
++        credited += c;
++        match credits.iter_mut().find(|x| x.0 == a.identity) {
++            Some(x) => x.1 += c,
++            None => credits.push((a.identity.clone(), c)),
++        }
++    }
+     Bonus { from_stratum, from_diff, credits, to_pool: pot - credited, diff_waived: 0 }
+ }
+ 
+@@ -121,15 +170,35 @@ mod tests {
+         WorkTotals { total: stratum + unauth + auth, stratum, unauthored_datum: unauth, authored: auth }
+     }
+ 
++    fn au(id: &str, gw: &str, work: u64) -> Authored {
++        Authored { identity: id.into(), gateway: gw.into(), work, independence_ppm: 1_000_000 }
++    }
++
++    fn got(b: &Bonus, id: &str) -> u64 {
++        b.credits.iter().find(|c| c.0 == id).map_or(0, |c| c.1)
++    }
++
+     fn sum(b: &Bonus) -> u64 {
+         b.credits.iter().map(|c| c.1).sum()
+     }
+ 
+     #[test]
+     fn bonus_is_clamped_under_the_fee_left_after_the_rebate() {
+-        let p = BonusParams { stratum_fee_bps: 800, datum_rebate_bps: 500, bonus_bps: 500, diff_bps: 0 };
++        let p = BonusParams {
++            stratum_fee_bps: 800,
++            datum_rebate_bps: 500,
++            bonus_bps: 500,
++            diff_bps: 0,
++            cap_per_gateway_bps: 0,
++        };
+         assert_eq!(p.effective_bonus_bps(), 300);
+-        let p = BonusParams { stratum_fee_bps: 800, datum_rebate_bps: 900, bonus_bps: 500, diff_bps: 0 };
++        let p = BonusParams {
++            stratum_fee_bps: 800,
++            datum_rebate_bps: 900,
++            bonus_bps: 500,
++            diff_bps: 0,
++            cap_per_gateway_bps: 0,
++        };
+         assert_eq!(p.effective_bonus_bps(), 0);
+     }
+ 
+@@ -137,19 +206,31 @@ mod tests {
+     fn stratum_funded_bonus_goes_to_authored_work_pro_rata() {
+         // 37% stratum, 40% unsigned DATUM, 23% signed; 25% fee, 10% rebate, 5% bonus.
+         let t = totals(370, 400, 230);
+-        let p = BonusParams { stratum_fee_bps: 2500, datum_rebate_bps: 1000, bonus_bps: 500, diff_bps: 0 };
+-        let b = compute(V, t, p, &[("a".into(), 200), ("b".into(), 30)]);
++        let p = BonusParams {
++            stratum_fee_bps: 2500,
++            datum_rebate_bps: 1000,
++            bonus_bps: 500,
++            diff_bps: 0,
++            cap_per_gateway_bps: 0,
++        };
++        let b = compute(V, t, p, &[au("a", "G1", 200), au("b", "G2", 30)]);
+         assert_eq!(b.from_stratum, V * 370 / 1000 * 500 / 10_000);
+         assert_eq!(sum(&b) + b.to_pool, b.from_stratum);
+-        let a = b.credits.iter().find(|c| c.0 == "a").unwrap().1;
+-        let bb = b.credits.iter().find(|c| c.0 == "b").unwrap().1;
++        let a = got(&b, "a");
++        let bb = got(&b, "b");
+         assert!((a as i64 - (bb as i64) * 200 / 30).abs() <= 7);
+     }
+ 
+     #[test]
+     fn nobody_authored_means_the_pool_keeps_it_and_nothing_is_owed() {
+         let t = totals(500, 500, 0);
+-        let p = BonusParams { stratum_fee_bps: 2500, datum_rebate_bps: 1000, bonus_bps: 500, diff_bps: 100 };
++        let p = BonusParams {
++            stratum_fee_bps: 2500,
++            datum_rebate_bps: 1000,
++            bonus_bps: 500,
++            diff_bps: 100,
++            cap_per_gateway_bps: 0,
++        };
+         let b = compute(V, t, p, &[]);
+         assert!(b.credits.is_empty());
+         assert_eq!(b.to_pool, b.from_stratum);
+@@ -160,8 +241,14 @@ mod tests {
+     #[test]
+     fn differential_keeps_the_bonus_alive_after_stratum_is_gone() {
+         let t = totals(0, 700, 300);
+-        let p = BonusParams { stratum_fee_bps: 2500, datum_rebate_bps: 1000, bonus_bps: 500, diff_bps: 100 };
+-        let b = compute(V, t, p, &[("x".into(), 300)]);
++        let p = BonusParams {
++            stratum_fee_bps: 2500,
++            datum_rebate_bps: 1000,
++            bonus_bps: 500,
++            diff_bps: 100,
++            cap_per_gateway_bps: 0,
++        };
++        let b = compute(V, t, p, &[au("x", "G1", 300)]);
+         assert_eq!(b.from_stratum, 0);
+         assert_eq!(b.from_diff, V * 700 / 1000 / 100);
+         assert_eq!(sum(&b) + b.to_pool, b.from_diff);
+@@ -171,12 +258,20 @@ mod tests {
+     #[test]
+     fn splitting_into_sybils_gains_nothing() {
+         let t = totals(400, 300, 300);
+-        let p = BonusParams { stratum_fee_bps: 2500, datum_rebate_bps: 1000, bonus_bps: 500, diff_bps: 50 };
+-        let one = compute(V, t, p, &[("farm".into(), 250), ("solo".into(), 50)]);
+-        let many: Vec<(String, u64)> =
+-            (0..25).map(|i| (format!("farm{i}"), 10)).chain(std::iter::once(("solo".into(), 50))).collect();
++        let p = BonusParams {
++            stratum_fee_bps: 2500,
++            datum_rebate_bps: 1000,
++            bonus_bps: 500,
++            diff_bps: 50,
++            cap_per_gateway_bps: 0,
++        };
++        let one = compute(V, t, p, &[au("farm", "Gf", 250), au("solo", "Gs", 50)]);
++        let many: Vec<Authored> = (0..25)
++            .map(|i| au(&format!("farm{i}"), &format!("Gf{i}"), 10))
++            .chain(std::iter::once(au("solo", "Gs", 50)))
++            .collect();
+         let split = compute(V, t, p, &many);
+-        let farm_one = one.credits.iter().find(|c| c.0 == "farm").unwrap().1;
++        let farm_one = got(&one, "farm");
+         let farm_many: u64 = split.credits.iter().filter(|c| c.0.starts_with("farm")).map(|c| c.1).sum();
+         assert!(farm_many <= farm_one, "Sybils must not earn more: {farm_many} > {farm_one}");
+         assert!(farm_one - farm_many <= 25, "only rounding");
+@@ -200,21 +295,74 @@ mod tests {
+                 datum_rebate_bps: next(3000) as u32,
+                 bonus_bps: next(3000) as u32,
+                 diff_bps: next(300) as u32,
++                cap_per_gateway_bps: 0,
+             };
+             let n = 1 + next(40) as usize;
+             let mut left = t.authored;
+-            let authored: Vec<(String, u64)> = (0..n)
++            let cap = [0u32, 1000, 2500, 5000][next(4) as usize];
++            let p = BonusParams { cap_per_gateway_bps: cap, ..p };
++            let authored: Vec<Authored> = (0..n)
+                 .map(|i| {
+                     let w = if i + 1 == n { left } else { next(left + 1) };
+                     left -= w;
+-                    (format!("m{i}"), w)
++                    Authored {
++                        identity: format!("m{}", next(8)),
++                        gateway: format!("G{}", next(5)),
++                        work: w,
++                        independence_ppm: next(1_000_001) as u32,
++                    }
+                 })
+                 .collect();
+             let v = 1 + next(1_000_000_000);
+             let b = compute(v, t, p, &authored);
+             assert_eq!(sum(&b) + b.to_pool + b.diff_waived, b.from_stratum + b.from_diff);
+-            assert!(b.to_pool <= b.from_stratum + n as u64);
++            assert!(cap > 0 || b.credits.is_empty() || b.to_pool <= b.from_stratum + 2 * n as u64);
+             let _ = pool_net_on_stratum(v, t, p); // panics if the fee is over-spent
+         }
+     }
++
++    #[test]
++    fn a_gateway_that_copies_the_pool_template_gets_nothing() {
++        let t = totals(400, 300, 300);
++        let p = BonusParams {
++            stratum_fee_bps: 2500,
++            datum_rebate_bps: 1000,
++            bonus_bps: 500,
++            diff_bps: 0,
++            cap_per_gateway_bps: 0,
++        };
++        let proxy = Authored { independence_ppm: 0, ..au("proxied", "Gp", 200) };
++        let b = compute(V, t, p, &[proxy, au("honest", "Gh", 100)]);
++        assert_eq!(got(&b, "proxied"), 0);
++        assert!(got(&b, "honest") + 1 >= b.from_stratum);
++        // half-independent work earns half per unit of work
++        let half = Authored { independence_ppm: 500_000, ..au("half", "Gx", 100) };
++        let b = compute(V, t, p, &[half, au("full", "Gh", 100)]);
++        let (h, f) = (got(&b, "half"), got(&b, "full"));
++        assert!((2 * h as i64 - f as i64).abs() <= 2, "{h} vs {f}");
++    }
++
++    #[test]
++    fn cap_per_gateway_returns_the_excess_to_the_pool() {
++        let t = totals(400, 300, 300);
++        let p = BonusParams {
++            stratum_fee_bps: 2500,
++            datum_rebate_bps: 1000,
++            bonus_bps: 500,
++            diff_bps: 0,
++            cap_per_gateway_bps: 2500,
++        };
++        // One G carries 90% of authored work from three farms.
++        let b = compute(
++            V,
++            t,
++            p,
++            &[au("f1", "Gbig", 300), au("f2", "Gbig", 300), au("f3", "Gbig", 300), au("s", "Gs", 100)],
++        );
++        let big = got(&b, "f1") + got(&b, "f2") + got(&b, "f3");
++        assert!(big <= b.from_stratum / 4 + 1, "capped at 25%: {big}");
++        assert_eq!(got(&b, "s"), b.from_stratum / 10, "the small gateway keeps its pro-rata share, no more");
++        assert_eq!(sum(&b) + b.to_pool, b.from_stratum);
++        assert!(b.to_pool > b.from_stratum / 2);
++    }
+ }
+diff --git a/prime/wire/examples/xta_fixture.rs b/prime/wire/examples/lzt1_fixture.rs
+similarity index 60%
+rename from prime/wire/examples/xta_fixture.rs
+rename to prime/wire/examples/lzt1_fixture.rs
+index 96a4f67..c2e753b 100644
+--- a/prime/wire/examples/xta_fixture.rs
++++ b/prime/wire/examples/lzt1_fixture.rs
+@@ -1,9 +1,10 @@
+-//! Print a signed template-authorship fixture as JSON, for cross-checking other verifiers
+-//! (the Python chain scanner in ~/xbt-rnd/XBT-051). Deterministic: fixed key, fixed template.
++//! Print a Sovereign TIDES (LZT1) attestation fixture as JSON, for cross-checking other
++//! verifiers (the Python chain scanner in ~/xbt-rnd/XBT-051). Deterministic: fixed key, fixed
++//! template.
+ //!
+-//! cargo run --offline -q -p datum-wire --example xta_fixture > fixture.json
++//! cargo run --offline -q -p datum-wire --example lzt1_fixture > fixture.json
+ 
+-use datum_wire::authorship;
++use datum_wire::authorship::{self, NodeView};
+ use datum_wire::coinbase::{self, TxOut};
+ use datum_wire::crypto::Identity;
+ use datum_wire::pow;
+@@ -18,16 +19,18 @@ fn main() {
+         TxOut { value: 112_538_966, script: [&[0x00, 0x20][..], &[0x5d; 32]].concat() },
+         TxOut { value: 0, script: [&[0x6a, 0x24, 0xaa, 0x21, 0xa9, 0xed][..], &[0x76; 32]].concat() },
+     ];
+-    let c = authorship::commitment_output(&id, height, &prev, &pow::merkle_branches_for_coinbase(&txids), &outs);
++    let node = NodeView { n_tx: 12, mempool_digest: [0x0d; 16], node_tag: [0x7a; 16], t_gbt: 1_788_408_500_000 };
++    let (a, sig, c) = authorship::attest(&id, height, &prev, &pow::merkle_branches_for_coinbase(&txids), &outs, node);
+     outs.push(c);
+     let (cb, _, _) = coinbase::build(height, b"Lazarus\x0fTofu Toes", &outs, 0);
+     let hx = |h: &[u8]| hex::encode(h);
+     println!(
+-        "{{\"height\":{height},\"prev_hash\":\"{}\",\"txids\":[{}],\"coinbase\":\"{}\",\"pk\":\"{}\",\"template_root\":\"{}\"}}",
++        "{{\"height\":{height},\"prev_hash\":\"{}\",\"txids\":[{}],\"coinbase\":\"{}\",\"pk\":\"{}\",\"attestation\":\"{}\",\"sig\":\"{}\"}}",
+         hx(&prev),
+         txids.iter().map(|t| format!("\"{}\"", hx(t))).collect::<Vec<_>>().join(","),
+         hx(&cb),
+         hx(&id.sign_pk()),
+-        hx(&authorship::template_root_from_txids(&txids)),
++        hx(&a.encode()),
++        hx(&sig),
+     );
+ }
+diff --git a/prime/wire/src/authorship.rs b/prime/wire/src/authorship.rs
+index 6d4670d..272cace 100644
+--- a/prime/wire/src/authorship.rs
++++ b/prime/wire/src/authorship.rs
+@@ -1,83 +1,111 @@
+-//! Template authorship: a gateway's signed claim, inside its own coinbase, that it built the
+-//! block template. R&D sketch for P-003 A2 ([[Tasks/XBT-051]]); nothing in Prime calls it yet.
++//! Sovereign TIDES template attestations ("LZT1"). R&D sketch for P-003 A2 ([[Tasks/XBT-051]]),
++//! following the research note's C.2 #2; nothing in Prime calls it yet.
+ //!
+-//! The gateway adds one zero-value output to each coinbase variant it publishes:
++//! Per job (per coinbase variant), the gateway signs an attestation `A` with its key `G` and
++//! puts a 70-byte commitment in that coinbase:
+ //!
+ //! ```text
+-//! OP_RETURN OP_PUSHDATA1 100 | "XTA" 0x01 | ed25519 pk (32) | signature (64)
++//! OP_RETURN PUSH68 | "LZT1" | BLAKE2b-256(A) | G
+ //! ```
+ //!
+-//! The signature is by `pk` over [`message`]:
++//! 70 bytes fits RDTS, which caps a coinbase OP_RETURN scriptPubKey at 83 bytes by consensus
++//! (Knots 29.4.2 refuses 84 with `bad-txns-vout-script-toolarge`; XBT-051 regtest). A full
++//! 64-byte signature plus a 32-byte key does not fit, so `A` and its signature travel off chain:
++//! the gateway sends them to Prime with the job, and the pool publishes them for every block.
++//!
++//! `A` is fixed-layout (see [`Attestation::encode`]):
+ //!
+ //! ```text
+-//! "XBT-TEMPLATE-AUTHOR/1" 0x00 | height (u32 LE) | prev hash (32, internal order)
+-//! | template root (32) | outputs digest (32)
++//! v (1) | G (32) | height (u32) | prev_hash (32) | branches_hash (32) | coinbase_value (u64)
++//! | n_tx (u32) | mempool_digest (16) | node_tag (16) | t_gbt (u64) | payout_digest (32)
+ //! ```
+ //!
+-//! * The **template root** is the block's merkle root with the coinbase txid replaced by 32 zero
+-//!   bytes: it commits to every other transaction and their order, and it is what the gateway's
+-//!   stratum merkle branches fold to from a zero leaf. A public verifier gets it from the block's
+-//!   txids; Prime gets it from the job's branches. The coinbase is left out because it holds
+-//!   the signature.
+-//! * The **outputs digest** is SHA256d over the coinbase outputs, serialized as in a transaction
+-//!   (count, then value and script each), with the commitment output itself left out. It pins the
+-//!   payout split and the segwit witness commitment (hence the wtxids) to the same key.
++//! * `branches_hash` is BLAKE2b-256 over the job's stratum merkle branches, concatenated. Prime
++//!   compares it byte for byte with the job; a public verifier rebuilds the branches from the
++//!   block's txids. It commits to every non-coinbase transaction and their order.
++//! * `payout_digest` (added to the note's sketch) is SHA256d over the coinbase outputs other than
++//!   the commitment. It stops a pool lifting a gateway's `A` onto a coinbase that pays someone
++//!   else: the template can be copied, the payout cannot.
++//! * `mempool_digest`, `node_tag` and `t_gbt` are what the gateway says about its own node; they
++//!   feed the template-entropy detector and are not checked here.
+ //!
+-//! What a valid claim proves: whoever holds `pk` approved exactly this transaction set and payout
+-//! on this parent, before the block existed. It does not prove whose node produced the set; see
+-//! the design note for what that leaves open.
++//! `G` is the gateway's DATUM identity key (ed25519), the key the session already handshook with,
++//! so "the attestation's key is this session's key" costs nothing new. The note has a BIP340 key;
++//! the layout is the same 32 bytes, and swapping the scheme is a crate change. Binding `G` to a
++//! payout address (a BIP322 message signed by that address) happens at registration, outside this
++//! module.
+ //!
+-//! The key is the gateway's DATUM identity signing key, so Prime can require the claim's key to
+-//! be the one the session handshook with. The domain prefix keeps these signatures from ever
+-//! being valid handshake or configuration signatures, and the other way round.
++//! What a valid attestation proves: whoever holds `G` approved exactly this transaction set and
++//! payout on this parent, before the block existed. Not whose node chose the set: that is the
++//! detector's job.
+ 
+ use crate::coinbase::{write_varint, Coinbase, TxOut};
+ use crate::crypto::{self, Identity, SIG, SIGN_PK};
+ use crate::pow::{self, Hash};
+ 
+-pub const MAGIC: [u8; 4] = *b"XTA\x01";
+-pub const DOMAIN: &[u8] = b"XBT-TEMPLATE-AUTHOR/1\0";
+-/// Bytes pushed after `OP_RETURN OP_PUSHDATA1 len`.
+-pub const PAYLOAD: usize = MAGIC.len() + SIGN_PK + SIG;
+-/// Serialized size of the commitment output: value, script length, script.
+-pub const OUTPUT_BYTES: usize = 8 + 1 + 3 + PAYLOAD;
++pub const MAGIC: [u8; 4] = *b"LZT1";
++pub const DOMAIN: &[u8] = b"XBT-SOVEREIGN-TIDES/1\0";
++pub const VERSION: u8 = 1;
++/// Bytes pushed after `OP_RETURN PUSH68`.
++pub const PAYLOAD: usize = MAGIC.len() + 32 + SIGN_PK;
++/// The commitment scriptPubKey: 70 bytes, under the RDTS cap of 83.
++pub const SCRIPT_LEN: usize = 2 + PAYLOAD;
++pub const RDTS_OP_RETURN_MAX: usize = 83;
++pub const ENCODED_LEN: usize = 1 + 32 + 4 + 32 + 32 + 8 + 4 + 16 + 16 + 8 + 32;
++
++#[derive(Clone, Debug, PartialEq, Eq)]
++pub struct Attestation {
++    pub g: [u8; SIGN_PK],
++    pub height: u32,
++    pub prev_hash: Hash,
++    pub branches_hash: Hash,
++    pub coinbase_value: u64,
++    pub n_tx: u32,
++    pub mempool_digest: [u8; 16],
++    pub node_tag: [u8; 16],
++    pub t_gbt: u64,
++    pub payout_digest: Hash,
++}
+ 
+-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+-pub struct Claim {
+-    pub pk: [u8; SIGN_PK],
+-    pub sig: [u8; SIG],
+-    /// Position of the commitment among the coinbase outputs.
+-    pub index: usize,
++/// What the gateway knows about its own node when it signs (fed to the entropy detector).
++#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
++pub struct NodeView {
++    /// Transactions in the block, coinbase included.
++    pub n_tx: u32,
++    /// Truncated hash of the mempool txids at or above the template's minimum feerate.
++    pub mempool_digest: [u8; 16],
++    /// Truncated hash of node version and policy knobs.
++    pub node_tag: [u8; 16],
++    /// When the node produced the template (unix ms).
++    pub t_gbt: u64,
+ }
+ 
+ #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+-pub enum AuthorshipError {
+-    /// No output carries the magic.
++pub enum AttestError {
++    /// The coinbase has no LZT1 output.
+     Missing,
+-    /// More than one does: refused rather than guessing which counts.
++    /// More than one LZT1 output.
+     Multiple,
+-    /// The magic is there but the output is not exactly the layout above, carries value, or the
+-    /// coinbase has no BIP34 height to bind.
++    /// An LZT1 output that is not exactly the layout above, or carries value; or an encoded
++    /// attestation of the wrong length or version.
+     Malformed,
++    /// The coinbase commits to a different attestation or key.
++    CommitmentMismatch,
+     /// Signed by a key other than the one expected (the session's identity key).
+     WrongKey,
+-    /// The signature does not cover this template.
+     BadSignature,
++    /// The attestation is for another parent, height or transaction set than the job/block.
++    WrongTemplate,
++    /// The attestation's payout digest is not this coinbase's outputs.
++    WrongPayout,
+ }
+ 
+-/// Merkle root with a zero coinbase txid, from the coinbase's stratum merkle branches.
+-pub fn template_root(branches: &[Hash]) -> Hash {
+-    pow::merkle_root([0u8; 32], branches)
++pub fn branches_hash(branches: &[Hash]) -> Hash {
++    pow::blake2b256(&branches.concat())
+ }
+ 
+-/// The same root from a block's transactions: `others` is every txid after the coinbase, in
+-/// block order.
+-pub fn template_root_from_txids(others: &[Hash]) -> Hash {
+-    template_root(&pow::merkle_branches_for_coinbase(others))
+-}
+-
+-/// SHA256d over the outputs, skipping the one at `skip`.
+-pub fn outputs_digest(outputs: &[TxOut], skip: Option<usize>) -> Hash {
++/// SHA256d over the outputs, as serialized in a transaction, skipping the one at `skip`.
++pub fn payout_digest(outputs: &[TxOut], skip: Option<usize>) -> Hash {
+     let kept: Vec<&TxOut> = outputs.iter().enumerate().filter(|(i, _)| Some(*i) != skip).map(|(_, o)| o).collect();
+     let mut buf = Vec::new();
+     write_varint(&mut buf, kept.len() as u64);
+@@ -89,75 +117,147 @@ pub fn outputs_digest(outputs: &[TxOut], skip: Option<usize>) -> Hash {
+     pow::sha256d(&buf)
+ }
+ 
+-pub fn message(height: u32, prev_hash: &Hash, template_root: &Hash, outputs_digest: &Hash) -> Vec<u8> {
+-    let mut m = Vec::with_capacity(DOMAIN.len() + 4 + 96);
+-    m.extend_from_slice(DOMAIN);
+-    m.extend_from_slice(&height.to_le_bytes());
+-    m.extend_from_slice(prev_hash);
+-    m.extend_from_slice(template_root);
+-    m.extend_from_slice(outputs_digest);
+-    m
+-}
++impl Attestation {
++    pub fn encode(&self) -> Vec<u8> {
++        let mut b = Vec::with_capacity(ENCODED_LEN);
++        b.push(VERSION);
++        b.extend_from_slice(&self.g);
++        b.extend_from_slice(&self.height.to_le_bytes());
++        b.extend_from_slice(&self.prev_hash);
++        b.extend_from_slice(&self.branches_hash);
++        b.extend_from_slice(&self.coinbase_value.to_le_bytes());
++        b.extend_from_slice(&self.n_tx.to_le_bytes());
++        b.extend_from_slice(&self.mempool_digest);
++        b.extend_from_slice(&self.node_tag);
++        b.extend_from_slice(&self.t_gbt.to_le_bytes());
++        b.extend_from_slice(&self.payout_digest);
++        debug_assert_eq!(b.len(), ENCODED_LEN);
++        b
++    }
+ 
+-fn script(pk: &[u8; SIGN_PK], sig: &[u8; SIG]) -> Vec<u8> {
+-    let mut s = Vec::with_capacity(3 + PAYLOAD);
+-    s.extend_from_slice(&[0x6a, 0x4c, PAYLOAD as u8]);
+-    s.extend_from_slice(&MAGIC);
+-    s.extend_from_slice(pk);
+-    s.extend_from_slice(sig);
+-    s
+-}
++    pub fn decode(b: &[u8]) -> Result<Self, AttestError> {
++        if b.len() != ENCODED_LEN || b[0] != VERSION {
++            return Err(AttestError::Malformed);
++        }
++        let mut at = 1usize;
++        let mut take = |n: usize| {
++            let s = &b[at..at + n];
++            at += n;
++            s
++        };
++        let h32 = |s: &[u8]| -> Hash { s.try_into().unwrap() };
++        Ok(Attestation {
++            g: h32(take(32)),
++            height: u32::from_le_bytes(take(4).try_into().unwrap()),
++            prev_hash: h32(take(32)),
++            branches_hash: h32(take(32)),
++            coinbase_value: u64::from_le_bytes(take(8).try_into().unwrap()),
++            n_tx: u32::from_le_bytes(take(4).try_into().unwrap()),
++            mempool_digest: take(16).try_into().unwrap(),
++            node_tag: take(16).try_into().unwrap(),
++            t_gbt: u64::from_le_bytes(take(8).try_into().unwrap()),
++            payout_digest: h32(take(32)),
++        })
++    }
+ 
+-/// What the gateway does: sign the template and return the output to add to `outputs`
+-/// (anywhere; the digest is over the others in order).
+-pub fn commitment_output(id: &Identity, height: u32, prev_hash: &Hash, branches: &[Hash], outputs: &[TxOut]) -> TxOut {
+-    let m = message(height, prev_hash, &template_root(branches), &outputs_digest(outputs, None));
+-    TxOut { value: 0, script: script(&id.sign_pk(), &id.sign(&m)) }
++    pub fn id(&self) -> Hash {
++        pow::blake2b256(&self.encode())
++    }
++
++    fn signed_message(&self) -> Vec<u8> {
++        [DOMAIN, &self.encode()].concat()
++    }
++
++    pub fn sign(&self, g: &Identity) -> [u8; SIG] {
++        g.sign(&self.signed_message())
++    }
++
++    /// The 70-byte commitment output for this attestation.
++    pub fn commitment_output(&self) -> TxOut {
++        let mut s = Vec::with_capacity(SCRIPT_LEN);
++        s.extend_from_slice(&[0x6a, PAYLOAD as u8]);
++        s.extend_from_slice(&MAGIC);
++        s.extend_from_slice(&self.id());
++        s.extend_from_slice(&self.g);
++        TxOut { value: 0, script: s }
++    }
+ }
+ 
+-/// An OP_RETURN whose first push opens with the magic, by either push opcode.
+-fn carries_magic(o: &TxOut) -> bool {
+-    let s = &o.script;
+-    s.first() == Some(&0x6a) && (s.get(2..6) == Some(&MAGIC[..]) || s.get(3..7) == Some(&MAGIC[..]))
++/// What a gateway does per job and coinbase variant: fill in `A` for the outputs it is about to
++/// publish, sign it, and return it with the output to add (anywhere among the outputs).
++pub fn attest(
++    g: &Identity,
++    height: u32,
++    prev_hash: &Hash,
++    branches: &[Hash],
++    outputs: &[TxOut],
++    node: NodeView,
++) -> (Attestation, [u8; SIG], TxOut) {
++    let a = Attestation {
++        g: g.sign_pk(),
++        height,
++        prev_hash: *prev_hash,
++        branches_hash: branches_hash(branches),
++        coinbase_value: outputs.iter().map(|o| o.value).sum(),
++        n_tx: node.n_tx,
++        mempool_digest: node.mempool_digest,
++        node_tag: node.node_tag,
++        t_gbt: node.t_gbt,
++        payout_digest: payout_digest(outputs, None),
++    };
++    let sig = a.sign(g);
++    let out = a.commitment_output();
++    (a, sig, out)
+ }
+ 
+-/// Find the commitment among `outputs`. `Ok(None)` when there is none.
+-pub fn find(outputs: &[TxOut]) -> Result<Option<Claim>, AuthorshipError> {
+-    let mut hits = outputs.iter().enumerate().filter(|(_, o)| carries_magic(o));
+-    let Some((index, o)) = hits.next() else {
++/// Find the LZT1 commitment: `(index, attestation id, G)`.
++#[allow(clippy::type_complexity)]
++pub fn find(outputs: &[TxOut]) -> Result<Option<(usize, Hash, [u8; SIGN_PK])>, AttestError> {
++    let mut hits = outputs
++        .iter()
++        .enumerate()
++        .filter(|(_, o)| o.script.first() == Some(&0x6a) && o.script.get(2..6) == Some(&MAGIC[..]));
++    let Some((i, o)) = hits.next() else {
+         return Ok(None);
+     };
+     if hits.next().is_some() {
+-        return Err(AuthorshipError::Multiple);
++        return Err(AttestError::Multiple);
+     }
+     let s = &o.script;
+-    if o.value != 0 || s.len() != 3 + PAYLOAD || s[..3] != [0x6a, 0x4c, PAYLOAD as u8] || s[3..7] != MAGIC {
+-        return Err(AuthorshipError::Malformed);
++    if o.value != 0 || s.len() != SCRIPT_LEN || s[1] != PAYLOAD as u8 {
++        return Err(AttestError::Malformed);
+     }
+-    let mut pk = [0u8; SIGN_PK];
+-    pk.copy_from_slice(&s[7..7 + SIGN_PK]);
+-    let mut sig = [0u8; SIG];
+-    sig.copy_from_slice(&s[7 + SIGN_PK..]);
+-    Ok(Some(Claim { pk, sig, index }))
++    Ok(Some((i, s[6..38].try_into().unwrap(), s[38..70].try_into().unwrap())))
+ }
+ 
+-/// Check a coinbase's claim against the template it sits in. `expect` is the key the claim must
+-/// be made with (Prime: the session's identity key); `None` accepts any key (a public verifier,
+-/// which then looks the key up in the gateway directory). Returns the signing key.
++/// Check `A` + its signature against a coinbase and the template it sits in.
++///
++/// Prime: `branches` and `prev_hash` from the job, `expect` = the session's identity key.
++/// Public verifier: branches rebuilt from the block's txids, `expect` = `None` (the key is then
++/// looked up in the registration directory). Returns `G`.
+ pub fn verify(
+     cb: &Coinbase,
++    a: &Attestation,
++    sig: &[u8],
+     prev_hash: &Hash,
+-    template_root: &Hash,
++    branches: &[Hash],
+     expect: Option<&[u8; SIGN_PK]>,
+-) -> Result<[u8; SIGN_PK], AuthorshipError> {
+-    let claim = find(&cb.outputs)?.ok_or(AuthorshipError::Missing)?;
+-    let height = cb.height.ok_or(AuthorshipError::Malformed)?;
+-    if expect.is_some_and(|k| *k != claim.pk) {
+-        return Err(AuthorshipError::WrongKey);
++) -> Result<[u8; SIGN_PK], AttestError> {
++    let (i, id, g) = find(&cb.outputs)?.ok_or(AttestError::Missing)?;
++    if id != a.id() || g != a.g {
++        return Err(AttestError::CommitmentMismatch);
+     }
+-    let m = message(height, prev_hash, template_root, &outputs_digest(&cb.outputs, Some(claim.index)));
+-    crypto::verify(&claim.pk, &m, &claim.sig).map_err(|_| AuthorshipError::BadSignature)?;
+-    Ok(claim.pk)
++    if expect.is_some_and(|k| *k != a.g) {
++        return Err(AttestError::WrongKey);
++    }
++    crypto::verify(&a.g, &a.signed_message(), sig).map_err(|_| AttestError::BadSignature)?;
++    if a.prev_hash != *prev_hash || Some(a.height) != cb.height || a.branches_hash != branches_hash(branches) {
++        return Err(AttestError::WrongTemplate);
++    }
++    if a.payout_digest != payout_digest(&cb.outputs, Some(i)) {
++        return Err(AttestError::WrongPayout);
++    }
++    Ok(a.g)
+ }
+ 
+ #[cfg(test)]
+@@ -173,45 +273,58 @@ mod tests {
+         Identity::from_secret_bytes(&[0x42; 64])
+     }
+ 
+-    /// Split outputs with the gateway's claim appended, and the coinbase they make.
+-    fn authored(id: &Identity, txs: &[Hash]) -> (Vec<TxOut>, Coinbase) {
++    fn node(n_tx: usize) -> NodeView {
++        NodeView { n_tx: n_tx as u32 + 1, mempool_digest: [0x0d; 16], node_tag: [0x7a; 16], t_gbt: 1_788_408_500_000 }
++    }
++
++    struct Made {
++        a: Attestation,
++        sig: [u8; SIG],
++        outs: Vec<TxOut>,
++        cb: Coinbase,
++        branches: Vec<Hash>,
++    }
++
++    fn made(id: &Identity, txs: &[Hash]) -> Made {
+         let mut outs = gateway_outputs(&split(), &pool_script(), VALUE);
+-        let c = commitment_output(id, HEIGHT, &PREV, &pow::merkle_branches_for_coinbase(txs), &outs);
++        let branches = pow::merkle_branches_for_coinbase(txs);
++        let (a, sig, c) = attest(id, HEIGHT, &PREV, &branches, &outs, node(txs.len()));
+         outs.push(c);
+         let (bytes, _, _) = coinbase::build(HEIGHT, b"Lazarus\x0fTofu Toes", &outs, 0);
+-        (outs, coinbase::parse(&bytes).unwrap())
++        Made { a, sig, outs, cb: coinbase::parse(&bytes).unwrap(), branches }
+     }
+ 
+-    fn root(txs: &[Hash]) -> Hash {
+-        template_root_from_txids(txs)
++    fn rebuild(outs: &[TxOut], height: u32) -> Coinbase {
++        let (bytes, _, _) = coinbase::build(height, b"Lazarus", outs, 0);
++        coinbase::parse(&bytes).unwrap()
+     }
+ 
+     #[test]
+-    fn claim_round_trips_and_names_its_key() {
++    fn attestation_verifies_and_names_its_key() {
+         let id = gateway();
+-        let txs = txids(7);
+-        let (_, cb) = authored(&id, &txs);
+-        assert_eq!(verify(&cb, &PREV, &root(&txs), None), Ok(id.sign_pk()));
+-        assert_eq!(verify(&cb, &PREV, &root(&txs), Some(&id.sign_pk())), Ok(id.sign_pk()));
++        let m = made(&id, &txids(7));
++        assert_eq!(verify(&m.cb, &m.a, &m.sig, &PREV, &m.branches, None), Ok(id.sign_pk()));
++        assert_eq!(verify(&m.cb, &m.a, &m.sig, &PREV, &m.branches, Some(&id.sign_pk())), Ok(id.sign_pk()));
+     }
+ 
+     #[test]
+-    fn output_is_the_documented_size() {
+-        let (outs, _) = authored(&gateway(), &txids(3));
+-        let c = outs.last().unwrap();
+-        assert_eq!(8 + 1 + c.script.len(), OUTPUT_BYTES);
+-        assert_eq!(OUTPUT_BYTES, 112);
++    fn commitment_fits_rdts() {
++        let m = made(&gateway(), &txids(3));
++        let c = m.outs.last().unwrap();
++        assert_eq!(c.script.len(), 70);
++        assert!(c.script.len() <= RDTS_OP_RETURN_MAX);
++        assert_eq!(Attestation::decode(&m.a.encode()), Ok(m.a.clone()));
++        assert_eq!(m.a.encode().len(), ENCODED_LEN);
+     }
+ 
+     #[test]
+-    fn root_from_branches_matches_root_from_block() {
+-        for n in [0usize, 1, 2, 3, 4, 5, 16, 17, 1000] {
+-            let txs = txids(n);
+-            assert_eq!(template_root(&pow::merkle_branches_for_coinbase(&txs)), root(&txs), "{n} txs");
+-        }
+-        // and folding the real coinbase txid through the same branches gives the block's
+-        // merkle root, computed here level by level as a node does
++    fn branches_from_the_block_match_the_job() {
++        // A public verifier rebuilds the branches from txids[1..]; they must hash the same.
+         let txs = txids(9);
++        let m = made(&gateway(), &txs);
++        assert_eq!(branches_hash(&pow::merkle_branches_for_coinbase(&txs)), m.a.branches_hash);
++        // and those branches fold the real coinbase txid to the block's merkle root, computed
++        // here level by level as a node does
+         let cbid = [0xabu8; 32];
+         let mut level = vec![cbid];
+         level.extend_from_slice(&txs);
+@@ -221,112 +334,85 @@ mod tests {
+             }
+             level = level.chunks(2).map(|p| pow::sha256d(&[p[0], p[1]].concat())).collect();
+         }
+-        assert_eq!(pow::merkle_root(cbid, &pow::merkle_branches_for_coinbase(&txs)), level[0]);
++        assert_eq!(pow::merkle_root(cbid, &m.branches), level[0]);
+     }
+ 
+     #[test]
+-    fn another_transaction_set_breaks_it() {
++    fn another_transaction_set_parent_or_height_is_the_wrong_template() {
+         let txs = txids(7);
+-        let (_, cb) = authored(&gateway(), &txs);
++        let m = made(&gateway(), &txs);
+         let mut swapped = txs.clone();
+         swapped.swap(2, 3);
+-        assert_eq!(verify(&cb, &PREV, &root(&swapped), None), Err(AuthorshipError::BadSignature));
+-        assert_eq!(verify(&cb, &PREV, &root(&txs[..6]), None), Err(AuthorshipError::BadSignature));
++        let b2 = pow::merkle_branches_for_coinbase(&swapped);
++        assert_eq!(verify(&m.cb, &m.a, &m.sig, &PREV, &b2, None), Err(AttestError::WrongTemplate));
++        assert_eq!(verify(&m.cb, &m.a, &m.sig, &[0x78; 32], &m.branches, None), Err(AttestError::WrongTemplate));
++        let other_height = rebuild(&m.outs, HEIGHT + 1);
++        assert_eq!(verify(&other_height, &m.a, &m.sig, &PREV, &m.branches, None), Err(AttestError::WrongTemplate));
+     }
+ 
+     #[test]
+-    fn another_parent_breaks_it() {
+-        let txs = txids(4);
+-        let (_, cb) = authored(&gateway(), &txs);
+-        assert_eq!(verify(&cb, &[0x78; 32], &root(&txs), None), Err(AuthorshipError::BadSignature));
++    fn lifting_a_gateways_attestation_onto_another_payout_fails() {
++        // The pool copies the gateway's template and A (it sees both) into a coinbase paying
++        // itself: the commitment matches, the signature is good, the payout is not.
++        let m = made(&gateway(), &txids(4));
++        let theirs = vec![
++            TxOut { value: VALUE, script: p2wpkh(0x99) },
++            m.outs[m.outs.len() - 2].clone(),
++            m.outs.last().unwrap().clone(),
++        ];
++        let cb = rebuild(&theirs, HEIGHT);
++        assert_eq!(verify(&cb, &m.a, &m.sig, &PREV, &m.branches, None), Err(AttestError::WrongPayout));
+     }
+ 
+     #[test]
+-    fn lifting_the_claim_onto_another_payout_breaks_it() {
+-        // A stratum pool that copies a gateway's claim into its own coinbase (same template,
+-        // its own payout) does not get a valid claim.
+-        let txs = txids(4);
+-        let (outs, _) = authored(&gateway(), &txs);
+-        let claim = outs.last().unwrap().clone();
+-        let mut theirs = vec![TxOut { value: VALUE, script: p2wpkh(0x99) }, outs[outs.len() - 2].clone()];
+-        theirs.push(claim);
+-        let (bytes, _, _) = coinbase::build(HEIGHT, b"Other", &theirs, 0);
+-        let cb = coinbase::parse(&bytes).unwrap();
+-        assert_eq!(verify(&cb, &PREV, &root(&txs), None), Err(AuthorshipError::BadSignature));
++    fn edited_attestation_no_longer_matches_the_commitment() {
++        let m = made(&gateway(), &txids(4));
++        let mut a = m.a.clone();
++        a.node_tag = [0; 16];
++        assert_eq!(verify(&m.cb, &a, &m.sig, &PREV, &m.branches, None), Err(AttestError::CommitmentMismatch));
+     }
+ 
+     #[test]
+-    fn a_different_height_in_the_scriptsig_breaks_it() {
+-        let txs = txids(4);
+-        let (outs, _) = authored(&gateway(), &txs);
+-        let (bytes, _, _) = coinbase::build(HEIGHT + 1, b"Lazarus", &outs, 0);
+-        let cb = coinbase::parse(&bytes).unwrap();
+-        assert_eq!(verify(&cb, &PREV, &root(&txs), None), Err(AuthorshipError::BadSignature));
+-    }
+-
+-    #[test]
+-    fn prime_requires_the_session_key() {
+-        let txs = txids(4);
+-        let (_, cb) = authored(&gateway(), &txs);
++    fn forged_signature_and_other_keys_fail() {
++        let id = gateway();
++        let m = made(&id, &txids(4));
++        let mut sig = m.sig;
++        sig[0] ^= 1;
++        assert_eq!(verify(&m.cb, &m.a, &sig, &PREV, &m.branches, None), Err(AttestError::BadSignature));
+         let session = Identity::from_secret_bytes(&[0x43; 64]);
+-        assert_eq!(verify(&cb, &PREV, &root(&txs), Some(&session.sign_pk())), Err(AuthorshipError::WrongKey));
+-    }
+-
+-    #[test]
+-    fn swapping_in_another_key_breaks_it() {
+-        // Replace the pk inside the claim, keep the signature: the name is not forgeable.
+-        let txs = txids(4);
+-        let (mut outs, _) = authored(&gateway(), &txs);
+-        let other = Identity::from_secret_bytes(&[0x44; 64]).sign_pk();
+-        let last = outs.last_mut().unwrap();
+-        last.script[7..7 + SIGN_PK].copy_from_slice(&other);
+-        let (bytes, _, _) = coinbase::build(HEIGHT, b"Lazarus", &outs, 0);
+-        let cb = coinbase::parse(&bytes).unwrap();
+-        assert_eq!(verify(&cb, &PREV, &root(&txs), None), Err(AuthorshipError::BadSignature));
++        assert_eq!(
++            verify(&m.cb, &m.a, &m.sig, &PREV, &m.branches, Some(&session.sign_pk())),
++            Err(AttestError::WrongKey)
++        );
++        // Someone else signs an A naming the gateway's G: commitment matches, signature fails.
++        let forged = m.a.sign(&session);
++        assert_eq!(verify(&m.cb, &m.a, &forged, &PREV, &m.branches, None), Err(AttestError::BadSignature));
+     }
+ 
+     #[test]
+-    fn missing_multiple_and_malformed_claims() {
+-        let txs = txids(4);
+-        let plain = gateway_outputs(&split(), &pool_script(), VALUE);
+-        let (bytes, _, _) = coinbase::build(HEIGHT, b"Lazarus", &plain, 0);
+-        let cb = coinbase::parse(&bytes).unwrap();
+-        assert_eq!(verify(&cb, &PREV, &root(&txs), None), Err(AuthorshipError::Missing));
+-
+-        let (mut outs, _) = authored(&gateway(), &txs);
+-        let c = outs.last().unwrap().clone();
+-        outs.push(c.clone());
+-        assert_eq!(find(&outs), Err(AuthorshipError::Multiple));
+-
++    fn missing_multiple_and_malformed_commitments() {
++        let m = made(&gateway(), &txids(4));
++        let plain = rebuild(&m.outs[..m.outs.len() - 1], HEIGHT);
++        assert_eq!(verify(&plain, &m.a, &m.sig, &PREV, &m.branches, None), Err(AttestError::Missing));
++        let c = m.outs.last().unwrap().clone();
++        assert_eq!(find(&[c.clone(), c.clone()]), Err(AttestError::Multiple));
+         let mut valued = c.clone();
+         valued.value = 1;
+-        assert_eq!(find(&[valued]), Err(AuthorshipError::Malformed));
++        assert_eq!(find(&[valued]), Err(AttestError::Malformed));
+         let mut short = c;
+         short.script.pop();
+-        assert_eq!(find(&[short]), Err(AuthorshipError::Malformed));
+-    }
+-
+-    #[test]
+-    fn claim_can_sit_anywhere_among_the_outputs() {
+-        let id = gateway();
+-        let txs = txids(5);
+-        let plain = gateway_outputs(&split(), &pool_script(), VALUE);
+-        let c = commitment_output(&id, HEIGHT, &PREV, &pow::merkle_branches_for_coinbase(&txs), &plain);
+-        let mut outs = plain.clone();
+-        outs.insert(1, c);
+-        let (bytes, _, _) = coinbase::build(HEIGHT, b"Lazarus", &outs, 0);
+-        let cb = coinbase::parse(&bytes).unwrap();
+-        assert_eq!(verify(&cb, &PREV, &root(&txs), None), Ok(id.sign_pk()));
++        assert_eq!(find(&[short]), Err(AttestError::Malformed));
++        assert_eq!(Attestation::decode(&[0u8; ENCODED_LEN]), Err(AttestError::Malformed));
+     }
+ 
+-    /// End to end through Prime's share verifier: an authored coinbase is still a full Split
+-    /// (the claim is a zero-value OP_RETURN), and the job Prime holds is enough to check the
+-    /// claim with the session key: prev hash and branches from the job, coinbase from the share.
++    /// End to end through Prime's share verifier: an attested coinbase is still a full Split
++    /// (the commitment is a zero-value OP_RETURN), and the job Prime holds is enough to check the
++    /// attestation against the session key.
+     #[test]
+-    fn prime_checks_a_real_share_on_an_authored_job() {
++    fn prime_checks_a_real_share_on_an_attested_job() {
+         let id = gateway();
+         let txs = txids(12);
+-        let (outs, _) = authored(&id, &txs);
++        let m = made(&id, &txs);
+         let iss = split();
+         let pool = pool_script();
+         let p = Policy {
+@@ -341,12 +427,14 @@ mod tests {
+             uncommitted_pot: 20,
+         };
+         let mut slot = JobSlot::default();
+-        let mut s = share(2, 4, 9, &outs, &txs, 3, [0; 8], [0; 8]);
++        let mut s = share(2, 4, 9, &m.outs, &txs, 3, [0; 8], [0; 8]);
+         let job = s.job.clone().unwrap();
+         grind(&mut slot, &mut s);
+         let v = verify_with_target(&mut slot, &s, &p, &easy_target()).expect("share verifies");
+         assert_eq!(v.coinbase_kind, CoinbaseKind::Split);
+-        let troot = template_root(&job.merkle_branches);
+-        assert_eq!(verify(&v.coinbase, &job.prev_hash, &troot, Some(&id.sign_pk())), Ok(id.sign_pk()));
++        assert_eq!(
++            verify(&v.coinbase, &m.a, &m.sig, &job.prev_hash, &job.merkle_branches, Some(&id.sign_pk())),
++            Ok(id.sign_pk())
++        );
+     }
+ }
+-- 
+2.43.0
+

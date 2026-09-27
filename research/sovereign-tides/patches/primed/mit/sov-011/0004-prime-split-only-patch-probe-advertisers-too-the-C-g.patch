@@ -1,0 +1,275 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: michael moore <mrmoore27@pm.me>
+Date: Sat, 26 Sep 2026 01:10:59 +0000
+Subject: [PATCH 4/4] prime, split-only patch: probe advertisers too; the C
+ gateway keeps zero-value outputs after its payees
+
+The readiness demo ran the split-only datum_gateway live for the first time.
+It advertised nta-v1, parsed the 70-byte attestations, and then dropped them
+all: generate_coinbase_txns_for_stratum_job_subtypebysize stopped adding
+outputs once the payees had used the coinbase value, and every attestation is
+a zero-value output after them. Prime caught it on the first post-activation
+share (attestations dropped) and refused it. Both loops now go on past the
+spent value; the value check still admits only zero-value outputs there.
+
+So the flag is a claim, not evidence. Prime now probes every gateway before
+activation, advertiser or not, and a dropped probe outranks the flag. A build
+that dropped while advertising is not believed again until it says hello with
+another user agent (an upgrade); a reconnect of the same build stays refused.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ prime/primed/src/config.rs              |  2 +-
+ prime/primed/src/readiness.rs           | 62 ++++++++++++++++++-------
+ prime/primed/src/session.rs             |  7 +--
+ prime/primed/tests/nta_readiness_e2e.rs | 19 +++++---
+ prime/wire/src/handshake.rs             |  3 +-
+ 5 files changed, 61 insertions(+), 32 deletions(-)
+
+diff --git a/prime/primed/src/config.rs b/prime/primed/src/config.rs
+index 23e3c2e..69b9f76 100644
+--- a/prime/primed/src/config.rs
++++ b/prime/primed/src/config.rs
+@@ -199,7 +199,7 @@ pub struct Config {
+     /// "patched-out" Prime, whose un-attested blocks nodes refuse).
+     #[serde(default)]
+     pub nta_disabled: bool,
+-    /// SOV-011: probe gateways that do not advertise `nta-v1` from `nta-height` minus this many
++    /// SOV-011: probe every gateway (advertising `nta-v1` or not) from `nta-height` minus this many
+     /// blocks until activation: one coinbaser per gateway per `nta-probe-every-secs` gets a
+     /// zero-value 70-byte NTA-shaped output at the end, and the next share on it says whether
+     /// the gateway kept it. 0 turns probing off.
+diff --git a/prime/primed/src/readiness.rs b/prime/primed/src/readiness.rs
+index 2d8cca0..add4f77 100644
+--- a/prime/primed/src/readiness.rs
++++ b/prime/primed/src/readiness.rs
+@@ -6,7 +6,7 @@
+ //! attestations and mine `bad-nta-count` blocks. Prime finds such gateways before that:
+ //!
+ //! * **Advertised.** A gateway that can carry them says `nta-v1` in its hello
+-//!   ([`datum_wire::handshake::NTA_V1_MARKER`]): ready.
++//!   ([`datum_wire::handshake::NTA_V1_MARKER`]): ready, until a probe says otherwise.
+ //! * **Probed.** From `nta-height − nta-probe-window`, one coinbaser per gateway per
+ //!   `nta-probe-every-secs` ends with a zero-value 70-byte NTA-shaped output
+ //!   ([`datum_wire::nta::probe_script`]). The first share on that coinbaser that pays every
+@@ -18,9 +18,16 @@
+ //! The probe pays nobody and changes no payee, and share classification skips zero-value
+ //! OP_RETURNs, so it costs a gateway nothing whichever way it goes.
+ //!
++//! Advertisers are probed too. The flag is a build's claim about itself, and the first build to
++//! make it was wrong: the split-only C patch parsed 70-byte scripts but stopped adding outputs
++//! once the payees had used the coinbase value, so it dropped every zero-value output after them
++//! (SOV-011 readiness demo). A dropped probe outranks the flag, and a gateway that dropped one
++//! while advertising stays unready until it says hello with another user agent (an upgrade).
++//!
+ //! The book is keyed by the gateway's `gateway=` hex (the first 8 bytes of its identity key,
+ //! what the logs and `/stats.json` show) and outlives sessions, so a gateway found unready
+-//! stays so across reconnects until it advertises or passes a probe.
++//! stays so across reconnects until it upgrades (advertises, or advertises from a new build) or
++//! passes a probe.
+ 
+ use std::collections::{HashMap, VecDeque};
+ 
+@@ -102,6 +109,9 @@ pub struct Entry {
+     /// Sessions refused because of this status, and when one was last logged in full.
+     pub refusals: u64,
+     refusal_logged: u64,
++    /// The user agent of an advertising build that was found dropping 70-byte outputs: the flag
++    /// from that build is not believed again.
++    pub dropped_as: Option<String>,
+     samples: VecDeque<(u64, u64)>,
+ }
+ 
+@@ -121,11 +131,15 @@ impl Entry {
+             probes_dropped: 0,
+             refusals: 0,
+             refusal_logged: 0,
++            dropped_as: None,
+             samples: VecDeque::new(),
+         }
+     }
+ 
+     fn set(&mut self, status: Status, evidence: Evidence, now: u64) -> bool {
++        if status == Status::Unready && self.advertised {
++            self.dropped_as = Some(self.user_agent.clone());
++        }
+         let changed = self.status != status;
+         if changed {
+             self.since = now;
+@@ -188,28 +202,34 @@ impl Book {
+         self.map.get(gw).map_or(Status::Unknown, |e| e.status)
+     }
+ 
+-    /// A hello. `nta-v1` makes the gateway ready. A gateway that stops advertising (a
+-    /// downgrade) loses what the advertisement gave it; a probe or attestation verdict stands.
++    /// A hello. `nta-v1` makes the gateway ready, unless this very build (same user agent)
++    /// advertised before and was found dropping. A gateway that stops advertising (a downgrade)
++    /// loses what the advertisement gave it; a probe or attestation verdict stands.
+     pub fn note_hello(&mut self, gw: &str, user_agent: &str, nta_v1: bool, now: u64) -> Status {
+         let e = self.entry(gw, now);
+-        e.user_agent = user_agent.chars().take(128).collect();
++        let ua: String = user_agent.chars().take(128).collect();
++        let disbelieved = e.status == Status::Unready && e.dropped_as.as_deref() == Some(ua.as_str());
++        e.user_agent = ua;
+         e.advertised = nta_v1;
+-        if nta_v1 {
+-            e.set(Status::Ready, Evidence::Advertised, now);
+-        } else if e.evidence == Evidence::Advertised {
++        if nta_v1 && !disbelieved {
++            e.dropped_as = None;
++            if e.status != Status::Ready {
++                e.set(Status::Ready, Evidence::Advertised, now);
++            }
++        } else if !nta_v1 && e.evidence == Evidence::Advertised {
+             e.set(Status::Unknown, Evidence::None, now);
+         }
+         e.status
+     }
+ 
+-    /// Whether the next coinbaser for `gw` should carry a probe: probing, not advertised, and
+-    /// none sent in the last `every` seconds.
++    /// Whether the next coinbaser for `gw` should carry a probe: probing, and none sent in the
++    /// last `every` seconds. Advertisers too (see the module docs).
+     pub fn probe_due(&self, gw: &str, chain: &Chain, every: u64, now: u64) -> bool {
+         if !chain.probing() {
+             return false;
+         }
+         match self.map.get(gw) {
+-            Some(e) => !e.advertised && (e.probes_sent == 0 || now.saturating_sub(e.last_probe) >= every),
++            Some(e) => e.probes_sent == 0 || now.saturating_sub(e.last_probe) >= every,
+             None => true,
+         }
+     }
+@@ -239,9 +259,6 @@ impl Book {
+     pub fn note_attestation_verdict(&mut self, gw: &str, kept: bool, now: u64) -> Option<Status> {
+         let e = self.entry(gw, now);
+         let changed = if kept {
+-            if e.evidence == Evidence::Advertised {
+-                return None;
+-            }
+             e.set(Status::Ready, Evidence::AttestationsKept, now)
+         } else {
+             e.set(Status::Unready, Evidence::AttestationsDropped, now)
+@@ -377,11 +394,11 @@ mod tests {
+     }
+ 
+     #[test]
+-    fn an_advertiser_is_never_probed_and_a_silent_gateway_is_probed_hourly() {
++    fn every_gateway_is_probed_hourly_advertiser_or_not() {
+         let c = Chain { next_height: Some(2500), ..CHAIN };
+         let mut b = Book::default();
+         assert_eq!(b.note_hello("aa", "lazarus-gateway/0.1", true, 10), Status::Ready);
+-        assert!(!b.probe_due("aa", &c, 3600, 10));
++        assert!(b.probe_due("aa", &c, 3600, 10));
+         assert_eq!(b.note_hello("bb", "v0.4.1-beta/x", false, 10), Status::Unknown);
+         assert!(b.probe_due("bb", &c, 3600, 10));
+         assert!(b.probe_due("never-seen", &c, 3600, 10));
+@@ -408,11 +425,20 @@ mod tests {
+         assert_eq!(b.note_probe_verdict("bb", true, 7), None);
+         assert_eq!(b.get("bb").unwrap().probes_kept, 2);
+         // after activation the coinbase outranks the hello
+-        b.note_hello("cc", "liar", true, 8);
++        b.note_hello("cc", "liar/1", true, 8);
+         assert_eq!(b.note_attestation_verdict("cc", true, 9), None);
+-        assert_eq!(b.get("cc").unwrap().evidence, Evidence::Advertised);
++        assert_eq!(b.get("cc").unwrap().evidence, Evidence::AttestationsKept);
+         assert_eq!(b.note_attestation_verdict("cc", false, 10), Some(Status::Unready));
+         assert_eq!(b.status("cc"), Status::Unready);
++        // the same build advertising again is not believed; a new build is
++        assert_eq!(b.note_hello("cc", "liar/1", true, 11), Status::Unready);
++        assert_eq!(b.note_hello("cc", "liar/2", true, 12), Status::Ready);
++        assert_eq!(b.get("cc").unwrap().evidence, Evidence::Advertised);
++        // and an advertiser that drops a probe before activation is unready despite the flag
++        b.note_hello("dd", "patched/1", true, 13);
++        assert_eq!(b.note_probe_verdict("dd", false, 14), Some(Status::Unready));
++        assert_eq!(b.note_hello("dd", "patched/1", true, 15), Status::Unready);
++        assert_eq!(b.note_hello("dd", "patched/2", true, 16), Status::Ready);
+         // refusals: the first is logged, the reconnects after it only every ten minutes
+         assert!(b.note_refusal("cc", 100));
+         assert!(!b.note_refusal("cc", 101));
+diff --git a/prime/primed/src/session.rs b/prime/primed/src/session.rs
+index 995dc3a..addc722 100644
+--- a/prime/primed/src/session.rs
++++ b/prime/primed/src/session.rs
+@@ -984,13 +984,10 @@ impl Session {
+         Err(SessionError::Bad("nta-unready: the gateway cannot carry XBT-NTA attestations"))
+     }
+ 
+-    /// A probe for this coinbaser, if one is due: before activation, for a gateway that did not
+-    /// advertise `nta-v1`, at most once per gateway per `nta-probe-every-secs`.
++    /// A probe for this coinbaser, if one is due: before activation, at most once per gateway per
++    /// `nta-probe-every-secs`, whether or not it advertised `nta-v1` (see `readiness`).
+     fn maybe_probe(&mut self, coinbaser_id: u8) -> Option<Vec<u8>> {
+         let chain = self.shared.nta_chain()?;
+-        if self.hello.nta_v1 {
+-            return None;
+-        }
+         let (every, ts) = (self.shared.cfg.nta_probe_every_secs, now());
+         let mut book = self.shared.readiness.lock().unwrap();
+         if !book.probe_due(&self.gateway_hex, &chain, every, ts) {
+diff --git a/prime/primed/tests/nta_readiness_e2e.rs b/prime/primed/tests/nta_readiness_e2e.rs
+index 5318f6a..7652006 100644
+--- a/prime/primed/tests/nta_readiness_e2e.rs
++++ b/prime/primed/tests/nta_readiness_e2e.rs
+@@ -103,25 +103,29 @@ fn is_probe(o: &Output) -> bool {
+ }
+ 
+ #[test]
+-fn before_activation_only_a_gateway_that_does_not_advertise_is_probed_and_only_hourly() {
++fn before_activation_every_gateway_is_probed_hourly_and_the_probe_changes_no_payee() {
+     // next block HEIGHT; activation 5 blocks on, inside the default 2016-block window
+     let (_node, primed, port, pool) = start(HEIGHT + 5, 2016, "");
+     let (a, s) = (Identity::generate(), Identity::generate());
+     let mut ga = connect(port, &pool, &a, &advertising());
+     let mut gs = connect(port, &pool, &s, &[0x99; 16]);
+ 
+-    let (_, plain) = ga.request_coinbaser_outputs(VALUE, &TIP);
+-    assert!(!plain.iter().any(is_probe), "an advertiser is not probed: {plain:?}");
++    // both get one: an advertisement is a claim, the probe is the evidence
++    let (_, ad) = ga.request_coinbaser_outputs(VALUE, &TIP);
++    assert!(is_probe(ad.last().unwrap()), "an advertiser is probed too: {ad:?}");
+     let (id, probed) = gs.request_coinbaser_outputs(VALUE, &TIP);
+     assert!(id > 0);
+-    // the probe is the last output, 70 bytes, zero value; everything before it is the same split
++    // the probe is the last output, 70 bytes, zero value; everything before it is the split
+     let last = probed.last().unwrap();
+     assert!(is_probe(last) && last.script.len() == 70, "{probed:?}");
+-    assert_eq!(&probed[..probed.len() - 1], &plain[..], "the probe changes no payee");
+     assert_eq!(probed.iter().map(|o| o.sats).sum::<u64>(), VALUE);
+-    // once an hour: the next coinbaser (a fresh one, for another value) has none
+-    let (_, again) = gs.request_coinbaser_outputs(VALUE - 1000, &TIP);
++    // once an hour: the next coinbaser (a fresh one, for another value) has none, and is the
++    // same split as the probed one without its last output
++    let (_, again) = gs.request_coinbaser_outputs(VALUE, &TIP);
+     assert!(!again.iter().any(is_probe), "{again:?}");
++    assert_eq!(&probed[..probed.len() - 1], &again[..], "the probe changes no payee");
++    let (_, again_a) = ga.request_coinbaser_outputs(VALUE - 1000, &TIP);
++    assert!(!again_a.iter().any(is_probe), "{again_a:?}");
+ 
+     let v = nta_json(&primed);
+     let r = &v["readiness"];
+@@ -130,6 +134,7 @@ fn before_activation_only_a_gateway_that_does_not_advertise_is_probed_and_only_h
+     assert_eq!(r["gateways"], serde_json::json!({"ready": 1, "unready": 0, "unknown": 1}), "{v}");
+     assert_eq!(r["unready_policy"], "refuse");
+     assert_eq!(row(&v, &a)["evidence"], "advertised nta-v1");
++    assert_eq!(row(&v, &a)["probes"]["sent"], 1);
+     assert_eq!(row(&v, &s)["status"], "unknown");
+     assert_eq!(row(&v, &s)["probes"]["sent"], 1);
+     assert_eq!(row(&v, &s)["probes"]["last_height"], HEIGHT);
+diff --git a/prime/wire/src/handshake.rs b/prime/wire/src/handshake.rs
+index 1436559..3ea89a2 100644
+--- a/prime/wire/src/handshake.rs
++++ b/prime/wire/src/handshake.rs
+@@ -25,7 +25,8 @@
+ //! `rand()` byte repeated 1–200 times (`datum_protocol_send_hello`, `datum_protocol.c:1028`
+ //! "TODO: maybe tack on other useful data here", then `memset(&hello_msg[i], rand(), j)` at
+ //! :1031–1033). The pad is filler to every server, so a Prime that does not know the marker
+-//! (or OCEAN's) reads past it exactly as it reads past random bytes.
++//! (or OCEAN's) reads past it exactly as it reads past random bytes. Prime still probes an
++//! advertiser before activation: the flag is a claim, the probe is evidence.
+ //!
+ //! **Server reply** (cmd 2, `sealed | signed`), sealed to the client's *session* box key,
+ //! signed by the pool's long-term signing key:
+-- 
+2.43.0
+

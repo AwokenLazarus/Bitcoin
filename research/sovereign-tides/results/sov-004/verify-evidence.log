@@ -1,0 +1,71 @@
+== build primed (rnd/sov-004 bc21f79) ==
+== run 1/3: 120s ==
+node: /Satoshi:29.4.2/Knots:20260508/
+peers: {'P': 2, 'H1': 2, 'H2': 2, 'X': 2, 'Y': 2} height 131
+knots: 120 s, height 141, blocks by ['P', 'H1', 'H2', 'H2', 'H1', 'P', 'P', 'P', 'H1', 'P'], snapshots {'POOL': 477, 'knots-h1': 479, 'knots-h2': 479, 'knots-proxy': 477, 'knots-mimic': 477, 'knots-hybrid': 477, 'knots-hybrid-filt': 477, 'knots-hybrid-forced': 477}
+canaries: 280 own, 40 shared, 40 decoys; own/shared leaks into pool templates 0; decoys in pool templates 36/40; decoys held by honest gateways {'knots-h1': 0, 'knots-h2': 0}
+forced hybrid: 99.0% of its template txs were in its own node's templates (within 6 s); 0.0% came from a pool template its own node never had
+| gateway | identical | jaccard | own hit/due | shared hit/due | decoys carried/due | evidence | independence | flagged | reasons |
+|---|---:|---:|---:|---:|---:|---|---:|---|---|
+| knots-h1 | 0.05 | 0.10 | 32/36 | 36/36 | 0/36 | canary | 0.889 | False |  |
+| knots-h2 | 0.05 | 0.10 | 32/36 | 30/36 | 0/36 | canary | 0.833 | False |  |
+| knots-proxy | 1.00 | 1.00 | 0/36 | 0/36 | 33/36 | canary | 0.000 | True | own-canaries-missed,shared-canaries-missed,decoys-carried |
+| knots-mimic | 0.27 | 0.93 | 0/36 | 0/36 | 33/36 | canary | 0.000 | True | own-canaries-missed,shared-canaries-missed,decoys-carried |
+| knots-hybrid | 0.00 | 0.42 | 36/36 | 36/36 | 33/36 | canary | 0.000 | True | decoys-carried |
+| knots-hybrid-filt | 0.08 | 0.25 | 36/36 | 0/36 | 0/36 | canary | 0.000 | True | shared-canaries-missed |
+| knots-hybrid-forced | 0.00 | 0.15 | 36/36 | 36/36 | 0/36 | canary | 1.000 | False |  |
+flagged (knots) ['knots-hybrid', 'knots-hybrid-filt', 'knots-mimic', 'knots-proxy']
+result results/sov-004/knots-1790320960.json
+KNOTS_OK
+== run 2/3: 120s ==
+node: /Satoshi:29.4.2/Knots:20260508/
+peers: {'P': 4, 'H1': 3, 'H2': 3, 'X': 2, 'Y': 2} height 131
+knots: 120 s, height 142, blocks by ['H1', 'H1', 'H1', 'H2', 'P', 'P', 'P', 'H1', 'P', 'P', 'H1'], snapshots {'POOL': 477, 'knots-h1': 479, 'knots-h2': 479, 'knots-proxy': 477, 'knots-mimic': 477, 'knots-hybrid': 477, 'knots-hybrid-filt': 477, 'knots-hybrid-forced': 477}
+canaries: 280 own, 40 shared, 40 decoys; own/shared leaks into pool templates 0; decoys in pool templates 34/40; decoys held by honest gateways {'knots-h1': 0, 'knots-h2': 0}
+forced hybrid: 92.1% of its template txs were in its own node's templates (within 6 s); 4.6% came from a pool template its own node never had
+| gateway | identical | jaccard | own hit/due | shared hit/due | decoys carried/due | evidence | independence | flagged | reasons |
+|---|---:|---:|---:|---:|---:|---|---:|---|---|
+| knots-h1 | 0.05 | 0.18 | 27/36 | 34/36 | 0/36 | canary | 0.750 | False |  |
+| knots-h2 | 0.05 | 0.18 | 30/36 | 34/36 | 0/36 | canary | 0.833 | False |  |
+| knots-proxy | 1.00 | 1.00 | 0/36 | 0/36 | 31/36 | canary | 0.000 | True | own-canaries-missed,shared-canaries-missed,decoys-carried |
+| knots-mimic | 0.28 | 0.94 | 0/37 | 0/37 | 32/37 | canary | 0.000 | True | own-canaries-missed,shared-canaries-missed,decoys-carried |
+| knots-hybrid | 0.00 | 0.40 | 35/36 | 36/36 | 31/36 | canary | 0.000 | True | decoys-carried |
+| knots-hybrid-filt | 0.06 | 0.24 | 35/36 | 0/36 | 0/36 | canary | 0.000 | True | shared-canaries-missed |
+| knots-hybrid-forced | 0.00 | 0.15 | 35/36 | 36/36 | 0/36 | canary | 0.972 | False |  |
+flagged (knots) ['knots-hybrid', 'knots-hybrid-filt', 'knots-mimic', 'knots-proxy']
+result results/sov-004/knots-1790321086.json
+KNOTS_OK
+== run 3/3: 120s ==
+node: /Satoshi:29.4.2/Knots:20260508/
+peers: {'P': 4, 'H1': 3, 'H2': 3, 'X': 2, 'Y': 2} height 131
+knots: 120 s, height 141, blocks by ['H1', 'P', 'H1', 'P', 'P', 'P', 'H2', 'H2', 'P', 'H1'], snapshots {'POOL': 477, 'knots-h1': 479, 'knots-h2': 479, 'knots-proxy': 477, 'knots-mimic': 477, 'knots-hybrid': 477, 'knots-hybrid-filt': 477, 'knots-hybrid-forced': 477}
+canaries: 280 own, 40 shared, 40 decoys; own/shared leaks into pool templates 0; decoys in pool templates 35/40; decoys held by honest gateways {'knots-h1': 0, 'knots-h2': 0}
+forced hybrid: 92.5% of its template txs were in its own node's templates (within 6 s); 4.0% came from a pool template its own node never had
+| gateway | identical | jaccard | own hit/due | shared hit/due | decoys carried/due | evidence | independence | flagged | reasons |
+|---|---:|---:|---:|---:|---:|---|---:|---|---|
+| knots-h1 | 0.10 | 0.23 | 28/36 | 36/36 | 0/36 | canary | 0.778 | False |  |
+| knots-h2 | 0.10 | 0.23 | 28/36 | 36/36 | 0/36 | canary | 0.778 | False |  |
+| knots-proxy | 1.00 | 1.00 | 0/36 | 0/36 | 31/36 | canary | 0.000 | True | own-canaries-missed,shared-canaries-missed,decoys-carried |
+| knots-mimic | 0.29 | 0.94 | 0/37 | 0/37 | 32/37 | canary | 0.000 | True | own-canaries-missed,shared-canaries-missed,decoys-carried |
+| knots-hybrid | 0.01 | 0.39 | 36/36 | 36/36 | 31/36 | canary | 0.000 | True | decoys-carried |
+| knots-hybrid-filt | 0.05 | 0.28 | 36/36 | 0/36 | 0/36 | canary | 0.000 | True | shared-canaries-missed |
+| knots-hybrid-forced | 0.01 | 0.20 | 36/36 | 36/36 | 0/36 | canary | 1.000 | False |  |
+flagged (knots) ['knots-hybrid', 'knots-hybrid-filt', 'knots-mimic', 'knots-proxy']
+result results/sov-004/knots-1790321213.json
+KNOTS_OK
+== summary over 3 runs ==
+| gateway | flagged runs | own hit rate | shared hit rate | decoys carried | reasons |
+|---|---:|---:|---:|---:|---|
+| knots-h1 | 0/3 | 87/108 = 0.81 | 106/108 = 0.98 | 0/108 |  |
+| knots-h2 | 0/3 | 90/108 = 0.83 | 100/108 = 0.93 | 0/108 |  |
+| knots-hybrid-forced | 0/3 | 107/108 = 0.99 | 108/108 = 1.00 | 0/108 |  |
+| knots-proxy | 3/3 | 0/108 = 0.00 | 0/108 = 0.00 | 95/108 | decoys-carried,own-canaries-missed,shared-canaries-missed |
+| knots-mimic | 3/3 | 0/110 = 0.00 | 0/110 = 0.00 | 97/110 | decoys-carried,own-canaries-missed,shared-canaries-missed |
+| knots-hybrid | 3/3 | 107/108 = 0.99 | 108/108 = 1.00 | 95/108 | decoys-carried |
+| knots-hybrid-filt | 3/3 | 107/108 = 0.99 | 0/108 = 0.00 | 0/108 | shared-canaries-missed |
+forced hybrid: share of its txs its own node templated within 6 s: [0.99, 0.921, 0.925] share of its txs from a pool template its own node never templated: [0.0, 0.046, 0.04]
+own/shared leaks into pool templates: [0, 0, 0] decoys in pool templates: ['36/40', '34/40', '35/40'] decoys held by honest nodes: [{'knots-h1': 0, 'knots-h2': 0}, {'knots-h1': 0, 'knots-h2': 0}, {'knots-h1': 0, 'knots-h2': 0}]
+honest false positives 0/6; hybrid detection 3/3; filtered hybrid 3/3; proxy 3/3; mimic 3/3
+RESULT PASS
+scoped miners left: none
+exit 0

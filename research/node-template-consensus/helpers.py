@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Mike Moore (AwokenLazarus)
 """Builders for the reference chain."""
 
 from __future__ import annotations

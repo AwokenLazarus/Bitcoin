@@ -1,0 +1,283 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: michael moore <mrmoore27@pm.me>
+Date: Fri, 25 Sep 2026 09:02:36 +0000
+Subject: [PATCH 6/8] gateway, pool: lazarus-gateway enrol and the public enrol
+ route
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+lazarus-gateway --config … enrol prints SOV-P-002 §4's LZT1 register v1|v2 from the gateway's
+persisted identity key (never a new one), at the node's tip, with G's signature and the JSON
+body the site takes; v2 needs --payout and leaves the payout signature to the wallet.
+
+pool/server.py: POST /api/sovereignty/enrol rate-limits per client IP and per G (every attempt
+counts), bounds the body to 8 KB, forwards only the fields primed reads to its loopback
+/sovereignty/enrol with the local token, and answers 503 when enrolment is shut (mode off, no
+token). The client is CF-Connecting-IP or the first X-Forwarded-For hop only from a trusted
+proxy. Nothing here stores or returns node addresses.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ lazarus/Cargo.lock           |   1 +
+ lazarus/gateway/Cargo.toml   |   3 +
+ lazarus/gateway/src/enrol.rs | 104 +++++++++++++++++++++++++++++++++++
+ lazarus/gateway/src/main.rs  |  92 ++++++++++++++++++++++++++++++-
+ 4 files changed, 199 insertions(+), 1 deletion(-)
+ create mode 100644 lazarus/gateway/src/enrol.rs
+
+diff --git a/lazarus/Cargo.lock b/lazarus/Cargo.lock
+index 576bc58..d97de47 100644
+--- a/lazarus/Cargo.lock
++++ b/lazarus/Cargo.lock
+@@ -494,6 +494,7 @@ version = "0.1.0"
+ dependencies = [
+  "base64",
+  "clap",
++ "ed25519-dalek",
+  "env_logger",
+  "hex",
+  "lazarus-protocol",
+diff --git a/lazarus/gateway/Cargo.toml b/lazarus/gateway/Cargo.toml
+index 7b00db1..530ceb3 100644
+--- a/lazarus/gateway/Cargo.toml
++++ b/lazarus/gateway/Cargo.toml
+@@ -21,3 +21,6 @@ minreq.workspace = true
+ rand.workspace = true
+ serde.workspace = true
+ serde_json.workspace = true
++
++[dev-dependencies]
++ed25519-dalek.workspace = true
+diff --git a/lazarus/gateway/src/enrol.rs b/lazarus/gateway/src/enrol.rs
+new file mode 100644
+index 0000000..a159251
+--- /dev/null
++++ b/lazarus/gateway/src/enrol.rs
+@@ -0,0 +1,104 @@
++//! `lazarus-gateway --config … enrol`: print this gateway's Sovereign TIDES registration
++//! (SOV-P-002 §4), signed by its persisted DATUM identity key `G`.
++//!
++//! v1 proves `G` and names the node canaries go to; v2 adds the payout address, which the
++//! operator then signs in their wallet (BIP322, or `signmessage` for a P2PKH payout) and pastes
++//! into the site's "Prove your template" form (`POST /api/sovereignty/enrol`).
++
++use std::path::Path;
++
++use lazarus_protocol::keys::PoolKeys;
++use lazarus_protocol::nacl;
++use serde_json::json;
++
++pub const DOMAIN: &[u8] = b"XBT-SOVEREIGN-TIDES/register\0";
++pub const POOL_NAME: &str = "lazarus-xbt";
++pub const MAX_TAG: usize = 32;
++
++pub struct Args<'a> {
++    pub version: &'a str,
++    pub node: &'a str,
++    pub tag: &'a str,
++    pub payout: Option<&'a str>,
++    pub at: (u64, String),
++}
++
++/// The message, exactly as §4.1/§4.2 lays it out (no trailing newline).
++pub fn message(g_hex: &str, a: &Args) -> Result<String, String> {
++    if a.tag.chars().count() > MAX_TAG || a.tag.chars().any(|c| c.is_control()) {
++        return Err(format!("tag must be at most {MAX_TAG} printable characters"));
++    }
++    if a.node.is_empty() || a.node.contains(char::is_whitespace) {
++        return Err("node must be host:port, xxx.onion:port or none".into());
++    }
++    let mut lines = vec![
++        format!("LZT1 register {}", a.version),
++        format!("pool: {POOL_NAME}"),
++        "chain: XBT".to_string(),
++        format!("G: {g_hex}"),
++        format!("node: {}", a.node),
++        format!("tag: {}", a.tag),
++        format!("at: {} {}", a.at.0, a.at.1),
++    ];
++    match (a.version, a.payout) {
++        ("v1", None) => {}
++        ("v2", Some(p)) if !p.trim().is_empty() => lines.push(format!("payout: {}", p.trim())),
++        ("v2", _) => return Err("v2 needs --payout <address the coinbase pays>".into()),
++        ("v1", Some(_)) => return Err("--payout is for v2".into()),
++        (v, _) => return Err(format!("version must be v1 or v2, not {v}")),
++    }
++    Ok(lines.join("\n"))
++}
++
++pub fn sign(keys: &PoolKeys, msg: &str) -> String {
++    let pre = [DOMAIN, msg.as_bytes()].concat();
++    hex::encode(nacl::sign_detached(&pre, &keys.ed_sk).expect("identity key"))
++}
++
++/// Read the persisted identity key; never make one (a new key would not be the gateway's).
++pub fn load_identity(path: &Path) -> Result<PoolKeys, String> {
++    if !path.exists() {
++        return Err(format!(
++            "{} does not exist: start the gateway once with identity_key_file set, so the key it enrols is the one it uses",
++            path.display()
++        ));
++    }
++    lazarus_protocol::keys::load_or_create_pool_keys(path).map_err(|e| format!("{}: {e}", path.display()))
++}
++
++/// What the operator pastes into the form (or POSTs), with the payout signature to fill in.
++pub fn body(msg: &str, g_sig: &str, v2: bool) -> serde_json::Value {
++    let mut b = json!({"message": msg, "g_sig": g_sig});
++    if v2 {
++        b["proof"] = json!("bip322");
++        b["payout_sig"] = json!("<BIP322 signature of the message by the payout address>");
++    }
++    b
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn prints_the_spec_message_and_signs_it_with_the_domain() {
++        let keys = lazarus_protocol::keys::generate_pool_keys();
++        let g = hex::encode(keys.ed_pk);
++        let at = (321, "ab".repeat(32));
++        let a = Args { version: "v1", node: "203.0.113.2:8333", tag: "Lazarus", payout: None, at: at.clone() };
++        let m = message(&g, &a).unwrap();
++        assert_eq!(
++            m,
++            format!("LZT1 register v1\npool: lazarus-xbt\nchain: XBT\nG: {g}\nnode: 203.0.113.2:8333\ntag: Lazarus\nat: 321 {}", at.1)
++        );
++        let sig = hex::decode(sign(&keys, &m)).unwrap();
++        use ed25519_dalek::Verifier;
++        let vk = ed25519_dalek::VerifyingKey::from_bytes(&keys.ed_pk).unwrap();
++        let s = ed25519_dalek::Signature::from_slice(&sig).unwrap();
++        assert!(vk.verify(&[DOMAIN, m.as_bytes()].concat(), &s).is_ok());
++        let v2 = Args { version: "v2", payout: Some("bcrt1pxyz"), ..a };
++        assert!(message(&g, &v2).unwrap().ends_with("\npayout: bcrt1pxyz"));
++        assert!(message(&g, &Args { payout: None, ..v2 }).is_err());
++        assert!(message(&g, &Args { version: "v1", tag: &"x".repeat(33), node: "none", payout: None, at }).is_err());
++    }
++}
+diff --git a/lazarus/gateway/src/main.rs b/lazarus/gateway/src/main.rs
+index 687e5a9..1f3e528 100644
+--- a/lazarus/gateway/src/main.rs
++++ b/lazarus/gateway/src/main.rs
+@@ -19,11 +19,43 @@ use lazarus_protocol::{identity_of, identity_script, Header};
+ use serde::Deserialize;
+ use serde_json::{json, Value};
+ 
++mod enrol;
+ mod overflow;
+ use overflow::{Gate, Overflow};
+ 
+ #[derive(Parser, Debug)]
+-struct Cli { #[arg(long)] config: PathBuf }
++struct Cli {
++    #[arg(long)]
++    config: PathBuf,
++    #[command(subcommand)]
++    cmd: Option<Cmd>,
++}
++
++#[derive(clap::Subcommand, Debug)]
++enum Cmd {
++    /// Print this gateway's Sovereign TIDES registration (LZT1 register v1|v2, SOV-P-002 §4),
++    /// signed by its identity key (identity_key_file), and exit.
++    Enrol {
++        /// v1 proves the key and names the node; v2 also binds the payout (sign it in your wallet).
++        #[arg(long, default_value = "v1")]
++        version: String,
++        /// Where canaries reach this gateway's node: host:port, xxx.onion:port, or none.
++        #[arg(long, default_value = "none")]
++        node: String,
++        /// v2: the XBT address this gateway's coinbase pays.
++        #[arg(long)]
++        payout: Option<String>,
++        /// DATUM tag to register (default: coinbase_tag from the config).
++        #[arg(long)]
++        tag: Option<String>,
++        /// Sign this "<height> <hash>" instead of the node's tip.
++        #[arg(long)]
++        at: Option<String>,
++        /// Print only the JSON body for POST /api/sovereignty/enrol.
++        #[arg(long)]
++        json: bool,
++    },
++}
+ 
+ #[derive(Clone, Debug, Deserialize)]
+ struct GwCfg {
+@@ -2292,11 +2324,69 @@ fn gbt_loop(st: Arc<Shared>) {
+         drop(due);
+     }
+ }
++/// `enrol`: the tip from the node this gateway builds on, the message, G's signature.
++fn enrol_cmd(
++    cfg: &GwCfg,
++    version: &str,
++    node: &str,
++    payout: Option<&str>,
++    tag: Option<&str>,
++    at: Option<&str>,
++    json_only: bool,
++) -> Result<(), String> {
++    let path = cfg.identity_key_file.as_ref().ok_or("identity_key_file is not set in the config: a gateway enrols its persisted key")?;
++    let keys = enrol::load_identity(path)?;
++    let at = match at {
++        Some(s) => {
++            let (h, hash) = s.trim().split_once(' ').ok_or("--at is \"<height> <hash>\"")?;
++            (h.parse::<u64>().map_err(|_| "--at height")?, hash.to_string())
++        }
++        None => {
++            let auth = cookie_auth(&cfg.rpc_cookie).ok_or_else(|| format!("rpc cookie {} unreadable", cfg.rpc_cookie.display()))?;
++            let h = rpc(&cfg.rpc, &auth, "getblockcount", json!([])).and_then(|v| v.as_u64()).ok_or("node: getblockcount")?;
++            let hash = rpc(&cfg.rpc, &auth, "getblockhash", json!([h]))
++                .and_then(|v| v.as_str().map(str::to_string))
++                .ok_or("node: getblockhash")?;
++            (h, hash)
++        }
++    };
++    let tag = tag.map(str::to_string).unwrap_or_else(|| cfg.coinbase_tag.clone().unwrap_or_default());
++    let g_hex = hex::encode(keys.ed_pk);
++    let msg = enrol::message(&g_hex, &enrol::Args { version, node, tag: &tag, payout, at })?;
++    let sig = enrol::sign(&keys, &msg);
++    let body = enrol::body(&msg, &sig, version == "v2");
++    if json_only {
++        println!("{body}");
++        return Ok(());
++    }
++    println!("{msg}\n");
++    println!("G signature: {sig}\n");
++    if version == "v2" {
++        println!("Sign the message above (every line, no trailing newline) with the payout address in your wallet");
++        println!("(BIP322; signmessage for a legacy 1... address), then paste both into the pool site's");
++        println!("\"Prove your template\" form, or POST this with payout_sig filled in:\n");
++    } else {
++        println!("Submit it on the pool site's \"Prove your template\" form, or POST this:\n");
++    }
++    println!("{body}");
++    println!("\nat must still be one of the pool node's last 144 blocks when it arrives.");
++    Ok(())
++}
++
+ fn main() {
+     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+     let cli = Cli::parse();
+     let raw = std::fs::read_to_string(&cli.config).expect("config");
+     let cfg: GwCfg = serde_json::from_str(&raw).expect("json config");
++    if let Some(Cmd::Enrol { version, node, payout, tag, at, json }) = &cli.cmd {
++        std::process::exit(match enrol_cmd(&cfg, version, node, payout.as_deref(), tag.as_deref(), at.as_deref(), *json) {
++            Ok(()) => 0,
++            Err(e) => {
++                eprintln!("enrol: {e}");
++                2
++            }
++        });
++    }
+     let extra1: [u8; 4] = rand::random();
+     let mode = run_mode(cfg.mode.as_deref());
+     // Solo pays whoever solves the block, so the fee output is the only thing standing
+-- 
+2.43.0
+

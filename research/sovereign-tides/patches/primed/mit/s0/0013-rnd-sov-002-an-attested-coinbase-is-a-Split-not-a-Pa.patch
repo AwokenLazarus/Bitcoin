@@ -1,0 +1,62 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: michael moore <mrmoore27@pm.me>
+Date: Fri, 25 Sep 2026 07:44:48 +0000
+Subject: [PATCH 13/27] rnd/sov-002: an attested coinbase is a Split, not a
+ Partial
+
+The 0-value NTA attestation outputs in an issued list pay nobody, but share
+verification counted them as miner outputs the coinbase failed to pay, so a
+coinbase paying the attested split verbatim was booked Partial.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ prime/wire/src/verify.rs | 26 +++++++++++++++++++++++++-
+ 1 file changed, 25 insertions(+), 1 deletion(-)
+
+diff --git a/prime/wire/src/verify.rs b/prime/wire/src/verify.rs
+index 7002c8f..a2bb4c4 100644
+--- a/prime/wire/src/verify.rs
++++ b/prime/wire/src/verify.rs
+@@ -288,7 +288,9 @@ pub fn classify_coinbase(
+     if let Some(iss) = issued {
+         // The pool's own output, if the list names one, takes whatever is left and is never
+         // "short"; only miner outputs are held to their amounts.
+-        let miners: Vec<&Output> = iss.iter().filter(|i| i.script != pool_script).collect();
++        // Zero-value entries (XBT-NTA attestations, rnd/sov-002) pay nobody: not miners.
++        let miners: Vec<&Output> =
++            iss.iter().filter(|i| i.script != pool_script && !(i.sats == 0 && i.script.first() == Some(&0x6a))).collect();
+         // A gateway whose template is worth less than the value the split was computed
+         // for may scale every output down by the same ratio (lazarus-gateway does; a
+         // stock gateway drops outputs that no longer fit instead). Both keep the split
+@@ -879,6 +881,28 @@ mod tests {
+         assert_eq!(check(&mut slot, &t, &policy(&iss, &pool)), Err(mining::REJECT_HIGH_HASH));
+     }
+ 
++    #[test]
++    fn an_attested_coinbase_is_a_full_split() {
++        // rnd/sov-002: the issued list is payees, the pool, then one 0-value NTA attestation
++        // per distinct paid script. Paid verbatim, that is the whole split, not a Partial.
++        let pool = pool_script();
++        let mut iss = split();
++        let paid: u64 = iss.iter().map(|o| o.sats).sum();
++        iss.push(Output { sats: VALUE - paid, script: pool.clone() });
++        for n in 0..4u8 {
++            iss.push(Output { sats: 0, script: crate::nta::attestation_script(&[n; 64]) });
++        }
++        let mut outs: Vec<TxOut> = iss.iter().map(|o| TxOut { value: o.sats, script: o.script.clone() }).collect();
++        let mut wc = vec![0x6a, 0x24, 0xaa, 0x21, 0xa9, 0xed];
++        wc.extend_from_slice(&[0x76; 32]);
++        outs.push(TxOut { value: 0, script: wc });
++        let mut slot = JobSlot::default();
++        let mut s = share(0, 4, 1, &outs, &txids(3), 1, [0; 8], [0; 8]);
++        grind(&mut slot, &mut s);
++        let v = check(&mut slot, &s, &policy(&iss, &pool)).unwrap();
++        assert_eq!(v.coinbase_kind, CoinbaseKind::Split);
++    }
++
+     #[test]
+     fn coinbase_that_underpays_or_diverts_is_rejected() {
+         let pool = pool_script();
+-- 
+2.43.0
+

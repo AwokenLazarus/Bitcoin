@@ -1,0 +1,682 @@
+From 5164677a5074b58e50b20ab5d284793eda273d93 Mon Sep 17 00:00:00 2001
+From: michael moore <mrmoore27@pm.me>
+Date: Fri, 25 Sep 2026 02:52:10 +0000
+Subject: [PATCH 1/3] xbt-nta: payee-signed coinbase attestations (inline
+ variant), regtest nta@<h>
+
+Research prototype of XBT-NTA (rnd/a1-nta, research/node-template-consensus).
+After -testactivationheight=nta@<h> (buried deployment, unscheduled on every
+network), ContextualCheckBlock requires every value-bearing coinbase output to
+pay a key-path taproot script OP_1 <K>, and each distinct payee (in output order)
+to bring a 70-byte OP_RETURN "NTA" 0x02 || sig64: a BIP340 signature by K over
+TaggedHash("XBT-NTA/attestation", script || height || nBits || prevhash).
+Fits the 83-byte RDTS OP_RETURN limit. Old nodes accept these blocks (soft fork).
+
+Not in this variant: the draft's extra transaction, inclusion list and vtxa
+sidecar/P2P. Local only, never pushed (XBT-065).
+
+feature_xbt_nta.py ports the model's test_xbt.py vectors; contrib/xbt-nta has
+the 3-node demo (before/after activation, old node follows).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ contrib/xbt-nta/demo.sh            |  26 ++++
+ contrib/xbt-nta/nta_demo.py        | 163 +++++++++++++++++++++
+ src/chainparamsbase.cpp            |   2 +-
+ src/consensus/params.h             |   9 +-
+ src/deploymentinfo.cpp             |   4 +
+ src/kernel/chainparams.cpp         |   3 +
+ src/rpc/blockchain.cpp             |   1 +
+ src/validation.cpp                 |  75 ++++++++++
+ test/functional/feature_xbt_nta.py | 227 +++++++++++++++++++++++++++++
+ test/functional/test_runner.py     |   1 +
+ 10 files changed, 509 insertions(+), 2 deletions(-)
+ create mode 100755 contrib/xbt-nta/demo.sh
+ create mode 100644 contrib/xbt-nta/nta_demo.py
+ create mode 100755 test/functional/feature_xbt_nta.py
+
+diff --git a/contrib/xbt-nta/demo.sh b/contrib/xbt-nta/demo.sh
+new file mode 100755
+index 0000000..5175f4e
+--- /dev/null
++++ b/contrib/xbt-nta/demo.sh
+@@ -0,0 +1,26 @@
++#!/usr/bin/env bash
++# XBT-065 demo: XBT-NTA Knots patch (branch rnd/xbt-065-nta, local only). No miners.
++#  1. model vectors (rnd/a1-nta research/node-template-consensus/test_xbt.py)
++#  2. functional test feature_xbt_nta.py (ported vectors), ports 30640-30692
++#  3. 3-node regtest: before/after activation, old node follows (ports 30601-30613)
++# Ports 30600-30699 and datadirs under ~/xbt-rnd/xbt-065/run only.
++set -euo pipefail
++ROOT=$HOME/xbt-rnd/xbt-065
++KNOTS=$ROOT/knots
++RUN=$ROOT/run
++BIN=$KNOTS/build/bin
++NTA=${NTA_DIR:-$HOME/Bitcoin.worktrees/rnd-a1-nta/research/node-template-consensus}
++if [[ ! -x $BIN/bitcoind ]] || [[ -n $(find "$KNOTS/src" -newer "$BIN/bitcoind" -name '*.cpp' -o -newer "$BIN/bitcoind" -name '*.h' | head -1) ]]; then
++  echo "== 0. build (nice -n 10 make -j4)"; (cd "$KNOTS/build" && nice -n 10 make -j4 bitcoind bitcoin-cli >/dev/null)
++fi
++mkdir -p "$RUN"
++echo "== 1. model: XBT profile vectors"
++(cd "$NTA" && python3 -W ignore test_xbt.py 2>&1 | tail -n 1)
++echo "== 2. functional test feature_xbt_nta.py"
++rm -rf "$RUN/ft"
++NTA_PORT_BASE=30640 python3 "$KNOTS/test/functional/feature_xbt_nta.py" \
++  --configfile "$KNOTS/build/test/config.ini" --tmpdir "$RUN/ft" > "$RUN/ft.log" 2>&1 || true
++sed -n 's/^.*TestFramework ([A-Z]*): //p' "$RUN/ft.log" | grep -v -e '^PRNG' -e '^Initializing' -e '^Cleaning up'
++grep -q "Tests successful" "$RUN/ft.log" || { echo "functional test FAILED: $RUN/ft.log"; exit 1; }
++echo "== 3. three-node regtest"
++python3 "$KNOTS/contrib/xbt-nta/nta_demo.py" "$BIN" "$RUN/demo" 30600
+diff --git a/contrib/xbt-nta/nta_demo.py b/contrib/xbt-nta/nta_demo.py
+new file mode 100644
+index 0000000..d8f3a1c
+--- /dev/null
++++ b/contrib/xbt-nta/nta_demo.py
+@@ -0,0 +1,163 @@
++#!/usr/bin/env python3
++"""XBT-NTA 3-node regtest demo (no miners; blocks are built and solved in Python).
++
++  A  enforces NTA (-testactivationheight=nta@120), mines payee-attested blocks
++  B  enforces NTA; unattested (stratum-to-pool style) blocks are handed to it
++  C  old rules (NTA unscheduled): shows the soft-fork property
++
++Before activation B accepts an unattested block. After activation B rejects one,
++C accepts it, and C then follows the heavier attested chain that A mines.
++
++usage: nta_demo.py <bindir> <rundir> <port-base>
++  ports: p2p base+1..3, rpc base+11..13 (all loopback)
++"""
++
++import os
++import shutil
++import subprocess
++import sys
++import time
++
++HERE = os.path.dirname(os.path.abspath(__file__))
++sys.path.insert(0, os.path.join(HERE, "..", "..", "test", "functional"))
++
++from test_framework.authproxy import AuthServiceProxy, JSONRPCException  # noqa: E402
++from test_framework.messages import COIN  # noqa: E402
++from test_framework.script import CScript, OP_TRUE  # noqa: E402
++from feature_xbt_nta import NTA_HEIGHT, Tmpl, att_script, keypair, p2tr  # noqa: E402
++
++BLAKE2B_HEIGHT = 101
++COMMON = [f"-testactivationheight=blake2b@{BLAKE2B_HEIGHT}", "-rdtsexpiry=4102444800",
++          "-whitelist=noban@127.0.0.1", "-listenonion=0", "-dnsseed=0", "-fixedseeds=0",
++          "-discover=0", "-upnp=0", "-natpmp=0", "-printtoconsole=0", "-server=1"]
++NODES = {
++    "A": [f"-testactivationheight=nta@{NTA_HEIGHT}"],
++    "B": [f"-testactivationheight=nta@{NTA_HEIGHT}"],
++    "C": [],
++}
++FAILS = []
++
++
++def check(ok, what):
++    print(("PASS  " if ok else "FAIL  ") + what)
++    if not ok:
++        FAILS.append(what)
++
++
++class Node:
++    def __init__(self, name, idx, bindir, rundir, base):
++        self.name, self.p2p, self.rpcport = name, base + 1 + idx, base + 11 + idx
++        self.datadir = os.path.join(rundir, name)
++        shutil.rmtree(self.datadir, ignore_errors=True)
++        os.makedirs(self.datadir)
++        args = [os.path.join(bindir, "bitcoind"), "-regtest", f"-datadir={self.datadir}",
++                f"-port={self.p2p}", f"-bind=127.0.0.1:{self.p2p}", f"-rpcport={self.rpcport}",
++                "-rpcbind=127.0.0.1", "-rpcallowip=127.0.0.1"] + COMMON + NODES[name]
++        self.proc = subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
++        self.rpc = None
++
++    def connect_rpc(self):
++        cookie = os.path.join(self.datadir, "regtest", ".cookie")
++        for _ in range(300):
++            if self.proc.poll() is not None:
++                raise SystemExit(f"node {self.name} exited ({self.proc.returncode}); see {self.datadir}/regtest/debug.log")
++            try:
++                with open(cookie) as f:
++                    auth = f.read().strip()
++                self.rpc = AuthServiceProxy(f"http://{auth}@127.0.0.1:{self.rpcport}", timeout=60)
++                self.rpc.getblockcount()
++                return
++            except (OSError, JSONRPCException):
++                time.sleep(0.1)
++        raise SystemExit(f"node {self.name}: RPC not up")
++
++    def stop(self):
++        try:
++            self.rpc.stop()
++        except Exception:
++            pass
++        try:
++            self.proc.wait(30)
++        except subprocess.TimeoutExpired:
++            self.proc.kill()
++
++    def tip(self):
++        return self.rpc.getbestblockhash()
++
++
++def wait_for(pred, secs=30):
++    end = time.time() + secs
++    while time.time() < end:
++        if pred():
++            return True
++        time.sleep(0.1)
++    return False
++
++
++def main():
++    bindir, rundir, base = sys.argv[1], sys.argv[2], int(sys.argv[3])
++    os.makedirs(rundir, exist_ok=True)
++    nodes = [Node(n, i, bindir, rundir, base) for i, n in enumerate(NODES)]
++    try:
++        for n in nodes:
++            n.connect_rpc()
++        A, B, C = nodes
++        for x, y in ((A, B), (B, C), (A, C)):
++            x.rpc.addnode(f"127.0.0.1:{y.p2p}", "onetry")
++        wait_for(lambda: all(n.rpc.getconnectioncount() >= 2 for n in nodes))
++        print(f"nodes up: A(enforce nta@{NTA_HEIGHT}) B(enforce) C(old rules); p2p {A.p2p}-{C.p2p}, rpc {A.rpcport}-{C.rpcport}")
++
++        alice_sk, alice = keypair(b"alice")   # a DATUM miner: runs a node, holds her payout key
++        _, pool = keypair(b"pool")            # a stratum pool paying its own script, no attestation
++        sub = 50 * COIN
++
++        A.rpc.generatetodescriptor(NTA_HEIGHT - 3, "raw(51)")
++        check(wait_for(lambda: len({n.tip() for n in nodes}) == 1), f"all nodes synced at height {NTA_HEIGHT - 3}")
++
++        print(f"-- before activation (block {NTA_HEIGHT - 2})")
++        t = Tmpl(B.rpc)
++        pre = t.block([(p2tr(pool), sub)])
++        check(B.rpc.submitblock(pre.serialize().hex()) is None, "B accepts an unattested block before activation")
++        check(wait_for(lambda: all(n.tip() == pre.hash for n in nodes)), "A, B and C all follow it")
++        t = Tmpl(A.rpc)
++        att = t.block([(p2tr(alice), sub), (att_script(t.sign(p2tr(alice), alice_sk)), 0)])
++        check(A.rpc.submitblock(att.serialize().hex()) is None, "A mines an attested block")
++        check(wait_for(lambda: all(n.tip() == att.hash for n in nodes)), f"all at height {NTA_HEIGHT - 1}")
++        check(A.rpc.getdeploymentinfo()["deployments"]["nta"]["active"], "NTA active for the next block on A")
++
++        print(f"-- after activation (block {NTA_HEIGHT})")
++        t = Tmpl(B.rpc)
++        stratum = t.block([(p2tr(pool), sub)])
++        r = B.rpc.submitblock(stratum.serialize().hex())
++        check(r == "bad-nta-count", f"B rejects the unattested block: {r}")
++        check(B.tip() == att.hash and A.tip() == att.hash, "A and B stay on the attested tip")
++        r = C.rpc.submitblock(stratum.serialize().hex())
++        check(r is None and C.tip() == stratum.hash, "C (old rules) accepts the unattested block")
++        time.sleep(1)
++        check(A.tip() == att.hash and B.tip() == att.hash, "relayed by C, it is still refused by A and B")
++
++        t = Tmpl(A.rpc)
++        a1 = t.block([(p2tr(alice), sub), (att_script(t.sign(p2tr(alice), alice_sk)), 0)])
++        check(A.rpc.submitblock(a1.serialize().hex()) is None, f"A mines attested block {NTA_HEIGHT}")
++        t = Tmpl(A.rpc)
++        a2 = t.block([(p2tr(alice), sub), (att_script(t.sign(p2tr(alice), alice_sk)), 0)])
++        check(A.rpc.submitblock(a2.serialize().hex()) is None, f"A mines attested block {NTA_HEIGHT + 1}")
++        check(wait_for(lambda: all(n.tip() == a2.hash for n in nodes)),
++              "C reorgs off the unattested block onto the heavier attested chain (soft fork)")
++        c_tips = {c["hash"]: c["status"] for c in C.rpc.getchaintips()}
++        a_tips = {c["hash"]: c["status"] for c in A.rpc.getchaintips()}
++        check(c_tips.get(stratum.hash) == "valid-fork", f"C: unattested block is a stale valid-fork ({c_tips.get(stratum.hash)})")
++        check(a_tips.get(stratum.hash, "invalid") == "invalid", f"A: unattested block is invalid ({a_tips.get(stratum.hash, 'invalid, never stored')})")
++        heights = {n.name: n.rpc.getblockcount() for n in nodes}
++        print(f"final heights {heights}, tip {a2.hash[:16]}…")
++        anyone = Tmpl(A.rpc).block([(CScript([OP_TRUE]), sub)])
++        check(A.rpc.submitblock(anyone.serialize().hex()) == "bad-nta-payee", "A rejects an anyone-can-spend payee")
++    finally:
++        for n in nodes:
++            n.stop()
++    print("RESULT: " + ("PASS" if not FAILS else f"FAIL ({len(FAILS)})"))
++    return 1 if FAILS else 0
++
++
++if __name__ == "__main__":
++    sys.exit(main())
+diff --git a/src/chainparamsbase.cpp b/src/chainparamsbase.cpp
+index de5a866..58c0935 100644
+--- a/src/chainparamsbase.cpp
++++ b/src/chainparamsbase.cpp
+@@ -16,7 +16,7 @@ void SetupChainParamsBaseOptions(ArgsManager& argsman)
+     argsman.AddArg("-chain=<chain>", "Use the chain <chain> (default: main). Allowed values: " LIST_CHAIN_NAMES, ArgsManager::ALLOW_ANY, OptionsCategory::CHAINPARAMS);
+     argsman.AddArg("-regtest", "Enter regression test mode, which uses a special chain in which blocks can be solved instantly. "
+                  "This is intended for regression testing tools and app development. Equivalent to -chain=regtest.", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::CHAINPARAMS);
+-    argsman.AddArg("-testactivationheight=name@height.", "Set the activation height of 'name' (segwit, bip34, dersig, cltv, csv, blake2b). (regtest-only)", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::DEBUG_TEST);
++    argsman.AddArg("-testactivationheight=name@height.", "Set the activation height of 'name' (segwit, bip34, dersig, cltv, csv, blake2b, nta). (regtest-only)", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::DEBUG_TEST);
+     argsman.AddArg("-rdtsexpiry=<time>", "Schedule the RDTS expiry: RDTS rules apply to blocks from the blake2b activation height until the parent block's median-time-past reaches <time>. Requires -testactivationheight=blake2b@<height>. (regtest-only)", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::DEBUG_TEST);
+     argsman.AddArg("-blake2b_headline=<headline>", "Specify consensus-critical proof-of-time news headline. Requires -testactivationheight=blake2b@<height>. (regtest-only)", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::DEBUG_TEST);
+     argsman.AddArg("-testcoinbasematuritylong=<start_height>:<enforce_height>:<release_height>", "Set long coinbase maturity parameters. Note that <start_height> must not be changed once used with a chainstate. (regtest-only)", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::DEBUG_TEST);
+diff --git a/src/consensus/params.h b/src/consensus/params.h
+index 45ef329..76b3b12 100644
+--- a/src/consensus/params.h
++++ b/src/consensus/params.h
+@@ -29,8 +29,9 @@ enum BuriedDeployment : int16_t {
+     DEPLOYMENT_CSV,
+     DEPLOYMENT_SEGWIT,
+     DEPLOYMENT_BLAKE2B,
++    DEPLOYMENT_NTA, // XBT-NTA payee-signed template attestations (research, regtest only)
+ };
+-constexpr bool ValidDeployment(BuriedDeployment dep) { return dep <= DEPLOYMENT_BLAKE2B; }
++constexpr bool ValidDeployment(BuriedDeployment dep) { return dep <= DEPLOYMENT_NTA; }
+ 
+ enum DeploymentPos : uint16_t {
+     DEPLOYMENT_TESTDUMMY,
+@@ -137,6 +138,10 @@ struct Params {
+     int SegwitHeight;
+     /** Block height at which BLAKE2b hardfork becomes active */
+     int Blake2bHeight{std::numeric_limits<int>::max()};
++    /** Block height at and after which the XBT-NTA payee-attestation rules
++     *  are enforced (see CheckNodeTemplateAttestations). Unscheduled on every
++     *  network; regtest can set it with -testactivationheight=nta@<height>. */
++    int NtaHeight{std::numeric_limits<int>::max()};
+     std::vector<unsigned char> Blake2bHeadline;
+     uint8_t Blake2bTargetShift{20};
+     /**
+@@ -216,6 +221,8 @@ struct Params {
+             return SegwitHeight;
+         case DEPLOYMENT_BLAKE2B:
+             return Blake2bHeight;
++        case DEPLOYMENT_NTA:
++            return NtaHeight;
+         } // no default case, so the compiler can warn about missing cases
+         return std::numeric_limits<int>::max();
+     }
+diff --git a/src/deploymentinfo.cpp b/src/deploymentinfo.cpp
+index 80aa0a6..7f25f06 100644
+--- a/src/deploymentinfo.cpp
++++ b/src/deploymentinfo.cpp
+@@ -35,6 +35,8 @@ std::string DeploymentName(Consensus::BuriedDeployment dep)
+         return "segwit";
+     case Consensus::DEPLOYMENT_BLAKE2B:
+         return "blake2b";
++    case Consensus::DEPLOYMENT_NTA:
++        return "nta";
+     } // no default case, so the compiler can warn about missing cases
+     return "";
+ }
+@@ -53,6 +55,8 @@ std::optional<Consensus::BuriedDeployment> GetBuriedDeployment(const std::string
+         return Consensus::BuriedDeployment::DEPLOYMENT_CSV;
+     } else if (name == "blake2b") {
+         return Consensus::BuriedDeployment::DEPLOYMENT_BLAKE2B;
++    } else if (name == "nta") {
++        return Consensus::BuriedDeployment::DEPLOYMENT_NTA;
+     }
+     return std::nullopt;
+ }
+diff --git a/src/kernel/chainparams.cpp b/src/kernel/chainparams.cpp
+index 5c22795..587b66a 100644
+--- a/src/kernel/chainparams.cpp
++++ b/src/kernel/chainparams.cpp
+@@ -656,6 +656,9 @@ public:
+             case Consensus::BuriedDeployment::DEPLOYMENT_BLAKE2B:
+                 consensus.Blake2bHeight = int{height};
+                 break;
++            case Consensus::BuriedDeployment::DEPLOYMENT_NTA:
++                consensus.NtaHeight = int{height};
++                break;
+             case Consensus::BuriedDeployment::DEPLOYMENT_SEGWIT:
+                 consensus.SegwitHeight = int{height};
+                 break;
+diff --git a/src/rpc/blockchain.cpp b/src/rpc/blockchain.cpp
+index 8af7a86..450edc0 100644
+--- a/src/rpc/blockchain.cpp
++++ b/src/rpc/blockchain.cpp
+@@ -1984,6 +1984,7 @@ UniValue DeploymentInfo(const CBlockIndex* blockindex, const ChainstateManager&
+     SoftForkDescPushBack(blockindex, softforks, chainman, Consensus::DEPLOYMENT_CLTV);
+     SoftForkDescPushBack(blockindex, softforks, chainman, Consensus::DEPLOYMENT_CSV);
+     SoftForkDescPushBack(blockindex, softforks, chainman, Consensus::DEPLOYMENT_SEGWIT);
++    SoftForkDescPushBack(blockindex, softforks, chainman, Consensus::DEPLOYMENT_NTA);
+     SoftForkDescPushBack(blockindex, softforks, chainman, Consensus::DEPLOYMENT_TESTDUMMY);
+     SoftForkDescPushBack(blockindex, softforks, chainman, Consensus::DEPLOYMENT_TAPROOT);
+     RdtsFlagDayDescPushBack(blockindex, softforks, chainman);
+diff --git a/src/validation.cpp b/src/validation.cpp
+index 26661fb..22ef2ac 100644
+--- a/src/validation.cpp
++++ b/src/validation.cpp
+@@ -42,6 +42,7 @@
+ #include <pow.h>
+ #include <primitives/block.h>
+ #include <primitives/transaction.h>
++#include <pubkey.h>
+ #include <random.h>
+ #include <script/script.h>
+ #include <script/sigcache.h>
+@@ -4821,6 +4822,74 @@ static bool ContextualCheckBlockHeaderVolatile(const CBlockHeader& block, BlockV
+     return true;
+ }
+ 
++/** XBT-NTA, inline variant (v0 of the research draft, research/node-template-consensus).
++ *
++ *  After activation every value-bearing coinbase output must pay a key-path taproot
++ *  script OP_1 <K>, and for each distinct such script (in output order) the coinbase
++ *  must carry one zero-value attestation output, in the same order:
++ *
++ *      OP_RETURN PUSH68 ( "NTA" 0x02 || sig64 )
++ *
++ *  sig64 is a BIP340 signature by K over NtaAttestationHash(script, height, nBits,
++ *  hashPrevBlock), so a pool cannot pay a script whose key it does not hold, and a
++ *  signature does not move to another height, difficulty or tip. The draft's extra
++ *  transaction and inclusion list need an attestation sidecar (vtxa) and P2P, and
++ *  are not part of this variant. The attestation output is 70 bytes, within the
++ *  83-byte RDTS OP_RETURN limit.
++ */
++static constexpr std::array<unsigned char, 6> NTA_ATTESTATION_PREFIX{OP_RETURN, 68, 'N', 'T', 'A', 0x02};
++static constexpr size_t NTA_ATTESTATION_SCRIPT_SIZE{NTA_ATTESTATION_PREFIX.size() + 64};
++
++static uint256 NtaAttestationHash(const CScript& payee, int height, uint32_t nbits, const uint256& prev)
++{
++    static const HashWriter HASHER_NTA{TaggedHash("XBT-NTA/attestation")};
++    HashWriter h{HASHER_NTA};
++    h << payee << height << nbits << prev;
++    return h.GetSHA256();
++}
++
++/** Exact bytes, like the witness commitment: any other encoding is an ordinary OP_RETURN. */
++static bool IsNtaAttestation(const CScript& script)
++{
++    return script.size() == NTA_ATTESTATION_SCRIPT_SIZE &&
++           std::equal(NTA_ATTESTATION_PREFIX.begin(), NTA_ATTESTATION_PREFIX.end(), script.begin());
++}
++
++static bool CheckNodeTemplateAttestations(const CBlock& block, int height, BlockValidationState& state)
++{
++    std::vector<CScript> payees;
++    std::vector<Span<const unsigned char>> sigs;
++    for (const CTxOut& out : block.vtx[0]->vout) {
++        if (IsNtaAttestation(out.scriptPubKey)) {
++            if (out.nValue != 0) {
++                return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-nta-att-value", "NTA attestation output carries value");
++            }
++            sigs.emplace_back(Span{out.scriptPubKey}.subspan(NTA_ATTESTATION_PREFIX.size()));
++            continue;
++        }
++        if (out.nValue == 0 || out.scriptPubKey.IsUnspendable()) continue;
++        const CScript& spk{out.scriptPubKey};
++        if (spk.size() != 34 || spk[0] != OP_1 || spk[1] != 32) {
++            return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-nta-payee", "coinbase pays a script that is not a key-path taproot output");
++        }
++        if (!XOnlyPubKey{Span{spk}.subspan(2)}.IsFullyValid()) {
++            return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-nta-payee-key", "coinbase payee key is not on the curve");
++        }
++        if (std::find(payees.begin(), payees.end(), spk) == payees.end()) payees.push_back(spk);
++    }
++    if (sigs.size() != payees.size()) {
++        return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-nta-count",
++                             strprintf("%u coinbase payees, %u NTA attestations", payees.size(), sigs.size()));
++    }
++    for (size_t i = 0; i < payees.size(); ++i) {
++        const XOnlyPubKey key{Span{payees[i]}.subspan(2)};
++        if (!key.VerifySchnorr(NtaAttestationHash(payees[i], height, block.nBits, block.hashPrevBlock), sigs[i])) {
++            return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-nta-sig", strprintf("NTA attestation %u is not signed by its payee key", i));
++        }
++    }
++    return true;
++}
++
+ /** NOTE: This function is not currently invoked by ConnectBlock(), so we
+  *  should consider upgrade issues if we change which consensus rules are
+  *  enforced in this function (eg by adding a new consensus rule). See comment
+@@ -4891,6 +4960,12 @@ static bool ContextualCheckBlock(const CBlock& block, BlockValidationState& stat
+         return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-blk-weight-reduced_data", strprintf("%s : RDTS weight limit failed", __func__));
+     }
+ 
++    // XBT-NTA: coinbase payees must bring a payee-signed attestation.
++    if (DeploymentActiveAfter(pindexPrev, chainman, Consensus::DEPLOYMENT_NTA) &&
++        !CheckNodeTemplateAttestations(block, nHeight, state)) {
++        return false;
++    }
++
+     return true;
+ }
+ 
+diff --git a/test/functional/feature_xbt_nta.py b/test/functional/feature_xbt_nta.py
+new file mode 100755
+index 0000000..6d7a6fc
+--- /dev/null
++++ b/test/functional/feature_xbt_nta.py
+@@ -0,0 +1,227 @@
++#!/usr/bin/env python3
++# Copyright (c) 2026 The Bitcoin Knots developers
++# Distributed under the MIT software license, see the accompanying
++# file COPYING or http://www.opensource.org/licenses/mit-license.php.
++"""XBT-NTA (inline variant): coinbase payees must bring a payee-signed attestation.
++
++After -testactivationheight=nta@<h>, every value-bearing coinbase output must pay a
++key-path taproot script OP_1 <K>, and for each distinct payee script (in output order)
++the coinbase carries a zero-value output OP_RETURN PUSH68("NTA" 0x02 || sig64), where
++sig64 is a BIP340 signature by K over
++
++    TaggedHash("XBT-NTA/attestation", ser(script) || height:i32 || nBits:u32 || prev:u256)
++
++Test vectors are ported from the research model (research/node-template-consensus,
++test_xbt.py on rnd/a1-nta). node0 enforces the rules; node1 runs the old rules and
++shows the soft-fork property.
++
++Set NTA_PORT_BASE to pin every port this test binds to NTA_PORT_BASE..+59.
++"""
++
++import hashlib
++import os
++import struct
++
++import test_framework.p2p as _p2p
++import test_framework.test_framework as _tf
++import test_framework.test_node as _tn
++import test_framework.util as _util
++
++from test_framework.blocktools import add_witness_commitment, create_block, create_coinbase
++from test_framework.key import TaggedHash, compute_xonly_pubkey, sign_schnorr
++from test_framework.messages import CTxOut, COIN, ser_string, ser_uint256
++from test_framework.script import CScript, OP_1, OP_RETURN, OP_TRUE
++from test_framework.test_framework import BitcoinTestFramework
++from test_framework.util import assert_equal
++
++if os.getenv("NTA_PORT_BASE"):
++    _base = int(os.environ["NTA_PORT_BASE"])
++    _p2p_port = lambda n: _base + n            # noqa: E731  n <= MAX_NODES (12)
++    _rpc_port = lambda n: _base + 20 + n       # noqa: E731
++    _tor_port = lambda n: _base + 40 + n       # noqa: E731
++    for _m in (_util, _tn, _tf, _p2p):
++        if hasattr(_m, "p2p_port"):
++            _m.p2p_port = _p2p_port
++    _util.rpc_port = _rpc_port
++    _util.tor_port = _tn.tor_port = _tor_port
++
++BLAKE2B_HEIGHT = 101
++NTA_HEIGHT = 120
++NTA_PREFIX = bytes([0x4e, 0x54, 0x41, 0x02])  # "NTA" 0x02
++SECP_P = 2**256 - 2**32 - 977
++
++
++def keypair(seed: bytes):
++    sk = hashlib.sha256(b"xbt-nta/" + seed).digest()
++    return sk, compute_xonly_pubkey(sk)[0]
++
++
++def p2tr(key: bytes) -> CScript:
++    return CScript([OP_1, key])
++
++
++def att_hash(script: CScript, height: int, nbits: int, prev: int) -> bytes:
++    return TaggedHash("XBT-NTA/attestation",
++                      ser_string(bytes(script)) + struct.pack("<i", height) +
++                      struct.pack("<I", nbits) + ser_uint256(prev))
++
++
++def att_script(sig: bytes) -> CScript:
++    return CScript([OP_RETURN, NTA_PREFIX + sig])
++
++
++class Tmpl:
++    """Where the next block goes: height, parent and nBits."""
++
++    def __init__(self, node):
++        tip = node.getbestblockhash()
++        hdr = node.getblockheader(tip)
++        self.height = hdr["height"] + 1
++        self.prev = int(tip, 16)
++        self.nbits = int(hdr["bits"], 16)
++        self.time = hdr["time"] + 1
++
++    def sign(self, script, sk, *, height=None, nbits=None, prev=None):
++        return sign_schnorr(sk, att_hash(script, self.height if height is None else height,
++                                         self.nbits if nbits is None else nbits,
++                                         self.prev if prev is None else prev))
++
++    def block(self, outs, *, witness_commitment=False):
++        """outs: list of (script, value in sats)."""
++        cb = create_coinbase(self.height)
++        cb.vout = [CTxOut(v, s) for s, v in outs]
++        cb.rehash()
++        b = create_block(self.prev, cb, self.time, height=self.height, header_v2=True)
++        b.nBits = self.nbits
++        if witness_commitment:
++            add_witness_commitment(b)
++        b.hashMerkleRoot = b.calc_merkle_root()
++        b.solve()
++        return b
++
++
++def not_on_curve_key() -> bytes:
++    x = 1
++    while pow((x ** 3 + 7) % SECP_P, (SECP_P - 1) // 2, SECP_P) == 1:
++        x += 1
++    return x.to_bytes(32, "big")
++
++
++class XbtNtaTest(BitcoinTestFramework):
++    def set_test_params(self):
++        self.num_nodes = 2
++        self.setup_clean_chain = True
++        common = [f"-testactivationheight=blake2b@{BLAKE2B_HEIGHT}", "-rdtsexpiry=4102444800",
++                  "-whitelist=noban@127.0.0.1"]
++        self.extra_args = [common + [f"-testactivationheight=nta@{NTA_HEIGHT}"], common]
++
++    def setup_network(self):
++        self.setup_nodes()  # unconnected: each block is handed to each node explicitly
++
++    def submit(self, node, block):
++        return node.submitblock(block.serialize().hex())
++
++    def accept(self, block, *nodes):
++        for n in nodes or self.nodes:
++            assert_equal(self.submit(n, block), None)
++            assert_equal(n.getbestblockhash(), block.hash)
++
++    def reject(self, block, reason):
++        assert_equal(self.submit(self.nodes[0], block), reason)
++        assert block.hash != self.nodes[0].getbestblockhash()
++
++    def run_test(self):
++        enf, old = self.nodes
++        anyone = CScript([OP_TRUE])
++        alice_sk, alice = keypair(b"alice")
++        bob_sk, bob = keypair(b"bob")
++        pool_sk, pool = keypair(b"pool")
++        cust_sk, cust = keypair(b"customer")
++        farm_sk, farm = keypair(b"farm")
++        sub = 50 * COIN
++
++        self.log.info("Mine to just below NTA activation with unattested blocks")
++        self.generatetodescriptor(enf, NTA_HEIGHT - 3, "raw(51)", sync_fun=self.no_op)
++        for h in range(1, NTA_HEIGHT - 2):
++            assert_equal(old.submitblock(enf.getblock(enf.getblockhash(h), 0)), None)
++        assert_equal(old.getbestblockhash(), enf.getbestblockhash())
++        info = enf.getdeploymentinfo()["deployments"]["nta"]
++        assert_equal((info["type"], info["height"], info["active"]), ("buried", NTA_HEIGHT, False))
++        assert "nta" not in old.getdeploymentinfo()["deployments"]
++
++        self.log.info("Before activation: a stratum-style block paying an unattested script is valid")
++        t = Tmpl(enf)
++        assert_equal(t.height, NTA_HEIGHT - 2)
++        self.accept(t.block([(anyone, sub)]))
++        t = Tmpl(enf)
++        self.accept(t.block([(p2tr(alice), sub), (att_script(t.sign(p2tr(alice), alice_sk)), 0)]))
++        assert_equal(enf.getblockcount(), NTA_HEIGHT - 1)
++        assert enf.getdeploymentinfo()["deployments"]["nta"]["active"]
++
++        self.log.info("After activation: unattested payee rejected, old node accepts it (soft fork)")
++        t = Tmpl(enf)
++        stratum = t.block([(p2tr(pool), sub)])
++        self.reject(stratum, "bad-nta-count")
++        self.reject(t.block([(anyone, sub)]), "bad-nta-payee")
++        assert_equal(self.submit(old, stratum), None)
++        assert_equal(old.getbestblockhash(), stratum.hash)
++
++        self.log.info("x04: non-taproot payee, key off the curve")
++        wpkh = CScript([0, b"\x11" * 20])
++        self.reject(t.block([(wpkh, sub), (att_script(b"\x00" * 64), 0)]), "bad-nta-payee")
++        bad = CScript([OP_1, not_on_curve_key()])
++        self.reject(t.block([(bad, sub), (att_script(b"\x00" * 64), 0)]), "bad-nta-payee-key")
++
++        self.log.info("x03: gifted attestation (pool signs for a customer's script) fails")
++        self.reject(t.block([(p2tr(cust), sub), (att_script(t.sign(p2tr(cust), pool_sk)), 0)]), "bad-nta-sig")
++
++        self.log.info("x05: a signature does not move to another height, nBits, tip or payee")
++        for kw in ({"height": t.height + 1}, {"nbits": t.nbits - 1}, {"prev": t.prev ^ 1}):
++            self.reject(t.block([(p2tr(alice), sub), (att_script(t.sign(p2tr(alice), alice_sk, **kw)), 0)]), "bad-nta-sig")
++        swapped = t.block([(p2tr(alice), sub // 2), (p2tr(bob), sub // 2),
++                           (att_script(t.sign(p2tr(bob), bob_sk)), 0), (att_script(t.sign(p2tr(alice), alice_sk)), 0)])
++        self.reject(swapped, "bad-nta-sig")
++
++        self.log.info("x09: attestation count, value and encoding")
++        self.reject(t.block([(p2tr(alice), sub // 2), (p2tr(bob), sub // 2),
++                             (att_script(t.sign(p2tr(alice), alice_sk)), 0)]), "bad-nta-count")
++        sig = t.sign(p2tr(alice), alice_sk)
++        self.reject(t.block([(p2tr(alice), sub), (att_script(sig), 0), (att_script(sig), 0)]), "bad-nta-count")
++        self.reject(t.block([(p2tr(alice), sub - 1), (att_script(sig), 1)]), "bad-nta-att-value")
++        # a truncated attestation is just an OP_RETURN, so the payee is unattested
++        self.reject(t.block([(p2tr(alice), sub), (CScript([OP_RETURN, NTA_PREFIX + sig[:63]]), 0)]), "bad-nta-count")
++
++        self.log.info("x01: signed payee is valid (with a SegWit commitment beside it); old node agrees")
++        ok = t.block([(p2tr(alice), sub), (att_script(sig), 0)], witness_commitment=True)
++        self.accept(ok, enf)
++        assert self.submit(old, ok) in (None, "inconclusive")  # equal-work side branch: old keeps its first-seen tip
++        assert_equal(old.getbestblockhash(), stratum.hash)
++
++        self.log.info("x02: TIDES-style split, each payee signs; repeated script shares one attestation")
++        t = Tmpl(enf)
++        split = t.block([(p2tr(alice), sub // 4), (p2tr(bob), sub // 2), (p2tr(alice), sub // 4),
++                         (att_script(t.sign(p2tr(alice), alice_sk)), 0), (att_script(t.sign(p2tr(bob), bob_sk)), 0)])
++        self.accept(split, enf)
++
++        self.log.info("Old node reorgs from the unattested block onto the heavier attested chain")
++        assert_equal(self.submit(old, split), None)
++        assert_equal(old.getbestblockhash(), enf.getbestblockhash())
++        tips = {c["hash"]: c["status"] for c in old.getchaintips()}
++        assert_equal(tips[stratum.hash], "valid-fork")
++
++        self.log.info("x06: custody residual - a pool that holds the farm's key can sign for it")
++        t = Tmpl(enf)
++        custody = t.block([(p2tr(farm), sub), (att_script(t.sign(p2tr(farm), farm_sk)), 0)])
++        self.accept(custody)
++
++        self.log.info("Zero-value and OP_RETURN outputs are not payees")
++        t = Tmpl(enf)
++        self.accept(t.block([(CScript([OP_RETURN, b"hello"]), 0), (p2tr(bob), 0)]))
++
++        self.log.info("Restart: the enforcing node reloads the attested chain")
++        self.restart_node(0)
++        assert_equal(enf.getbestblockhash(), old.getbestblockhash())
++
++
++if __name__ == "__main__":
++    XbtNtaTest(__file__).main()
+diff --git a/test/functional/test_runner.py b/test/functional/test_runner.py
+index 337d667..80a31c9 100755
+--- a/test/functional/test_runner.py
++++ b/test/functional/test_runner.py
+@@ -100,6 +100,7 @@ BASE_SCRIPTS = [
+     'feature_reduced_data_temporary_deployment.py',
+     'feature_bip9_max_activation_height.py',
+     'feature_rdts.py',
++    'feature_xbt_nta.py',
+     'feature_rdts_ignore_rejects.py',
+     'feature_block.py',
+     'mempool_ephemeral_dust.py',
+-- 
+2.43.0
+

@@ -1,0 +1,74 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: michael moore <mrmoore27@pm.me>
+Date: Fri, 25 Sep 2026 08:25:55 +0000
+Subject: [PATCH 2/8] rnd/sov-002: lazarus-gateway serves the block its node
+ last refused (/rejected)
+
+An invalid block is never relayed and Knots refuses NTA before storing it, so
+the gateway's copy is the only one: kept in memory, served with its reason.
+(primed asks gateways for the full block before submitting; lazarus-gateway
+does not answer that, so primed's rejected-blocks copy only covers stock ones.)
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ lazarus/gateway/src/main.rs | 16 ++++++++++++++--
+ 1 file changed, 14 insertions(+), 2 deletions(-)
+
+diff --git a/lazarus/gateway/src/main.rs b/lazarus/gateway/src/main.rs
+index 2676495..527d81a 100644
+--- a/lazarus/gateway/src/main.rs
++++ b/lazarus/gateway/src/main.rs
+@@ -881,6 +881,9 @@ struct Shared {
+     nta: Option<lazarus_protocol::nta::Signer>,
+     /// Last (prev, height, nbits) signed, and when the tip was first seen here, for the log.
+     nta_last: Mutex<Option<([u8; 32], u32, u32)>>,
++    /// The last block our node refused (height, reason, block hex), served at `/rejected`: an
++    /// invalid block is never relayed, so this is the only copy anyone can check again.
++    last_rejected: Mutex<Option<(u32, String, String)>>,
+     /// Newest template. Solo mode builds a job from it whenever a miner authorises, so a
+     /// session that arrives mid-template does not wait for the next one.
+     tpl: Mutex<Option<Arc<Template>>>,
+@@ -1849,7 +1852,8 @@ fn maybe_submit_block(st: &Shared, j: &Job, hdr: &HeaderV2) {
+     }
+     let blk = assemble_block(&st.extra1, j, hdr);
+     log::info!("submitblock height={} outputs={} bytes={}", j.height(), j.outputs(), blk.len());
+-    let body = json!({"jsonrpc":"1.0","id":"sb","method":"submitblock","params":[hex::encode(&blk)]});
++    let blk_hex = hex::encode(&blk);
++    let body = json!({"jsonrpc":"1.0","id":"sb","method":"submitblock","params":[blk_hex]});
+     let outcome = match minreq::post(&st.cfg.rpc).with_timeout(30).with_header("Authorization", &auth).with_header("Content-Type", "application/json").with_body(body.to_string()).send() {
+         Ok(r) => {
+             let txt = r.as_str().unwrap_or("");
+@@ -1869,6 +1873,8 @@ fn maybe_submit_block(st: &Shared, j: &Job, hdr: &HeaderV2) {
+                     }
+                     Some(x) => {
+                         log::warn!("submitblock result: {x}");
++                        let reason = x.as_str().unwrap_or("").to_string();
++                        *lk(&st.last_rejected) = Some((j.height(), reason, blk_hex.clone()));
+                         format!("rejected:{x}")
+                     }
+                 }
+@@ -1969,6 +1975,12 @@ fn api_loop(st: Arc<Shared>) {
+             let path = req.split_whitespace().nth(1).unwrap_or("/");
+             let (ctype, body) = if path.starts_with("/audit") {
+                 ("application/json", audit_json(&st))
++            } else if path.starts_with("/rejected") {
++                let r = lk(&st.last_rejected).clone();
++                ("application/json", match r {
++                    Some((height, reason, hex)) => json!({"height": height, "reason": reason, "block_hex": hex}),
++                    None => Value::Null,
++                }.to_string())
+             } else if path.starts_with("/solo.json") {
+                 ("application/json", solo_json(&st))
+             } else if path.starts_with("/proxied") {
+@@ -2302,7 +2314,7 @@ fn main() {
+     let (utx, urx) = mpsc::channel();
+     let st = Arc::new(Shared {
+         cfg: cfg.clone(), mode,
+-        nta, nta_last: Mutex::new(None),
++        nta, nta_last: Mutex::new(None), last_rejected: Mutex::new(None),
+         tpl: Mutex::new(None),
+         solo_fee_script: fee_script, solo_fee_bps: fee_bps,
+         solo: Mutex::new(load_solo_book(solo_dir.as_ref())),
+-- 
+2.43.0
+

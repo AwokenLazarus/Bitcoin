@@ -1,0 +1,82 @@
+From 8a153ba77f6c109a505429516dafda6834e7838a Mon Sep 17 00:00:00 2001
+From: michael moore <mrmoore27@pm.me>
+Date: Fri, 25 Sep 2026 04:22:08 +0000
+Subject: [PATCH 2/3] xbt-nta: getblocktemplate keeps working after activation
+
+After nta@<h> every template failed CreateNewBlock's TestBlockValidity with
+bad-nta-payee: the placeholder coinbase pays the node's (empty or configured)
+script, and the node holds no payee key. Prime and DATUM gateways build their
+coinbases from getblocktemplate, so an NTA chain had no templates at all.
+
+Check the transaction set against a zero-value placeholder coinbase once NTA
+is active; coinbasevalue is unchanged. A block built from the placeholder as
+is (generate*) is still refused on submission. feature_xbt_nta.py covers both.
+
+Found by XBT-071 (Sovereign TIDES + NTA integrated regtest). Local research
+branch rnd/a2-nta on top of rnd/xbt-065-nta; never pushed.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/node/miner.cpp                 | 14 +++++++++++++-
+ test/functional/feature_xbt_nta.py | 13 ++++++++++++-
+ 2 files changed, 25 insertions(+), 2 deletions(-)
+
+diff --git a/src/node/miner.cpp b/src/node/miner.cpp
+index 5fe1039..be28807 100644
+--- a/src/node/miner.cpp
++++ b/src/node/miner.cpp
+@@ -231,7 +231,19 @@ std::shared_ptr<CBlockTemplate> BlockAssembler::CreateNewBlock()
+     pblocktemplate->vTxSigOpsCost[0] = WITNESS_SCALE_FACTOR * GetLegacySigOpCount(*pblock->vtx[0]);
+ 
+     BlockValidationState state;
+-    if (m_options.test_block_validity && !TestBlockValidity(state, chainparams, m_chainstate, *pblock, pindexPrev,
++    // XBT-NTA: the template's coinbase is a placeholder that the pool or gateway replaces with
++    // payee-signed outputs, and this node holds no payee key. Check the transaction set against a
++    // zero-value placeholder so getblocktemplate keeps working after activation; a block built
++    // from this coinbase as is (generate*) is still refused on submission.
++    CBlock nta_check;
++    const bool nta_placeholder{DeploymentActiveAfter(pindexPrev, m_chainstate.m_chainman, Consensus::DEPLOYMENT_NTA)};
++    if (nta_placeholder) {
++        nta_check = *pblock;
++        CMutableTransaction cb{*nta_check.vtx[0]};
++        cb.vout[0].nValue = 0;
++        nta_check.vtx[0] = MakeTransactionRef(std::move(cb));
++    }
++    if (m_options.test_block_validity && !TestBlockValidity(state, chainparams, m_chainstate, nta_placeholder ? nta_check : *pblock, pindexPrev,
+                                                             /*fCheckPOW=*/false, /*fCheckMerkleRoot=*/false)) {
+         throw std::runtime_error(strprintf("%s: TestBlockValidity failed: %s", __func__, state.ToString()));
+     }
+diff --git a/test/functional/feature_xbt_nta.py b/test/functional/feature_xbt_nta.py
+index 6d7a6fc..999b0f5 100755
+--- a/test/functional/feature_xbt_nta.py
++++ b/test/functional/feature_xbt_nta.py
+@@ -32,7 +32,7 @@ from test_framework.key import TaggedHash, compute_xonly_pubkey, sign_schnorr
+ from test_framework.messages import CTxOut, COIN, ser_string, ser_uint256
+ from test_framework.script import CScript, OP_1, OP_RETURN, OP_TRUE
+ from test_framework.test_framework import BitcoinTestFramework
+-from test_framework.util import assert_equal
++from test_framework.util import assert_equal, assert_raises_rpc_error
+ 
+ if os.getenv("NTA_PORT_BASE"):
+     _base = int(os.environ["NTA_PORT_BASE"])
+@@ -218,6 +218,17 @@ class XbtNtaTest(BitcoinTestFramework):
+         t = Tmpl(enf)
+         self.accept(t.block([(CScript([OP_RETURN, b"hello"]), 0), (p2tr(bob), 0)]))
+ 
++        self.log.info("getblocktemplate still works after activation; a generate* block is refused")
++        # The pool or gateway replaces the template's placeholder coinbase with payee-signed
++        # outputs (XBT-071), so the template must not fail on it. The built-in miner can't sign.
++        tmpl = enf.getblocktemplate({"rules": ["segwit", "blake2b"]})
++        assert_equal(tmpl["height"], enf.getblockcount() + 1)
++        assert tmpl["coinbasevalue"] > 0
++        tip = enf.getbestblockhash()
++        assert_raises_rpc_error(-32603, "block not accepted",
++                                lambda: self.generatetodescriptor(enf, 1, "raw(51)", sync_fun=self.no_op))
++        assert_equal(enf.getbestblockhash(), tip)
++
+         self.log.info("Restart: the enforcing node reloads the attested chain")
+         self.restart_node(0)
+         assert_equal(enf.getbestblockhash(), old.getbestblockhash())
+-- 
+2.43.0
+

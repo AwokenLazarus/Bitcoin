@@ -1,0 +1,207 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: michael moore <mrmoore27@pm.me>
+Date: Fri, 25 Sep 2026 11:06:56 +0000
+Subject: [PATCH 24/27] Merge resolution: Merge rnd/sov-009 (bb2187a) into
+ rnd/sov-s0
+
+Linearised for publication: the side-branch commits above were replayed onto the
+first parent; this commit brings the tree to exactly a097586 (the merge).
+---
+ prime/Cargo.toml                |   3 +-
+ prime/README.md                 |  18 +++++-
+ prime/primed/src/sovereignty.rs | 108 +++++++++++++++++++++++++++++++-
+ prime/primed/src/stats.rs       |   6 +-
+ 4 files changed, 128 insertions(+), 7 deletions(-)
+
+diff --git a/prime/Cargo.toml b/prime/Cargo.toml
+index 39e8a43..1979ee9 100644
+--- a/prime/Cargo.toml
++++ b/prime/Cargo.toml
+@@ -27,7 +27,8 @@ tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "time"
+ bech32 = "0.11"
+ bs58 = { version = "0.5", features = ["check"] }
+ thiserror = "1"
+-secp256k1 = "0.29"
++# XBT-NTA (rnd/sov-002): BIP340 attestations. No rand: signing uses zero aux randomness.
++secp256k1 = { version = "0.29", default-features = false, features = ["std"] }
+ bitcoin_hashes = "0.14"
+ 
+ [profile.release]
+diff --git a/prime/README.md b/prime/README.md
+index a1a786b..94a8105 100644
+--- a/prime/README.md
++++ b/prime/README.md
+@@ -402,11 +402,25 @@ detector and the score):
+ | `observe` | Job snapshots, attestations and blocks are recorded. The detector runs in the background every `sovereignty-recompute-secs` (default 300) on a copy of its store, never under the ledger lock; stats.json and `GET /sovereignty.json` serve the last pass (`compute_ms`, `computed_at`), with `published: false`. |
+ | `publish` | As `observe`, with `published: true` for the pool site. |
+ 
+-`POST /sovereignty/{enrol,attest}` need the mode on and the token from
++`POST /sovereignty/{enrol,attest,canary}` need the mode on and the token from
+ `data-dir/sovereignty.token` in an `X-Sovereignty-Token` header; the other POSTs (the old
+-`register`, snapshot, canary, credit, observe, apply-bonus) also need `sovereignty-demo = true`
++`register`, snapshot, check, credit, observe, apply-bonus) also need `sovereignty-demo = true`
+ (local rnd only).
+ 
++**Canary evidence comes from canary checks (SOV-P-002 W8).** The canary sidecar
++(`lazarus/canary/`, W9) reports each canary it places with `POST /sovereignty/canary`
++`{"gateway": G, "t": <delivered, unix s>, "txid": <hex>, "kind": "own"|"shared"|"decoy"}`.
++An own canary schedules one extra check of that gateway `sovereignty-canary-check-secs`
++(default 45) later: on its next 5 s tick the session sends `request_full_block` for the newest
++job the gateway has sent (whatever its shares scored). The reply counts only if its transactions hash to that job's merkle branches, so a
++gateway cannot answer with a list its miners are not hashing (refusals are logged and counted
++in `/sovereignty.json` `store.checks_refused`). A canary is judged by the checks of jobs Prime
++first saw 12–180 s after its delivery, and hit if one of them holds it; shared canaries and
++decoys are read from the same job lists. Job snapshots still feed the timing and cluster
++features but are no canary evidence. One gateway gets at most one canary check per
++`sovereignty-canary-check-gap-secs` (default 300: a full block is megabytes of upload for it);
++checks due together are made once. 256 checks are kept per key.
++
+ **Registration** (`POST /sovereignty/enrol`, SOV-P-002 §4; public through `pool/server.py`'s
+ rate-limited `POST /api/sovereignty/enrol`). `lazarus-gateway --config … enrol [--version v2
+ --payout ADDR] [--node host:port]` prints the message from the gateway's persisted identity key:
+diff --git a/prime/primed/src/sovereignty.rs b/prime/primed/src/sovereignty.rs
+index 238e28a..3d7d7fe 100644
+--- a/prime/primed/src/sovereignty.rs
++++ b/prime/primed/src/sovereignty.rs
+@@ -1395,7 +1395,7 @@ impl Engine {
+     ) -> bool {
+         let g_hex = hex::encode(g);
+         let house = house_session || self.is_house(&g_hex);
+-        let registered = self.lookup(&g_hex).is_some() || self.demo;
++        let registered = self.active(&g_hex).is_some() || self.demo;
+         let attested = result.is_ok() && registered && !house;
+         if attested {
+             let key = JobKey { g, prev: a.prev_hash, branches_hash: a.branches_hash }.id();
+@@ -2438,6 +2438,112 @@ mod tests {
+         );
+     }
+ 
++    /// A DATUM attestation for a fresh job by `g`, and the coinbase it commits to.
++    fn datum_job(g: &Identity, seed: u8) -> (Attestation, [u8; SIG], Coinbase, Hash, Vec<Hash>) {
++        let prev = [seed; 32];
++        let txs: Vec<Hash> = (1..=3u8).map(|i| [i ^ seed; 32]).collect();
++        let branches = datum_wire::pow::merkle_branches_for_coinbase(&txs);
++        let mut outs = sample_outs(312_538_966);
++        let (a, sig, c) = attest(g, 966_267, &prev, &branches, &outs, NodeView::default());
++        outs.push(c);
++        let (bytes, _, _) = coinbase::build(966_267, b"Lazarus", &outs, 0);
++        (a, sig, coinbase::parse(&bytes).unwrap(), prev, branches)
++    }
++
++    /// W7: a verified DATUM attestation from a registered key is an attested job (its shares
++    /// credit, its block counts as verified); unregistered, house and failed ones are only
++    /// logged. Every verdict is counted.
++    #[test]
++    fn datum_attestations_enter_the_set_only_verified_registered_and_not_house() {
++        let dir = std::env::temp_dir().join(format!("sov007-attest-{}", std::process::id()));
++        let _ = std::fs::remove_dir_all(&dir);
++        std::fs::create_dir_all(&dir).unwrap();
++        let mut e = Engine { dir: dir.clone(), ..engine() };
++        let (reg, unreg, house) = (
++            Identity::from_secret_bytes(&[0x61; 64]),
++            Identity::from_secret_bytes(&[0x62; 64]),
++            Identity::from_secret_bytes(&[0x63; 64]),
++        );
++        e.register(&hex::encode(reg.sign_pk()), "bc1qreg", false, None).unwrap();
++        e.register(&hex::encode(house.sign_pk()), "", true, None).unwrap();
++        e.demo = false;
++
++        let (a, sig, cb, prev, branches) = datum_job(&reg, 0x31);
++        let verdict = authorship::verify(&cb, &a, &sig, &prev, &branches, Some(&reg.sign_pk())).map(|_| ());
++        assert!(e.note_datum_verdict(reg.sign_pk(), false, 4, 0, &a, &sig, verdict));
++        let g_hex = hex::encode(reg.sign_pk());
++        e.note_share(&g_hex, false, "bc1qminer", 8, &prev, &branches, 1_000);
++        assert_eq!(e.authored.iter().map(|x| x.work).sum::<u64>(), 8, "shares on the job are attested work");
++        assert!(e.note_block(&g_hex, false, None, &cb, &prev, &branches, 966_267, "bb"));
++        assert!(e.blocks.back().unwrap().verified, "and its block is verified");
++
++        let (a2, sig2, cb2, prev2, br2) = datum_job(&unreg, 0x32);
++        let v2 = authorship::verify(&cb2, &a2, &sig2, &prev2, &br2, Some(&unreg.sign_pk())).map(|_| ());
++        assert!(v2.is_ok());
++        assert!(!e.note_datum_verdict(unreg.sign_pk(), false, 5, 0, &a2, &sig2, v2), "not registered");
++
++        let (a3, sig3, _, _, _) = datum_job(&house, 0x33);
++        assert!(!e.note_datum_verdict(house.sign_pk(), false, 6, 0, &a3, &sig3, Ok(())), "house key");
++        assert!(!e.note_datum_verdict(reg.sign_pk(), true, 6, 1, &a3, &sig3, Ok(())), "house session");
++
++        let (a4, sig4, _, _, _) = datum_job(&reg, 0x34);
++        assert!(!e.note_datum_verdict(reg.sign_pk(), false, 7, 2, &a4, &sig4, Err(AttestError::WrongPayout)));
++
++        let d = &e.datum_attest;
++        assert_eq!((d.verified, d.failed), (4, 1));
++        assert_eq!(d.reasons.get("WrongPayout"), Some(&1));
++        assert_eq!(d.last.len(), 5);
++        let lines: Vec<AttestVerdict> = std::fs::read_to_string(dir.join(ATTEST_FILE))
++            .unwrap()
++            .lines()
++            .map(|l| serde_json::from_str(l).unwrap())
++            .collect();
++        assert_eq!(lines, d.last.iter().cloned().collect::<Vec<_>>(), "every verdict is on disk");
++        assert_eq!(
++            lines.iter().map(|v| (v.verdict.as_str(), v.registered, v.house, v.attested)).collect::<Vec<_>>(),
++            vec![
++                ("verified", true, false, true),
++                ("verified", false, false, false),
++                ("verified", true, true, false),
++                ("verified", true, true, false),
++                ("WrongPayout", true, false, false),
++            ]
++        );
++        let body = compute(&e.inputs(now())).body;
++        assert_eq!(body["attest"]["verified"], 4, "{body}");
++        assert_eq!(body["attest"]["failed"], 1, "{body}");
++        assert_eq!(body["attest"]["reasons"]["WrongPayout"], 1, "{body}");
++        let _ = std::fs::remove_dir_all(&dir);
++    }
++
++    /// W7: `sovereignty-attest.jsonl` rolls over at the first verdict of a new (UTC) day, and
++    /// only `ATTEST_KEEP_DAYS` of old files are kept.
++    #[test]
++    fn the_attest_log_rotates_daily() {
++        assert_eq!(ymd(0), "1970-01-01");
++        assert_eq!(ymd(11_016), "2000-02-29");
++        assert_eq!(ymd(20_721), "2026-09-25");
++        let dir = std::env::temp_dir().join(format!("sov007-rotate-{}", std::process::id()));
++        let _ = std::fs::remove_dir_all(&dir);
++        std::fs::create_dir_all(&dir).unwrap();
++        let mut e = Engine { dir: dir.clone(), ..engine() };
++        let today = now() / 86_400;
++        let stale = dir.join(format!("{ATTEST_FILE}.{}", ymd(today - ATTEST_KEEP_DAYS)));
++        std::fs::write(&stale, "old\n").unwrap();
++        let g = Identity::from_secret_bytes(&[0x64; 64]);
++        let (a, sig, _, _, _) = datum_job(&g, 0x35);
++        std::fs::write(dir.join(ATTEST_FILE), "yesterday\n").unwrap();
++        e.datum_attest.day = Some(today - 1);
++        e.note_datum_verdict(g.sign_pk(), false, 1, 0, &a, &sig, Ok(()));
++        let rolled = std::fs::read_to_string(dir.join(format!("{ATTEST_FILE}.{}", ymd(today - 1)))).unwrap();
++        assert_eq!(rolled, "yesterday\n");
++        assert_eq!(std::fs::read_to_string(dir.join(ATTEST_FILE)).unwrap().lines().count(), 1);
++        assert!(!stale.exists(), "files older than the keep window go");
++        e.note_datum_verdict(g.sign_pk(), false, 2, 0, &a, &sig, Ok(()));
++        assert_eq!(std::fs::read_to_string(dir.join(ATTEST_FILE)).unwrap().lines().count(), 2, "same day: appended");
++        let _ = std::fs::remove_dir_all(&dir);
++    }
++
+     // --- registration v1/v2 (SOV-009, SOV-P-002 §4) ------------------------------------
+ 
+     use crate::enrol::{self, Checked, Kind, Proof};
+diff --git a/prime/primed/src/stats.rs b/prime/primed/src/stats.rs
+index d84daa6..9e7a0ce 100644
+--- a/prime/primed/src/stats.rs
++++ b/prime/primed/src/stats.rs
+@@ -509,9 +509,9 @@ fn header<'a>(req: &'a str, name: &str) -> Option<&'a str> {
+     })
+ }
+ 
+-/// `POST /sovereignty/*`, token already checked. `attest` (and `enrol`, handled by the caller)
+-/// are live in any mode but `off`; the rest, the old `register` included, are for local demos
+-/// (`sovereignty-demo`).
++/// `POST /sovereignty/*`, token already checked. `attest` and `canary` (and `enrol`, handled by
++/// the caller) are live in any mode but `off`; the rest, the old `register` included, are for
++/// local demos (`sovereignty-demo`).
+ fn ingest(shared: &Shared, path: &str, body: &str) -> Result<Value, String> {
+     let demo = shared.sovereignty.engine().demo();
+     let v: Value = if body.trim().is_empty() { json!({}) } else { serde_json::from_str(body).map_err(|e| e.to_string())? };
+-- 
+2.43.0
+

@@ -1,0 +1,1623 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: michael moore <mrmoore27@pm.me>
+Date: Fri, 25 Sep 2026 08:56:44 +0000
+Subject: [PATCH 22/27] prime: register gateways with LZT1 register v1/v2 and
+ bind the payout by BIP322
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+POST /sovereignty/enrol (token, loopback) takes SOV-P-002 §4's messages. v1 is signed by G
+over "XBT-SOVEREIGN-TIDES/register\0" ‖ message and names the gateway's node; v2 adds a
+payout line and the payout owner's consent: BIP322 (simple or full), the legacy signmessage
+for P2PKH (the pool node's verifymessage), or a confirmed spend from the payout to itself
+carrying OP_RETURN "LZT1E" ‖ SHA256(message)[0..16]. at must be one of the pool node's last
+144 blocks and move forward per key, so neither an old message nor one inside the window can
+be replayed.
+
+A v2's payout must match what Prime learned for the gateway (gateway-scripts.json), or else
+its first split coinbase confirms it; paying elsewhere refuses the key. A new G from the same
+payout supersedes the old one for good, its key age not carried; the payout can revoke its
+binding (LZT1 revoke v2). Key age counts from the first v2's at block. Node addresses go to
+sovereignty-nodes.json, 0600 from creation, and nowhere else. The old
+"LZT1 register G=… pool=lazarus" ingest stays for the demos only.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ prime/primed/Cargo.toml               |   8 +
+ prime/primed/src/enrol.rs             | 466 +++++++++++++++++++
+ prime/primed/src/main.rs              |   1 +
+ prime/primed/src/sovereignty.rs       | 640 +++++++++++++++++++++-----
+ prime/primed/src/state.rs             |   4 +
+ prime/primed/src/stats.rs             |  14 +-
+ prime/primed/tests/enrol_e2e.rs       | 198 ++++++++
+ prime/primed/tests/sovereignty_e2e.rs |  10 +-
+ 8 files changed, 1213 insertions(+), 128 deletions(-)
+ create mode 100644 prime/primed/src/enrol.rs
+ create mode 100644 prime/primed/tests/enrol_e2e.rs
+
+diff --git a/prime/primed/Cargo.toml b/prime/primed/Cargo.toml
+index 890c5fb..5bee176 100644
+--- a/prime/primed/Cargo.toml
++++ b/prime/primed/Cargo.toml
+@@ -15,6 +15,11 @@ path = "src/main.rs"
+ name = "stratum-grind"
+ path = "src/bin/stratum-grind.rs"
+ 
++[features]
++# Accept BIP322 payout proofs signed SIGHASH_ALL|SIGHASH_UNIFIED (0x21), as XBT Knots wallets
++# sign by default. Off: SOV-P-002 §4.2 verifies under standard BIP143/BIP341 sighash.
++unified-sighash = ["datum-wire/unified-sighash"]
++
+ [dependencies]
+ datum-wire = { path = "../wire" }
+ tides = { path = "../tides" }
+@@ -31,3 +36,6 @@ bs58.workspace = true
+ thiserror.workspace = true
+ rand_core.workspace = true
+ sha2.workspace = true
++
++[dev-dependencies]
++datum-wire = { path = "../wire", features = ["bip322-signer"] }
+diff --git a/prime/primed/src/enrol.rs b/prime/primed/src/enrol.rs
+new file mode 100644
+index 0000000..35ae5d4
+--- /dev/null
++++ b/prime/primed/src/enrol.rs
+@@ -0,0 +1,466 @@
++//! Gateway registration for Sovereign TIDES (SOV-P-002 §4, W10).
++//!
++//! * **v1** proves the DATUM identity key `G` and names the gateway's node (canary delivery):
++//!   an ed25519 signature by `G` over `"XBT-SOVEREIGN-TIDES/register\0" ‖ message`.
++//! * **v2** is v1 plus a `payout:` line and a second proof, by the payout owner: BIP322
++//!   (simple or full, [`datum_wire::bip322`]), the legacy `signmessage` for P2PKH (checked by
++//!   the pool node's `verifymessage`), or *enrol by spend*: a confirmed tx from `payout` to
++//!   itself carrying `OP_RETURN "LZT1E" ‖ SHA256(message)[0..16]`.
++//! * **revoke** (`LZT1 revoke v2`) is signed by the payout alone and ends its binding to `G`.
++//!
++//! `at: <height> <hash>` must name a block of the pool node's active chain at most
++//! [`AT_WINDOW`] − 1 blocks below its tip: a stateless nonce, so a signed message cannot be
++//! replayed later. Per key, `at` must also move forward, so an older message cannot be replayed
++//! inside the window either. The `pool:` and `chain:` lines keep a signature from being reused
++//! against another pool or chain.
++//!
++//! This module parses and checks proofs, and runs the node lookups (async); the registration
++//! rules themselves (rotation, revocation, payout consistency, key age) live in
++//! [`crate::sovereignty::Engine::enrol`].
++
++use serde_json::{json, Value};
++
++use crate::address;
++use crate::state::Shared;
++
++pub const DOMAIN: &[u8] = b"XBT-SOVEREIGN-TIDES/register\0";
++pub const POOL_NAME: &str = "lazarus-xbt";
++pub const CHAIN: &str = "XBT";
++/// `at` must be one of the last this many blocks of the pool node's chain.
++pub const AT_WINDOW: u32 = 144;
++/// Enrol-by-spend marker, followed by 16 bytes of SHA256(message).
++pub const SPEND_TAG: &[u8] = b"LZT1E";
++pub const MAX_TAG: usize = 32;
++const MAX_MESSAGE: usize = 1024;
++
++#[derive(Clone, Copy, Debug, PartialEq, Eq)]
++pub enum Kind {
++    V1,
++    V2,
++    Revoke,
++}
++
++impl Kind {
++    pub fn as_str(self) -> &'static str {
++        match self {
++            Kind::V1 => "v1",
++            Kind::V2 => "v2",
++            Kind::Revoke => "revoke",
++        }
++    }
++}
++
++/// A parsed registration or revocation message.
++#[derive(Clone, Debug, PartialEq, Eq)]
++pub struct Message {
++    pub raw: String,
++    pub kind: Kind,
++    pub g: [u8; 32],
++    pub g_hex: String,
++    /// `None` for `node: none` (and for a revocation).
++    pub node: Option<String>,
++    pub tag: String,
++    pub at_height: u32,
++    pub at_hash: String,
++    pub payout: Option<String>,
++}
++
++/// How the payout owner consented (v2 and revoke).
++#[derive(Clone, Copy, Debug, PartialEq, Eq)]
++pub enum Proof {
++    Bip322,
++    SignMessage,
++    Spend,
++}
++
++impl Proof {
++    pub fn parse(s: Option<&str>) -> Result<Proof, String> {
++        match s.unwrap_or("bip322") {
++            "bip322" => Ok(Proof::Bip322),
++            "signmessage" => Ok(Proof::SignMessage),
++            "spend" => Ok(Proof::Spend),
++            other => Err(format!("proof must be bip322, signmessage or spend, not {other:?}")),
++        }
++    }
++    pub fn as_str(self) -> &'static str {
++        match self {
++            Proof::Bip322 => "bip322",
++            Proof::SignMessage => "signmessage",
++            Proof::Spend => "spend",
++        }
++    }
++}
++
++fn field<'a>(line: Option<&'a str>, name: &str) -> Result<&'a str, String> {
++    let line = line.ok_or_else(|| format!("missing line {name:?}"))?;
++    line.strip_prefix(name)
++        .and_then(|r| r.strip_prefix(": "))
++        .ok_or_else(|| format!("expected line \"{name}: …\", got {line:?}"))
++}
++
++/// Parse the exact line format of SOV-P-002 §4.1/§4.2 (lines separated by `\n`, no trailing
++/// newline, no `\r`). `payout:` is the last line of a v2.
++pub fn parse(raw: &str) -> Result<Message, String> {
++    if raw.len() > MAX_MESSAGE {
++        return Err("message too long".into());
++    }
++    if raw.contains('\r') || raw.ends_with('\n') {
++        return Err("lines are separated by \\n, with no \\r and no trailing newline".into());
++    }
++    let mut lines = raw.split('\n');
++    let kind = match lines.next() {
++        Some("LZT1 register v1") => Kind::V1,
++        Some("LZT1 register v2") => Kind::V2,
++        Some("LZT1 revoke v2") => Kind::Revoke,
++        other => return Err(format!("first line must be LZT1 register v1|v2 or LZT1 revoke v2, got {other:?}")),
++    };
++    let pool = field(lines.next(), "pool")?;
++    if pool != POOL_NAME {
++        return Err(format!("wrong pool line: {pool:?} (this pool is {POOL_NAME})"));
++    }
++    let chain = field(lines.next(), "chain")?;
++    if chain != CHAIN {
++        return Err(format!("wrong chain line: {chain:?} (this chain is {CHAIN})"));
++    }
++    let g_hex = field(lines.next(), "G")?;
++    if g_hex.len() != 64 || !g_hex.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) {
++        return Err("G must be 64 lowercase hex digits".into());
++    }
++    let g: [u8; 32] = hex::decode(g_hex).unwrap().try_into().unwrap();
++    let (mut node, mut tag, mut payout) = (None, String::new(), None);
++    if kind == Kind::Revoke {
++        payout = Some(field(lines.next(), "payout")?.to_string());
++    } else {
++        let n = field(lines.next(), "node")?;
++        node = parse_node(n)?;
++        let t = field(lines.next(), "tag")?;
++        if t.chars().count() > MAX_TAG || t.chars().any(|c| c.is_control()) {
++            return Err(format!("tag must be at most {MAX_TAG} printable characters"));
++        }
++        tag = t.to_string();
++    }
++    let at = field(lines.next(), "at")?;
++    let (h, hash) = at.split_once(' ').ok_or("at must be \"<height> <block hash>\"")?;
++    let at_height: u32 = h.parse().map_err(|_| "at height is not a number")?;
++    if hash.len() != 64 || !hash.bytes().all(|b| b.is_ascii_hexdigit()) {
++        return Err("at hash must be 64 hex digits".into());
++    }
++    if kind == Kind::V2 {
++        payout = Some(field(lines.next(), "payout")?.to_string());
++    }
++    if let Some(extra) = lines.next() {
++        return Err(format!("unexpected line {extra:?}"));
++    }
++    if payout.as_deref().is_some_and(|p| p.is_empty() || p.len() > 90) {
++        return Err("payout must be an address".into());
++    }
++    Ok(Message {
++        raw: raw.to_string(),
++        kind,
++        g,
++        g_hex: g_hex.to_string(),
++        node,
++        tag,
++        at_height,
++        at_hash: hash.to_ascii_lowercase(),
++        payout,
++    })
++}
++
++/// `host:port`, `[v6]:port`, `xxx.onion:port`, or `none`.
++fn parse_node(n: &str) -> Result<Option<String>, String> {
++    if n == "none" {
++        return Ok(None);
++    }
++    let bad = || format!("node must be host:port, [ipv6]:port, xxx.onion:port or none, not {n:?}");
++    let (host, port) = n.rsplit_once(':').ok_or_else(bad)?;
++    let port: u16 = port.parse().map_err(|_| bad())?;
++    if port == 0 || host.is_empty() || host.len() > 255 {
++        return Err(bad());
++    }
++    let ok = if let Some(v6) = host.strip_prefix('[').and_then(|h| h.strip_suffix(']')) {
++        v6.parse::<std::net::Ipv6Addr>().is_ok()
++    } else {
++        host.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-')
++            && !host.starts_with(['.', '-'])
++            && !host.ends_with(['.', '-'])
++    };
++    if !ok {
++        return Err(bad());
++    }
++    Ok(Some(n.to_string()))
++}
++
++/// The bytes G signs.
++pub fn g_preimage(raw: &str) -> Vec<u8> {
++    [DOMAIN, raw.as_bytes()].concat()
++}
++
++pub fn check_g_sig(m: &Message, sig_hex: &str) -> Result<(), String> {
++    let sig: [u8; 64] = hex::decode(sig_hex.trim())
++        .ok()
++        .and_then(|b| b.try_into().ok())
++        .ok_or("g_sig must be 128 hex digits")?;
++    datum_wire::crypto::verify(&m.g, &g_preimage(&m.raw), &sig).map_err(|_| "bad G signature".to_string())
++}
++
++/// `at` against the pool node: `tip` its height, `hash_at` the hash of its block at the
++/// message's height (`None` if it has none).
++pub fn check_at(m: &Message, tip: u32, hash_at: Option<&str>) -> Result<(), String> {
++    if m.at_height > tip {
++        return Err(format!("at height {} is ahead of the pool node's tip {tip}", m.at_height));
++    }
++    let behind = tip - m.at_height;
++    if behind >= AT_WINDOW {
++        return Err(format!(
++            "stale at: height {} is {behind} blocks below the tip {tip}; it must be one of the last {AT_WINDOW}",
++            m.at_height
++        ));
++    }
++    if hash_at.map(str::to_ascii_lowercase).as_deref() != Some(m.at_hash.as_str()) {
++        return Err(format!("at: {} is not the pool node's block at height {}", m.at_hash, m.at_height));
++    }
++    Ok(())
++}
++
++/// The enrol-by-spend marker script: `OP_RETURN PUSH21("LZT1E" ‖ SHA256(message)[0..16])`.
++pub fn spend_marker(raw: &str) -> Vec<u8> {
++    let mut data = SPEND_TAG.to_vec();
++    data.extend_from_slice(&datum_wire::bip322::sha256(raw.as_bytes())[..16]);
++    let mut s = vec![0x6a, data.len() as u8];
++    s.extend_from_slice(&data);
++    s
++}
++
++/// A verbose (`getrawtransaction … 2`) transaction as an enrol-by-spend proof for
++/// `payout_script`: confirmed, every input spends `payout`, every other output pays it back,
++/// and exactly one output is the marker.
++pub fn check_spend(tx: &Value, payout_script: &[u8], raw: &str, at_height: u32, block_height: Option<u32>) -> Result<(), String> {
++    let confs = tx["confirmations"].as_u64().unwrap_or(0);
++    if confs == 0 {
++        return Err("the enrol-by-spend tx is not confirmed yet".into());
++    }
++    if let Some(h) = block_height {
++        if h < at_height {
++            return Err("the enrol-by-spend tx is older than the message's at".into());
++        }
++    }
++    let payout_hex = hex::encode(payout_script);
++    let vin = tx["vin"].as_array().ok_or("tx has no vin")?;
++    if vin.is_empty() {
++        return Err("tx has no inputs".into());
++    }
++    for i in vin {
++        if i.get("coinbase").is_some() {
++            return Err("a coinbase is not an enrol-by-spend".into());
++        }
++        let spk = i["prevout"]["scriptPubKey"]["hex"].as_str().ok_or("node did not return the spent outputs (prevout)")?;
++        if spk != payout_hex {
++            return Err("an input of the enrol-by-spend tx is not held by the payout".into());
++        }
++    }
++    let marker = hex::encode(spend_marker(raw));
++    let mut markers = 0;
++    for o in tx["vout"].as_array().ok_or("tx has no vout")? {
++        let spk = o["scriptPubKey"]["hex"].as_str().unwrap_or("");
++        if spk.starts_with("6a") {
++            if spk != marker {
++                return Err("the tx's OP_RETURN is not LZT1E ‖ SHA256(message)[0..16] for this message".into());
++            }
++            markers += 1;
++        } else if spk != payout_hex {
++            return Err("the enrol-by-spend tx pays somewhere other than the payout".into());
++        }
++    }
++    if markers != 1 {
++        return Err("the enrol-by-spend tx must carry exactly one LZT1E output".into());
++    }
++    Ok(())
++}
++
++/// A checked message, ready for the registration rules.
++pub struct Checked {
++    pub msg: Message,
++    pub proof: Option<Proof>,
++    pub payout_script: Option<Vec<u8>>,
++    /// Time of the `at` block (key age for v2 counts from it).
++    pub at_time: u64,
++}
++
++async fn rpc(shared: &Shared, method: &str, params: Value) -> Result<Value, String> {
++    shared.rpc.call(method, params).await.map_err(|e| format!("pool node {method}: {e}"))
++}
++
++/// `POST /sovereignty/enrol` (token checked by the caller): a v1, v2 or revoke.
++///
++/// Body: `{"message", "g_sig"?, "payout_sig"?, "proof"?: "bip322"|"signmessage"|"spend",
++/// "spend_txid"?, "spend_block"?}`.
++pub async fn handle(shared: &Shared, body: &str) -> Result<Value, String> {
++    let v: Value = serde_json::from_str(body).map_err(|e| format!("body: {e}"))?;
++    let raw = v["message"].as_str().ok_or("message")?;
++    let msg = parse(raw)?;
++    if msg.kind != Kind::Revoke {
++        check_g_sig(&msg, v["g_sig"].as_str().ok_or("g_sig (G's signature) is required")?)?;
++    }
++    // at: one of the last AT_WINDOW blocks of the pool node's chain
++    let tip = rpc(shared, "getblockcount", json!([])).await?.as_u64().ok_or("getblockcount")? as u32;
++    let hash_at = if msg.at_height <= tip {
++        rpc(shared, "getblockhash", json!([msg.at_height])).await.ok().and_then(|h| h.as_str().map(str::to_string))
++    } else {
++        None
++    };
++    check_at(&msg, tip, hash_at.as_deref())?;
++    let header = rpc(shared, "getblockheader", json!([msg.at_hash, true])).await?;
++    let at_time = header["time"].as_u64().unwrap_or(0);
++
++    let (mut proof, mut payout_script) = (None, None);
++    if let Some(payout) = &msg.payout {
++        let script = address::decode_script(payout, shared.network)
++            .ok_or_else(|| format!("payout {payout:?} is not an address on this network"))?;
++        let p = Proof::parse(v["proof"].as_str())?;
++        match p {
++            Proof::Bip322 => {
++                let sig = v["payout_sig"].as_str().ok_or("payout_sig (BIP322 by the payout) is required")?;
++                let opts = datum_wire::bip322::Options { unified_sighash: true };
++                match datum_wire::bip322::verify(&script, raw.as_bytes(), sig, opts) {
++                    datum_wire::bip322::Verdict::Valid(ok) if ok.untimed() => {}
++                    datum_wire::bip322::Verdict::Valid(_) => return Err("BIP322 proof carries a timelock".into()),
++                    datum_wire::bip322::Verdict::Invalid(e) => return Err(format!("BIP322: {e}")),
++                    datum_wire::bip322::Verdict::Inconclusive(e) => {
++                        return Err(format!("BIP322 inconclusive (not accepted): {e}"))
++                    }
++                }
++            }
++            Proof::SignMessage => {
++                // BIP322: the legacy format is for P2PKH only
++                if !(script.len() == 25 && script[0] == 0x76) {
++                    return Err("signmessage is for P2PKH payouts only; use BIP322".into());
++                }
++                let sig = v["payout_sig"].as_str().ok_or("payout_sig (signmessage) is required")?;
++                let ok = rpc(shared, "verifymessage", json!([payout, sig, raw])).await?;
++                if ok != Value::Bool(true) {
++                    return Err("signmessage: the pool node's verifymessage says no".into());
++                }
++            }
++            Proof::Spend => {
++                let txid = v["spend_txid"].as_str().ok_or("spend_txid is required")?;
++                let tx = match v["spend_block"].as_str() {
++                    Some(b) => rpc(shared, "getrawtransaction", json!([txid, 2, b])).await?,
++                    None => rpc(shared, "getrawtransaction", json!([txid, 2])).await?,
++                };
++                let block_height = match tx["blockhash"].as_str() {
++                    Some(b) => rpc(shared, "getblockheader", json!([b, true])).await?["height"].as_u64().map(|h| h as u32),
++                    None => None,
++                };
++                check_spend(&tx, &script, raw, msg.at_height, block_height)?;
++            }
++        }
++        proof = Some(p);
++        payout_script = Some(script);
++    }
++    let known = shared.lookup_gateway_script(&msg.g_hex);
++    let checked = Checked { msg, proof, payout_script, at_time };
++    let rec = shared.sovereignty.engine().enrol(checked, known.as_deref())?;
++    Ok(json!({
++        "ok": true,
++        "g": rec.g,
++        "version": rec.version,
++        "status": rec.status.as_str(),
++        "payout_confirmed": rec.payout_confirmed,
++        "bound_height": rec.bound_height,
++    }))
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    pub fn v1(g: &str, node: &str, at: (u32, &str)) -> String {
++        format!("LZT1 register v1\npool: lazarus-xbt\nchain: XBT\nG: {g}\nnode: {node}\ntag: t\nat: {} {}", at.0, at.1)
++    }
++
++    #[test]
++    fn parses_the_spec_format() {
++        let g = "ab".repeat(32);
++        let h = "cd".repeat(32);
++        let m = parse(&v1(&g, "203.0.113.5:8333", (100, &h))).unwrap();
++        assert_eq!((m.kind, m.at_height, m.node.as_deref()), (Kind::V1, 100, Some("203.0.113.5:8333")));
++        let v2 = format!("{}\npayout: bcrt1qxyz", v1(&g, "none", (100, &h)).replace("register v1", "register v2"));
++        let m = parse(&v2).unwrap();
++        assert_eq!((m.kind, m.node, m.payout.as_deref()), (Kind::V2, None, Some("bcrt1qxyz")));
++        let rv = format!("LZT1 revoke v2\npool: lazarus-xbt\nchain: XBT\nG: {g}\npayout: bcrt1qxyz\nat: 7 {h}");
++        assert_eq!(parse(&rv).unwrap().kind, Kind::Revoke);
++        for node in ["abcdefghij234567.onion:8333", "[2001:db8::1]:8333", "node.example:18444"] {
++            assert!(parse(&v1(&g, node, (1, &h))).is_ok(), "{node}");
++        }
++    }
++
++    #[test]
++    fn refuses_what_the_spec_does_not_say() {
++        let g = "ab".repeat(32);
++        let h = "cd".repeat(32);
++        let good = v1(&g, "none", (1, &h));
++        let cases = [
++            (good.replace("chain: XBT", "chain: BTC"), "wrong chain line"),
++            (good.replace("pool: lazarus-xbt", "pool: ocean"), "wrong pool line"),
++            (format!("{good}\n"), "trailing newline"),
++            (good.replace('\n', "\r\n"), "\\r"),
++            (good.replace(&g, &g.to_uppercase()), "lowercase hex"),
++            (good.replace("node: none", "node: 1.2.3.4"), "node must be"),
++            (good.replace("node: none", "node: a b:1"), "node must be"),
++            (good.replace("tag: t", &format!("tag: {}", "x".repeat(33))), "at most 32"),
++            (format!("{good}\npayout: bcrt1q"), "unexpected line"),
++            (good.replace("register v1", "register v2"), "missing line \"payout\""),
++        ];
++        for (m, want) in cases {
++            let e = parse(&m).unwrap_err();
++            assert!(e.contains(want), "{m:?}: {e} (want {want})");
++        }
++    }
++
++    #[test]
++    fn at_is_a_recent_block_of_our_chain() {
++        let h = "cd".repeat(32);
++        let m = parse(&v1(&"ab".repeat(32), "none", (1000, &h))).unwrap();
++        assert!(check_at(&m, 1000, Some(&h)).is_ok());
++        assert!(check_at(&m, 1143, Some(&h)).is_ok());
++        assert!(check_at(&m, 1144, Some(&h)).unwrap_err().contains("stale at"));
++        assert!(check_at(&m, 999, None).unwrap_err().contains("ahead"));
++        assert!(check_at(&m, 1000, Some(&"ee".repeat(32))).unwrap_err().contains("not the pool node's block"));
++    }
++
++    #[test]
++    fn g_signs_the_domain_separated_message() {
++        let g = datum_wire::crypto::Identity::from_secret_bytes(&[0x42; 64]);
++        let g_hex = hex::encode(g.sign_pk());
++        let raw = v1(&g_hex, "none", (5, &"cd".repeat(32)));
++        let m = parse(&raw).unwrap();
++        assert!(check_g_sig(&m, &hex::encode(g.sign(&g_preimage(&raw)))).is_ok());
++        // the bare message (no domain) is not a registration signature
++        assert!(check_g_sig(&m, &hex::encode(g.sign(raw.as_bytes()))).is_err());
++        let other = datum_wire::crypto::Identity::from_secret_bytes(&[0x43; 64]);
++        assert!(check_g_sig(&m, &hex::encode(other.sign(&g_preimage(&raw)))).is_err());
++    }
++
++    #[test]
++    fn enrol_by_spend_shape() {
++        let payout = hex::decode("0014".to_string() + &"11".repeat(20)).unwrap();
++        let raw = "LZT1 register v2 (stand-in)";
++        let marker = hex::encode(spend_marker(raw));
++        assert_eq!(marker.len(), 2 * (2 + 5 + 16));
++        let tx = |confs: u64, out2: &str, input: &str| {
++            json!({
++                "confirmations": confs,
++                "vin": [{"prevout": {"scriptPubKey": {"hex": input}}}],
++                "vout": [{"scriptPubKey": {"hex": hex::encode(&payout)}}, {"scriptPubKey": {"hex": out2}}],
++            })
++        };
++        let p = hex::encode(&payout);
++        assert!(check_spend(&tx(1, &marker, &p), &payout, raw, 10, Some(12)).is_ok());
++        assert!(check_spend(&tx(0, &marker, &p), &payout, raw, 10, None).unwrap_err().contains("not confirmed"));
++        assert!(check_spend(&tx(1, &marker, &p), &payout, "other message", 10, Some(12)).is_err());
++        assert!(check_spend(&tx(1, &marker, "0014ff"), &payout, raw, 10, Some(12)).unwrap_err().contains("not held"));
++        assert!(check_spend(&tx(1, "0014ee", &p), &payout, raw, 10, Some(12)).is_err());
++        assert!(check_spend(&tx(1, &marker, &p), &payout, raw, 10, Some(9)).unwrap_err().contains("older"));
++    }
++}
+diff --git a/prime/primed/src/main.rs b/prime/primed/src/main.rs
+index d247907..0895616 100644
+--- a/prime/primed/src/main.rs
++++ b/prime/primed/src/main.rs
+@@ -6,6 +6,7 @@
+ 
+ mod address;
+ mod config;
++mod enrol;
+ mod node;
+ mod nta;
+ mod payouts;
+diff --git a/prime/primed/src/sovereignty.rs b/prime/primed/src/sovereignty.rs
+index bec2b40..238e28a 100644
+--- a/prime/primed/src/sovereignty.rs
++++ b/prime/primed/src/sovereignty.rs
+@@ -58,6 +58,9 @@ pub const MAX_CHECKS: usize = 256;
+ /// Canary checks one gateway may have scheduled at once; more are coalesced into the last.
+ const MAX_PENDING_CHECKS: usize = 16;
+ const TOKEN_FILE: &str = "sovereignty.token";
++const KEYS_FILE: &str = "sovereignty-keys.json";
++/// Registered gateways' node addresses: private, mode 0600, never in stats or on the site.
++pub const NODES_FILE: &str = "sovereignty-nodes.json";
+ const BLOCKS_FILE: &str = "sovereignty-blocks.jsonl";
+ /// W7 verdicts on LZT1 attestations delivered over DATUM (`0x5A`), one JSON line each. Rotated
+ /// daily to `sovereignty-attest.jsonl.<YYYY-MM-DD>`; `ATTEST_KEEP_DAYS` are kept.
+@@ -71,15 +74,113 @@ pub const TOKEN_HEADER: &str = "x-sovereignty-token";
+ const REGISTER_PREFIX: &[u8] = b"LZT1 register G=";
+ const REGISTER_SUFFIX: &[u8] = b" pool=lazarus";
+ 
++/// One key of the directory, as `sovereignty-keys.json` holds it. The node address is never
++/// here: it is in `sovereignty-nodes.json` (0600) alone.
+ #[derive(Clone, Debug, Serialize, Deserialize)]
+ pub struct KeyRecord {
+     pub g: String,
++    /// The payout address a v2 bound this key to ("" for v1, house and old demo keys).
+     pub payout: String,
+     pub first_seen: u64,
+     #[serde(default)]
+     pub house: bool,
+     #[serde(default)]
+     pub node_tag: String,
++    /// Registration: 0 the old demo ingest, 1 or 2 (SOV-P-002 §4).
++    #[serde(default)]
++    pub version: u8,
++    #[serde(default)]
++    pub status: KeyStatus,
++    /// The DATUM secondary tag the last registration named.
++    #[serde(default)]
++    pub tag: String,
++    /// `at` height of the last accepted message for this key: a later one must be newer.
++    #[serde(default)]
++    pub at_height: u32,
++    /// The first v2 that bound this key to `payout`: its `at` height and block time. Key age
++    /// (`sovereignty-min-key-age-secs`) counts from there. 0 = not bound.
++    #[serde(default)]
++    pub bound_height: u32,
++    #[serde(default)]
++    pub bound_ts: u64,
++    #[serde(default)]
++    pub payout_script: String,
++    /// The payout matched what Prime learned for this gateway (`gateway-scripts.json`, or its
++    /// first split coinbase after registering).
++    #[serde(default)]
++    pub payout_confirmed: bool,
++    /// bip322 | signmessage | spend
++    #[serde(default)]
++    pub proof: String,
++    #[serde(default)]
++    pub superseded_by: String,
++    /// Why the key is refused or revoked.
++    #[serde(default)]
++    pub note: String,
++}
++
++impl KeyRecord {
++    fn new(g: String, ts: u64) -> Self {
++        KeyRecord {
++            g,
++            payout: String::new(),
++            first_seen: ts,
++            house: false,
++            node_tag: String::new(),
++            version: 0,
++            status: KeyStatus::Active,
++            tag: String::new(),
++            at_height: 0,
++            bound_height: 0,
++            bound_ts: 0,
++            payout_script: String::new(),
++            payout_confirmed: false,
++            proof: String::new(),
++            superseded_by: String::new(),
++            note: String::new(),
++        }
++    }
++
++    pub fn active(&self) -> bool {
++        self.status == KeyStatus::Active
++    }
++
++    /// v2-bound and not refused (S5: what `bonus_eligible` will require).
++    pub fn bound(&self) -> bool {
++        self.active() && self.version == 2 && self.bound_height > 0
++    }
++}
++
++#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
++#[serde(rename_all = "kebab-case")]
++pub enum KeyStatus {
++    #[default]
++    Active,
++    /// A newer v2 from the same payout named another key; this one never comes back.
++    Superseded,
++    /// The payout revoked its binding; only a newer v2 binds the key again.
++    Revoked,
++    /// Its payout did not match the one Prime learned for the gateway.
++    Refused,
++}
++
++impl KeyStatus {
++    pub fn as_str(self) -> &'static str {
++        match self {
++            KeyStatus::Active => "active",
++            KeyStatus::Superseded => "superseded",
++            KeyStatus::Revoked => "revoked",
++            KeyStatus::Refused => "refused",
++        }
++    }
++}
++
++/// A registered key's node address (`sovereignty-nodes.json`, mode 0600).
++#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
++pub struct NodeEntry {
++    pub node: String,
++    pub at_height: u32,
++    pub updated: u64,
+ }
+ 
+ #[derive(Clone, Debug)]
+@@ -344,7 +445,10 @@ fn render(inp: &Inputs, r: &Report) -> Value {
+                     "in_pool_cluster": r.pool_cluster.contains(n),
+                     "blocks": gw_blocks.get(n.as_str()).copied().unwrap_or(0),
+                     "house": key.is_some_and(|k| k.house),
+-                    "registered": key.is_some(),
++                    "registered": key.is_some_and(|k| k.active()),
++                    "registration": key.map_or(0, |k| k.version),
++                    "status": key.map_or("unregistered", |k| k.status.as_str()),
++                    "bound": key.is_some_and(|k| k.bound()),
+                 }),
+             )
+         })
+@@ -395,6 +499,7 @@ fn render(inp: &Inputs, r: &Report) -> Value {
+         "gateways": gateways,
+         "clusters": r.clusters,
+         "flagged": r.rows.iter().filter(|(_, f)| f.flagged).map(|(n, _)| n).collect::<Vec<_>>(),
++        "registrations": registrations(&inp.keys),
+         "demo": inp.demo,
+     });
+     // W11: who earns what, and payout addresses, only when there is a bonus to explain. Node
+@@ -416,12 +521,29 @@ fn render(inp: &Inputs, r: &Report) -> Value {
+             .iter()
+             .map(|k| json!({
+                 "g": k.g, "payout": k.payout, "first_seen": k.first_seen, "house": k.house,
++                "registration": k.version, "status": k.status.as_str(), "bound_height": k.bound_height,
++                "payout_confirmed": k.payout_confirmed, "proof": k.proof,
+             }))
+             .collect::<Vec<_>>());
+     }
+     body
+ }
+ 
++/// Counts of the directory by registration and status; no keys, payouts or nodes.
++fn registrations(keys: &HashMap<String, KeyRecord>) -> Value {
++    let regs = keys.values().filter(|k| !k.house);
++    let count = |f: &dyn Fn(&KeyRecord) -> bool| keys.values().filter(|k| !k.house && f(k)).count();
++    json!({
++        "keys": regs.count(),
++        "v1": count(&|k| k.active() && k.version == 1),
++        "v2": count(&|k| k.bound()),
++        "v2_pending_payout": count(&|k| k.bound() && !k.payout_confirmed),
++        "superseded": count(&|k| k.status == KeyStatus::Superseded),
++        "revoked": count(&|k| k.status == KeyStatus::Revoked),
++        "refused": count(&|k| k.status == KeyStatus::Refused),
++    })
++}
++
+ /// Window work by kind, read under the ledger lock (O(miners)); the bonus sample adds authored
+ /// work to it outside the lock.
+ #[derive(Clone, Copy, Debug, Default)]
+@@ -662,6 +784,8 @@ pub struct Engine {
+     mode: SovereigntyMode,
+     recompute_secs: u64,
+     keys: HashMap<String, KeyRecord>,
++    /// G → node address (registration v1/v2), persisted to `NODES_FILE` only.
++    nodes: HashMap<String, NodeEntry>,
+     tracks: HashMap<String, Track>,
+     /// Own canaries per gateway; shared canaries and decoys under `ALL`.
+     canaries: HashMap<String, CanaryList>,
+@@ -705,6 +829,7 @@ impl Engine {
+             ..Engine::default()
+         };
+         e.load_keys();
++        e.load_nodes();
+         e.load_blocks();
+         for h in &cfg.house_gateways {
+             if h.is_empty() {
+@@ -713,13 +838,7 @@ impl Engine {
+             let g = h.to_ascii_lowercase();
+             e.keys
+                 .entry(g.clone())
+-                .or_insert(KeyRecord {
+-                    g: g.clone(),
+-                    payout: String::new(),
+-                    first_seen: e.started_ts,
+-                    house: true,
+-                    node_tag: "house".into(),
+-                })
++                .or_insert(KeyRecord { house: true, node_tag: "house".into(), ..KeyRecord::new(g.clone(), e.started_ts) })
+                 .house = true;
+         }
+         e
+@@ -738,8 +857,49 @@ impl Engine {
+         !self.dir.as_os_str().is_empty()
+     }
+ 
++    fn load_nodes(&mut self) {
++        let Ok(bytes) = std::fs::read(self.dir.join(NODES_FILE)) else { return };
++        if let Ok(map) = serde_json::from_slice::<HashMap<String, NodeEntry>>(&bytes) {
++            self.nodes = map;
++        }
++    }
++
++    /// Rewrite `NODES_FILE`, mode 0600 from creation (a temp file renamed over it).
++    fn persist_nodes(&self) {
++        if !self.persists() {
++            return;
++        }
++        let _ = std::fs::create_dir_all(&self.dir);
++        let sorted: BTreeMap<&String, &NodeEntry> = self.nodes.iter().collect();
++        let Ok(bytes) = serde_json::to_vec_pretty(&sorted) else { return };
++        let tmp = self.dir.join(format!("{NODES_FILE}.tmp"));
++        let _ = std::fs::remove_file(&tmp);
++        let mut opts = std::fs::OpenOptions::new();
++        opts.write(true).create_new(true);
++        #[cfg(unix)]
++        {
++            use std::os::unix::fs::OpenOptionsExt;
++            opts.mode(0o600);
++        }
++        let ok = opts
++            .open(&tmp)
++            .and_then(|mut f| f.write_all(&bytes).and_then(|_| f.sync_all()))
++            .and_then(|_| std::fs::rename(&tmp, self.dir.join(NODES_FILE)));
++        if let Err(e) = ok {
++            log::warn!("sovereignty: cannot write {NODES_FILE}: {e}");
++        }
++    }
++
++    /// The node address a registered, active key named (for canary delivery).
++    #[allow(dead_code)]
++    pub fn node_of(&self, g_hex: &str) -> Option<&str> {
++        let g = g_hex.to_ascii_lowercase();
++        self.active(&g)?;
++        self.nodes.get(&g).map(|n| n.node.as_str())
++    }
++
+     fn load_keys(&mut self) {
+-        let path = self.dir.join("sovereignty-keys.json");
++        let path = self.dir.join(KEYS_FILE);
+         let Ok(bytes) = std::fs::read(&path) else { return };
+         let Ok(list) = serde_json::from_slice::<Vec<KeyRecord>>(&bytes) else { return };
+         for r in list {
+@@ -755,9 +915,9 @@ impl Engine {
+         let mut list: Vec<&KeyRecord> = self.keys.values().collect();
+         list.sort_by(|a, b| a.g.cmp(&b.g));
+         if let Ok(bytes) = serde_json::to_vec_pretty(&list) {
+-            let tmp = self.dir.join("sovereignty-keys.json.tmp");
++            let tmp = self.dir.join(format!("{KEYS_FILE}.tmp"));
+             if std::fs::write(&tmp, bytes).is_ok() {
+-                let _ = std::fs::rename(tmp, self.dir.join("sovereignty-keys.json"));
++                let _ = std::fs::rename(tmp, self.dir.join(KEYS_FILE));
+             }
+         }
+     }
+@@ -818,10 +978,9 @@ impl Engine {
+         self.dirty = true;
+     }
+ 
+-    /// Register `G`. Proof of possession is an ed25519 signature by `G` over
+-    /// `LZT1 register G=<hex> pool=lazarus` (BIP322 binding to the payout address is the
+-    /// production path; this is the pool-side check that the caller holds the DATUM key).
+-    /// `sovereignty-demo` may omit the signature.
++    /// The pre-SOV-009 demo ingest (`POST /sovereignty/register`, `sovereignty-demo` only):
++    /// an ed25519 signature by `G` over `LZT1 register G=<hex> pool=lazarus`, which the demo
++    /// may also omit. Real registrations go through [`Engine::enrol`].
+     pub fn register(
+         &mut self,
+         g_hex: &str,
+@@ -839,13 +998,7 @@ impl Engine {
+             msg.extend_from_slice(REGISTER_SUFFIX);
+             datum_wire::crypto::verify(&g, &msg, &sigb).map_err(|_| "bad register signature".to_string())?;
+         }
+-        let rec = KeyRecord {
+-            g: g_hex.clone(),
+-            payout: payout.to_string(),
+-            first_seen: now(),
+-            house,
+-            node_tag: String::new(),
+-        };
++        let rec = KeyRecord { payout: payout.to_string(), house, ..KeyRecord::new(g_hex.clone(), now()) };
+         self.keys.insert(g_hex, rec.clone());
+         self.persist_keys();
+         self.dirty = true;
+@@ -861,14 +1014,162 @@ impl Engine {
+         self.lookup(g_hex).is_some_and(|r| r.house)
+     }
+ 
++    /// The record for this `G` if it is registered and active (not superseded, revoked or
++    /// refused).
++    pub fn active(&self, g_hex: &str) -> Option<&KeyRecord> {
++        self.lookup(g_hex).filter(|r| r.active())
++    }
++
++    /// `sovereignty-min-key-age-secs`: counted from the `at` block of the first v2 that bound
++    /// this key (SOV-P-002 §4.2), so an unbound key is never old enough. Keys from the old
++    /// demo ingest count from when they were first seen.
+     fn key_old_enough(&self, g_hex: &str, ts: u64) -> bool {
+         if self.min_key_age_secs == 0 {
+             return true;
+         }
+-        match self.lookup(g_hex) {
+-            Some(r) => ts.saturating_sub(r.first_seen) >= u64::from(self.min_key_age_secs),
+-            None => false,
++        let since = match self.active(g_hex) {
++            Some(r) if r.version == 0 => r.first_seen,
++            Some(r) if r.bound() => r.bound_ts,
++            _ => return false,
++        };
++        ts.saturating_sub(since) >= u64::from(self.min_key_age_secs)
++    }
++
++    /// Apply a checked v1, v2 or revocation ([`crate::enrol`]): the registration rules of
++    /// SOV-P-002 §4. `known` is the payout script Prime has learned for this gateway
++    /// (`gateway-scripts.json`), if any.
++    pub fn enrol(&mut self, c: crate::enrol::Checked, known: Option<&[u8]>) -> Result<KeyRecord, String> {
++        use crate::enrol::Kind;
++        let m = &c.msg;
++        let g = m.g_hex.clone();
++        if self.is_house(&g) {
++            return Err("a house key does not register (it never scores or earns)".into());
++        }
++        let ts = now();
++        if let Some(old) = self.keys.get(&g) {
++            if old.status == KeyStatus::Superseded {
++                return Err(format!("G was superseded by {} (rotation); a superseded key cannot register again", old.superseded_by));
++            }
++            if m.at_height <= old.at_height {
++                return Err(format!(
++                    "replay: at height {} is not newer than this key's last accepted message (at {})",
++                    m.at_height, old.at_height
++                ));
++            }
++            if old.status == KeyStatus::Revoked && m.kind == Kind::V1 {
++                return Err("G was revoked by its payout; only a newer v2 binds it again".into());
++            }
++        }
++        let script_hex = c.payout_script.as_deref().map(hex::encode).unwrap_or_default();
++        if m.kind == Kind::Revoke {
++            let rec = self.keys.get_mut(&g).ok_or("revoke: G is not registered")?;
++            if !rec.bound() || rec.payout_script != script_hex {
++                return Err("revoke: G is not bound to this payout".into());
++            }
++            rec.status = KeyStatus::Revoked;
++            rec.note = format!("revoked by the payout at height {}", m.at_height);
++            rec.at_height = m.at_height;
++            rec.bound_height = 0;
++            rec.bound_ts = 0;
++            let rec = rec.clone();
++            self.nodes.remove(&g);
++            self.persist_keys();
++            self.persist_nodes();
++            self.dirty = true;
++            log::info!("sovereignty: G {} revoked by its payout", &g[..16]);
++            return Ok(rec);
++        }
++        if m.kind == Kind::V2 {
++            if let Some(k) = known {
++                if hex::encode(k) != script_hex {
++                    return Err(format!(
++                        "payout {} does not match the payout Prime has learned for this gateway (gateway-scripts.json)",
++                        m.payout.as_deref().unwrap_or("")
++                    ));
++                }
++            }
++        }
++        let mut rec = self.keys.get(&g).cloned().unwrap_or_else(|| KeyRecord::new(g.clone(), ts));
++        rec.status = KeyStatus::Active;
++        rec.note.clear();
++        rec.tag = m.tag.clone();
++        rec.at_height = m.at_height;
++        if rec.version == 0 {
++            rec.version = 1;
++        }
++        if m.kind == Kind::V2 {
++            // key age counts from the first v2 that bound this key to this payout; a new
++            // payout (or a key revoked before) starts it again
++            if !rec.bound() || rec.payout_script != script_hex {
++                rec.bound_height = m.at_height;
++                rec.bound_ts = c.at_time;
++                rec.payout_confirmed = false;
++            }
++            rec.version = 2;
++            rec.payout = m.payout.clone().unwrap_or_default();
++            rec.payout_script = script_hex.clone();
++            rec.proof = c.proof.map(|p| p.as_str()).unwrap_or_default().to_string();
++            rec.payout_confirmed |= known.is_some();
++            // rotation: the same payout's older keys are superseded, their age not carried
++            for (other_g, other) in self.keys.iter_mut() {
++                if *other_g != g && other.active() && other.version == 2 && other.payout_script == script_hex {
++                    other.status = KeyStatus::Superseded;
++                    other.superseded_by = g.clone();
++                    other.bound_height = 0;
++                    other.bound_ts = 0;
++                    other.note = format!("superseded at height {}", m.at_height);
++                    self.nodes.remove(other_g);
++                    log::info!("sovereignty: G {} superseded by {}", &other_g[..16], &g[..16]);
++                }
++            }
++        }
++        match &m.node {
++            Some(n) => {
++                self.nodes.insert(g.clone(), NodeEntry { node: n.clone(), at_height: m.at_height, updated: ts });
++            }
++            None => {
++                self.nodes.remove(&g);
++            }
++        }
++        self.keys.insert(g.clone(), rec.clone());
++        self.persist_keys();
++        self.persist_nodes();
++        self.dirty = true;
++        log::info!(
++            "sovereignty: G {} registered {} (node {}, payout {})",
++            &g[..16],
++            m.kind.as_str(),
++            if m.node.is_some() { "named" } else { "none" },
++            if rec.version == 2 { if rec.payout_confirmed { "confirmed" } else { "pending its first split coinbase" } } else { "-" }
++        );
++        Ok(rec)
++    }
++
++    /// Prime learned (or re-learned) the payout a gateway's coinbase pays. A v2 waiting on its
++    /// first split coinbase is confirmed by a match and refused by anything else; a confirmed
++    /// binding whose gateway starts paying elsewhere is refused too.
++    pub fn note_gateway_payout(&mut self, g_hex: &str, script: &[u8]) {
++        let g = g_hex.to_ascii_lowercase();
++        let Some(rec) = self.keys.get_mut(&g) else { return };
++        if !rec.bound() {
++            return;
++        }
++        if rec.payout_script == hex::encode(script) {
++            if !rec.payout_confirmed {
++                rec.payout_confirmed = true;
++                log::info!("sovereignty: G {} payout confirmed by its coinbase", &g[..16]);
++            } else {
++                return;
++            }
++        } else {
++            rec.status = KeyStatus::Refused;
++            rec.note = "the gateway's coinbase pays another payout than the v2 bound".into();
++            rec.bound_height = 0;
++            rec.bound_ts = 0;
++            log::warn!("sovereignty: G {} refused: its coinbase pays another payout than it registered", &g[..16]);
+         }
++        self.persist_keys();
++        self.dirty = true;
+     }
+ 
+     /// The snapshot-store key for a live gateway: `POOL` for the house stratum, its `G` when
+@@ -879,7 +1180,7 @@ impl Engine {
+             return Some(POOL.into());
+         }
+         let g = g_hex.to_ascii_lowercase();
+-        if self.keys.contains_key(&g) {
++        if self.active(&g).is_some() {
+             return Some(g);
+         }
+         payout_script.filter(|s| !s.is_empty()).map(|s| format!("s:{}", hex::encode(s)))
+@@ -1038,8 +1339,8 @@ impl Engine {
+         if self.is_house(&g_hex) {
+             return Err("house key never attests for score or bonus".into());
+         }
+-        if self.lookup(&g_hex).is_none() && !self.demo {
+-            return Err("G is not registered".into());
++        if self.active(&g_hex).is_none() && !self.demo {
++            return Err("G is not registered (or was superseded, revoked or refused)".into());
+         }
+         let key = JobKey { g, prev, branches_hash: authorship::branches_hash(&branches) }.id();
+         self.insert_attested(key.clone(), a, sig);
+@@ -2137,109 +2438,206 @@ mod tests {
+         );
+     }
+ 
+-    /// A DATUM attestation for a fresh job by `g`, and the coinbase it commits to.
+-    fn datum_job(g: &Identity, seed: u8) -> (Attestation, [u8; SIG], Coinbase, Hash, Vec<Hash>) {
+-        let prev = [seed; 32];
+-        let txs: Vec<Hash> = (1..=3u8).map(|i| [i ^ seed; 32]).collect();
+-        let branches = datum_wire::pow::merkle_branches_for_coinbase(&txs);
+-        let mut outs = sample_outs(312_538_966);
+-        let (a, sig, c) = attest(g, 966_267, &prev, &branches, &outs, NodeView::default());
+-        outs.push(c);
+-        let (bytes, _, _) = coinbase::build(966_267, b"Lazarus", &outs, 0);
+-        (a, sig, coinbase::parse(&bytes).unwrap(), prev, branches)
++    // --- registration v1/v2 (SOV-009, SOV-P-002 §4) ------------------------------------
++
++    use crate::enrol::{self, Checked, Kind, Proof};
++    use datum_wire::bip322::signer;
++
++    fn reg_dir(name: &str) -> PathBuf {
++        let dir = std::env::temp_dir().join(format!("sov009-{name}-{}", std::process::id()));
++        let _ = std::fs::remove_dir_all(&dir);
++        std::fs::create_dir_all(&dir).unwrap();
++        dir
++    }
++
++    /// A message as the gateway prints it, already checked (the engine sees only this).
++    fn checked(kind: Kind, g: &Identity, at: u32, node: &str, payout_sk: Option<u8>) -> Checked {
++        let g_hex = hex::encode(g.sign_pk());
++        let at_hash = format!("{at:064x}");
++        let payout = payout_sk.map(|k| signer::p2tr_script(&[k; 32]));
++        let addr = payout.as_ref().map(|s| format!("bcrt1p-{}", hex::encode(&s[2..10]))).unwrap_or_default();
++        let raw = match kind {
++            Kind::Revoke => format!("LZT1 revoke v2\npool: lazarus-xbt\nchain: XBT\nG: {g_hex}\npayout: {addr}\nat: {at} {at_hash}"),
++            _ => {
++                let mut m = format!(
++                    "LZT1 register {}\npool: lazarus-xbt\nchain: XBT\nG: {g_hex}\nnode: {node}\ntag: gw\nat: {at} {at_hash}",
++                    kind.as_str()
++                );
++                if kind == Kind::V2 {
++                    m.push_str(&format!("\npayout: {addr}"));
++                }
++                m
++            }
++        };
++        Checked {
++            msg: enrol::parse(&raw).unwrap(),
++            proof: payout_sk.map(|_| Proof::Bip322),
++            payout_script: payout,
++            at_time: 1_000_000 + u64::from(at) * 600,
++        }
++    }
++
++    fn reg_engine(dir: &std::path::Path) -> Engine {
++        Engine { dir: dir.to_path_buf(), demo: false, ..engine() }
+     }
+ 
+-    /// W7: a verified DATUM attestation from a registered key is an attested job (its shares
+-    /// credit, its block counts as verified); unregistered, house and failed ones are only
+-    /// logged. Every verdict is counted.
+     #[test]
+-    fn datum_attestations_enter_the_set_only_verified_registered_and_not_house() {
+-        let dir = std::env::temp_dir().join(format!("sov007-attest-{}", std::process::id()));
++    fn v1_then_v2_binds_and_rotation_supersedes() {
++        let dir = reg_dir("rotate");
++        let mut e = reg_engine(&dir);
++        let (g1, g2) = (Identity::from_secret_bytes(&[0x31; 64]), Identity::from_secret_bytes(&[0x32; 64]));
++        let (h1, h2) = (hex::encode(g1.sign_pk()), hex::encode(g2.sign_pk()));
++        let r = e.enrol(checked(Kind::V1, &g1, 100, "198.51.100.7:8333", None), None).unwrap();
++        assert_eq!((r.version, r.status, r.bound()), (1, KeyStatus::Active, false));
++        let r = e.enrol(checked(Kind::V2, &g1, 101, "198.51.100.7:8333", Some(1)), None).unwrap();
++        assert!(r.bound() && !r.payout_confirmed, "{r:?}");
++        assert_eq!(r.bound_height, 101);
++        // a later v2 from the same payout keeps the key age
++        let r = e.enrol(checked(Kind::V2, &g1, 110, "none", Some(1)), None).unwrap();
++        assert_eq!(r.bound_height, 101);
++        assert!(e.node_of(&h1).is_none(), "node: none drops the address");
++        // rotation: the same payout names G2; G1 is superseded, G2's age starts afresh
++        let r = e.enrol(checked(Kind::V2, &g2, 120, "198.51.100.8:8333", Some(1)), None).unwrap();
++        assert_eq!(r.bound_height, 120);
++        let old = e.lookup(&h1).unwrap();
++        assert_eq!((old.status, old.superseded_by.as_str(), old.bound()), (KeyStatus::Superseded, h2.as_str(), false));
++        assert!(e.active(&h1).is_none() && e.track_name(&h1, false, None).is_none());
++        // a replayed (or even fresh) v1 for the superseded key is refused
++        let err = e.enrol(checked(Kind::V1, &g1, 100, "198.51.100.7:8333", None), None).unwrap_err();
++        assert!(err.contains("superseded"), "{err}");
++        let err = e.enrol(checked(Kind::V1, &g1, 125, "198.51.100.7:8333", None), None).unwrap_err();
++        assert!(err.contains("superseded"), "{err}");
++        // the directory survives a restart
++        let e2 = reg_engine(&dir);
++        let mut e2 = Engine { ..e2 };
++        e2.load_keys();
++        e2.load_nodes();
++        assert_eq!(e2.lookup(&h1).unwrap().status, KeyStatus::Superseded);
++        assert_eq!(e2.node_of(&h2), Some("198.51.100.8:8333"));
+         let _ = std::fs::remove_dir_all(&dir);
+-        std::fs::create_dir_all(&dir).unwrap();
+-        let mut e = Engine { dir: dir.clone(), ..engine() };
+-        let (reg, unreg, house) = (
+-            Identity::from_secret_bytes(&[0x61; 64]),
+-            Identity::from_secret_bytes(&[0x62; 64]),
+-            Identity::from_secret_bytes(&[0x63; 64]),
+-        );
+-        e.register(&hex::encode(reg.sign_pk()), "bc1qreg", false, None).unwrap();
+-        e.register(&hex::encode(house.sign_pk()), "", true, None).unwrap();
+-        e.demo = false;
++    }
+ 
+-        let (a, sig, cb, prev, branches) = datum_job(&reg, 0x31);
+-        let verdict = authorship::verify(&cb, &a, &sig, &prev, &branches, Some(&reg.sign_pk())).map(|_| ());
+-        assert!(e.note_datum_verdict(reg.sign_pk(), false, 4, 0, &a, &sig, verdict));
+-        let g_hex = hex::encode(reg.sign_pk());
+-        e.note_share(&g_hex, false, "bc1qminer", 8, &prev, &branches, 1_000);
+-        assert_eq!(e.authored.iter().map(|x| x.work).sum::<u64>(), 8, "shares on the job are attested work");
+-        assert!(e.note_block(&g_hex, false, None, &cb, &prev, &branches, 966_267, "bb"));
+-        assert!(e.blocks.back().unwrap().verified, "and its block is verified");
+-
+-        let (a2, sig2, cb2, prev2, br2) = datum_job(&unreg, 0x32);
+-        let v2 = authorship::verify(&cb2, &a2, &sig2, &prev2, &br2, Some(&unreg.sign_pk())).map(|_| ());
+-        assert!(v2.is_ok());
+-        assert!(!e.note_datum_verdict(unreg.sign_pk(), false, 5, 0, &a2, &sig2, v2), "not registered");
+-
+-        let (a3, sig3, _, _, _) = datum_job(&house, 0x33);
+-        assert!(!e.note_datum_verdict(house.sign_pk(), false, 6, 0, &a3, &sig3, Ok(())), "house key");
+-        assert!(!e.note_datum_verdict(reg.sign_pk(), true, 6, 1, &a3, &sig3, Ok(())), "house session");
+-
+-        let (a4, sig4, _, _, _) = datum_job(&reg, 0x34);
+-        assert!(!e.note_datum_verdict(reg.sign_pk(), false, 7, 2, &a4, &sig4, Err(AttestError::WrongPayout)));
+-
+-        let d = &e.datum_attest;
+-        assert_eq!((d.verified, d.failed), (4, 1));
+-        assert_eq!(d.reasons.get("WrongPayout"), Some(&1));
+-        assert_eq!(d.last.len(), 5);
+-        let lines: Vec<AttestVerdict> = std::fs::read_to_string(dir.join(ATTEST_FILE))
+-            .unwrap()
+-            .lines()
+-            .map(|l| serde_json::from_str(l).unwrap())
+-            .collect();
+-        assert_eq!(lines, d.last.iter().cloned().collect::<Vec<_>>(), "every verdict is on disk");
+-        assert_eq!(
+-            lines.iter().map(|v| (v.verdict.as_str(), v.registered, v.house, v.attested)).collect::<Vec<_>>(),
+-            vec![
+-                ("verified", true, false, true),
+-                ("verified", false, false, false),
+-                ("verified", true, true, false),
+-                ("verified", true, true, false),
+-                ("WrongPayout", true, false, false),
+-            ]
+-        );
+-        let body = compute(&e.inputs(now())).body;
+-        assert_eq!(body["attest"]["verified"], 4, "{body}");
+-        assert_eq!(body["attest"]["failed"], 1, "{body}");
+-        assert_eq!(body["attest"]["reasons"]["WrongPayout"], 1, "{body}");
++    #[test]
++    fn at_must_move_forward_per_key() {
++        let dir = reg_dir("replay");
++        let mut e = reg_engine(&dir);
++        let g = Identity::from_secret_bytes(&[0x33; 64]);
++        e.enrol(checked(Kind::V1, &g, 200, "none", None), None).unwrap();
++        for at in [200, 150] {
++            let err = e.enrol(checked(Kind::V1, &g, at, "203.0.113.9:1", None), None).unwrap_err();
++            assert!(err.contains("replay"), "{err}");
++        }
++        assert!(e.enrol(checked(Kind::V1, &g, 201, "203.0.113.9:1", None), None).is_ok());
+         let _ = std::fs::remove_dir_all(&dir);
+     }
+ 
+-    /// W7: `sovereignty-attest.jsonl` rolls over at the first verdict of a new (UTC) day, and
+-    /// only `ATTEST_KEEP_DAYS` of old files are kept.
+     #[test]
+-    fn the_attest_log_rotates_daily() {
+-        assert_eq!(ymd(0), "1970-01-01");
+-        assert_eq!(ymd(11_016), "2000-02-29");
+-        assert_eq!(ymd(20_721), "2026-09-25");
+-        let dir = std::env::temp_dir().join(format!("sov007-rotate-{}", std::process::id()));
++    fn revocation_is_by_the_bound_payout_and_ends_the_binding() {
++        let dir = reg_dir("revoke");
++        let mut e = reg_engine(&dir);
++        let g = Identity::from_secret_bytes(&[0x34; 64]);
++        let h = hex::encode(g.sign_pk());
++        // a v1 key has no payout to revoke it
++        e.enrol(checked(Kind::V1, &g, 300, "none", None), None).unwrap();
++        assert!(e.enrol(checked(Kind::Revoke, &g, 301, "", Some(4)), None).unwrap_err().contains("not bound"));
++        e.enrol(checked(Kind::V2, &g, 302, "203.0.113.4:8333", Some(4)), None).unwrap();
++        // another payout cannot revoke it
++        assert!(e.enrol(checked(Kind::Revoke, &g, 303, "", Some(5)), None).unwrap_err().contains("not bound"));
++        let r = e.enrol(checked(Kind::Revoke, &g, 304, "", Some(4)), None).unwrap();
++        assert_eq!((r.status, r.bound()), (KeyStatus::Revoked, false));
++        assert!(e.node_of(&h).is_none() && e.active(&h).is_none());
++        // replaying the revocation, or a v1, does nothing; a newer v2 binds it again
++        assert!(e.enrol(checked(Kind::Revoke, &g, 304, "", Some(4)), None).is_err());
++        assert!(e.enrol(checked(Kind::V1, &g, 305, "none", None), None).unwrap_err().contains("revoked"));
++        let r = e.enrol(checked(Kind::V2, &g, 306, "none", Some(4)), None).unwrap();
++        assert!(r.bound() && r.bound_height == 306);
+         let _ = std::fs::remove_dir_all(&dir);
+-        std::fs::create_dir_all(&dir).unwrap();
+-        let mut e = Engine { dir: dir.clone(), ..engine() };
+-        let today = now() / 86_400;
+-        let stale = dir.join(format!("{ATTEST_FILE}.{}", ymd(today - ATTEST_KEEP_DAYS)));
+-        std::fs::write(&stale, "old\n").unwrap();
+-        let g = Identity::from_secret_bytes(&[0x64; 64]);
+-        let (a, sig, _, _, _) = datum_job(&g, 0x35);
+-        std::fs::write(dir.join(ATTEST_FILE), "yesterday\n").unwrap();
+-        e.datum_attest.day = Some(today - 1);
+-        e.note_datum_verdict(g.sign_pk(), false, 1, 0, &a, &sig, Ok(()));
+-        let rolled = std::fs::read_to_string(dir.join(format!("{ATTEST_FILE}.{}", ymd(today - 1)))).unwrap();
+-        assert_eq!(rolled, "yesterday\n");
+-        assert_eq!(std::fs::read_to_string(dir.join(ATTEST_FILE)).unwrap().lines().count(), 1);
+-        assert!(!stale.exists(), "files older than the keep window go");
+-        e.note_datum_verdict(g.sign_pk(), false, 2, 0, &a, &sig, Ok(()));
+-        assert_eq!(std::fs::read_to_string(dir.join(ATTEST_FILE)).unwrap().lines().count(), 2, "same day: appended");
++    }
++
++    #[test]
++    fn payout_must_match_what_prime_learned() {
++        let dir = reg_dir("payout");
++        let mut e = reg_engine(&dir);
++        let (g, g2) = (Identity::from_secret_bytes(&[0x35; 64]), Identity::from_secret_bytes(&[0x36; 64]));
++        let (h, h2) = (hex::encode(g.sign_pk()), hex::encode(g2.sign_pk()));
++        let learned = signer::p2tr_script(&[6; 32]);
++        let other = signer::p2tr_script(&[7; 32]);
++        // gateway-scripts.json says it pays `learned`: a v2 naming `other` is refused
++        let err = e.enrol(checked(Kind::V2, &g, 400, "none", Some(7)), Some(&learned)).unwrap_err();
++        assert!(err.contains("gateway-scripts.json"), "{err}");
++        let r = e.enrol(checked(Kind::V2, &g, 401, "none", Some(6)), Some(&learned)).unwrap();
++        assert!(r.payout_confirmed);
++        // unknown yet: pending until its first split coinbase, which then confirms or refuses
++        let r = e.enrol(checked(Kind::V2, &g2, 402, "none", Some(8)), None).unwrap();
++        assert!(!r.payout_confirmed);
++        e.note_gateway_payout(&h2, &other);
++        let r = e.lookup(&h2).unwrap();
++        assert_eq!((r.status, r.bound()), (KeyStatus::Refused, false));
++        // a confirmed key that starts paying elsewhere is refused too
++        e.note_gateway_payout(&h, &learned);
++        assert!(e.lookup(&h).unwrap().bound());
++        e.note_gateway_payout(&h, &other);
++        assert_eq!(e.lookup(&h).unwrap().status, KeyStatus::Refused);
++        let _ = std::fs::remove_dir_all(&dir);
++    }
++
++    #[test]
++    fn key_age_counts_from_the_first_v2() {
++        let dir = reg_dir("age");
++        let mut e = Engine { min_key_age_secs: 3600, ..reg_engine(&dir) };
++        let g = Identity::from_secret_bytes(&[0x37; 64]);
++        let h = hex::encode(g.sign_pk());
++        e.enrol(checked(Kind::V1, &g, 500, "none", None), None).unwrap();
++        assert!(!e.key_old_enough(&h, u64::MAX / 2), "v1 alone is never old enough");
++        let c = checked(Kind::V2, &g, 501, "none", Some(9));
++        let t = c.at_time;
++        e.enrol(c, None).unwrap();
++        assert!(!e.key_old_enough(&h, t + 3599));
++        assert!(e.key_old_enough(&h, t + 3600));
++    }
++
++    #[test]
++    fn house_keys_do_not_register() {
++        let dir = reg_dir("house");
++        let mut e = reg_engine(&dir);
++        let g = Identity::from_secret_bytes(&[0x38; 64]);
++        e.keys.insert(hex::encode(g.sign_pk()), KeyRecord { house: true, ..KeyRecord::new(hex::encode(g.sign_pk()), 1) });
++        assert!(e.enrol(checked(Kind::V1, &g, 1, "none", None), None).unwrap_err().contains("house"));
++    }
++
++    /// Node addresses live in `sovereignty-nodes.json` (0600) alone: never in the keys file,
++    /// stats.json's `sovereignty`, `/sovereignty.json`, or the bonus directory.
++    #[test]
++    fn node_addresses_are_never_exposed() {
++        let dir = reg_dir("nodes");
++        let mut e = Engine { bonus_on: true, ..reg_engine(&dir) };
++        let nodes = ["198.51.100.77:18444", "abcdefghijklmnop.onion:8333", "[2001:db8::77]:8333"];
++        for (i, n) in nodes.iter().enumerate() {
++            let g = Identity::from_secret_bytes(&[0x40 + i as u8; 64]);
++            let kind = if i == 0 { Kind::V1 } else { Kind::V2 };
++            e.enrol(checked(kind, &g, 600 + i as u32, n, (i > 0).then_some(10 + i as u8)), None).unwrap();
++            e.note_prepared(&hex::encode(g.sign_pk()), Prepared::new(&Snapshot::new(1.0, "00", vec![])), now());
++        }
++        let report = e.refresh();
++        let texts = [
++            report.render(Some(WindowWork { total: 100, stratum: 50, datum: 50 })).to_string(),
++            report.render(None).to_string(),
++            std::fs::read_to_string(dir.join(KEYS_FILE)).unwrap(),
++        ];
++        for t in &texts {
++            for n in nodes {
++                assert!(!t.contains(n) && !t.contains(n.split(':').next().unwrap().trim_matches(['[', ']'])), "{n} in {t}");
++            }
++        }
++        assert!(texts[0].contains("\"directory\""), "bonus on renders the directory");
++        let file = std::fs::read_to_string(dir.join(NODES_FILE)).unwrap();
++        assert!(nodes.iter().all(|n| file.contains(n)));
++        #[cfg(unix)]
++        {
++            use std::os::unix::fs::PermissionsExt;
++            let mode = std::fs::metadata(dir.join(NODES_FILE)).unwrap().permissions().mode() & 0o777;
++            assert_eq!(mode, 0o600);
++        }
+         let _ = std::fs::remove_dir_all(&dir);
+     }
+ }
+diff --git a/prime/primed/src/state.rs b/prime/primed/src/state.rs
+index 52d7819..129feb0 100644
+--- a/prime/primed/src/state.rs
++++ b/prime/primed/src/state.rs
+@@ -526,6 +526,10 @@ impl Shared {
+             log::warn!("gateway-scripts.json write failed: {e}");
+         }
+         drop(map);
++        // a v2 registration waits on this: the payout its coinbase actually pays
++        if self.sovereignty.on() {
++            self.sovereignty.engine().note_gateway_payout(key_hex, script);
++        }
+     }
+ 
+     pub fn load_gateway_payouts(dir: &std::path::Path) -> HashMap<String, GatewayPayout> {
+diff --git a/prime/primed/src/stats.rs b/prime/primed/src/stats.rs
+index 8e3bdcb..d84daa6 100644
+--- a/prime/primed/src/stats.rs
++++ b/prime/primed/src/stats.rs
+@@ -429,6 +429,12 @@ pub async fn serve(shared: Arc<Shared>) {
+                     let token = header(&req, crate::sovereignty::TOKEN_HEADER);
+                     if !shared.sovereignty.token_ok(token) {
+                         ("403 Forbidden", "application/json", Arc::new(json!({"error": "sovereignty token"}).to_string()))
++                    } else if p == "/sovereignty/enrol" {
++                        // registration v1/v2 and revocation (SOV-P-002 §4): asks the pool node
++                        match crate::enrol::handle(&shared, body).await {
++                            Ok(v) => ("200 OK", "application/json", Arc::new(v.to_string())),
++                            Err(e) => ("400 Bad Request", "application/json", Arc::new(json!({"error": e}).to_string())),
++                        }
+                     } else {
+                         match ingest(&shared, p, body) {
+                             Ok(v) => ("200 OK", "application/json", Arc::new(v.to_string())),
+@@ -503,13 +509,17 @@ fn header<'a>(req: &'a str, name: &str) -> Option<&'a str> {
+     })
+ }
+ 
+-/// `POST /sovereignty/*`, token already checked. `register`, `attest` and `canary` are live in
+-/// any mode but `off`; the rest are for local demos (`sovereignty-demo`).
++/// `POST /sovereignty/*`, token already checked. `attest` (and `enrol`, handled by the caller)
++/// are live in any mode but `off`; the rest, the old `register` included, are for local demos
++/// (`sovereignty-demo`).
+ fn ingest(shared: &Shared, path: &str, body: &str) -> Result<Value, String> {
+     let demo = shared.sovereignty.engine().demo();
+     let v: Value = if body.trim().is_empty() { json!({}) } else { serde_json::from_str(body).map_err(|e| e.to_string())? };
+     match path {
+         "/sovereignty/register" => {
++            if !demo {
++                return Err("registration is POST /sovereignty/enrol (LZT1 register v1|v2, SOV-P-002 §4)".into());
++            }
+             let g = v["g"].as_str().ok_or("g")?;
+             let payout = v["payout"].as_str().unwrap_or("");
+             let house = v["house"].as_bool().unwrap_or(false);
+diff --git a/prime/primed/tests/enrol_e2e.rs b/prime/primed/tests/enrol_e2e.rs
+new file mode 100644
+index 0000000..74a9180
+--- /dev/null
++++ b/prime/primed/tests/enrol_e2e.rs
+@@ -0,0 +1,198 @@
++//! SOV-009: registration v1/v2 over `POST /sovereignty/enrol`, against a stand-in node that
++//! answers the RPCs the route asks (tip, block hash, header). The Knots path, `verifymessage`
++//! and enrol-by-spend run in `~/xbt-rnd/sov-009/enrol-demo.sh`.
++
++mod common;
++
++use std::io::{BufRead, BufReader, Read, Write};
++use std::net::{TcpListener, TcpStream};
++
++use datum_wire::bip322::signer;
++use datum_wire::crypto::Identity;
++use serde_json::{json, Value};
++
++const TIP: u64 = 300;
++
++fn block_hash(h: u64) -> String {
++    format!("{:064x}", h + 0xb10c_0000)
++}
++
++/// A JSON-RPC node with a 300-block chain; anything else is "method not found".
++fn fake_node() -> u16 {
++    let l = TcpListener::bind("127.0.0.1:0").unwrap();
++    let port = l.local_addr().unwrap().port();
++    std::thread::spawn(move || {
++        for s in l.incoming().flatten() {
++            std::thread::spawn(move || serve(s));
++        }
++    });
++    port
++}
++
++fn serve(s: TcpStream) {
++    let mut r = BufReader::new(s.try_clone().unwrap());
++    let mut len = 0;
++    loop {
++        let mut line = String::new();
++        if r.read_line(&mut line).unwrap_or(0) == 0 {
++            return;
++        }
++        if line == "\r\n" {
++            break;
++        }
++        if let Some(v) = line.to_ascii_lowercase().strip_prefix("content-length:") {
++            len = v.trim().parse().unwrap_or(0);
++        }
++    }
++    let mut body = vec![0; len];
++    if r.read_exact(&mut body).is_err() {
++        return;
++    }
++    let req: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
++    let p = &req["params"];
++    let (result, error) = match req["method"].as_str().unwrap_or("") {
++        "getblockcount" => (json!(TIP), Value::Null),
++        "getblockhash" => (json!(block_hash(p[0].as_u64().unwrap_or(0))), Value::Null),
++        "getblockheader" => {
++            let h = u64::from_str_radix(&p[0].as_str().unwrap_or("0")[48..], 16).unwrap_or(0) - 0xb10c_0000;
++            (json!({"height": h, "time": 1_700_000_000 + h * 600}), Value::Null)
++        }
++        _ => (Value::Null, json!({"code": -32601, "message": "Method not found"})),
++    };
++    let out = json!({"result": result, "error": error, "id": req["id"]}).to_string();
++    let _ = (&s).write_all(
++        format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{out}", out.len())
++            .as_bytes(),
++    );
++}
++
++fn post(port: u16, path: &str, body: &Value, token: &str) -> Value {
++    let payload = body.to_string();
++    let req = format!(
++        "POST {path} HTTP/1.0\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nX-Sovereignty-Token: {token}\r\nContent-Length: {}\r\n\r\n{payload}",
++        payload.len()
++    );
++    let text = get_raw(port, &req);
++    serde_json::from_str(text.split("\r\n\r\n").nth(1).unwrap_or("")).unwrap_or(json!({"raw": text}))
++}
++
++fn get_raw(port: u16, req: &str) -> String {
++    let mut s = TcpStream::connect(("127.0.0.1", port)).unwrap();
++    s.write_all(req.as_bytes()).unwrap();
++    let mut buf = Vec::new();
++    s.read_to_end(&mut buf).unwrap();
++    String::from_utf8_lossy(&buf).to_string()
++}
++
++fn get(port: u16, path: &str) -> String {
++    get_raw(port, &format!("GET {path} HTTP/1.0\r\nHost: 127.0.0.1\r\n\r\n"))
++}
++
++fn msg(version: &str, g: &Identity, node: &str, at: u64, chain: &str, payout: Option<&str>) -> String {
++    let mut m = format!(
++        "LZT1 register {version}\npool: lazarus-xbt\nchain: {chain}\nG: {}\nnode: {node}\ntag: e2e\nat: {at} {}",
++        hex::encode(g.sign_pk()),
++        block_hash(at)
++    );
++    if let Some(p) = payout {
++        m.push_str(&format!("\npayout: {p}"));
++    }
++    m
++}
++
++fn g_sig(g: &Identity, m: &str) -> String {
++    hex::encode(g.sign(&[b"XBT-SOVEREIGN-TIDES/register\0".as_slice(), m.as_bytes()].concat()))
++}
++
++fn p2tr_address(sk: &[u8; 32]) -> String {
++    let s = signer::p2tr_script(sk);
++    bech32::segwit::encode(bech32::hrp::BC, bech32::segwit::VERSION_1, &s[2..]).unwrap()
++}
++
++#[test]
++fn registration_over_the_stats_listener() {
++    let node = fake_node();
++    let pool = Identity::from_secret_bytes(&[0x61; 64]);
++    let (p, _listen) = common::start_primed(
++        &pool,
++        &format!(
++            "rpc = \"http://127.0.0.1:{node}\"\nrpc-user = \"u\"\nrpc-password = \"p\"\npoll = 60\nsovereignty-mode = \"observe\"\nsovereignty-recompute-secs = 1\n"
++        ),
++    );
++    let token = std::fs::read_to_string(p.dir.join("sovereignty.token")).unwrap().trim().to_string();
++    let enrol = |body: Value| post(p.stats, "/sovereignty/enrol", &body, &token);
++    let (g1, g2) = (Identity::from_secret_bytes(&[0x62; 64]), Identity::from_secret_bytes(&[0x63; 64]));
++    let secret_node = "198.51.100.19:8333";
++
++    // v1: G-signed, names the node
++    let m = msg("v1", &g1, secret_node, TIP - 3, "XBT", None);
++    let r = enrol(json!({"message": m, "g_sig": g_sig(&g1, &m)}));
++    assert_eq!((r["ok"].as_bool(), r["version"].as_u64()), (Some(true), Some(1)), "{r}");
++    let nodes = std::fs::read_to_string(p.dir.join("sovereignty-nodes.json")).unwrap();
++    assert!(nodes.contains(secret_node), "{nodes}");
++    // the same message again is a replay
++    let r = enrol(json!({"message": m, "g_sig": g_sig(&g1, &m)}));
++    assert!(r["error"].as_str().unwrap().contains("replay"), "{r}");
++
++    // negatives: stale at, wrong chain, G's signature by another key, no token
++    for (m, sig_by, want) in [
++        (msg("v1", &g2, "none", TIP - 144, "XBT", None), &g2, "stale at"),
++        (msg("v1", &g2, "none", TIP + 1, "XBT", None), &g2, "ahead"),
++        (msg("v1", &g2, "none", TIP - 1, "BTC", None), &g2, "wrong chain line"),
++        (msg("v1", &g2, "none", TIP - 1, "XBT", None), &g1, "bad G signature"),
++    ] {
++        let r = enrol(json!({"message": m, "g_sig": g_sig(sig_by, &m)}));
++        assert!(r["error"].as_str().unwrap_or("").contains(want), "{want}: {r}");
++    }
++    let m = msg("v1", &g2, "none", TIP - 1, "XBT", None);
++    let r = post(p.stats, "/sovereignty/enrol", &json!({"message": m, "g_sig": g_sig(&g2, &m)}), "wrong");
++    assert_eq!(r["error"], "sovereignty token", "{r}");
++    // at names a height we have, but not our block there
++    let m = msg("v1", &g2, "none", TIP - 1, "XBT", None).replace(&block_hash(TIP - 1), &"ee".repeat(32));
++    let r = enrol(json!({"message": m, "g_sig": g_sig(&g2, &m)}));
++    assert!(r["error"].as_str().unwrap().contains("not the pool node's block"), "{r}");
++
++    // v2: BIP322 simple (P2TR key path) by the payout
++    let sk = [0x64u8; 32];
++    let payout = p2tr_address(&sk);
++    let m = msg("v2", &g1, secret_node, TIP - 2, "XBT", Some(&payout));
++    let bad = signer::simple_p2tr(&sk, b"not the message", 0x00);
++    let r = enrol(json!({"message": m, "g_sig": g_sig(&g1, &m), "payout_sig": bad}));
++    assert!(r["error"].as_str().unwrap().contains("BIP322"), "{r}");
++    let r = enrol(json!({"message": m, "g_sig": g_sig(&g1, &m), "payout_sig": signer::simple_p2tr(&sk, m.as_bytes(), 0x00)}));
++    assert_eq!((r["version"].as_u64(), r["bound_height"].as_u64()), (Some(2), Some(TIP - 2)), "{r}");
++    // signmessage is refused for a non-P2PKH payout without asking the node
++    let m2 = msg("v2", &g1, "none", TIP - 1, "XBT", Some(&payout));
++    let r = enrol(json!({"message": m2, "g_sig": g_sig(&g1, &m2), "proof": "signmessage", "payout_sig": "AAAA"}));
++    assert!(r["error"].as_str().unwrap().contains("P2PKH"), "{r}");
++
++    // rotation: G2 with the same payout supersedes G1; G1's old v1 cannot come back
++    let m = msg("v2", &g2, "none", TIP - 1, "XBT", Some(&payout));
++    let r = enrol(json!({"message": m, "g_sig": g_sig(&g2, &m), "payout_sig": signer::simple_p2tr(&sk, m.as_bytes(), 0x01)}));
++    assert_eq!(r["status"], "active", "{r}");
++    let m = msg("v1", &g1, secret_node, TIP, "XBT", None);
++    let r = enrol(json!({"message": m, "g_sig": g_sig(&g1, &m)}));
++    assert!(r["error"].as_str().unwrap().contains("superseded"), "{r}");
++
++    // the old demo ingest is closed outside the demo
++    let r = post(p.stats, "/sovereignty/register", &json!({"g": hex::encode(g1.sign_pk())}), &token);
++    assert!(r["error"].as_str().unwrap().contains("/sovereignty/enrol"), "{r}");
++
++    // the node address is in sovereignty-nodes.json (0600) and nowhere served
++    std::thread::sleep(std::time::Duration::from_millis(5_600)); // a housekeeping pass writes stats.json
++    let sov = get(p.stats, "/sovereignty.json");
++    assert!(sov.contains("\"registrations\""), "{sov}");
++    for text in [get(p.stats, "/stats.json"), sov, std::fs::read_to_string(p.dir.join("stats.json")).unwrap(),
++                 std::fs::read_to_string(p.dir.join("sovereignty-keys.json")).unwrap()] {
++        assert!(!text.contains("198.51.100.19"), "node address exposed: {text}");
++    }
++    let nodes = std::fs::read_to_string(p.dir.join("sovereignty-nodes.json")).unwrap();
++    // G1 was superseded, so its node is gone too
++    assert!(!nodes.contains("198.51.100.19"), "{nodes}");
++    #[cfg(unix)]
++    {
++        use std::os::unix::fs::PermissionsExt;
++        let mode = std::fs::metadata(p.dir.join("sovereignty-nodes.json")).unwrap().permissions().mode();
++        assert_eq!(mode & 0o777, 0o600);
++    }
++}
+diff --git a/prime/primed/tests/sovereignty_e2e.rs b/prime/primed/tests/sovereignty_e2e.rs
+index d67aa99..c6386c7 100644
+--- a/prime/primed/tests/sovereignty_e2e.rs
++++ b/prime/primed/tests/sovereignty_e2e.rs
+@@ -226,8 +226,8 @@ fn mode_off_is_the_old_prime() {
+     }
+ }
+ 
+-/// W1: `observe` serves the report but marks it unpublished; `register` needs the token and,
+-/// outside the demo, a signature by G.
++/// W1: `observe` serves the report but marks it unpublished; the old `register` ingest is
++/// demo-only (SOV-009).
+ #[test]
+ fn mode_observe_serves_an_unpublished_report() {
+     let pool = Identity::from_secret_bytes(&[0x66; 64]);
+@@ -241,12 +241,12 @@ fn mode_observe_serves_an_unpublished_report() {
+     assert!(sov.get("directory").is_none() && sov.get("authored").is_none(), "{sov}");
+     let g = Identity::from_secret_bytes(&[0x21; 64]);
+     let g_hex = hex::encode(g.sign_pk());
+-    let r = post(p.stats, "/sovereignty/register", &json!({"g": g_hex, "payout": "bc1q"}));
+-    assert_eq!(r["error"], "signature required", "{r}");
++    // SOV-009: outside the demo, registration is `LZT1 register v1|v2` on /sovereignty/enrol
++    // (tests/enrol_e2e.rs); the old string is refused even when G signed it
+     let msg = format!("LZT1 register G={g_hex} pool=lazarus");
+     let sig = hex::encode(g.sign(msg.as_bytes()));
+     let r = post(p.stats, "/sovereignty/register", &json!({"g": g_hex, "payout": "bc1q", "sig": sig}));
+-    assert_eq!(r["g"], g_hex, "{r}");
++    assert!(r["error"].as_str().unwrap_or("").contains("/sovereignty/enrol"), "{r}");
+     let r = post(p.stats, "/sovereignty/snapshot", &json!({"gateway": "x", "t": 1.0, "prev": "00", "txids": []}));
+     assert_eq!(r["error"], "sovereignty-demo is off", "{r}");
+     let r = post(p.stats, "/sovereignty/check", &json!({"gateway": "x", "t": 1.0, "txids": []}));
+-- 
+2.43.0
+

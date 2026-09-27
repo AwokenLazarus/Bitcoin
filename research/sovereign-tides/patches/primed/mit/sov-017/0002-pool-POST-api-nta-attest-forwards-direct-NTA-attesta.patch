@@ -1,0 +1,117 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: michael moore <mrmoore27@pm.me>
+Date: Sat, 26 Sep 2026 01:33:43 +0000
+Subject: [PATCH 2/4] pool: POST /api/nta/attest forwards direct NTA
+ attestations to primed
+
+SOV-017, rnd only. Rate-limited per client IP (nta_attest_per_ip, default 60
+a minute), body bounded to 2 KB, only the six attestation fields forwarded,
+with primed's nta-attest-token-file when configured. primed's own verdicts
+(400/403/409/422/429) pass through.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ pool/server.py | 69 +++++++++++++++++++++++++++++++++++++++++++++++---
+ 1 file changed, 65 insertions(+), 4 deletions(-)
+
+diff --git a/pool/server.py b/pool/server.py
+index 60f83ad..a03aae0 100644
+--- a/pool/server.py
++++ b/pool/server.py
+@@ -5617,6 +5617,65 @@ def sov_enrol(body, client_ip):
+         return 503, {"error": "enrolment is not open"}
+ 
+ 
++# --- XBT-NTA direct attestations (SOV-017, rnd only) ----------------------------------------
++# POST /api/nta/attest takes a TIDES payee's per-tip NTA attestation (a pay-with-work provider,
++# or any payee with no gateway of its own) and hands it to primed's loopback `POST /nta/attest`,
++# which checks everything (live payee, its own node's tip, the BIP340 signature). This side only
++# rate-limits per client IP, bounds the body and forwards the six fields.
++NTA_ATTEST_URL = CONF.get("nta_attest_url") or PRIME_STATS.rsplit("/", 1)[0] + "/nta/attest"
++NTA_TOKEN_FILE = CONF.get("nta_attest_token_file")  # primed's nta-attest-token-file, if it has one
++NTA_ATTEST_PER_IP = tuple(CONF.get("nta_attest_per_ip", (60, 60)))
++_NTA_FIELDS = {"version": int, "key": str, "height": int, "nbits": (str, int), "prev": str, "sig": str}
++_NTA_MAX_BODY = 2048
++# primed's answers passed through as they are; anything else means the door is shut
++_NTA_PASS = (200, 400, 403, 409, 422, 429)
++
++
++def nta_attest(body, client_ip):
++    """(status, reply) for one direct attestation POST body."""
++    if not sov_rate_ok(("nta-ip", client_ip), NTA_ATTEST_PER_IP):
++        return 429, {"error": "too many attestations from this address; try again later"}
++    try:
++        doc = json.loads(body)
++    except ValueError:
++        return 400, {"error": "body must be JSON"}
++    if not isinstance(doc, dict):
++        return 400, {"error": "body must be a JSON object"}
++    fwd = {}
++    for k, t in _NTA_FIELDS.items():
++        v = doc.get(k)
++        if not isinstance(v, t) or isinstance(v, bool) or (isinstance(v, str) and len(v) > 128):
++            return 400, {"error": f"{k} is required"}
++        fwd[k] = v
++    headers = {"Content-Type": "application/json"}
++    if NTA_TOKEN_FILE:
++        try:
++            headers["X-NTA-Token"] = Path(NTA_TOKEN_FILE).read_text().strip()
++        except OSError:
++            return 503, {"error": "attestations are not open"}
++    import urllib.error
++    import urllib.request
++
++    req = urllib.request.Request(NTA_ATTEST_URL, json.dumps(fwd).encode(), headers)
++    try:
++        with urllib.request.urlopen(req, timeout=10) as r:
++            return 200, json.loads(r.read(65536) or b"{}")
++    except urllib.error.HTTPError as e:
++        if e.code in _NTA_PASS:
++            try:
++                reply = json.loads(e.read(65536))
++                err = reply.get("error") or "refused"
++            except (ValueError, AttributeError):
++                reply, err = {}, "refused"
++            out = {"error": str(err)[:300]}
++            if isinstance(reply, dict) and isinstance(reply.get("tip"), str):
++                out["tip"] = reply["tip"][:64]
++            return e.code, out
++        return 503, {"error": "attestations are not open"}
++    except (OSError, ValueError):
++        return 503, {"error": "attestations are not open"}
++
++
+ class Handler(BaseHTTPRequestHandler):
+     # Socket timeout per request: a client that opens a connection and trickles bytes
+     # (slowloris) otherwise holds a thread forever on this thread-per-connection server.
+@@ -5760,21 +5819,23 @@ class Handler(BaseHTTPRequestHandler):
+         return peer
+ 
+     def do_POST(self):
+-        """Only the enrol route takes a POST (SOV-P-002 §4)."""
++        """Only the enrol route (SOV-P-002 §4) and NTA direct attestations (SOV-017) take a POST."""
+         try:
+             path = urlparse(self.path).path
+-            if path != "/api/sovereignty/enrol":
++            routes = {"/api/sovereignty/enrol": (sov_enrol, _SOV_MAX_BODY), "/api/nta/attest": (nta_attest, _NTA_MAX_BODY)}
++            if path not in routes:
+                 self.send_json({"error": "not found"}, 404)
+                 return
++            handle, max_body = routes[path]
+             try:
+                 n = int(self.headers.get("Content-Length") or "0")
+             except ValueError:
+                 n = -1
+-            if n < 0 or n > _SOV_MAX_BODY:
++            if n < 0 or n > max_body:
+                 self.close_connection = True
+                 self.send_json({"error": "body too large"}, 413)
+                 return
+-            code, reply = sov_enrol(self.rfile.read(n).decode("utf-8", "replace"), self.client_ip())
++            code, reply = handle(self.rfile.read(n).decode("utf-8", "replace"), self.client_ip())
+             self.send_json(reply, code)
+         except (BrokenPipeError, ConnectionResetError, TimeoutError):
+             raise
+-- 
+2.43.0
+

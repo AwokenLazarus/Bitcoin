@@ -1,0 +1,76 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: michael moore <mrmoore27@pm.me>
+Date: Sat, 26 Sep 2026 01:49:31 +0000
+Subject: [PATCH 4/4] prime, nta-signer: a direct attestation waits up to 1 s
+ for Prime's tip
+
+The SOV-017 demo showed every signer's first POST landing ~2 ms after its
+node heard of the block, ahead of primed's 250 ms poller; refresh_ahead then
+skipped (the poller had just refreshed) and the answer was 409, so acceptance
+waited on the signer's retry (~750 ms). POST /nta/attest now waits on the tip
+watch for that parent before refusing. The coinbaser's best_payees count no
+longer subtracts a pool output that is not there. Signer retry 750 -> 250 ms.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ prime/primed/src/session.rs |  4 +++-
+ prime/primed/src/stats.rs   | 21 ++++++++++++++++++++-
+ 2 files changed, 23 insertions(+), 2 deletions(-)
+
+diff --git a/prime/primed/src/session.rs b/prime/primed/src/session.rs
+index a2a18d2..74ccf72 100644
+--- a/prime/primed/src/session.rs
++++ b/prime/primed/src/session.rs
+@@ -1094,7 +1094,9 @@ impl Session {
+             match book.attestations(t, &paid, pool) {
+                 Some(atts) => {
+                     let carried = split.unpaid.iter().filter(|u| u.reason == tides::UnpaidReason::Unattested).count();
+-                    book.note_coinbaser(t, atts.len().saturating_sub(1), carried, pool);
++                    // payees besides the pool, which is only listed (and attested) when it is paid
++                    let pool_paid = paid.iter().any(|(sats, s)| *sats > 0 && *s == pool.script());
++                    book.note_coinbaser(t, atts.len() - usize::from(pool_paid), carried, pool);
+                     outputs.extend(atts.into_iter().map(|script| Output { sats: 0, script }));
+                 }
+                 None => log::error!(
+diff --git a/prime/primed/src/stats.rs b/prime/primed/src/stats.rs
+index ad84bc8..59aa87f 100644
+--- a/prime/primed/src/stats.rs
++++ b/prime/primed/src/stats.rs
+@@ -545,7 +545,23 @@ async fn direct_attest(shared: &Arc<Shared>, req: &str, body: &str, peer: std::n
+         log::debug!("NTA direct from {peer}: key {} {}", &hex::encode(a.key)[..16], g.reason());
+         return gated(g);
+     }
+-    let target = crate::nta::target(shared, &a.prev_hash).await;
++    let mut target = crate::nta::target(shared, &a.prev_hash).await;
++    if target.is_none() {
++        // A signer whose node heard of the block first is often a few ms ahead of this Prime's
++        // poller (and of `refresh_ahead`, which skips a refresh the poller just made): give
++        // the tip a moment to arrive rather than send it back to retry.
++        let mut rx = shared.tip.clone();
++        let want = a.prev_hash;
++        let _ = tokio::time::timeout(DIRECT_TIP_WAIT, async {
++            while rx.changed().await.is_ok() {
++                if rx.borrow().as_ref().and_then(|t| t.hash_le) == Some(want) {
++                    break;
++                }
++            }
++        })
++        .await;
++        target = crate::nta::target(shared, &a.prev_hash).await;
++    }
+     let outcome = shared.nta.lock().unwrap().add(&a, target, "direct", pool);
+     shared.nta_direct.note(&outcome);
+     let key = &hex::encode(a.key)[..16];
+@@ -569,6 +585,9 @@ async fn direct_attest(shared: &Arc<Shared>, req: &str, body: &str, peer: std::n
+     }
+ }
+ 
++/// How long `POST /nta/attest` waits for this Prime's node to reach a tip it does not have yet.
++const DIRECT_TIP_WAIT: Duration = Duration::from_secs(1);
++
+ /// A request header's value (name compared without case).
+ fn header<'a>(req: &'a str, name: &str) -> Option<&'a str> {
+     let head = req.split("\r\n\r\n").next().unwrap_or("");
+-- 
+2.43.0
+

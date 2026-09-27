@@ -1,0 +1,110 @@
+{
+ "node": "/Satoshi:29.4.2/Knots:20260508/",
+ "flags": [],
+ "controls": {
+  "p2pk-35": {
+   "submitblock": "null (accepted)",
+   "tip_on_A": true,
+   "relayed_to_B": true
+  },
+  "bare-multisig-37": {
+   "submitblock": "null (accepted)",
+   "tip_on_A": true,
+   "relayed_to_B": true
+  }
+ },
+ "coinbase": {
+  "38": {
+   "submitblock": "null (accepted)",
+   "tip_on_A": true,
+   "relayed_to_B": true
+  },
+  "70": {
+   "submitblock": "null (accepted)",
+   "tip_on_A": true,
+   "relayed_to_B": true
+  },
+  "77": {
+   "submitblock": "null (accepted)",
+   "tip_on_A": true,
+   "relayed_to_B": true
+  },
+  "80": {
+   "submitblock": "null (accepted)",
+   "tip_on_A": true,
+   "relayed_to_B": true
+  },
+  "81": {
+   "submitblock": "null (accepted)",
+   "tip_on_A": true,
+   "relayed_to_B": true
+  },
+  "82": {
+   "submitblock": "null (accepted)",
+   "tip_on_A": true,
+   "relayed_to_B": true
+  },
+  "83": {
+   "submitblock": "null (accepted)",
+   "tip_on_A": true,
+   "relayed_to_B": true
+  },
+  "84": {
+   "submitblock": "null (accepted)",
+   "tip_on_A": true,
+   "relayed_to_B": true
+  },
+  "85": {
+   "submitblock": "null (accepted)",
+   "tip_on_A": true,
+   "relayed_to_B": true
+  },
+  "103": {
+   "submitblock": "null (accepted)",
+   "tip_on_A": true,
+   "relayed_to_B": true
+  }
+ },
+ "mempool": {
+  "38": {
+   "allowed": true,
+   "reject": null
+  },
+  "70": {
+   "allowed": true,
+   "reject": null
+  },
+  "77": {
+   "allowed": true,
+   "reject": null
+  },
+  "80": {
+   "allowed": true,
+   "reject": null
+  },
+  "81": {
+   "allowed": true,
+   "reject": null
+  },
+  "82": {
+   "allowed": true,
+   "reject": null
+  },
+  "83": {
+   "allowed": true,
+   "reject": null
+  },
+  "84": {
+   "allowed": false,
+   "reject": "scriptpubkey"
+  },
+  "85": {
+   "allowed": false,
+   "reject": "scriptpubkey"
+  },
+  "103": {
+   "allowed": false,
+   "reject": "scriptpubkey"
+  }
+ }
+}

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Mike Moore (AwokenLazarus)
 """Pure ConnectBlock for node-template consensus (soft-fork rules).
 
 Validity is a function of (chain, block) only. IL transaction bodies live in

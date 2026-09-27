@@ -1,0 +1,17 @@
+[package]
+name = "gwsim"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# SOV-008 demo only: a DATUM gateway that speaks the real protocol to primed (handshake, jobs,
+# request_full_block replies) with templates fed on stdin. Built against the rnd/sov-008 wire crate.
+[dependencies]
+# The datum-wire crate of this repo, with the s0 and sov-015 series of research/sovereign-tides/patches/primed applied.
+datum-wire = { path = "../../../../../prime/wire" }
+serde_json = "1"
+hex = "0.4"
+
+[profile.release]
+codegen-units = 1
+opt-level = 3

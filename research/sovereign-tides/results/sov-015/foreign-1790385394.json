@@ -1,0 +1,611 @@
+{
+ "secs": 420.0,
+ "finders": [
+  "H1",
+  "P",
+  "H1",
+  "P",
+  "H1"
+ ],
+ "leaks": 0,
+ "decoys_in_pool": 28,
+ "decoys": 28,
+ "rows": {
+  "knots-h1": {
+   "blocks": 0,
+   "bound": false,
+   "branch_sim": 0.0,
+   "canaries": 224,
+   "canaries_due": 21,
+   "canary_hits": 20,
+   "canary_pool_leaks": 0,
+   "canary_rate": 0.9523809523809523,
+   "canary_source": "checks",
+   "checks": 14,
+   "compared": 0,
+   "decoy_rate": 0.0,
+   "decoys_carried": 0,
+   "decoys_due": 25,
+   "evidence": "canary",
+   "flag_reasons": [],
+   "flagged": false,
+   "follower": 0.0,
+   "foreign": {
+    "0450ee091cda2c20dddd2f2ec8ef81f4794215a319c2d9e8be3af0197f3689b0": {
+     "due": 21,
+     "hits": 0
+    },
+    "296d82f218fc1eeebf01c3eb1f459d15b242035e720cb06cd86fbd00a3131551": {
+     "due": 21,
+     "hits": 0
+    },
+    "64f9acf210d2922b769133066460706a9e915decbe519883998106c06b4e8456": {
+     "due": 21,
+     "hits": 0
+    },
+    "842a9117c6d3a9b5636ff40f4987a513dc54861d5f09b667977f9f3127d47257": {
+     "due": 21,
+     "hits": 0
+    },
+    "c5ef469f12e6cbf92abfae3d8e05d4da457071cb156b69b2d9b473dfb592b31b": {
+     "due": 21,
+     "hits": 0
+    }
+   },
+   "foreign_due": 105,
+   "foreign_hits": 0,
+   "house": false,
+   "identical": 0.0,
+   "in_pool_cluster": false,
+   "incl_lag": null,
+   "independence": 0.923,
+   "independence_ppm": 923000,
+   "insufficient": false,
+   "jaccard": 0.0,
+   "lead": 1.0,
+   "lockstep": 0.0,
+   "pool_clustered": false,
+   "registered": true,
+   "registration": 1,
+   "shared_due": 26,
+   "shared_hits": 24,
+   "shared_rate": 0.9230769230769231,
+   "shared_source": [],
+   "snapshots": 82,
+   "status": "active",
+   "subset": 0.0,
+   "switch_lag": null,
+   "tip_lead": 0.0,
+   "weight": 0.923
+  },
+  "knots-h2": {
+   "blocks": 0,
+   "bound": false,
+   "branch_sim": 0.0,
+   "canaries": 224,
+   "canaries_due": 22,
+   "canary_hits": 21,
+   "canary_pool_leaks": 0,
+   "canary_rate": 0.9545454545454546,
+   "canary_source": "checks",
+   "checks": 14,
+   "compared": 0,
+   "decoy_rate": 0.0,
+   "decoys_carried": 0,
+   "decoys_due": 26,
+   "evidence": "canary",
+   "flag_reasons": [],
+   "flagged": false,
+   "follower": 0.0,
+   "foreign": {
+    "0450ee091cda2c20dddd2f2ec8ef81f4794215a319c2d9e8be3af0197f3689b0": {
+     "due": 22,
+     "hits": 0
+    },
+    "64f9acf210d2922b769133066460706a9e915decbe519883998106c06b4e8456": {
+     "due": 22,
+     "hits": 0
+    },
+    "842a9117c6d3a9b5636ff40f4987a513dc54861d5f09b667977f9f3127d47257": {
+     "due": 22,
+     "hits": 0
+    },
+    "8832ec8bdb0e79a422dbcdeba4e980186b8aa64f83705f26682936dd10c67a63": {
+     "due": 22,
+     "hits": 0
+    },
+    "c5ef469f12e6cbf92abfae3d8e05d4da457071cb156b69b2d9b473dfb592b31b": {
+     "due": 22,
+     "hits": 0
+    }
+   },
+   "foreign_due": 110,
+   "foreign_hits": 0,
+   "house": false,
+   "identical": 0.0,
+   "in_pool_cluster": false,
+   "incl_lag": null,
+   "independence": 0.923,
+   "independence_ppm": 923000,
+   "insufficient": false,
+   "jaccard": 0.0,
+   "lead": 1.0,
+   "lockstep": 0.0,
+   "pool_clustered": false,
+   "registered": true,
+   "registration": 1,
+   "shared_due": 26,
+   "shared_hits": 24,
+   "shared_rate": 0.9230769230769231,
+   "shared_source": [],
+   "snapshots": 82,
+   "status": "active",
+   "subset": 0.0,
+   "switch_lag": null,
+   "tip_lead": 0.0,
+   "weight": 0.923
+  },
+  "knots-proxy": {
+   "blocks": 0,
+   "bound": false,
+   "branch_sim": 0.0,
+   "canaries": 224,
+   "canaries_due": 21,
+   "canary_hits": 0,
+   "canary_pool_leaks": 0,
+   "canary_rate": 0.0,
+   "canary_source": "checks",
+   "checks": 14,
+   "compared": 0,
+   "decoy_rate": 1.0,
+   "decoys_carried": 25,
+   "decoys_due": 25,
+   "evidence": "canary",
+   "flag_reasons": [
+    "own-canaries-missed",
+    "shared-canaries-missed",
+    "decoys-carried"
+   ],
+   "flagged": true,
+   "follower": 0.0,
+   "foreign": {
+    "296d82f218fc1eeebf01c3eb1f459d15b242035e720cb06cd86fbd00a3131551": {
+     "due": 21,
+     "hits": 0
+    },
+    "64f9acf210d2922b769133066460706a9e915decbe519883998106c06b4e8456": {
+     "due": 21,
+     "hits": 0
+    },
+    "842a9117c6d3a9b5636ff40f4987a513dc54861d5f09b667977f9f3127d47257": {
+     "due": 21,
+     "hits": 0
+    },
+    "8832ec8bdb0e79a422dbcdeba4e980186b8aa64f83705f26682936dd10c67a63": {
+     "due": 21,
+     "hits": 0
+    },
+    "c5ef469f12e6cbf92abfae3d8e05d4da457071cb156b69b2d9b473dfb592b31b": {
+     "due": 21,
+     "hits": 0
+    }
+   },
+   "foreign_due": 105,
+   "foreign_hits": 0,
+   "house": false,
+   "identical": 0.0,
+   "in_pool_cluster": false,
+   "incl_lag": null,
+   "independence": 0.0,
+   "independence_ppm": 0,
+   "insufficient": false,
+   "jaccard": 0.0,
+   "lead": 1.0,
+   "lockstep": 0.0,
+   "pool_clustered": false,
+   "registered": true,
+   "registration": 1,
+   "shared_due": 26,
+   "shared_hits": 0,
+   "shared_rate": 0.0,
+   "shared_source": [],
+   "snapshots": 82,
+   "status": "active",
+   "subset": 0.0,
+   "switch_lag": null,
+   "tip_lead": 0.0,
+   "weight": 0.0
+  },
+  "tfarm-1": {
+   "blocks": 0,
+   "bound": false,
+   "branch_sim": 0.0,
+   "canaries": 224,
+   "canaries_due": 21,
+   "canary_hits": 20,
+   "canary_pool_leaks": 0,
+   "canary_rate": 0.9523809523809523,
+   "canary_source": "checks",
+   "checks": 14,
+   "compared": 0,
+   "decoy_rate": 0.0,
+   "decoys_carried": 0,
+   "decoys_due": 25,
+   "evidence": "canary",
+   "flag_reasons": [
+    "shared-template-source"
+   ],
+   "flagged": false,
+   "follower": 0.0,
+   "foreign": {
+    "0450ee091cda2c20dddd2f2ec8ef81f4794215a319c2d9e8be3af0197f3689b0": {
+     "due": 21,
+     "hits": 0
+    },
+    "296d82f218fc1eeebf01c3eb1f459d15b242035e720cb06cd86fbd00a3131551": {
+     "due": 21,
+     "hits": 0
+    },
+    "64f9acf210d2922b769133066460706a9e915decbe519883998106c06b4e8456": {
+     "due": 21,
+     "hits": 20
+    },
+    "842a9117c6d3a9b5636ff40f4987a513dc54861d5f09b667977f9f3127d47257": {
+     "due": 21,
+     "hits": 20
+    },
+    "8832ec8bdb0e79a422dbcdeba4e980186b8aa64f83705f26682936dd10c67a63": {
+     "due": 21,
+     "hits": 0
+    }
+   },
+   "foreign_due": 105,
+   "foreign_hits": 40,
+   "house": false,
+   "identical": 0.0,
+   "in_pool_cluster": false,
+   "incl_lag": null,
+   "independence": 0.308,
+   "independence_ppm": 308000,
+   "insufficient": false,
+   "jaccard": 0.0,
+   "lead": 1.0,
+   "lockstep": 0.0,
+   "pool_clustered": false,
+   "registered": true,
+   "registration": 1,
+   "shared_due": 26,
+   "shared_hits": 24,
+   "shared_rate": 0.9230769230769231,
+   "shared_source": [
+    "64f9acf210d2922b769133066460706a9e915decbe519883998106c06b4e8456",
+    "842a9117c6d3a9b5636ff40f4987a513dc54861d5f09b667977f9f3127d47257"
+   ],
+   "snapshots": 82,
+   "status": "active",
+   "subset": 0.0,
+   "switch_lag": null,
+   "tip_lead": 0.0,
+   "weight": 0.308
+  },
+  "tfarm-2": {
+   "blocks": 0,
+   "bound": false,
+   "branch_sim": 0.0,
+   "canaries": 224,
+   "canaries_due": 21,
+   "canary_hits": 20,
+   "canary_pool_leaks": 0,
+   "canary_rate": 0.9523809523809523,
+   "canary_source": "checks",
+   "checks": 14,
+   "compared": 0,
+   "decoy_rate": 0.0,
+   "decoys_carried": 0,
+   "decoys_due": 25,
+   "evidence": "canary",
+   "flag_reasons": [
+    "shared-template-source"
+   ],
+   "flagged": false,
+   "follower": 0.0,
+   "foreign": {
+    "0450ee091cda2c20dddd2f2ec8ef81f4794215a319c2d9e8be3af0197f3689b0": {
+     "due": 21,
+     "hits": 0
+    },
+    "296d82f218fc1eeebf01c3eb1f459d15b242035e720cb06cd86fbd00a3131551": {
+     "due": 21,
+     "hits": 0
+    },
+    "64f9acf210d2922b769133066460706a9e915decbe519883998106c06b4e8456": {
+     "due": 21,
+     "hits": 20
+    },
+    "8832ec8bdb0e79a422dbcdeba4e980186b8aa64f83705f26682936dd10c67a63": {
+     "due": 21,
+     "hits": 0
+    },
+    "c5ef469f12e6cbf92abfae3d8e05d4da457071cb156b69b2d9b473dfb592b31b": {
+     "due": 21,
+     "hits": 20
+    }
+   },
+   "foreign_due": 105,
+   "foreign_hits": 40,
+   "house": false,
+   "identical": 0.0,
+   "in_pool_cluster": false,
+   "incl_lag": null,
+   "independence": 0.308,
+   "independence_ppm": 308000,
+   "insufficient": false,
+   "jaccard": 0.0,
+   "lead": 1.0,
+   "lockstep": 0.0,
+   "pool_clustered": false,
+   "registered": true,
+   "registration": 1,
+   "shared_due": 26,
+   "shared_hits": 24,
+   "shared_rate": 0.9230769230769231,
+   "shared_source": [
+    "64f9acf210d2922b769133066460706a9e915decbe519883998106c06b4e8456",
+    "c5ef469f12e6cbf92abfae3d8e05d4da457071cb156b69b2d9b473dfb592b31b"
+   ],
+   "snapshots": 82,
+   "status": "active",
+   "subset": 0.0,
+   "switch_lag": null,
+   "tip_lead": 0.0,
+   "weight": 0.308
+  },
+  "tfarm-3": {
+   "blocks": 0,
+   "bound": false,
+   "branch_sim": 0.0,
+   "canaries": 224,
+   "canaries_due": 21,
+   "canary_hits": 20,
+   "canary_pool_leaks": 0,
+   "canary_rate": 0.9523809523809523,
+   "canary_source": "checks",
+   "checks": 14,
+   "compared": 0,
+   "decoy_rate": 0.0,
+   "decoys_carried": 0,
+   "decoys_due": 25,
+   "evidence": "canary",
+   "flag_reasons": [
+    "shared-template-source"
+   ],
+   "flagged": false,
+   "follower": 0.0,
+   "foreign": {
+    "0450ee091cda2c20dddd2f2ec8ef81f4794215a319c2d9e8be3af0197f3689b0": {
+     "due": 21,
+     "hits": 0
+    },
+    "296d82f218fc1eeebf01c3eb1f459d15b242035e720cb06cd86fbd00a3131551": {
+     "due": 21,
+     "hits": 0
+    },
+    "842a9117c6d3a9b5636ff40f4987a513dc54861d5f09b667977f9f3127d47257": {
+     "due": 21,
+     "hits": 20
+    },
+    "8832ec8bdb0e79a422dbcdeba4e980186b8aa64f83705f26682936dd10c67a63": {
+     "due": 21,
+     "hits": 0
+    },
+    "c5ef469f12e6cbf92abfae3d8e05d4da457071cb156b69b2d9b473dfb592b31b": {
+     "due": 21,
+     "hits": 20
+    }
+   },
+   "foreign_due": 105,
+   "foreign_hits": 40,
+   "house": false,
+   "identical": 0.0,
+   "in_pool_cluster": false,
+   "incl_lag": null,
+   "independence": 0.308,
+   "independence_ppm": 308000,
+   "insufficient": false,
+   "jaccard": 0.0,
+   "lead": 1.0,
+   "lockstep": 0.0,
+   "pool_clustered": false,
+   "registered": true,
+   "registration": 1,
+   "shared_due": 26,
+   "shared_hits": 24,
+   "shared_rate": 0.9230769230769231,
+   "shared_source": [
+    "842a9117c6d3a9b5636ff40f4987a513dc54861d5f09b667977f9f3127d47257",
+    "c5ef469f12e6cbf92abfae3d8e05d4da457071cb156b69b2d9b473dfb592b31b"
+   ],
+   "snapshots": 82,
+   "status": "active",
+   "subset": 0.0,
+   "switch_lag": null,
+   "tip_lead": 0.0,
+   "weight": 0.308
+  }
+ },
+ "foreign_by_source": {
+  "knots-h1": {
+   "knots-proxy": {
+    "due": 21,
+    "hits": 0
+   },
+   "knots-h2": {
+    "due": 21,
+    "hits": 0
+   },
+   "tfarm-3": {
+    "due": 21,
+    "hits": 0
+   },
+   "tfarm-2": {
+    "due": 21,
+    "hits": 0
+   },
+   "tfarm-1": {
+    "due": 21,
+    "hits": 0
+   }
+  },
+  "knots-h2": {
+   "knots-proxy": {
+    "due": 22,
+    "hits": 0
+   },
+   "tfarm-3": {
+    "due": 22,
+    "hits": 0
+   },
+   "tfarm-2": {
+    "due": 22,
+    "hits": 0
+   },
+   "knots-h1": {
+    "due": 22,
+    "hits": 0
+   },
+   "tfarm-1": {
+    "due": 22,
+    "hits": 0
+   }
+  },
+  "knots-proxy": {
+   "knots-h2": {
+    "due": 21,
+    "hits": 0
+   },
+   "tfarm-3": {
+    "due": 21,
+    "hits": 0
+   },
+   "tfarm-2": {
+    "due": 21,
+    "hits": 0
+   },
+   "knots-h1": {
+    "due": 21,
+    "hits": 0
+   },
+   "tfarm-1": {
+    "due": 21,
+    "hits": 0
+   }
+  },
+  "tfarm-1": {
+   "knots-proxy": {
+    "due": 21,
+    "hits": 0
+   },
+   "knots-h2": {
+    "due": 21,
+    "hits": 0
+   },
+   "tfarm-3": {
+    "due": 21,
+    "hits": 20
+   },
+   "tfarm-2": {
+    "due": 21,
+    "hits": 20
+   },
+   "knots-h1": {
+    "due": 21,
+    "hits": 0
+   }
+  },
+  "tfarm-2": {
+   "knots-proxy": {
+    "due": 21,
+    "hits": 0
+   },
+   "knots-h2": {
+    "due": 21,
+    "hits": 0
+   },
+   "tfarm-3": {
+    "due": 21,
+    "hits": 20
+   },
+   "knots-h1": {
+    "due": 21,
+    "hits": 0
+   },
+   "tfarm-1": {
+    "due": 21,
+    "hits": 20
+   }
+  },
+  "tfarm-3": {
+   "knots-proxy": {
+    "due": 21,
+    "hits": 0
+   },
+   "knots-h2": {
+    "due": 21,
+    "hits": 0
+   },
+   "tfarm-2": {
+    "due": 21,
+    "hits": 20
+   },
+   "knots-h1": {
+    "due": 21,
+    "hits": 0
+   },
+   "tfarm-1": {
+    "due": 21,
+    "hits": 20
+   }
+  }
+ },
+ "clusters": [
+  [
+   "tfarm-1",
+   "tfarm-2",
+   "tfarm-3"
+  ]
+ ],
+ "held_foreign": {
+  "knots-h1": 0,
+  "knots-h2": 0,
+  "knots-proxy": 0,
+  "tfarm-1": 52,
+  "tfarm-2": 52,
+  "tfarm-3": 52
+ },
+ "lags": {
+  "twins_acked": 840,
+  "median": 0.0019,
+  "p99": 0.003,
+  "max": 0.0034,
+  "over_max_lag": 0
+ },
+ "key_ok": true,
+ "sidecar": {
+  "rounds": 28,
+  "delivered": {
+   "own": 168,
+   "shared": 28,
+   "decoy": 28
+  },
+  "delivery_failed": 0,
+  "foreign": {
+   "twins": 840,
+   "in_time": 840,
+   "late": 0,
+   "failed": 0
+  },
+  "fees_planned": 215768,
+  "fees_paid": 176132
+ },
+ "checks_refused": 0
+}

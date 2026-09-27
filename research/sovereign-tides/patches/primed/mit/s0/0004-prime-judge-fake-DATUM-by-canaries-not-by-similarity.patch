@@ -1,0 +1,1003 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: michael moore <mrmoore27@pm.me>
+Date: Fri, 25 Sep 2026 03:55:09 +0000
+Subject: [PATCH 04/27] prime: judge fake DATUM by canaries, not by similarity
+ to the pool
+
+Real Knots nodes with converged mempools build near-identical
+templates, so the similarity detector flagged honest gateways
+(xbt-lead's verify: knots-h1/h2 flagged). Being identical to the
+pool is now reported only, never scored.
+
+Canaries convict and clear. Prime hands a gateway's registered node a
+canary C, sends P a conflicting twin C' that pays 1 sat more (neither
+can replace the other), and tells P never to template C. A gateway
+built from P's template cannot carry C. Flagged when at least 10 are
+due and fewer than 25 % were templated in time. Timing leads (tx and
+tip) can only clear a gateway, because an honest node near the pool
+lags it too. With neither signal, independence is 0 and nothing is
+flagged.
+
+The Knots path now asserts the verdict: 2 honest + proxy + mimic, 100 %
+of traffic entering at P, 3/3 runs green. The demo's primed no longer
+outlives the script (exec), and a busy stats port fails the run.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ prime/primed/src/sovereignty.rs       |  54 ++++-
+ prime/primed/src/stats.rs             |  10 +
+ prime/primed/tests/sovereignty_e2e.rs |  21 +-
+ prime/scripts/rnd-a2-demo.sh          |  11 +-
+ prime/scripts/rnd-a2-feed.py          |  18 +-
+ prime/scripts/rnd-a2-knots.py         | 324 ++++++++++++++++++++------
+ prime/tides/src/entropy.rs            | 239 +++++++++++++++++--
+ prime/tides/src/lib.rs                |   2 +-
+ 8 files changed, 572 insertions(+), 107 deletions(-)
+
+diff --git a/prime/primed/src/sovereignty.rs b/prime/primed/src/sovereignty.rs
+index b2e7ce6..f6274ec 100644
+--- a/prime/primed/src/sovereignty.rs
++++ b/prime/primed/src/sovereignty.rs
+@@ -20,7 +20,7 @@ use datum_wire::crypto::{Identity, SIGN_PK, SIG};
+ use datum_wire::pow::Hash;
+ use serde::{Deserialize, Serialize};
+ use serde_json::{json, Value};
+-use tides::entropy::{self, Snapshot};
++use tides::entropy::{self, Canary, Snapshot};
+ use tides::score::{self, PoolScore};
+ use tides::sovereignty::{self as bonus, Authored, Bonus, BonusParams, WorkTotals};
+ use tides::Window;
+@@ -67,6 +67,8 @@ pub struct Engine {
+     dir: PathBuf,
+     keys: HashMap<String, KeyRecord>,
+     snapshots: BTreeMap<String, Vec<Snapshot>>,
++    /// Canary txs handed to each gateway's node (Prime keeps the pool node from templating them).
++    canaries: BTreeMap<String, Vec<Canary>>,
+     attested: HashMap<String, AttestedJob>,
+     authored: Vec<Authored>,
+     /// Observed blocks for the public score (demo + any LZT1-verified job).
+@@ -203,6 +205,21 @@ impl Engine {
+         }
+     }
+ 
++    /// Record a canary handed to `gateway`'s node. The caller must already have told the pool
++    /// node to never template `txid` (`prioritisetransaction <txid> 0 -100000000`).
++    pub fn note_canary(&mut self, gateway: &str, canary: Canary) {
++        let v = self.canaries.entry(gateway.to_ascii_lowercase()).or_default();
++        v.push(canary);
++        if v.len() > 500 {
++            v.drain(..v.len() - 400);
++        }
++    }
++
++    fn features_of(&self, name: &str, snaps: &[Snapshot]) -> entropy::Features {
++        let canaries = self.canaries.get(name).map(Vec::as_slice).unwrap_or(&[]);
++        entropy::features_with(snaps, self.pool_snaps(), canaries)
++    }
++
+     /// A live session's job: prev + merkle branches. Txids are empty until a validation
+     /// reply or an HTTP ingest fills them in; `identical` still works from branches alone
+     /// if we store the branch list as a synthetic txid set.
+@@ -333,15 +350,14 @@ impl Engine {
+     pub fn independence_of(&self, gateway: &str) -> u32 {
+         let g = if gateway.eq_ignore_ascii_case("pool") { "POOL".to_string() } else { gateway.to_ascii_lowercase() };
+         let Some(snaps) = self.snapshots.get(&g) else { return 0 };
+-        entropy::independence_ppm(&entropy::features(snaps, self.pool_snaps()))
++        entropy::independence_ppm(&self.features_of(&g, snaps))
+     }
+ 
+     pub fn detector_rows(&self) -> BTreeMap<String, entropy::Features> {
+-        let pool = self.pool_snaps();
+         self.snapshots
+             .iter()
+             .filter(|(n, _)| n.as_str() != "POOL")
+-            .map(|(n, s)| (n.clone(), entropy::features(s, pool)))
++            .map(|(n, s)| (n.clone(), self.features_of(n, s)))
+             .collect()
+     }
+ 
+@@ -352,7 +368,7 @@ impl Engine {
+     pub fn flagged(&self) -> Vec<String> {
+         self.detector_rows()
+             .into_iter()
+-            .filter(|(_, f)| !f.insufficient && f.independence < 0.2)
++            .filter(|(_, f)| f.flagged)
+             .map(|(n, _)| n)
+             .collect()
+     }
+@@ -416,6 +432,17 @@ impl Engine {
+                     "branch_sim": f.branch_sim,
+                     "jaccard": f.jaccard,
+                     "lead": f.lead,
++                    "tip_lead": f.tip_lead,
++                    "lockstep": f.lockstep,
++                    "switch_lag": f.switch_lag,
++                    "incl_lag": f.incl_lag,
++                    "canaries": f.canaries,
++                    "canaries_due": f.canaries_due,
++                    "canary_hits": f.canary_hits,
++                    "canary_rate": f.canary_rate,
++                    "canary_pool_leaks": f.canary_pool_leaks,
++                    "evidence": f.evidence,
++                    "flagged": f.flagged,
+                     "subset": f.subset,
+                     "follower": f.follower,
+                     "independence": f.independence,
+@@ -615,6 +642,23 @@ mod tests {
+             e.note_snapshot("h2", Snapshot::new(t + 0.02, prev.clone(), vec![format!("{:064x}", i + 500)]));
+             e.note_snapshot("proxy", Snapshot::new(t + 0.04, prev, pool_tx));
+         }
++        // Without canaries nobody is flagged: identity to the pool is not evidence.
++        assert!(e.flagged().is_empty());
++        // Canaries handed to each gateway's node; honest ones template them, the proxy can't.
++        for k in 0..12u64 {
++            let t = 30.0 + k as f64;
++            let prev = format!("{:064x}", 999);
++            for gw in ["h1", "h2", "proxy"] {
++                let c = format!("{:064x}", 0xc000 + k * 10 + gw.len() as u64);
++                e.note_canary(gw, Canary::new(t, c.clone()));
++                if gw != "proxy" {
++                    e.note_snapshot(gw, Snapshot::new(t + 1.0, prev.clone(), vec![c]));
++                }
++            }
++        }
++        for gw in ["h1", "h2", "proxy"] {
++            e.note_snapshot(gw, Snapshot::new(60.0, format!("{:064x}", 999), vec![]));
++        }
+         let rows = e.detector_rows();
+         assert!(rows["proxy"].independence < 0.05, "{}", rows["proxy"].independence);
+         assert!(rows["h1"].independence > 0.8, "{}", rows["h1"].independence);
+diff --git a/prime/primed/src/stats.rs b/prime/primed/src/stats.rs
+index 6a0c61c..e597f8c 100644
+--- a/prime/primed/src/stats.rs
++++ b/prime/primed/src/stats.rs
+@@ -483,6 +483,16 @@ fn ingest(shared: &Shared, path: &str, body: &str) -> Result<Value, String> {
+             shared.sovereignty.lock().unwrap().note_snapshot(gw, tides::Snapshot::new(t, prev, txids));
+             Ok(json!({"ok": true}))
+         }
++        "/sovereignty/canary" => {
++            if !demo {
++                return Err("sovereignty-demo is off".into());
++            }
++            let gw = v["gateway"].as_str().ok_or("gateway")?;
++            let t = v["t"].as_f64().ok_or("t")?;
++            let txid = v["txid"].as_str().ok_or("txid")?;
++            shared.sovereignty.lock().unwrap().note_canary(gw, tides::Canary::new(t, txid));
++            Ok(json!({"ok": true}))
++        }
+         "/sovereignty/attest" => {
+             let a = v["a"].as_str().ok_or("a")?;
+             let sig = v["sig"].as_str().ok_or("sig")?;
+diff --git a/prime/primed/tests/sovereignty_e2e.rs b/prime/primed/tests/sovereignty_e2e.rs
+index 9ae0b82..9ac561c 100644
+--- a/prime/primed/tests/sovereignty_e2e.rs
++++ b/prime/primed/tests/sovereignty_e2e.rs
+@@ -61,8 +61,12 @@ fn snaps(n: usize) -> (Vec<Value>, Vec<Value>, Vec<Value>, Vec<Value>) {
+         let t = i as f64;
+         let prev = hex32(i / 8);
+         let ptx = vec![hex32(i + 100), hex32(i + 200)];
+-        let h1tx = vec![hex32(i + 300), hex32(i + 400)];
+-        let h2tx = vec![hex32(i + 500)];
++        // Canary k (delivered at t = k) sits in the honest nodes' templates for t in k+1..=k+3.
++        let live: Vec<u64> = (0..17).filter(|&k| k + 1 <= i && i <= k + 3).collect();
++        let mut h1tx = vec![hex32(i + 300), hex32(i + 400)];
++        h1tx.extend(live.iter().map(|&k| canary("h1", k)));
++        let mut h2tx = vec![hex32(i + 500)];
++        h2tx.extend(live.iter().map(|&k| canary("h2", k)));
+         pool.push(json!({"t": t, "prev": prev, "txids": ptx}));
+         h1.push(json!({"t": t + 0.01, "prev": prev, "txids": h1tx}));
+         h2.push(json!({"t": t + 0.02, "prev": prev, "txids": h2tx}));
+@@ -71,6 +75,10 @@ fn snaps(n: usize) -> (Vec<Value>, Vec<Value>, Vec<Value>, Vec<Value>) {
+     (pool, h1, h2, proxy)
+ }
+ 
++fn canary(gw: &str, k: u64) -> String {
++    hex32(0xca_0000 + k * 16 + gw.len() as u64)
++}
++
+ #[test]
+ fn primed_flags_the_fake_gateway_and_moves_bonus_credit() {
+     let pool = Identity::from_secret_bytes(&[0x64; 64]);
+@@ -107,6 +115,15 @@ house-loopback = false
+         }
+     }
+ 
++    // Nobody is flagged on similarity alone.
++    assert_eq!(common::settled_stats(&p)["sovereignty"]["flagged"], json!([]));
++    for gw in ["h1", "h2", "proxy"] {
++        for k in 0..17u64 {
++            let r = post(stats, "/sovereignty/canary", &json!({"gateway": gw, "t": k as f64, "txid": canary(gw, k)}));
++            assert_eq!(r["ok"], true, "{r}");
++        }
++    }
++
+     let attester = Identity::from_secret_bytes(&[0x42; 64]);
+     let pk = hex::encode(attester.sign_pk());
+     post(stats, "/sovereignty/register", &json!({"g": pk, "payout": "bc1qhonest", "house": false}));
+diff --git a/prime/scripts/rnd-a2-demo.sh b/prime/scripts/rnd-a2-demo.sh
+index f52bdbe..0c30ef8 100755
+--- a/prime/scripts/rnd-a2-demo.sh
++++ b/prime/scripts/rnd-a2-demo.sh
+@@ -48,8 +48,13 @@ sovereignty-min-key-age-secs = 0
+ headline = "XBT-064 rnd/a2"
+ EOF
+ 
++if curl -s -o /dev/null "$PRIME_STATS/healthz"; then
++  echo "something already listens on :${STATS_PORT} (a stale primed?); refusing to test against it" >&2
++  exit 1
++fi
++
+ echo "== start primed on :${LISTEN_PORT} / :${STATS_PORT} =="
+-(cd "$PRIME" && RUST_LOG=info ./target/debug/primed -c "$RUN/prime/prime.toml" run \
++(cd "$PRIME" && RUST_LOG=info exec ./target/debug/primed -c "$RUN/prime/prime.toml" run \
+   >"$RUN/prime/primed.log" 2>"$RUN/prime/primed.err") &
+ PRIMED_PID=$!
+ for i in $(seq 1 50); do
+@@ -67,8 +72,8 @@ echo "== feed (honest vs fake, attestation, bonus) =="
+ python3 "$HERE/rnd-a2-feed.py"
+ 
+ if [[ -x "$KNOTS" ]]; then
+-  echo "== optional Knots 29.4.2: 2 honest + 1 proxy (40s, ports 30520+) =="
+-  python3 "$HERE/rnd-a2-knots.py" "$KNOTS" 40 30520 || echo "(knots poll skipped: $?)"
++  echo "== Knots 29.4.2: 2 honest (converged mempools) + proxy + mimic, canaries (${KNOTS_SECS:-60}s, ports 30520-30527) =="
++  python3 "$HERE/rnd-a2-knots.py" "$KNOTS" "${KNOTS_SECS:-60}" 30520
+ else
+   echo "== no Knots 29.4.2 at $KNOTS; synth-only detector (still asserted) =="
+ fi
+diff --git a/prime/scripts/rnd-a2-feed.py b/prime/scripts/rnd-a2-feed.py
+index 85a1007..0390158 100755
+--- a/prime/scripts/rnd-a2-feed.py
++++ b/prime/scripts/rnd-a2-feed.py
+@@ -2,7 +2,7 @@
+ """Drive a primed with sovereignty-demo on: 2 honest + 1 proxy snapshots, LZT1 attest,
+ TIDES bonus. Optional Knots 29.4.2 poll (ports 30520+) if bitcoind is given.
+ """
+-import json, os, random, subprocess, sys, time, urllib.request
++import hashlib, json, os, random, subprocess, sys, time, urllib.request
+ 
+ STATS = os.environ.get("PRIME_STATS", "http://127.0.0.1:30516")
+ HERE = os.path.dirname(os.path.abspath(__file__))
+@@ -24,14 +24,21 @@ def hex32(i):
+     return f"{i:064x}"
+ 
+ 
++def canary_id(gw, k):
++    return hashlib.sha256(f"canary {gw} {k}".encode()).hexdigest()
++
++
+ def synth(n=30):
++    """Pool + 2 honest + a proxy. Every 1 s Prime hands each gateway's node a canary (the pool
++    node never templates it); honest templates carry it 1-3 s later, the proxy never can."""
+     pool, h1, h2, proxy = [], [], [], []
+     for i in range(n):
+         t, prev = float(i), hex32(i // 8)
+         ptx = [hex32(i + 100), hex32(i + 200)]
+         pool.append({"t": t, "prev": prev, "txids": ptx})
+-        h1.append({"t": t + 0.01, "prev": prev, "txids": [hex32(i + 300), hex32(i + 400)]})
+-        h2.append({"t": t + 0.02, "prev": prev, "txids": [hex32(i + 500)]})
++        live = [k for k in range(0, 17) if k + 1 <= i <= k + 3]
++        h1.append({"t": t + 0.01, "prev": prev, "txids": [hex32(i + 300), hex32(i + 400)] + [canary_id("h1", k) for k in live]})
++        h2.append({"t": t + 0.02, "prev": prev, "txids": [hex32(i + 500)] + [canary_id("h2", k) for k in live]})
+         proxy.append({"t": t + 0.04, "prev": prev, "txids": list(ptx)})
+     return {"POOL": pool, "h1": h1, "h2": h2, "proxy": proxy}
+ 
+@@ -40,6 +47,9 @@ def push_snaps(gws):
+     for gw, snaps in gws.items():
+         for s in snaps:
+             post("/sovereignty/snapshot", {"gateway": gw, **s})
++    for gw in ("h1", "h2", "proxy"):
++        for k in range(0, 17):
++            post("/sovereignty/canary", {"gateway": gw, "t": float(k), "txid": canary_id(gw, k)})
+ 
+ 
+ def fixture():
+@@ -78,7 +88,7 @@ def main():
+     print("== detector ==")
+     for name in ("h1", "h2", "proxy"):
+         f = gw[name]
+-        print(f"  {name:6} independence={f['independence']:.3f} identical={f['identical']:.3f} lead={f['lead']:.3f}")
++        print(f"  {name:6} independence={f['independence']:.3f} evidence={f['evidence']} canaries={f['canary_hits']}/{f['canaries_due']} identical={f['identical']:.3f} lead={f['lead']:.3f}")
+     print("flagged", sov["flagged"])
+     print("score", json.dumps(sov["score"], indent=2))
+     print("sample bonus", json.dumps(sov["bonus"]["sample"], indent=2))
+diff --git a/prime/scripts/rnd-a2-knots.py b/prime/scripts/rnd-a2-knots.py
+index 6531bd5..1a2d9aa 100755
+--- a/prime/scripts/rnd-a2-knots.py
++++ b/prime/scripts/rnd-a2-knots.py
+@@ -1,42 +1,77 @@
+ #!/usr/bin/env python3
+-"""Short isolated Knots net: pool node + 2 honest + a proxy of the pool's templates.
+-Posts snapshots to primed (PRIME_STATS). Ports from argv. No miners.
++"""XBT-064 fake-DATUM detector on real Knots 29.4.2 regtest nodes with converged mempools.
++
++Isolated, loopback only, ports BASE..BASE+7 (default 30520), datadirs under $XBT064_RUN.
++No miner processes: blocks come from generatetodescriptor on whichever node "finds" them.
++
++  P   the pool's node (Prime's)
++  H1  honest gateway node, peers P
++  H2  honest gateway node, peers P and H1
++  X   the node the fake gateway registered (it runs, relays, and is ignored by its gateway)
++
++Gateways, polled every 0.5 s (getblocktemplate) as Prime would see their jobs:
++  knots-h1, knots-h2  their own node's template (same policy as P, same mempool: near-identical)
++  knots-proxy         P's template 20-80 ms later            (canaries go to X)
++  knots-mimic         P's template reordered, 0.3-1.5 s later (canaries go to X)
++
++Traffic: P2WSH(OP_TRUE) spends; a share XBT064_TO_POOL (default 1.0) enters at P, the rest at
++H1/H2/X. At 1.0 every honest mempool is the pool's (plus the canaries): the case that made the
++similarity detector flag honest gateways.
++Blocks: every 8-14 s from P (50 %), H1 or H2 (25 % each, "other miners").
++Canaries: every 2 s per gateway, Prime (this script) builds a conflicting pair from one
++confirmed UTXO: C (to the gateway's registered node) and C' (1 sat more fee, to P). Neither
++can replace the other (BIP125 needs +incremental relay fee), so first-seen partitions the
++network: the gateway's node holds C, P and whoever hears from it first hold C'. P also gets
++`prioritisetransaction C 0 -100000000` before C exists, so P can never template C. A gateway
++built from P's template (or from any node that heard C' first) cannot carry C.
++XBT064_CANARY_EVERY=0 turns canaries off (control run: nothing may be flagged). Snapshots and canaries are posted to primed (PRIME_STATS); primed's verdict is
++asserted: the honest gateways are not flagged, proxy and mimic are.
++
++Usage: rnd-a2-knots.py <bitcoind> [seconds] [base_port]
+ """
+-import atexit, base64, json, os, random, shutil, subprocess, sys, time, urllib.request
++import atexit, base64, hashlib, json, os, random, shutil, struct, subprocess, sys, threading, time
++import urllib.error, urllib.request
+ 
+ BITCOIND = sys.argv[1]
+-SECS = float(sys.argv[2]) if len(sys.argv) > 2 else 40
++SECS = float(sys.argv[2]) if len(sys.argv) > 2 else 60
+ BASE = int(sys.argv[3]) if len(sys.argv) > 3 else 30520
+ STATS = os.environ.get("PRIME_STATS", "http://127.0.0.1:30516")
+ RUN = os.environ.get("XBT064_RUN", os.path.expanduser("~/xbt-rnd/xbt-064/run"))
+ RDTS = "-rdtsexpiry=4102444800"
+-nodes, snaps = {}, {"POOL": [], "knots-h1": [], "knots-h2": [], "knots-proxy": []}
++P2WSH_TRUE = b"\x00\x20" + hashlib.sha256(b"\x51").digest()
++DESC = "raw(" + P2WSH_TRUE.hex() + ")"
++CANARY_EVERY = float(os.environ.get("XBT064_CANARY_EVERY", "2"))
++TO_POOL = float(os.environ.get("XBT064_TO_POOL", "1.0"))
++POLL = 0.25
++CANARY_FEE = 3_000  # ~30 sat/vB: well above any honest node's block min fee
++rng = random.Random(int(os.environ.get("XBT064_SEED", "64")))
++nodes = {}
++GATEWAYS = {"knots-h1": "H1", "knots-h2": "H2", "knots-proxy": "X", "knots-mimic": "X"}
+ 
+ 
+ def start(name, i, extra, connect=()):
+     d = os.path.join(RUN, f"knots-{name}")
+     shutil.rmtree(d, ignore_errors=True)
+     os.makedirs(d, exist_ok=True)
+-    rpc, p2p = BASE + 2 * i, BASE + 2 * i + 1
+-    args = [f"-datadir={d}", "-regtest", "-server", f"-rpcport={rpc}", "-rpcbind=127.0.0.1",
+-            "-rpcallowip=127.0.0.1", "-rpcuser=x", "-rpcpassword=xbt064",
+-            "-testactivationheight=blake2b@101", RDTS, "-disablewallet", f"-port={p2p}",
+-            "-bind=127.0.0.1", "-listen=1", "-dnsseed=0", "-fixedseeds=0"] + [
+-                f"-addnode=127.0.0.1:{BASE + 2 * j + 1}" for j in connect
+-            ] + extra
++    rpcport, p2p = BASE + 2 * i, BASE + 2 * i + 1
++    args = [f"-datadir={d}", "-regtest", "-server", f"-rpcport={rpcport}", "-rpcbind=127.0.0.1",
++            "-rpcallowip=127.0.0.1", "-rpcuser=x", "-rpcpassword=xbt064", "-testactivationheight=blake2b@101",
++            "-blake2b_headline=Lazarus", RDTS, "-disablewallet", f"-port={p2p}", "-bind=127.0.0.1",
++            "-listen=1", "-dnsseed=0", "-fixedseeds=0"] + [
++                f"-addnode=127.0.0.1:{BASE + 2 * j + 1}" for j in connect] + extra
+     p = subprocess.Popen([BITCOIND] + args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+-    nodes[name] = {"p": p, "d": d, "port": rpc}
++    nodes[name] = {"p": p, "d": d, "port": rpcport}
+ 
+ 
+ def rpc(name, method, *params):
+     body = json.dumps({"jsonrpc": "1.0", "id": 0, "method": method, "params": list(params)}).encode()
+-    req = urllib.request.Request(
+-        f"http://127.0.0.1:{nodes[name]['port']}/",
+-        body,
+-        {"Authorization": "Basic " + base64.b64encode(b"x:xbt064").decode()},
+-    )
+-    with urllib.request.urlopen(req, timeout=30) as r:
+-        return json.load(r)["result"]
++    req = urllib.request.Request(f"http://127.0.0.1:{nodes[name]['port']}/", body,
++                                 {"Authorization": "Basic " + base64.b64encode(b"x:xbt064").decode()})
++    try:
++        with urllib.request.urlopen(req, timeout=30) as r:
++            return json.load(r)["result"]
++    except urllib.error.HTTPError as e:
++        raise RuntimeError(json.load(e).get("error")) from None
+ 
+ 
+ def stop_all():
+@@ -44,16 +79,35 @@ def stop_all():
+         n["p"].terminate()
+     for n in nodes.values():
+         try:
+-            n["p"].wait(timeout=30)
+-        except Exception:
++            n["p"].wait(timeout=60)
++        except Exception:  # noqa: BLE001
+             n["p"].kill()
+         shutil.rmtree(n["d"], ignore_errors=True)
+ 
+ 
+-def gbt(name):
+-    t = rpc(name, "getblocktemplate", {"rules": ["segwit", "blake2b"]})
+-    txids = [x["txid"] for x in t.get("transactions") or []]
+-    return {"t": time.time(), "prev": t["previousblockhash"], "txids": txids}
++def wait_up(name):
++    for _ in range(120):
++        try:
++            rpc(name, "getblockcount")
++            return
++        except Exception:  # noqa: BLE001
++            time.sleep(0.5)
++    raise SystemExit(f"{name} did not start")
++
++
++def varint(n):
++    return bytes([n]) if n < 0xFD else b"\xfd" + struct.pack("<H", n)
++
++
++def tx(inputs, outputs):
++    """inputs [(txid_hex, vout)], outputs [(sats, script)] -> (hex, txid); inputs are P2WSH(OP_TRUE)."""
++    ins = varint(len(inputs)) + b"".join(
++        bytes.fromhex(t)[::-1] + struct.pack("<I", n) + b"\x00" + b"\xfd\xff\xff\xff" for t, n in inputs)
++    outs = varint(len(outputs)) + b"".join(struct.pack("<Q", v) + varint(len(s)) + s for v, s in outputs)
++    ver, lock = struct.pack("<I", 2), b"\x00" * 4
++    txid = hashlib.sha256(hashlib.sha256(ver + ins + outs + lock).digest()).digest()[::-1].hex()
++    wit = b"".join(b"\x01\x01\x51" for _ in inputs)
++    return (ver + b"\x00\x01" + ins + outs + wit + lock).hex(), txid
+ 
+ 
+ def post(path, body):
+@@ -66,55 +120,185 @@ def main():
+     atexit.register(stop_all)
+     os.makedirs(RUN, exist_ok=True)
+     start("P", 0, [])
+-    start("H1", 1, [], connect=(0,))
+-    start("H2", 2, ["-blockmintxfee=0.00005"], connect=(0, 1))
+-    for _ in range(40):
+-        try:
+-            rpc("P", "getblockcount")
+-            rpc("H1", "getblockcount")
+-            rpc("H2", "getblockcount")
++    start("H1", 1, [], connect=[0])
++    start("H2", 2, [], connect=[0, 1])
++    start("X", 3, [], connect=[0, 1])
++    for n in nodes:
++        wait_up(n)
++    print("node:", rpc("P", "getnetworkinfo")["subversion"])
++    rpc("P", "generatetodescriptor", 130, DESC)
++    time.sleep(2)
++    utxos, reserve = [], []
++    for h in range(1, 26):
++        cb = rpc("P", "getblock", rpc("P", "getblockhash", h), 2)["tx"][0]
++        v = round(cb["vout"][0]["value"] * 1e8)
++        outs = [((v - 50_000) // 24, P2WSH_TRUE)] * 24
++        raw, txid = tx([(cb["txid"], 0)], outs)
++        assert rpc("P", "sendrawtransaction", raw) == txid
++        (reserve if h <= 8 else utxos).extend((txid, i, outs[0][0]) for i in range(24))
++    tip = rpc("P", "generatetodescriptor", 1, DESC)[0]
++    for _ in range(240):  # canaries spend these outputs on every gateway node: all must have them
++        if all(rpc(n, "getbestblockhash") == tip for n in nodes):
+             break
+-        except Exception:
+-            time.sleep(0.25)
+-    try:
+-        rpc("P", "generatetodescriptor", 130, "raw(51)")
+-    except Exception as e:
+-        print("generatetodescriptor:", e, file=sys.stderr)
+-    deadline = time.time() + SECS
+-    rng = random.Random(64)
+-    fails = 0
+-    while time.time() < deadline:
+-        try:
+-            p = gbt("P")
+-            h1 = gbt("H1")
+-            h2 = gbt("H2")
+-            proxy = dict(p, t=p["t"] + rng.uniform(0.02, 0.08))
+-            snaps["POOL"].append(p)
+-            snaps["knots-h1"].append(h1)
+-            snaps["knots-h2"].append(h2)
+-            snaps["knots-proxy"].append(proxy)
+-            for gw, s in (("POOL", p), ("knots-h1", h1), ("knots-h2", h2), ("knots-proxy", proxy)):
+-                post("/sovereignty/snapshot", {"gateway": gw, **s})
+-            fails = 0
+-        except Exception as e:
+-            fails += 1
+-            print("poll", e, file=sys.stderr)
+-            if fails >= 5:
+-                print("knots: getblocktemplate failing; synth detector already asserted", file=sys.stderr)
+-                break
+-        if rng.random() < 0.4:
++        time.sleep(0.5)
++    else:
++        raise SystemExit(f"nodes did not sync to {tip}: " + str({n: rpc(n, "getblockcount") for n in nodes}))
++    print("peers:", {n: rpc(n, "getconnectioncount") for n in nodes}, "height", rpc("P", "getblockcount"))
++
++    snaps = {g: [] for g in ("POOL", *GATEWAYS)}
++    canaries = {g: [] for g in GATEWAYS}
++    stop = threading.Event()
++    lock = threading.Lock()
++    ulock = threading.Lock()
++
++    def take_utxo(pool=utxos):
++        with ulock:
++            return pool.pop(rng.randrange(len(pool))) if pool else None
++
++    def gbt(n):
++        t = rpc(n, "getblocktemplate", {"rules": ["segwit", "blake2b"]})
++        return {"t": time.time(), "prev": t["previousblockhash"], "txids": [x["txid"] for x in t["transactions"]]}
++
++    def poll(node, name):
++        while not stop.is_set():
++            try:
++                s = gbt(node)
++                with lock:
++                    snaps[name].append(s)
++                    if node == "P":
++                        snaps["knots-proxy"].append(dict(s, txids=list(s["txids"]), t=s["t"] + rng.uniform(0.02, 0.08)))
++                        m = list(s["txids"])
++                        rng.shuffle(m)
++                        snaps["knots-mimic"].append(dict(s, txids=m, t=s["t"] + rng.uniform(0.3, 1.5)))
++            except Exception as e:  # noqa: BLE001
++                print("poll", node, e, file=sys.stderr)
++            time.sleep(POLL)
++
++    def traffic():
++        while not stop.is_set():
++            u = take_utxo()
++            if u is None:
++                return
++            txid, n, v = u
++            fee = rng.choice([300, 800, 2_000, 5_000])
++            outs = [(v - fee, P2WSH_TRUE)]
++            if rng.random() < 0.3:
++                outs.append((0, b"\x6a\x14" + rng.randbytes(20)))
++            raw, new = tx([(txid, n)], outs)
++            target = "P" if rng.random() < TO_POOL else rng.choice(["H1", "H2", "X"])
+             try:
+-                rpc("P", "generatetodescriptor", 1, "raw(51)")
+-            except Exception:
++                rpc(target, "sendrawtransaction", raw)
++                with ulock:
++                    utxos.append((new, 0, v - fee))
++            except Exception:  # noqa: BLE001
+                 pass
+-        time.sleep(0.5)
++            time.sleep(rng.uniform(0.2, 0.8))
++
++    def canary_loop():
++        while CANARY_EVERY > 0 and not stop.is_set():
++            for gw, node in GATEWAYS.items():
++                u = take_utxo(reserve)  # confirmed: every node already has the input
++                if u is None:
++                    return
++                txid, n, v = u
++                raw, cid = tx([(txid, n)], [(v - CANARY_FEE, P2WSH_TRUE)])
++                twin, _ = tx([(txid, n)], [(v - CANARY_FEE - 1, P2WSH_TRUE)])
++                try:
++                    # the pool node must never template C: set the delta before it can arrive
++                    rpc("P", "prioritisetransaction", cid, 0, -100_000_000)
++                    rpc(node, "sendrawtransaction", raw)
++                    t0 = time.time()
++                    rpc("P", "sendrawtransaction", twin)
++                    with lock:
++                        canaries[gw].append({"t": t0, "txid": cid})
++                except Exception as e:  # noqa: BLE001
++                    print("canary", gw, e, file=sys.stderr)
++            stop.wait(CANARY_EVERY)
++
++    finders = []
++
++    def blocks():
++        while not stop.wait(rng.uniform(8, 14)):
++            who = rng.choice(["P", "P", "H1", "H2"])
++            try:
++                rpc(who, "generatetodescriptor", 1, DESC)
++                finders.append(who)
++            except Exception as e:  # noqa: BLE001
++                print("block", who, e, file=sys.stderr)
++
++    threads = [threading.Thread(target=poll, args=(n, "POOL" if n == "P" else f"knots-{n.lower()}"))
++               for n in ("P", "H1", "H2")]
++    threads += [threading.Thread(target=f) for f in (traffic, canary_loop, blocks)]
++    for t in threads:
++        t.daemon = True
++        t.start()
++    time.sleep(SECS)
++    stop.set()
++    for t in threads:
++        t.join(timeout=30)
++    # Did the pool node ever template a canary?
++    pool_txids = {x for s in snaps["POOL"] for x in s["txids"]}
++    leaks = sum(c["txid"] in pool_txids for cs in canaries.values() for c in cs)
++
++    # Honest templates are the pool's apart from the canaries: how often exactly?
++    ctx = {c["txid"] for cs in canaries.values() for c in cs}
++
++    def same_sans_canaries(ss):
++        hits = 0
++        for s in ss:
++            mine = [x for x in s["txids"] if x not in ctx]
++            hits += any(p["prev"] == s["prev"] and s["t"] - 3 <= p["t"] <= s["t"] + 0.05 and p["txids"] == mine
++                        for p in snaps["POOL"])
++        return hits / len(ss) if ss else 0.0
++
++    sans = {g: same_sans_canaries(snaps[g]) for g in GATEWAYS}
++
++    for gw, ss in snaps.items():
++        for s in ss:
++            post("/sovereignty/snapshot", {"gateway": gw, **s})
++    for gw, cs in canaries.items():
++        for c in cs:
++            post("/sovereignty/canary", {"gateway": gw, **c})
+     with urllib.request.urlopen(STATS + "/sovereignty.json", timeout=15) as r:
+         sov = json.load(r)
+-    gw = sov.get("gateways") or {}
+-    print("knots snapshots", {k: len(v) for k, v in snaps.items()})
+-    for name in ("knots-h1", "knots-h2", "knots-proxy"):
+-        f = gw.get(name) or {}
+-        print(f"  {name:12} independence={f.get('independence')} identical={f.get('identical')} compared={f.get('compared')}")
++    gws = sov.get("gateways") or {}
++    print(f"knots: {SECS:.0f} s, height {rpc('P', 'getblockcount')}, blocks by {finders}, "
++          f"snapshots {({k: len(v) for k, v in snaps.items()})}, canary leaks into pool templates: {leaks}")
++    print(f"traffic entering at the pool node: {TO_POOL:.0%}")
++    print("| gateway | identical | identical sans canaries | jaccard | follower (old rule) | lead | tip_lead | lockstep | canaries hit/due | evidence | independence | flagged |")
++    print("|---|---:|---:|---:|---:|---:|---:|---:|---:|---|---:|---|")
++    rows = {}
++    for name in GATEWAYS:
++        f = gws.get(name) or {}
++        old = round(1 - max(f.get("identical", 0), f.get("follower", 0)), 2)
++        rows[name] = dict(f, old_independence=old, identical_sans_canaries=sans[name])
++        print(f"| {name} | {f.get('identical', 0):.2f} | {sans[name]:.2f} | {f.get('jaccard', 0):.2f} | "
++              f"{f.get('follower', 0):.2f} (old indep {old:.2f}) | "
++              f"{f.get('lead', 0):.2f} | {f.get('tip_lead', 0):.2f} | {f.get('lockstep', 0):.2f} | "
++              f"{f.get('canary_hits')}/{f.get('canaries_due')} | {f.get('evidence')} | "
++              f"{f.get('independence', 0):.3f} | {f.get('flagged')} |")
++    knots_flagged = sorted(g for g in sov.get("flagged") or [] if g.startswith("knots-"))
++    print("flagged (knots)", knots_flagged)
++    os.makedirs(os.path.join(RUN, "results"), exist_ok=True)
++    out = os.path.join(RUN, "results", f"knots-{int(time.time())}.json")
++    with open(out, "w") as fh:
++        json.dump({"secs": SECS, "to_pool": TO_POOL, "finders": finders, "leaks": leaks, "rows": rows, "flagged": knots_flagged}, fh, indent=1)
++    print("result", out)
++
++    if CANARY_EVERY <= 0:
++        # control: no canary evidence, so nobody may be flagged however similar the templates
++        assert knots_flagged == [], knots_flagged
++        print("KNOTS_CONTROL_OK")
++        return
++    assert knots_flagged == ["knots-mimic", "knots-proxy"], knots_flagged
++    for h in ("knots-h1", "knots-h2"):
++        # regtest blocks every 8-14 s make honest misses ~25 % (mainnet ~2 %): check the verdict
++        # and that at least half the canaries were carried, not a mainnet-level rate
++        assert rows[h]["evidence"] == "canary" and not rows[h]["flagged"], rows[h]
++        assert rows[h]["canary_rate"] >= 0.5, rows[h]
++    for p in ("knots-proxy", "knots-mimic"):
++        assert rows[p]["canary_hits"] == 0 and rows[p]["independence"] == 0.0, rows[p]
++    assert leaks == 0, leaks
+     print("KNOTS_OK")
+ 
+ 
+diff --git a/prime/tides/src/entropy.rs b/prime/tides/src/entropy.rs
+index fd6de15..490baa2 100644
+--- a/prime/tides/src/entropy.rs
++++ b/prime/tides/src/entropy.rs
+@@ -1,22 +1,45 @@
+-//! Template-entropy detector (research note C.2 #5 / XBT-051 `entropy.py`).
++//! Template-entropy detector (research note C.2 #5 / XBT-051 `entropy.py`), reworked
++//! (XBT-064 w2) after real Knots nodes showed that honest gateways with converged mempools
++//! build templates identical to the pool's. **Similarity is reported, never scored.**
+ //!
+-//! Prime already sees every gateway's jobs. From those snapshots, against the pool node's
+-//! own templates, this scores how independently a gateway is building:
++//! Signals, strongest first:
+ //!
+-//! * `identical` — merkle branches equal a pool template on the same parent in the last
+-//!   `window` seconds (a straight proxy).
+-//! * `lead` — share of the gateway's txs it templated before the pool did. A copy can never
+-//!   be ahead of its source.
+-//! * `subset` (containment) — share of each template's txs the pool's recent templates
+-//!   already had.
++//! * **Canaries** (convict *and* clear). Prime hands a unique, valid, low-value tx only to
++//!   the gateway's registered node and tells the pool node to never template it
++//!   (`prioritisetransaction <txid> 0 -1e8`, set before the tx can reach it). An honest
++//!   gateway's own template picks the canary up; a gateway serving the pool's template (straight,
++//!   reordered or delayed) never can, because the source never has it. A canary is a *hit*
++//!   when the gateway templates it within `CANARY_WINDOW` s of delivery and before any pool
++//!   template has it (margin `LEAD_MARGIN`).
++//! * **Timing leads** (clear only). `lead`: share of the gateway's txs it templated before the
++//!   pool did; `tip_lead`: share of new tips it switched to before the pool did. A copy can
++//!   never be ahead of its source, so a lead is evidence of an independent view. The absence
++//!   of a lead is *not* evidence of copying (an honest node next to a well-connected pool node
++//!   lags it on most tips and txs), so timing never flags.
++//! * `identical`, `branch_sim`, `jaccard`, `subset`, `lockstep`, `switch_lag`, `incl_lag`:
++//!   reported for the public table, not scored.
++//!
++//! Decision rule:
+ //!
+ //! ```text
+-//! follower     = subset × (1 − min(1, lead / lead_ref))
+-//! independence = 1 − max(identical, follower)
++//! due          = canaries delivered ≥ CANARY_DUE s before the gateway's last template
++//! canary evidence ⇔ due ≥ CANARY_MIN
++//!   independence = hits / due                       (bonus weight)
++//!   flagged      ⇔ hits / due < CANARY_FLAG         (fake-DATUM verdict)
++//! else if compared ≥ MIN_COMPARED
++//!   independence = min(1, max(lead / LEAD_REF, tip_lead / TIP_LEAD_REF)),  never flagged
++//! else insufficient: independence 0 (an unknown gateway earns no bonus), never flagged
+ //! ```
+ //!
+-//! Fewer than 20 comparable snapshots scores 0: an unknown gateway earns no bonus.
+-//! Switch lag and lockstep are reported but not scored (on a LAN honest nodes lockstep too).
++//! Error rates (per-canary honest miss probability `m`, independent): an honest gateway is
++//! flagged with `P[Bin(due, m) > due·(1−CANARY_FLAG)]`. Misses come from a block (usually the
++//! pool's, mining the conflicting twin C') landing before the gateway's node refreshes its
++//! template, so `m ≈ refresh / block interval`: measured m ≈ 0.25 on regtest with 8-14 s
++//! blocks (→ 4e-4 at due = 10, 2e-6 at due = 20); on 10-minute blocks m ≈ 0.02 (→ ~1e-12).
++//! A pure proxy (straight, reordered, delayed) scores 0 hits by construction: miss rate 0. A *hybrid* proxy that also runs a node on
++//! the registered address and merges that node's mempool into the pool's template picks up
++//! canaries and passes; that residual is out of reach of any template-side test (it is a
++//! gifted attestation, see A2 note §8) and is priced by key age + the per-gateway cap.
+ 
+ use serde::Serialize;
+ 
+@@ -24,8 +47,31 @@ const WINDOW: f64 = 3.0;
+ const LOCKSTEP: f64 = 0.25;
+ const LEAD_MARGIN: f64 = 0.1;
+ const LEAD_REF: f64 = 0.25;
++const TIP_LEAD_REF: f64 = 0.25;
+ const MIN_COMPARED: usize = 20;
+ const CLUSTER_THRESHOLD: f64 = 0.8;
++/// Seconds a gateway has to template a canary for it to count (delivery + relay + refresh).
++pub const CANARY_WINDOW: f64 = 30.0;
++/// A canary is judged once the gateway has sent a template this long after its delivery.
++pub const CANARY_DUE: f64 = 12.0;
++/// Canaries judged before the canary verdict replaces the timing fallback.
++pub const CANARY_MIN: usize = 10;
++/// Hit rate below which a gateway with canary evidence is flagged as fake DATUM. A proxy of
++/// the pool's template hits exactly 0, so the bar can sit low and absorb honest misses.
++pub const CANARY_FLAG: f64 = 0.25;
++
++/// A canary tx handed to one gateway's node at `t`; the pool node never templates it.
++#[derive(Clone, Debug, PartialEq, Serialize)]
++pub struct Canary {
++    pub t: f64,
++    pub txid: String,
++}
++
++impl Canary {
++    pub fn new(t: f64, txid: impl Into<String>) -> Self {
++        Canary { t, txid: txid.into() }
++    }
++}
+ 
+ /// One template snapshot, as Prime would log it from a DATUM job (or the pool node poll).
+ #[derive(Clone, Debug, PartialEq, Serialize)]
+@@ -57,10 +103,20 @@ pub struct Features {
+     pub lockstep: f64,
+     pub incl_lag: Option<f64>,
+     pub lead: f64,
++    pub tip_lead: f64,
+     pub subset: f64,
+     pub follower: f64,
++    pub canaries: usize,
++    pub canaries_due: usize,
++    pub canary_hits: usize,
++    pub canary_rate: Option<f64>,
++    /// Canaries a pool template carried (should stay 0: the pool node deprioritises them).
++    pub canary_pool_leaks: usize,
++    /// `canary`, `timing` or `none`: which rule set `independence`.
++    pub evidence: &'static str,
+     pub independence: f64,
+     pub insufficient: bool,
++    pub flagged: bool,
+ }
+ 
+ #[derive(Clone)]
+@@ -195,8 +251,18 @@ fn median(mut v: Vec<f64>) -> Option<f64> {
+     Some(if n % 2 == 1 { v[n / 2] } else { (v[n / 2 - 1] + v[n / 2]) / 2.0 })
+ }
+ 
+-/// Detector features for `gw` against the pool node's snapshots.
++/// Detector features for `gw` against the pool node's snapshots, without canaries.
+ pub fn features(gw: &[Snapshot], pool: &[Snapshot]) -> Features {
++    features_with(gw, pool, &[])
++}
++
++fn first_with(snaps: &[Prepared], txid: &str, from: f64, to: f64) -> Option<f64> {
++    snaps.iter().find(|s| s.t >= from && s.t <= to && s.txids.iter().any(|t| t == txid)).map(|s| s.t)
++}
++
++/// Detector features for `gw` against the pool node's snapshots and the canaries handed
++/// to `gw`'s node.
++pub fn features_with(gw: &[Snapshot], pool: &[Snapshot], canaries: &[Canary]) -> Features {
+     let gw = prep(gw);
+     let pool = prep(pool);
+     let mut by_prev: std::collections::HashMap<&str, Vec<&Prepared>> = std::collections::HashMap::new();
+@@ -236,10 +302,19 @@ pub fn features(gw: &[Snapshot], pool: &[Snapshot]) -> Features {
+     }
+     let pf = first_on_parent(&pool);
+     let gf = first_on_parent(&gw);
+-    let mut lags: Vec<f64> = gf.iter().filter_map(|(p, &gt)| pf.get(p).map(|&pt| gt - pt)).collect();
+-    if lags.len() > 1 {
+-        lags.remove(0);
+-    }
++    // Tips both saw, minus the one each started on (its first-seen time is just the start).
++    let start_p = pool.first().map(|p| p.prev.as_str());
++    let start_g = gw.first().map(|p| p.prev.as_str());
++    let lags: Vec<f64> = gf
++        .iter()
++        .filter(|(p, _)| Some(p.as_str()) != start_p && Some(p.as_str()) != start_g)
++        .filter_map(|(p, &gt)| pf.get(p).map(|&pt| gt - pt))
++        .collect();
++    let tip_lead = if lags.is_empty() {
++        0.0
++    } else {
++        lags.iter().filter(|&&l| l < -LEAD_MARGIN).count() as f64 / lags.len() as f64
++    };
+     let pseen = first_seen(&pool);
+     let gseen = first_seen(&gw);
+     let incl: Vec<f64> = gseen.iter().filter_map(|(t, &gt)| pseen.get(t).map(|&pt| gt - pt)).collect();
+@@ -275,8 +350,35 @@ pub fn features(gw: &[Snapshot], pool: &[Snapshot]) -> Features {
+     let identical = if n > 0 { ident as f64 / n as f64 } else { 0.0 };
+     let subset = if subn > 0 { sub / subn as f64 } else { 0.0 };
+     let follower = subset * (1.0 - (lead / LEAD_REF).min(1.0));
+-    let insufficient = n < MIN_COMPARED;
+-    let independence = if insufficient { 0.0 } else { (1.0 - identical.max(follower)).max(0.0) };
++
++    let last_gw = gw.last().map(|s| s.t).unwrap_or(f64::NEG_INFINITY);
++    let mut due = 0usize;
++    let mut hits = 0usize;
++    let mut leaks = 0usize;
++    for c in canaries {
++        let pool_at = first_with(&pool, &c.txid, c.t - WINDOW, f64::INFINITY);
++        if pool_at.is_some() {
++            leaks += 1;
++        }
++        if c.t + CANARY_DUE > last_gw {
++            continue;
++        }
++        due += 1;
++        if let Some(at) = first_with(&gw, &c.txid, c.t, c.t + CANARY_WINDOW) {
++            if pool_at.is_none_or(|pt| at < pt - LEAD_MARGIN) {
++                hits += 1;
++            }
++        }
++    }
++    let canary_rate = (due > 0).then(|| hits as f64 / due as f64);
++    let (evidence, independence, flagged) = if due >= CANARY_MIN {
++        let r = hits as f64 / due as f64;
++        ("canary", r, r < CANARY_FLAG)
++    } else if n >= MIN_COMPARED {
++        ("timing", (lead / LEAD_REF).max(tip_lead / TIP_LEAD_REF).min(1.0), false)
++    } else {
++        ("none", 0.0, false)
++    };
+     Features {
+         snapshots: gw.len(),
+         compared: n,
+@@ -293,10 +395,18 @@ pub fn features(gw: &[Snapshot], pool: &[Snapshot]) -> Features {
+         },
+         incl_lag: median(incl),
+         lead,
++        tip_lead,
+         subset,
+         follower,
+-        independence: if insufficient { 0.0 } else { (independence * 1000.0).round() / 1000.0 },
+-        insufficient,
++        canaries: canaries.len(),
++        canaries_due: due,
++        canary_hits: hits,
++        canary_rate,
++        canary_pool_leaks: leaks,
++        evidence,
++        independence: (independence.clamp(0.0, 1.0) * 1000.0).round() / 1000.0,
++        insufficient: evidence == "none",
++        flagged,
+     }
+ }
+ 
+@@ -471,6 +581,91 @@ mod tests {
+         assert!(s < 1.0 && s > 0.0, "{s}");
+     }
+ 
++    /// Converged mempools: every honest template equals the pool's, except for the canaries
++    /// Prime handed to that gateway's node (the pool node never templates them).
++    fn converged(n: usize) -> (Vec<Snapshot>, Vec<Snapshot>, Vec<Snapshot>, Vec<Snapshot>, Vec<Canary>) {
++        let mut pool = Vec::new();
++        let mut honest = Vec::new();
++        let mut proxy = Vec::new();
++        let mut hybrid = Vec::new();
++        let mut canaries = Vec::new();
++        let mut live: Vec<String> = Vec::new();
++        for i in 0..n {
++            let t = i as f64 * 0.5;
++            let prev = hex32(1 + (i / 30) as u64);
++            let shared: Vec<String> = (0..5).map(|k| hex32(1_000 + (i / 4 + k) as u64)).collect();
++            if i % 8 == 0 {
++                let c = hex32(9_000_000 + i as u64);
++                canaries.push(Canary::new(t, c.clone()));
++                live.push(c);
++            }
++            if i % 30 == 0 {
++                live.clear(); // mined into the gateway's block
++            }
++            let mut h = shared.clone();
++            // the gateway's node refreshes its template a couple of seconds after delivery
++            h.extend(live.iter().filter(|c| canaries.iter().any(|k| &&k.txid == c && k.t + 2.0 <= t)).cloned());
++            pool.push(Snapshot::new(t, prev.clone(), shared.clone()));
++            honest.push(Snapshot::new(t + 0.01, prev.clone(), h.clone()));
++            proxy.push(Snapshot::new(t + 0.05, prev.clone(), shared.clone()));
++            hybrid.push(Snapshot::new(t + 0.3, prev.clone(), h));
++        }
++        (pool, honest, proxy, hybrid, canaries)
++    }
++
++    #[test]
++    fn converged_honest_is_not_flagged_without_canaries() {
++        let (pool, _, _, _, _) = converged(200);
++        // no canaries yet: the honest node's template is the pool's, 10 ms later
++        let honest: Vec<Snapshot> = pool.iter().map(|s| Snapshot { t: s.t + 0.01, ..s.clone() }).collect();
++        let f = features(&honest, &pool);
++        assert!(f.identical > 0.9, "{}", f.identical);
++        assert!(!f.flagged, "identity to the pool alone must never flag");
++        assert_eq!(f.evidence, "timing");
++    }
++
++    #[test]
++    fn canaries_clear_converged_honest_and_convict_proxies() {
++        let (pool, honest, proxy, _, canaries) = converged(200);
++        let fh = features_with(&honest, &pool, &canaries);
++        assert_eq!(fh.evidence, "canary");
++        assert!(fh.canaries_due >= CANARY_MIN, "{}", fh.canaries_due);
++        assert!(fh.independence > 0.8, "honest {}", fh.independence);
++        assert!(!fh.flagged);
++        let fp = features_with(&proxy, &pool, &canaries);
++        assert_eq!(fp.canary_hits, 0);
++        assert_eq!(fp.independence, 0.0);
++        assert!(fp.flagged);
++        let mut mimic = proxy.clone();
++        for s in &mut mimic {
++            s.t += 1.0;
++            s.txids.reverse();
++        }
++        let fm = features_with(&mimic, &pool, &canaries);
++        assert!(fm.flagged && fm.canary_hits == 0);
++    }
++
++    #[test]
++    fn a_canary_the_pool_had_first_is_not_a_hit() {
++        let (mut pool, honest, _, _, canaries) = converged(200);
++        // pool node ignored its prioritisetransaction: every canary shows up there first
++        for c in &canaries {
++            pool.push(Snapshot::new(c.t, "zz", vec![c.txid.clone()]));
++        }
++        let f = features_with(&honest, &pool, &canaries);
++        assert_eq!(f.canary_hits, 0);
++        assert_eq!(f.canary_pool_leaks, canaries.len());
++    }
++
++    /// Known limit: a proxy that also runs the registered node and merges its mempool into the
++    /// pool's template carries the canaries. It is only priced by key age and the cap.
++    #[test]
++    fn hybrid_merging_its_own_node_passes_canaries() {
++        let (pool, _, _, hybrid, canaries) = converged(200);
++        let f = features_with(&hybrid, &pool, &canaries);
++        assert!(!f.flagged);
++    }
++
+     #[test]
+     fn a_straight_copy_is_identical_and_scores_zero() {
+         let pool = vec![
+diff --git a/prime/tides/src/lib.rs b/prime/tides/src/lib.rs
+index 88e4a6a..4070b41 100644
+--- a/prime/tides/src/lib.rs
++++ b/prime/tides/src/lib.rs
+@@ -34,7 +34,7 @@ pub mod sovereignty;
+ pub mod split;
+ pub use split::{Payee, Split, SplitParams, Unpaid, UnpaidReason};
+ pub use score::{hhi_effective, nakamoto, sovereignty_score, PoolScore};
+-pub use entropy::{features, independence_ppm, report, Snapshot};
++pub use entropy::{features, features_with, independence_ppm, report, Canary, Snapshot};
+ 
+ /// Work that arrived before dual-fee tagging. Split as DATUM (the lower fee).
+ pub const SOURCE_UNKNOWN: u8 = 0;
+-- 
+2.43.0
+

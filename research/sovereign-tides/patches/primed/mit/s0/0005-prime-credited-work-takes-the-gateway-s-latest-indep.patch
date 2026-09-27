@@ -1,0 +1,63 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: michael moore <mrmoore27@pm.me>
+Date: Fri, 25 Sep 2026 04:13:35 +0000
+Subject: [PATCH 05/27] prime: credited work takes the gateway's latest
+ independence
+
+credit_authored kept the independence it saw on a gateway's first credit, so
+work credited before the canary detector had evidence stayed at 0 (and a
+gateway flagged later kept its old weight). Refresh it on every credit, like
+note_share does. Found by the XBT-071 integrated regtest (A2 + NTA), where the
+bonus is applied block by block while canary evidence builds up.
+
+Local research branch rnd/a2-nta (P-003 XBT-071); never pushed.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ prime/primed/src/sovereignty.rs | 23 ++++++++++++++++++++++-
+ 1 file changed, 22 insertions(+), 1 deletion(-)
+
+diff --git a/prime/primed/src/sovereignty.rs b/prime/primed/src/sovereignty.rs
+index f6274ec..5173527 100644
+--- a/prime/primed/src/sovereignty.rs
++++ b/prime/primed/src/sovereignty.rs
+@@ -333,7 +333,12 @@ impl Engine {
+         }
+         let ppm = self.independence_of(&g);
+         match self.authored.iter_mut().find(|a| a.identity == identity && a.gateway == g) {
+-            Some(a) => a.work = a.work.saturating_add(work),
++            // Like `note_share`: the latest verdict weighs all of the gateway's work, so work
++            // credited before the detector had evidence doesn't stay at 0 (or at 1) forever.
++            Some(a) => {
++                a.work = a.work.saturating_add(work);
++                a.independence_ppm = ppm;
++            }
+             None => self.authored.push(Authored {
+                 identity: identity.to_string(),
+                 gateway: g,
+@@ -598,6 +603,22 @@ mod tests {
+         assert!(e.authored.is_empty());
+     }
+ 
++    #[test]
++    fn credited_work_takes_the_latest_independence() {
++        let mut e = engine();
++        e.credit_authored("miner", "h1", 100);
++        assert_eq!(e.authored[0].independence_ppm, 0, "no evidence yet: unknown earns nothing");
++        for k in 0..12u64 {
++            let c = format!("{:064x}", 0xc000 + k);
++            e.note_canary("h1", Canary::new(k as f64, c.clone()));
++            e.note_snapshot("h1", Snapshot::new(k as f64 + 1.0, format!("{:064x}", 1), vec![c]));
++        }
++        e.note_snapshot("h1", Snapshot::new(40.0, format!("{:064x}", 1), vec![]));
++        e.credit_authored("miner", "h1", 100);
++        assert_eq!(e.authored[0].work, 200);
++        assert!(e.authored[0].independence_ppm > 800_000, "{}", e.authored[0].independence_ppm);
++    }
++
+     #[test]
+     fn ingest_attest_and_score() {
+         let mut e = engine();
+-- 
+2.43.0
+

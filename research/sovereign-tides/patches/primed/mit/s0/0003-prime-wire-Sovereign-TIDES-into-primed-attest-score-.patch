@@ -1,0 +1,2224 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: michael moore <mrmoore27@pm.me>
+Date: Fri, 25 Sep 2026 03:12:35 +0000
+Subject: [PATCH 03/27] prime: wire Sovereign TIDES into primed (attest, score,
+ bonus, detector)
+
+XBT-064: register G, verify LZT1 per job, publish the sovereignty score
+in stats.json, pay the independence-weighted TIDES pot behind a flag
+(default off), and flag a fake-DATUM proxy. Local rnd/a2 only.
+
+Co-authored-by: Cursor <cursoragent@cursor.com>
+---
+ prime/Cargo.lock                      |   2 +
+ prime/primed/src/config.rs            |  35 ++
+ prime/primed/src/main.rs              |   7 +-
+ prime/primed/src/session.rs           |  36 +-
+ prime/primed/src/sovereignty.rs       | 627 ++++++++++++++++++++++++++
+ prime/primed/src/state.rs             |   2 +
+ prime/primed/src/stats.rs             | 144 +++++-
+ prime/primed/tests/common/mod.rs      |   2 +-
+ prime/primed/tests/sovereignty_e2e.rs | 154 +++++++
+ prime/scripts/rnd-a2-demo.sh          |  84 ++++
+ prime/scripts/rnd-a2-feed.py          |  99 ++++
+ prime/scripts/rnd-a2-knots.py         | 122 +++++
+ prime/tides/Cargo.toml                |   2 +
+ prime/tides/src/entropy.rs            | 489 ++++++++++++++++++++
+ prime/tides/src/lib.rs                |   4 +
+ prime/tides/src/score.rs              | 105 +++++
+ prime/tides/src/sovereignty.rs        |   2 +-
+ prime/wire/examples/lzt1_fixture.rs   |   6 +-
+ prime/wire/src/authorship.rs          |   4 +-
+ 19 files changed, 1910 insertions(+), 16 deletions(-)
+ create mode 100644 prime/primed/src/sovereignty.rs
+ create mode 100644 prime/primed/tests/sovereignty_e2e.rs
+ create mode 100755 prime/scripts/rnd-a2-demo.sh
+ create mode 100755 prime/scripts/rnd-a2-feed.py
+ create mode 100755 prime/scripts/rnd-a2-knots.py
+ create mode 100644 prime/tides/src/entropy.rs
+ create mode 100644 prime/tides/src/score.rs
+
+diff --git a/prime/Cargo.lock b/prime/Cargo.lock
+index 42a033f..1e2899b 100644
+--- a/prime/Cargo.lock
++++ b/prime/Cargo.lock
+@@ -875,9 +875,11 @@ dependencies = [
+ name = "tides"
+ version = "0.1.0"
+ dependencies = [
++ "hex",
+  "log",
+  "serde",
+  "serde_json",
++ "sha2",
+  "thiserror 1.0.69",
+ ]
+ 
+diff --git a/prime/primed/src/config.rs b/prime/primed/src/config.rs
+index 12ef235..62ee52b 100644
+--- a/prime/primed/src/config.rs
++++ b/prime/primed/src/config.rs
+@@ -153,6 +153,26 @@ pub struct Config {
+     /// this true.
+     #[serde(default)]
+     pub require_split_gateway: bool,
++    /// Pay the Sovereign TIDES bonus (stratum-fee pot, independence-weighted). Default off.
++    #[serde(default)]
++    pub sovereignty_bonus: bool,
++    /// Bonus out of the stratum fee, basis points. Clamped to fee − rebate. Ignored unless
++    /// `sovereignty-bonus` is on.
++    #[serde(default = "d_sov_bonus_bps")]
++    pub sovereignty_bonus_bps: u32,
++    /// Optional differential on unattested DATUM work (all of it credited to attested work).
++    #[serde(default)]
++    pub sovereignty_diff_bps: u32,
++    /// Most of the pot one gateway key can take, basis points (0 = no cap).
++    #[serde(default)]
++    pub sovereignty_cap_per_gateway_bps: u32,
++    /// A key earns the bonus only after this many seconds. 0 (default) is the rnd demo;
++    /// production wants about one TIDES window.
++    #[serde(default)]
++    pub sovereignty_min_key_age_secs: u32,
++    /// Accept HTTP ingest for snapshots / attestations / demo credits. Local rnd only.
++    #[serde(default)]
++    pub sovereignty_demo: bool,
+ 
+     // Keys the previous Prime used. Accepted so an existing config starts unchanged;
+     // `load` reports each one it saw.
+@@ -234,6 +254,9 @@ fn d_owe() -> String {
+ fn d_solo_tag() -> String {
+     "Lazarus/solo".into()
+ }
++fn d_sov_bonus_bps() -> u32 {
++    500
++}
+ 
+ impl Config {
+     /// `stale-after-days` in seconds; 0 when the rule is off.
+@@ -295,6 +318,15 @@ impl Config {
+         if c.empty_solo_fee_bps > 10_000 {
+             return Err("empty-solo-fee-bps cannot exceed 10000".into());
+         }
++        if c.sovereignty_bonus_bps > 10_000 {
++            return Err("sovereignty-bonus-bps cannot exceed 10000".into());
++        }
++        if c.sovereignty_diff_bps > 10_000 {
++            return Err("sovereignty-diff-bps cannot exceed 10000".into());
++        }
++        if c.sovereignty_cap_per_gateway_bps > 10_000 {
++            return Err("sovereignty-cap-per-gateway-bps cannot exceed 10000".into());
++        }
+         match c.stock_full_pool_only.as_str() {
+             "owe" | "gateway-solo" => {}
+             other => return Err(format!("stock-full-pool-only must be owe or gateway-solo, not {other:?}")),
+@@ -384,6 +416,9 @@ require-split-gateway = true
+         assert_eq!(c.min_pot(), 0);
+         assert_eq!(c.legacy_notes().len(), 2);
+         assert!(c.require_split_gateway);
++        assert!(!c.sovereignty_bonus);
++        assert!(!c.sovereignty_demo);
++        assert_eq!(c.sovereignty_bonus_bps, 500);
+         // a data dir the old Prime left behind keeps its key, hence its pubkey
+         std::fs::write(dir.join("lazarus-prime.key"), "00").unwrap();
+         let c = Config::load(&p).unwrap();
+diff --git a/prime/primed/src/main.rs b/prime/primed/src/main.rs
+index 9d59e94..dc9b529 100644
+--- a/prime/primed/src/main.rs
++++ b/prime/primed/src/main.rs
+@@ -11,6 +11,7 @@ mod payouts;
+ mod rpc;
+ mod session;
+ mod solo;
++mod sovereignty;
+ mod state;
+ mod stats;
+ 
+@@ -281,16 +282,18 @@ fn run(cfg: Config) -> i32 {
+         next_client_id: AtomicU64::new(1),
+         coinbaser_base: Mutex::new(None),
+         gateway_payouts: Mutex::new(Shared::load_gateway_payouts(&cfg.data_dir)),
++        sovereignty: Mutex::new(crate::sovereignty::Engine::from_config(&cfg)),
+         cfg,
+     });
+     log::info!("pool pubkey {}", shared.pool.public_hex());
+     log::info!(
+-        "payout {} fee {}bps stratum {}bps window {}x min-diff {}",
++        "payout {} fee {}bps stratum {}bps window {}x min-diff {} sovereignty-bonus={}",
+         shared.cfg.payout_address,
+         shared.cfg.fee_bps,
+         shared.cfg.stratum_fee_bps,
+         shared.cfg.window,
+-        shared.cfg.min_diff
++        shared.cfg.min_diff,
++        shared.cfg.sovereignty_bonus
+     );
+ 
+     let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build().expect("tokio runtime");
+diff --git a/prime/primed/src/session.rs b/prime/primed/src/session.rs
+index 5509035..35fac16 100644
+--- a/prime/primed/src/session.rs
++++ b/prime/primed/src/session.rs
+@@ -1065,6 +1065,15 @@ impl Session {
+         if absorbed.job_changed {
+             self.touch_slot(job_id);
+             self.coinbase_bytes = self.slots.iter().map(JobSlot::coinbase_bytes).sum();
++            if let Some(j) = &self.slots[job_id].job {
++                let name = if self.is_house_stratum() { "POOL".to_string() } else { self.gateway_key_hex() };
++                self.shared.sovereignty.lock().unwrap().note_job(
++                    &name,
++                    crate::sovereignty::now_f64(),
++                    &j.prev_hash,
++                    &j.merkle_branches,
++                );
++            }
+         } else {
+             let held_after = self.slots[job_id].coinbase_bytes();
+             self.coinbase_bytes = self.coinbase_bytes.saturating_sub(held_before).saturating_add(held_after);
+@@ -1240,6 +1249,20 @@ impl Session {
+         if !credited {
+             return self.reject(&s, mining::REJECT_BAD_USERNAME).await;
+         }
++        if !solo && v.work > 0 {
++            if let Some(j) = &self.slots[job_id].job {
++                self.shared.sovereignty.lock().unwrap().note_share(
++                    &self.gateway_key_hex(),
++                    self.is_house_stratum(),
++                    &identity,
++                    v.work,
++                    &v.coinbase,
++                    &j.prev_hash,
++                    &j.merkle_branches,
++                    ts as u32,
++                );
++            }
++        }
+         self.shared.totals.add(&self.shared.totals.accepted, 1);
+         if solo {
+             match v.coinbase_kind {
+@@ -1510,9 +1533,20 @@ impl Session {
+         };
+         let (rebate_owed_credited, rebate_deferred) =
+             cb.as_ref().map_or((0, 0), |c| (c.rebate_owed_credited, c.rebate_deferred));
+-        let Settlement { kind, owed, split, carry_paid, carry_delta, rebate_credited, rebate_delta } =
++        let Settlement { kind, owed, split, carry_paid, mut carry_delta, rebate_credited, rebate_delta } =
+             settle(&v.coinbase_kind, cb, v.coinbase_value, |script| v.coinbase.paid_to(script));
+         let _ = fee;
++        if self.shared.cfg.sovereignty_bonus {
++            let extra = {
++                let ledger = self.shared.ledger.lock().unwrap();
++                self.shared.sovereignty.lock().unwrap().bonus_for_block(v.coinbase_value, &ledger.window)
++            };
++            for (id, sats) in extra {
++                if sats > 0 {
++                    carry_delta.push((id, sats as i64));
++                }
++            }
++        }
+         // Booked in two steps (`tides::Books`). Now: what this coinbase took off the books, so
+         // that the coinbaser computed a few seconds from now cannot hand the same carry out
+         // again. When the node has the block in its main chain (`node::confirm_blocks`): what
+diff --git a/prime/primed/src/sovereignty.rs b/prime/primed/src/sovereignty.rs
+new file mode 100644
+index 0000000..b2e7ce6
+--- /dev/null
++++ b/prime/primed/src/sovereignty.rs
+@@ -0,0 +1,627 @@
++//! Primed side of Sovereign TIDES (P-003 A2 / XBT-064).
++//!
++//! * Directory of registered gateway keys `G`.
++//! * Per-job LZT1 attestation check (once, when the coinbase is absorbed).
++//! * Template-entropy detector over job snapshots (Rust port of `~/xbt-rnd/XBT-051/entropy.py`).
++//! * Sovereignty score and the TIDES bonus pot (flag, default off).
++//!
++//! The DATUM sub-command that will carry `A`+sig is not in stock gateways yet. Until it is,
++//! attestations and extra snapshots arrive over the stats HTTP ingest (only when
++//! `sovereignty-demo` is on). Live sessions still record job snapshots from the job section
++//! (prev + merkle branches) so a straight proxy is visible from Prime's own telemetry.
++
++use std::collections::{BTreeMap, HashMap};
++use std::path::{Path, PathBuf};
++use std::time::{SystemTime, UNIX_EPOCH};
++
++use datum_wire::authorship::{self, Attestation, AttestError};
++use datum_wire::coinbase::Coinbase;
++use datum_wire::crypto::{Identity, SIGN_PK, SIG};
++use datum_wire::pow::Hash;
++use serde::{Deserialize, Serialize};
++use serde_json::{json, Value};
++use tides::entropy::{self, Snapshot};
++use tides::score::{self, PoolScore};
++use tides::sovereignty::{self as bonus, Authored, Bonus, BonusParams, WorkTotals};
++use tides::Window;
++
++use crate::config::Config;
++use crate::state::now;
++
++const REGISTER_PREFIX: &[u8] = b"LZT1 register G=";
++const REGISTER_SUFFIX: &[u8] = b" pool=lazarus";
++
++#[derive(Clone, Debug, Serialize, Deserialize)]
++pub struct KeyRecord {
++    pub g: String,
++    pub payout: String,
++    pub first_seen: u64,
++    #[serde(default)]
++    pub house: bool,
++    #[serde(default)]
++    pub node_tag: String,
++}
++
++#[derive(Clone, Debug)]
++struct JobKey {
++    g: [u8; SIGN_PK],
++    prev: Hash,
++    branches_hash: Hash,
++}
++
++impl JobKey {
++    fn id(&self) -> String {
++        format!("{}:{}:{}", hex::encode(self.g), hex::encode(self.prev), hex::encode(self.branches_hash))
++    }
++}
++
++#[derive(Clone, Debug)]
++#[allow(dead_code)]
++struct AttestedJob {
++    a: Attestation,
++    sig: [u8; SIG],
++}
++
++#[derive(Default)]
++pub struct Engine {
++    dir: PathBuf,
++    keys: HashMap<String, KeyRecord>,
++    snapshots: BTreeMap<String, Vec<Snapshot>>,
++    attested: HashMap<String, AttestedJob>,
++    authored: Vec<Authored>,
++    /// Observed blocks for the public score (demo + any LZT1-verified job).
++    observed_blocks: u64,
++    observed_claimed: u64,
++    observed_verified: u64,
++    builder_counts: HashMap<String, u64>,
++    params: BonusParams,
++    bonus_on: bool,
++    demo: bool,
++    min_key_age_secs: u32,
++    started_ts: u64,
++}
++
++impl Engine {
++    pub fn from_config(cfg: &Config) -> Self {
++        let mut e = Engine {
++            dir: cfg.data_dir.clone(),
++            params: BonusParams {
++                stratum_fee_bps: cfg.stratum_fee_bps,
++                datum_rebate_bps: cfg.datum_rebate_bps,
++                bonus_bps: cfg.sovereignty_bonus_bps,
++                diff_bps: cfg.sovereignty_diff_bps,
++                cap_per_gateway_bps: cfg.sovereignty_cap_per_gateway_bps,
++            },
++            bonus_on: cfg.sovereignty_bonus,
++            demo: cfg.sovereignty_demo,
++            min_key_age_secs: cfg.sovereignty_min_key_age_secs,
++            started_ts: now(),
++            ..Engine::default()
++        };
++        e.load_keys();
++        for h in &cfg.house_gateways {
++            if h.is_empty() {
++                continue;
++            }
++            let g = h.to_ascii_lowercase();
++            e.keys.entry(g.clone()).or_insert(KeyRecord {
++                g: g.clone(),
++                payout: String::new(),
++                first_seen: e.started_ts,
++                house: true,
++                node_tag: "house".into(),
++            }).house = true;
++        }
++        e
++    }
++
++    pub fn demo(&self) -> bool {
++        self.demo
++    }
++
++    #[allow(dead_code)]
++    pub fn bonus_on(&self) -> bool {
++        self.bonus_on
++    }
++
++    fn load_keys(&mut self) {
++        let path = self.dir.join("sovereignty-keys.json");
++        let Ok(bytes) = std::fs::read(&path) else { return };
++        let Ok(list) = serde_json::from_slice::<Vec<KeyRecord>>(&bytes) else { return };
++        for r in list {
++            self.keys.insert(r.g.to_ascii_lowercase(), r);
++        }
++    }
++
++    fn persist_keys(&self) {
++        if self.dir.as_os_str().is_empty() {
++            return;
++        }
++        let _ = std::fs::create_dir_all(&self.dir);
++        let mut list: Vec<&KeyRecord> = self.keys.values().collect();
++        list.sort_by(|a, b| a.g.cmp(&b.g));
++        if let Ok(bytes) = serde_json::to_vec_pretty(&list) {
++            let tmp = self.dir.join("sovereignty-keys.json.tmp");
++            if std::fs::write(&tmp, bytes).is_ok() {
++                let _ = std::fs::rename(tmp, self.dir.join("sovereignty-keys.json"));
++            }
++        }
++    }
++
++    /// Register `G`. Proof of possession is an ed25519 signature by `G` over
++    /// `LZT1 register G=<hex> pool=lazarus` (BIP322 binding to the payout address is the
++    /// production path; this is the pool-side check that the caller holds the DATUM key).
++    /// `sovereignty-demo` may omit the signature.
++    pub fn register(&mut self, g_hex: &str, payout: &str, house: bool, sig_hex: Option<&str>) -> Result<KeyRecord, String> {
++        let g_hex = g_hex.to_ascii_lowercase();
++        let g = decode_pk(&g_hex)?;
++        if !self.demo {
++            let sig = sig_hex.ok_or("signature required")?;
++            let sigb = decode_sig(sig)?;
++            let mut msg = REGISTER_PREFIX.to_vec();
++            msg.extend_from_slice(g_hex.as_bytes());
++            msg.extend_from_slice(REGISTER_SUFFIX);
++            datum_wire::crypto::verify(&g, &msg, &sigb).map_err(|_| "bad register signature".to_string())?;
++        }
++        let rec = KeyRecord {
++            g: g_hex.clone(),
++            payout: payout.to_string(),
++            first_seen: now(),
++            house,
++            node_tag: String::new(),
++        };
++        self.keys.insert(g_hex, rec.clone());
++        self.persist_keys();
++        Ok(rec)
++    }
++
++    pub fn lookup(&self, g_hex: &str) -> Option<&KeyRecord> {
++        let g = g_hex.to_ascii_lowercase();
++        self.keys.get(&g).or_else(|| self.keys.values().find(|r| g.starts_with(&r.g) || r.g.starts_with(&g)))
++    }
++
++    fn is_house(&self, g_hex: &str) -> bool {
++        self.lookup(g_hex).is_some_and(|r| r.house)
++    }
++
++    fn key_old_enough(&self, g_hex: &str, ts: u64) -> bool {
++        if self.min_key_age_secs == 0 {
++            return true;
++        }
++        match self.lookup(g_hex) {
++            Some(r) => ts.saturating_sub(r.first_seen) >= u64::from(self.min_key_age_secs),
++            None => false,
++        }
++    }
++
++    pub fn note_snapshot(&mut self, gateway: &str, snap: Snapshot) {
++        let name = if gateway.eq_ignore_ascii_case("pool") { "POOL".to_string() } else { gateway.to_ascii_lowercase() };
++        let v = self.snapshots.entry(name).or_default();
++        v.push(snap);
++        if v.len() > 2_000 {
++            v.drain(..v.len() - 1_500);
++        }
++    }
++
++    /// A live session's job: prev + merkle branches. Txids are empty until a validation
++    /// reply or an HTTP ingest fills them in; `identical` still works from branches alone
++    /// if we store the branch list as a synthetic txid set.
++    pub fn note_job(&mut self, gateway: &str, t: f64, prev: &Hash, branches: &[Hash]) {
++        let prev_hex = hex::encode(prev);
++        let txids = branches.iter().map(hex::encode).collect();
++        self.note_snapshot(gateway, Snapshot::new(t, prev_hex, txids));
++    }
++
++    pub fn ingest_attest(
++        &mut self,
++        a_hex: &str,
++        sig_hex: &str,
++        coinbase_hex: &str,
++        prev_hex: &str,
++        branches_hex: &[String],
++        expect_g: Option<&str>,
++    ) -> Result<String, String> {
++        let a = Attestation::decode(&decode_hex(a_hex, "attestation")?).map_err(|e| format!("attestation: {e:?}"))?;
++        let sig = decode_sig(sig_hex)?;
++        let cb = datum_wire::coinbase::parse(&decode_hex(coinbase_hex, "coinbase")?)
++            .map_err(|e| format!("coinbase: {e}"))?;
++        let prev = decode_hash(prev_hex)?;
++        let branches: Result<Vec<Hash>, String> = branches_hex.iter().map(|h| decode_hash(h)).collect();
++        let branches = branches?;
++        let expect = match expect_g {
++            Some(h) => Some(decode_pk(h)?),
++            None => None,
++        };
++        let g = authorship::verify(&cb, &a, &sig, &prev, &branches, expect.as_ref()).map_err(attest_err)?;
++        let g_hex = hex::encode(g);
++        if self.is_house(&g_hex) {
++            return Err("house key never attests for score or bonus".into());
++        }
++        if self.lookup(&g_hex).is_none() && !self.demo {
++            return Err("G is not registered".into());
++        }
++        let key = JobKey { g, prev, branches_hash: authorship::branches_hash(&branches) }.id();
++        self.attested.insert(key, AttestedJob { a, sig });
++        self.observe_block(&g_hex, true, true);
++        Ok(g_hex)
++    }
++
++    /// Verify a live share's coinbase against a stored attestation for this job, or just
++    /// record the job as claimed.
++    pub fn note_share(
++        &mut self,
++        gateway: &str,
++        house: bool,
++        identity: &str,
++        work: u64,
++        cb: &Coinbase,
++        prev: &Hash,
++        branches: &[Hash],
++        ts: u32,
++    ) {
++        if work == 0 || house {
++            return;
++        }
++        let g_hex = gateway.to_ascii_lowercase();
++        let claimed = authorship::find(&cb.outputs).ok().flatten().is_some();
++        let key = JobKey {
++            g: decode_pk(&g_hex).unwrap_or([0; 32]),
++            prev: *prev,
++            branches_hash: authorship::branches_hash(branches),
++        }
++        .id();
++        let verified = self.attested.contains_key(&key)
++            && !self.is_house(&g_hex)
++            && self.key_old_enough(&g_hex, u64::from(ts));
++        if claimed || verified {
++            self.observe_block(&g_hex, claimed, verified);
++        }
++        if !verified {
++            return;
++        }
++        let ppm = self.independence_of(&g_hex);
++        match self.authored.iter_mut().find(|a| a.identity == identity && a.gateway == g_hex) {
++            Some(a) => {
++                a.work = a.work.saturating_add(work);
++                a.independence_ppm = ppm;
++            }
++            None => self.authored.push(Authored {
++                identity: identity.to_string(),
++                gateway: g_hex,
++                work,
++                independence_ppm: ppm,
++            }),
++        }
++    }
++
++    fn observe_block(&mut self, builder: &str, claimed: bool, verified: bool) {
++        self.observed_blocks += 1;
++        if claimed {
++            self.observed_claimed += 1;
++        }
++        if verified {
++            self.observed_verified += 1;
++        }
++        *self.builder_counts.entry(builder.to_string()).or_insert(0) += 1;
++    }
++
++    pub fn observe(&mut self, builder: &str, claimed: bool, verified: bool) {
++        self.observe_block(builder, claimed, verified);
++    }
++
++    pub fn credit_authored(&mut self, identity: &str, gateway: &str, work: u64) {
++        let g = gateway.to_ascii_lowercase();
++        if self.is_house(&g) {
++            return;
++        }
++        let ppm = self.independence_of(&g);
++        match self.authored.iter_mut().find(|a| a.identity == identity && a.gateway == g) {
++            Some(a) => a.work = a.work.saturating_add(work),
++            None => self.authored.push(Authored {
++                identity: identity.to_string(),
++                gateway: g,
++                work,
++                independence_ppm: ppm,
++            }),
++        }
++    }
++
++    fn pool_snaps(&self) -> &[Snapshot] {
++        self.snapshots.get("POOL").map(Vec::as_slice).unwrap_or(&[])
++    }
++
++    pub fn independence_of(&self, gateway: &str) -> u32 {
++        let g = if gateway.eq_ignore_ascii_case("pool") { "POOL".to_string() } else { gateway.to_ascii_lowercase() };
++        let Some(snaps) = self.snapshots.get(&g) else { return 0 };
++        entropy::independence_ppm(&entropy::features(snaps, self.pool_snaps()))
++    }
++
++    pub fn detector_rows(&self) -> BTreeMap<String, entropy::Features> {
++        let pool = self.pool_snaps();
++        self.snapshots
++            .iter()
++            .filter(|(n, _)| n.as_str() != "POOL")
++            .map(|(n, s)| (n.clone(), entropy::features(s, pool)))
++            .collect()
++    }
++
++    pub fn clusters(&self) -> Vec<Vec<String>> {
++        entropy::clusters(&self.snapshots)
++    }
++
++    pub fn flagged(&self) -> Vec<String> {
++        self.detector_rows()
++            .into_iter()
++            .filter(|(_, f)| !f.insufficient && f.independence < 0.2)
++            .map(|(n, _)| n)
++            .collect()
++    }
++
++    pub fn work_totals(&self, w: &Window) -> WorkTotals {
++        let mut stratum = 0u64;
++        let mut datum = 0u64;
++        for m in w.miners() {
++            stratum = stratum.saturating_add(m.stratum_work);
++            datum = datum.saturating_add(m.work.saturating_sub(m.stratum_work));
++        }
++        let authored: u64 = self.authored.iter().map(|a| a.work).sum();
++        let authored = authored.min(datum);
++        WorkTotals {
++            total: w.total_work(),
++            stratum,
++            unauthored_datum: datum.saturating_sub(authored),
++            authored,
++        }
++    }
++
++    pub fn sample_bonus(&self, value: u64, w: &Window) -> Bonus {
++        bonus::compute(value, self.work_totals(w), self.params, &self.authored)
++    }
++
++    /// Credits the found-block bonus (identity → sats). Empty when the flag is off.
++    pub fn bonus_for_block(&self, value: u64, w: &Window) -> Vec<(String, u64)> {
++        if !self.bonus_on {
++            return Vec::new();
++        }
++        self.sample_bonus(value, w).credits
++    }
++
++    pub fn score(&self) -> PoolScore {
++        let counts: Vec<u64> = self.builder_counts.values().copied().collect();
++        score::summarize(self.observed_blocks, self.observed_claimed, self.observed_verified, &counts)
++    }
++
++    pub fn stats_json(&self, w: Option<&Window>) -> Value {
++        let rows = self.detector_rows();
++        let clusters = self.clusters();
++        let flagged = self.flagged();
++        let score = self.score();
++        let sample = w.map(|win| {
++            let b = self.sample_bonus(312_500_000, win);
++            json!({
++                "from_stratum": b.from_stratum,
++                "from_diff": b.from_diff,
++                "credits": b.credits,
++                "to_pool": b.to_pool,
++                "diff_waived": b.diff_waived,
++            })
++        });
++        let gateways: BTreeMap<String, Value> = rows
++            .into_iter()
++            .map(|(n, f)| {
++                (n.clone(), json!({
++                    "snapshots": f.snapshots,
++                    "compared": f.compared,
++                    "identical": f.identical,
++                    "branch_sim": f.branch_sim,
++                    "jaccard": f.jaccard,
++                    "lead": f.lead,
++                    "subset": f.subset,
++                    "follower": f.follower,
++                    "independence": f.independence,
++                    "insufficient": f.insufficient,
++                    "independence_ppm": entropy::independence_ppm(&f),
++                    "house": self.is_house(&n),
++                    "registered": self.lookup(&n).is_some(),
++                }))
++            })
++            .collect();
++        json!({
++            "bonus": {
++                "on": self.bonus_on,
++                "bps": self.params.bonus_bps,
++                "effective_bps": self.params.effective_bonus_bps(),
++                "diff_bps": self.params.diff_bps,
++                "cap_per_gateway_bps": self.params.cap_per_gateway_bps,
++                "min_key_age_secs": self.min_key_age_secs,
++                "sample": sample,
++            },
++            "score": {
++                "blocks": score.blocks,
++                "claimed": score.claimed,
++                "verified": score.verified,
++                "score": score.score,
++                "builders": score.builders,
++                "effective_builders": score.effective_builders,
++                "top_builder_share": score.top_builder_share,
++                "template_nakamoto": score.template_nakamoto,
++            },
++            "authored": self.authored.iter().map(|a| json!({
++                "identity": a.identity,
++                "gateway": a.gateway,
++                "work": a.work,
++                "independence_ppm": a.independence_ppm,
++            })).collect::<Vec<_>>(),
++            "directory": self.keys.values().map(|k| json!({
++                "g": k.g, "payout": k.payout, "first_seen": k.first_seen, "house": k.house,
++            })).collect::<Vec<_>>(),
++            "gateways": gateways,
++            "clusters": clusters,
++            "flagged": flagged,
++            "demo": self.demo,
++        })
++    }
++
++    /// Sign a registration message with `G` (helper for tests and the demo).
++    #[allow(dead_code)]
++    pub fn register_message(g_hex: &str) -> Vec<u8> {
++        let mut msg = REGISTER_PREFIX.to_vec();
++        msg.extend_from_slice(g_hex.to_ascii_lowercase().as_bytes());
++        msg.extend_from_slice(REGISTER_SUFFIX);
++        msg
++    }
++
++    #[allow(dead_code)]
++    pub fn sign_register(g: &Identity) -> (String, String) {
++        let hex = hex::encode(g.sign_pk());
++        let sig = hex::encode(g.sign(&Self::register_message(&hex)));
++        (hex, sig)
++    }
++}
++
++fn decode_hex(s: &str, what: &str) -> Result<Vec<u8>, String> {
++    hex::decode(s.trim()).map_err(|e| format!("{what}: {e}"))
++}
++
++fn decode_pk(s: &str) -> Result<[u8; SIGN_PK], String> {
++    let b = decode_hex(s, "G")?;
++    if b.len() < SIGN_PK {
++        return Err("G is short".into());
++    }
++    Ok(b[..SIGN_PK].try_into().unwrap())
++}
++
++fn decode_sig(s: &str) -> Result<[u8; SIG], String> {
++    let b = decode_hex(s, "sig")?;
++    b.try_into().map_err(|_| "sig must be 64 bytes".into())
++}
++
++fn decode_hash(s: &str) -> Result<Hash, String> {
++    let b = decode_hex(s, "hash")?;
++    b.try_into().map_err(|_| "hash must be 32 bytes".into())
++}
++
++fn attest_err(e: AttestError) -> String {
++    format!("{e:?}")
++}
++
++/// Unix seconds with a fractional part, for detector snapshots.
++pub fn now_f64() -> f64 {
++    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs_f64()).unwrap_or(0.0)
++}
++
++#[allow(dead_code)]
++pub fn data_dir_ok(p: &Path) -> bool {
++    p.exists()
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use datum_wire::authorship::{attest, NodeView};
++    use datum_wire::coinbase::{self, TxOut};
++
++    fn engine() -> Engine {
++        Engine { demo: true, min_key_age_secs: 0, started_ts: 1, ..Engine::default() }
++    }
++
++    fn p2wpkh(fill: u8) -> Vec<u8> {
++        let mut s = vec![0x00, 0x14];
++        s.extend_from_slice(&[fill; 20]);
++        s
++    }
++
++    fn sample_outs(value: u64) -> Vec<TxOut> {
++        vec![
++            TxOut { value: value / 2, script: p2wpkh(0x11) },
++            TxOut { value: value - value / 2, script: p2wpkh(0x22) },
++        ]
++    }
++
++    #[test]
++    fn register_without_sig_is_demo_only() {
++        let mut e = engine();
++        e.demo = false;
++        assert!(e.register("aa".repeat(32).as_str(), "bc1q", false, None).is_err());
++        e.demo = true;
++        let g = Identity::from_secret_bytes(&[0x11; 64]);
++        let hex = hex::encode(g.sign_pk());
++        assert!(e.register(&hex, "bc1q", false, None).is_ok());
++        assert!(!e.is_house(&hex));
++    }
++
++    #[test]
++    fn register_checks_the_key_signature() {
++        let mut e = Engine { demo: false, ..Engine::default() };
++        let g = Identity::from_secret_bytes(&[0x22; 64]);
++        let (hex, sig) = Engine::sign_register(&g);
++        assert!(e.register(&hex, "bc1qtest", false, Some(&sig)).is_ok());
++        let other = Identity::from_secret_bytes(&[0x23; 64]);
++        let bad = hex::encode(other.sign(&Engine::register_message(&hex)));
++        assert!(e.register(&hex, "bc1q", false, Some(&bad)).is_err());
++    }
++
++    #[test]
++    fn house_keys_never_earn() {
++        let mut e = engine();
++        let g = Identity::from_secret_bytes(&[0x33; 64]);
++        let hex = hex::encode(g.sign_pk());
++        e.register(&hex, "bc1q", true, None).unwrap();
++        e.credit_authored("miner", &hex, 1_000);
++        assert!(e.authored.is_empty());
++    }
++
++    #[test]
++    fn ingest_attest_and_score() {
++        let mut e = engine();
++        let g = Identity::from_secret_bytes(&[0x44; 64]);
++        let g_hex = hex::encode(g.sign_pk());
++        e.register(&g_hex, "bc1q", false, None).unwrap();
++        let prev = [0x77u8; 32];
++        let height = 966_267u32;
++        let txs: Vec<Hash> = (1..=4u8).map(|i| [i; 32]).collect();
++        let branches = datum_wire::pow::merkle_branches_for_coinbase(&txs);
++        let mut outs = sample_outs(312_538_966);
++        let (a, sig, c) = attest(&g, height, &prev, &branches, &outs, NodeView::default());
++        outs.push(c);
++        let (bytes, _, _) = coinbase::build(height, b"Lazarus\x0fTofu", &outs, 0);
++        let g_out = e
++            .ingest_attest(
++                &hex::encode(a.encode()),
++                &hex::encode(sig),
++                &hex::encode(&bytes),
++                &hex::encode(prev),
++                &branches.iter().map(hex::encode).collect::<Vec<_>>(),
++                Some(&g_hex),
++            )
++            .unwrap();
++        assert_eq!(g_out, g_hex);
++        let s = e.score();
++        assert_eq!(s.verified, 1);
++        assert!(s.score > 0.0);
++    }
++
++    #[test]
++    fn detector_flags_only_the_proxy() {
++        let mut e = engine();
++        // 30 pool templates; honest has its own txs first; proxy copies pool.
++        for i in 0..30u64 {
++            let t = i as f64;
++            let prev = format!("{i:064x}");
++            let pool_tx = vec![format!("{:064x}", i + 100), format!("{:064x}", i + 200)];
++            let honest_tx = vec![format!("{:064x}", i + 300), format!("{:064x}", i + 400)];
++            e.note_snapshot("POOL", Snapshot::new(t, prev.clone(), pool_tx.clone()));
++            e.note_snapshot("h1", Snapshot::new(t + 0.01, prev.clone(), honest_tx));
++            e.note_snapshot("h2", Snapshot::new(t + 0.02, prev.clone(), vec![format!("{:064x}", i + 500)]));
++            e.note_snapshot("proxy", Snapshot::new(t + 0.04, prev, pool_tx));
++        }
++        let rows = e.detector_rows();
++        assert!(rows["proxy"].independence < 0.05, "{}", rows["proxy"].independence);
++        assert!(rows["h1"].independence > 0.8, "{}", rows["h1"].independence);
++        assert!(rows["h2"].independence > 0.8, "{}", rows["h2"].independence);
++        let flagged = e.flagged();
++        assert_eq!(flagged, vec!["proxy".to_string()]);
++        let cl = e.clusters();
++        assert!(cl.iter().any(|c| c.contains(&"POOL".to_string()) && c.contains(&"proxy".to_string())), "{cl:?}");
++    }
++}
+diff --git a/prime/primed/src/state.rs b/prime/primed/src/state.rs
+index 00c80c7..0524a39 100644
+--- a/prime/primed/src/state.rs
++++ b/prime/primed/src/state.rs
+@@ -425,6 +425,8 @@ pub struct Shared {
+     /// Last known payout script per gateway signing key (64 hex chars). Survives reconnect
+     /// so the first empty job of a returning gateway already pays them.
+     pub gateway_payouts: Mutex<HashMap<String, GatewayPayout>>,
++    /// Sovereign TIDES: key directory, job snapshots, attestations, detector, bonus.
++    pub sovereignty: Mutex<crate::sovereignty::Engine>,
+ }
+ 
+ /// What Prime last learned as a gateway's own payout, persisted in `gateway-scripts.json`.
+diff --git a/prime/primed/src/stats.rs b/prime/primed/src/stats.rs
+index 519d679..6a0c61c 100644
+--- a/prime/primed/src/stats.rs
++++ b/prime/primed/src/stats.rs
+@@ -289,6 +289,7 @@ pub fn build(shared: &Shared) -> Value {
+         "connections_open": shared.connections.lock().unwrap().total(),
+         "owed": owed,
+         "blocks": blocks,
++        "sovereignty": shared.sovereignty.lock().unwrap().stats_json(Some(w)),
+     })
+ }
+ 
+@@ -333,13 +334,41 @@ pub async fn serve(shared: Arc<Shared>) {
+         let cache = cache.clone();
+         tokio::spawn(async move {
+             let _slot = slot;
+-            let mut buf = [0u8; 2048];
++            let mut buf = vec![0u8; 64 * 1024];
+             let n = match tokio::time::timeout(Duration::from_secs(5), sock.read(&mut buf)).await {
+                 Ok(Ok(n)) => n,
+                 _ => return,
+             };
+-            let req = String::from_utf8_lossy(&buf[..n]);
+-            let path = req.split_whitespace().nth(1).unwrap_or("/");
++            buf.truncate(n);
++            // A POST with Content-Length longer than the first read: pull the rest.
++            let head_end = buf.windows(4).position(|w| w == b"\r\n\r\n").map(|i| i + 4);
++            if let Some(end) = head_end {
++                let headers = String::from_utf8_lossy(&buf[..end]);
++                let want = headers
++                    .lines()
++                    .find(|l| l.to_ascii_lowercase().starts_with("content-length:"))
++                    .and_then(|l| l.split(':').nth(1))
++                    .and_then(|v| v.trim().parse::<usize>().ok())
++                    .unwrap_or(0)
++                    .min(1_000_000);
++                let have = buf.len().saturating_sub(end);
++                while buf.len() - end < want {
++                    let mut more = vec![0u8; (want - (buf.len() - end)).min(64 * 1024)];
++                    match tokio::time::timeout(Duration::from_secs(5), sock.read(&mut more)).await {
++                        Ok(Ok(0)) => break,
++                        Ok(Ok(m)) => buf.extend_from_slice(&more[..m]),
++                        _ => break,
++                    }
++                }
++                let _ = have;
++            }
++            let req = String::from_utf8_lossy(&buf);
++            let mut lines = req.split("\r\n");
++            let start = lines.next().unwrap_or("");
++            let mut start_w = start.split_whitespace();
++            let method = start_w.next().unwrap_or("GET");
++            let path = start_w.next().unwrap_or("/");
++            let body = req.split("\r\n\r\n").nth(1).unwrap_or("");
+             let document = |which: usize| {
+                 let (cache, shared) = (cache.clone(), shared.clone());
+                 async move {
+@@ -355,10 +384,21 @@ pub async fn serve(shared: Arc<Shared>) {
+                 }
+             };
+             let plain = |text: &str| Arc::new(text.to_string());
+-            let (status, ctype, body) = match path.split('?').next().unwrap_or("/") {
+-                "/" | "/stats.json" | "/stats" => ("200 OK", "application/json", document(0).await),
+-                "/ledger.json" => ("200 OK", "application/json", document(1).await),
+-                "/healthz" => ("200 OK", "text/plain", plain("ok\n")),
++            let (status, ctype, body) = match (method, path.split('?').next().unwrap_or("/")) {
++                ("GET", "/" | "/stats.json" | "/stats") => ("200 OK", "application/json", document(0).await),
++                ("GET", "/ledger.json") => ("200 OK", "application/json", document(1).await),
++                ("GET", "/healthz") => ("200 OK", "text/plain", plain("ok\n")),
++                ("GET", "/sovereignty.json" | "/sovereignty") => {
++                    let ledger = shared.ledger.lock().unwrap();
++                    let body = shared.sovereignty.lock().unwrap().stats_json(Some(&ledger.window)).to_string();
++                    ("200 OK", "application/json", Arc::new(body))
++                }
++                ("POST", p) if p.starts_with("/sovereignty/") => {
++                    match ingest(&shared, p, body) {
++                        Ok(v) => ("200 OK", "application/json", Arc::new(v.to_string())),
++                        Err(e) => ("400 Bad Request", "application/json", Arc::new(json!({"error": e}).to_string())),
++                    }
++                }
+                 _ => ("404 Not Found", "text/plain", plain("not found\n")),
+             };
+             let resp = format!(
+@@ -417,6 +457,96 @@ pub async fn housekeeping(shared: Arc<Shared>) {
+     }
+ }
+ 
++fn ingest(shared: &Shared, path: &str, body: &str) -> Result<Value, String> {
++    let demo = shared.sovereignty.lock().unwrap().demo();
++    let v: Value = if body.trim().is_empty() { json!({}) } else { serde_json::from_str(body).map_err(|e| e.to_string())? };
++    match path {
++        "/sovereignty/register" => {
++            let g = v["g"].as_str().ok_or("g")?;
++            let payout = v["payout"].as_str().unwrap_or("");
++            let house = v["house"].as_bool().unwrap_or(false);
++            let sig = v["sig"].as_str();
++            let rec = shared.sovereignty.lock().unwrap().register(g, payout, house, sig)?;
++            Ok(serde_json::to_value(rec).unwrap())
++        }
++        "/sovereignty/snapshot" => {
++            if !demo {
++                return Err("sovereignty-demo is off".into());
++            }
++            let gw = v["gateway"].as_str().ok_or("gateway")?;
++            let t = v["t"].as_f64().ok_or("t")?;
++            let prev = v["prev"].as_str().ok_or("prev")?;
++            let txids = v["txids"].as_array().ok_or("txids")?
++                .iter()
++                .filter_map(|x| x.as_str().map(str::to_string))
++                .collect();
++            shared.sovereignty.lock().unwrap().note_snapshot(gw, tides::Snapshot::new(t, prev, txids));
++            Ok(json!({"ok": true}))
++        }
++        "/sovereignty/attest" => {
++            let a = v["a"].as_str().ok_or("a")?;
++            let sig = v["sig"].as_str().ok_or("sig")?;
++            let cb = v["coinbase"].as_str().ok_or("coinbase")?;
++            let prev = v["prev"].as_str().ok_or("prev")?;
++            let branches: Vec<String> = v["branches"]
++                .as_array()
++                .ok_or("branches")?
++                .iter()
++                .filter_map(|x| x.as_str().map(str::to_string))
++                .collect();
++            let expect = v["g"].as_str();
++            let g = shared.sovereignty.lock().unwrap().ingest_attest(a, sig, cb, prev, &branches, expect)?;
++            Ok(json!({"ok": true, "g": g}))
++        }
++        "/sovereignty/credit" => {
++            if !demo {
++                return Err("sovereignty-demo is off".into());
++            }
++            let identity = v["identity"].as_str().ok_or("identity")?;
++            let gateway = v["gateway"].as_str().ok_or("gateway")?;
++            let work = v["work"].as_u64().ok_or("work")?;
++            let source = if v["stratum"].as_bool().unwrap_or(false) { tides::SOURCE_STRATUM } else { tides::SOURCE_DATUM };
++            {
++                let mut ledger = shared.ledger.lock().unwrap();
++                ledger.credit(identity, work, v["height"].as_u64().unwrap_or(1) as u32, now() as u32, source)
++                    .map_err(|e| e.to_string())?;
++            }
++            if source != tides::SOURCE_STRATUM {
++                shared.sovereignty.lock().unwrap().credit_authored(identity, gateway, work);
++            }
++            Ok(json!({"ok": true}))
++        }
++        "/sovereignty/observe" => {
++            if !demo {
++                return Err("sovereignty-demo is off".into());
++            }
++            shared.sovereignty.lock().unwrap().observe(
++                v["builder"].as_str().unwrap_or("unknown"),
++                v["claimed"].as_bool().unwrap_or(false),
++                v["verified"].as_bool().unwrap_or(false),
++            );
++            Ok(json!({"ok": true}))
++        }
++        "/sovereignty/apply-bonus" => {
++            if !demo || !shared.cfg.sovereignty_bonus {
++                return Err("bonus off or not in demo".into());
++            }
++            let value = v["value"].as_u64().unwrap_or(312_500_000);
++            let credits = {
++                let ledger = shared.ledger.lock().unwrap();
++                shared.sovereignty.lock().unwrap().bonus_for_block(value, &ledger.window)
++            };
++            {
++                let mut ledger = shared.ledger.lock().unwrap();
++                let delta: Vec<(String, i64)> = credits.iter().map(|(i, s)| (i.clone(), *s as i64)).collect();
++                ledger.settle_carry(&delta);
++            }
++            Ok(json!({"ok": true, "credits": credits}))
++        }
++        _ => Err("unknown sovereignty path".into()),
++    }
++}
++
+ fn write_atomic(path: &std::path::Path, data: &[u8]) {
+     let tmp = path.with_extension("tmp");
+     if std::fs::write(&tmp, data).and_then(|_| std::fs::rename(&tmp, path)).is_err() {
+diff --git a/prime/primed/tests/common/mod.rs b/prime/primed/tests/common/mod.rs
+index 3c7cb2c..2632afc 100644
+--- a/prime/primed/tests/common/mod.rs
++++ b/prime/primed/tests/common/mod.rs
+@@ -26,7 +26,7 @@ pub const POOL_ADDRESS: &str = "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4";
+ 
+ pub struct Primed {
+     child: Child,
+-    stats: u16,
++    pub stats: u16,
+     pub dir: std::path::PathBuf,
+ }
+ 
+diff --git a/prime/primed/tests/sovereignty_e2e.rs b/prime/primed/tests/sovereignty_e2e.rs
+new file mode 100644
+index 0000000..9ae0b82
+--- /dev/null
++++ b/prime/primed/tests/sovereignty_e2e.rs
+@@ -0,0 +1,154 @@
++//! XBT-064: primed sovereignty ingest — register, detector, attestation, bonus.
++//! Uses the stats HTTP API with `sovereignty-demo` on; no miners.
++
++mod common;
++
++use std::io::{Read, Write};
++use std::net::TcpStream;
++
++use datum_wire::authorship::{attest, NodeView};
++use datum_wire::coinbase::{self, TxOut};
++use datum_wire::crypto::Identity;
++use datum_wire::pow;
++use serde_json::{json, Value};
++
++fn make_attest(id: &Identity) -> (String, String, String, String, Vec<String>) {
++    let prev = [0x77u8; 32];
++    let height = 966_267u32;
++    let txs: Vec<[u8; 32]> = (1..=4u8).map(|i| [i; 32]).collect();
++    let branches = pow::merkle_branches_for_coinbase(&txs);
++    let mut outs = vec![
++        TxOut { value: 150_000_000, script: { let mut s = vec![0x00, 0x14]; s.extend_from_slice(&[0x11; 20]); s } },
++        TxOut { value: 162_538_966, script: { let mut s = vec![0x00, 0x14]; s.extend_from_slice(&[0x22; 20]); s } },
++    ];
++    let (a, sig, c) = attest(id, height, &prev, &branches, &outs, NodeView::default());
++    outs.push(c);
++    let (bytes, _, _) = coinbase::build(height, b"Lazarus\x0fH1", &outs, 0);
++    (
++        hex::encode(a.encode()),
++        hex::encode(sig),
++        hex::encode(bytes),
++        hex::encode(prev),
++        branches.iter().map(hex::encode).collect(),
++    )
++}
++
++fn post(port: u16, path: &str, body: &Value) -> Value {
++    let payload = body.to_string();
++    let req = format!(
++        "POST {path} HTTP/1.0\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{payload}",
++        payload.len()
++    );
++    let mut s = TcpStream::connect(("127.0.0.1", port)).unwrap();
++    s.write_all(req.as_bytes()).unwrap();
++    let mut buf = Vec::new();
++    s.read_to_end(&mut buf).unwrap();
++    let text = String::from_utf8_lossy(&buf);
++    let body = text.split("\r\n\r\n").nth(1).unwrap_or("");
++    serde_json::from_str(body).unwrap_or_else(|_| json!({"raw": body}))
++}
++
++fn hex32(i: u64) -> String {
++    format!("{i:064x}")
++}
++
++fn snaps(n: usize) -> (Vec<Value>, Vec<Value>, Vec<Value>, Vec<Value>) {
++    let mut pool = Vec::new();
++    let mut h1 = Vec::new();
++    let mut h2 = Vec::new();
++    let mut proxy = Vec::new();
++    for i in 0..n as u64 {
++        let t = i as f64;
++        let prev = hex32(i / 8);
++        let ptx = vec![hex32(i + 100), hex32(i + 200)];
++        let h1tx = vec![hex32(i + 300), hex32(i + 400)];
++        let h2tx = vec![hex32(i + 500)];
++        pool.push(json!({"t": t, "prev": prev, "txids": ptx}));
++        h1.push(json!({"t": t + 0.01, "prev": prev, "txids": h1tx}));
++        h2.push(json!({"t": t + 0.02, "prev": prev, "txids": h2tx}));
++        proxy.push(json!({"t": t + 0.04, "prev": prev, "txids": ptx}));
++    }
++    (pool, h1, h2, proxy)
++}
++
++#[test]
++fn primed_flags_the_fake_gateway_and_moves_bonus_credit() {
++    let pool = Identity::from_secret_bytes(&[0x64; 64]);
++    let extra = r#"
++rpc = "http://127.0.0.1:9"
++poll = 60
++sovereignty-bonus = true
++sovereignty-demo = true
++sovereignty-bonus-bps = 500
++sovereignty-min-key-age-secs = 0
++stratum-fee-bps = 2500
++datum-rebate-bps = 1000
++house-loopback = false
++"#;
++    let (p, _listen) = common::start_primed(&pool, extra);
++    let stats = p.stats; // u16, passed by value to post()
++
++    let h1 = Identity::from_secret_bytes(&[0x11; 64]);
++    let h2 = Identity::from_secret_bytes(&[0x12; 64]);
++    let px = Identity::from_secret_bytes(&[0x13; 64]);
++    for (id, name) in [(&h1, "h1"), (&h2, "h2"), (&px, "proxy")] {
++        let g = hex::encode(id.sign_pk());
++        let r = post(stats, "/sovereignty/register", &json!({"g": g, "payout": format!("bc1q{name}"), "house": false}));
++        assert!(r.get("g").is_some(), "{r}");
++    }
++
++    let (pool_s, h1_s, h2_s, px_s) = snaps(30);
++    for (gw, snaps) in [("POOL", pool_s), ("h1", h1_s), ("h2", h2_s), ("proxy", px_s)] {
++        for s in snaps {
++            let mut body = s;
++            body["gateway"] = json!(gw);
++            let r = post(stats, "/sovereignty/snapshot", &body);
++            assert_eq!(r["ok"], true, "{r}");
++        }
++    }
++
++    let attester = Identity::from_secret_bytes(&[0x42; 64]);
++    let pk = hex::encode(attester.sign_pk());
++    post(stats, "/sovereignty/register", &json!({"g": pk, "payout": "bc1qhonest", "house": false}));
++    let (a_hex, sig_hex, cb_hex, prev_hex, branches_hex) = make_attest(&attester);
++    let att = post(
++        stats,
++        "/sovereignty/attest",
++        &json!({
++            "a": a_hex,
++            "sig": sig_hex,
++            "coinbase": cb_hex,
++            "prev": prev_hex,
++            "branches": branches_hex,
++            "g": pk,
++        }),
++    );
++    assert_eq!(att["ok"], true, "{att}");
++
++    // Window work: stratum + attested honest + proxy (proxy independence 0 → no bonus).
++    post(stats, "/sovereignty/credit", &json!({"identity": "bc1qstratum", "gateway": "house", "work": 400, "stratum": true}));
++    post(stats, "/sovereignty/credit", &json!({"identity": "bc1qh1", "gateway": "h1", "work": 200}));
++    post(stats, "/sovereignty/credit", &json!({"identity": "bc1qh2", "gateway": "h2", "work": 100}));
++    post(stats, "/sovereignty/credit", &json!({"identity": "bc1qproxy", "gateway": "proxy", "work": 200}));
++
++    let applied = post(stats, "/sovereignty/apply-bonus", &json!({"value": 312_500_000}));
++    assert_eq!(applied["ok"], true, "{applied}");
++    let credits = applied["credits"].as_array().cloned().unwrap_or_default();
++    let got = |id: &str| -> u64 {
++        credits.iter().find(|c| c[0] == id).and_then(|c| c[1].as_u64()).unwrap_or(0)
++    };
++    assert!(got("bc1qh1") > 0, "honest h1 should take bonus: {credits:?}");
++    assert!(got("bc1qh2") > 0, "honest h2 should take bonus: {credits:?}");
++    assert_eq!(got("bc1qproxy"), 0, "proxy independence 0 earns nothing: {credits:?}");
++
++    let doc = common::settled_stats(&p);
++    let sov = &doc["sovereignty"];
++    assert_eq!(sov["bonus"]["on"], true);
++    assert!(sov["score"]["verified"].as_u64().unwrap() >= 1);
++    let gw = &sov["gateways"];
++    assert!(gw["proxy"]["independence"].as_f64().unwrap() < 0.05, "{gw}");
++    assert!(gw["h1"]["independence"].as_f64().unwrap() > 0.8, "{gw}");
++    assert!(gw["h2"]["independence"].as_f64().unwrap() > 0.8, "{gw}");
++    let flagged = sov["flagged"].as_array().unwrap();
++    assert_eq!(flagged, &vec![json!("proxy")]);
++}
+diff --git a/prime/scripts/rnd-a2-demo.sh b/prime/scripts/rnd-a2-demo.sh
+new file mode 100755
+index 0000000..f52bdbe
+--- /dev/null
++++ b/prime/scripts/rnd-a2-demo.sh
+@@ -0,0 +1,84 @@
++#!/usr/bin/env bash
++# XBT-064 / P-003 A2: primed sovereignty — attestations, score, TIDES bonus, fake-DATUM detector.
++# Ports 30500-30599. Datadirs under ~/xbt-rnd/xbt-064/run/. Nothing pushed. No miners.
++set -euo pipefail
++HERE=$(cd "$(dirname "$0")" && pwd)
++PRIME=$(cd "$HERE/.." && pwd)
++RUN=${XBT064_RUN:-$HOME/xbt-rnd/xbt-064/run}
++STATS_PORT=${STATS_PORT:-30516}
++LISTEN_PORT=${LISTEN_PORT:-30515}
++KNOTS=${KNOTS:-$HOME/lazarus-regtest/b1-xbt402/knots-29.4.2/bitcoind}
++export PRIME_STATS="http://127.0.0.1:${STATS_PORT}"
++
++mkdir -p "$RUN/prime"
++cleanup() {
++  if [[ -n "${PRIMED_PID:-}" ]]; then
++    kill "$PRIMED_PID" 2>/dev/null || true
++    wait "$PRIMED_PID" 2>/dev/null || true
++  fi
++  if [[ -n "${KNOTS_PIDS:-}" ]]; then
++    for p in $KNOTS_PIDS; do kill "$p" 2>/dev/null || true; done
++    for p in $KNOTS_PIDS; do wait "$p" 2>/dev/null || true; done
++  fi
++}
++trap cleanup EXIT INT TERM HUP
++
++echo "== build primed =="
++(cd "$PRIME" && nice -n 10 cargo build -j4 --offline -q --bin primed \
++  && nice -n 10 cargo build -j4 --offline -q -p datum-wire --example lzt1_fixture)
++
++PAYOUT=bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4
++cat > "$RUN/prime/prime.toml" <<EOF
++listen = "127.0.0.1:${LISTEN_PORT}"
++stats-listen = "127.0.0.1:${STATS_PORT}"
++data-dir = "$RUN/prime"
++payout-address = "$PAYOUT"
++network = "mainnet"
++rpc = "http://127.0.0.1:30532"
++poll = 60
++min-diff = 1
++fee-bps = 0
++stratum-fee-bps = 2500
++datum-rebate-bps = 1000
++house-loopback = false
++sovereignty-bonus = true
++sovereignty-demo = true
++sovereignty-bonus-bps = 500
++sovereignty-min-key-age-secs = 0
++headline = "XBT-064 rnd/a2"
++EOF
++
++echo "== start primed on :${LISTEN_PORT} / :${STATS_PORT} =="
++(cd "$PRIME" && RUST_LOG=info ./target/debug/primed -c "$RUN/prime/prime.toml" run \
++  >"$RUN/prime/primed.log" 2>"$RUN/prime/primed.err") &
++PRIMED_PID=$!
++for i in $(seq 1 50); do
++  if curl -sf "$PRIME_STATS/healthz" >/dev/null; then break; fi
++  sleep 0.2
++  if ! kill -0 "$PRIMED_PID" 2>/dev/null; then
++    echo "primed died:" >&2
++    cat "$RUN/prime/primed.err" >&2
++    exit 1
++  fi
++done
++curl -sf "$PRIME_STATS/healthz" >/dev/null
++
++echo "== feed (honest vs fake, attestation, bonus) =="
++python3 "$HERE/rnd-a2-feed.py"
++
++if [[ -x "$KNOTS" ]]; then
++  echo "== optional Knots 29.4.2: 2 honest + 1 proxy (40s, ports 30520+) =="
++  python3 "$HERE/rnd-a2-knots.py" "$KNOTS" 40 30520 || echo "(knots poll skipped: $?)"
++else
++  echo "== no Knots 29.4.2 at $KNOTS; synth-only detector (still asserted) =="
++fi
++
++echo "== stats sovereignty excerpt =="
++curl -sf "$PRIME_STATS/sovereignty.json" | python3 -c '
++import json,sys
++s=json.load(sys.stdin)
++print("score", s["score"]["score"], "verified", s["score"]["verified"], "flagged", s["flagged"])
++print("bonus on", s["bonus"]["on"], "effective_bps", s["bonus"]["effective_bps"])
++print("credits", (s["bonus"].get("sample") or {}).get("credits"))
++'
++echo "demo OK"
+diff --git a/prime/scripts/rnd-a2-feed.py b/prime/scripts/rnd-a2-feed.py
+new file mode 100755
+index 0000000..85a1007
+--- /dev/null
++++ b/prime/scripts/rnd-a2-feed.py
+@@ -0,0 +1,99 @@
++#!/usr/bin/env python3
++"""Drive a primed with sovereignty-demo on: 2 honest + 1 proxy snapshots, LZT1 attest,
++TIDES bonus. Optional Knots 29.4.2 poll (ports 30520+) if bitcoind is given.
++"""
++import json, os, random, subprocess, sys, time, urllib.request
++
++STATS = os.environ.get("PRIME_STATS", "http://127.0.0.1:30516")
++HERE = os.path.dirname(os.path.abspath(__file__))
++PRIME = os.path.abspath(os.path.join(HERE, ".."))
++
++
++def post(path, body):
++    req = urllib.request.Request(STATS + path, json.dumps(body).encode(), {"Content-Type": "application/json"})
++    with urllib.request.urlopen(req, timeout=30) as r:
++        return json.load(r)
++
++
++def get(path="/sovereignty.json"):
++    with urllib.request.urlopen(STATS + path, timeout=30) as r:
++        return json.load(r)
++
++
++def hex32(i):
++    return f"{i:064x}"
++
++
++def synth(n=30):
++    pool, h1, h2, proxy = [], [], [], []
++    for i in range(n):
++        t, prev = float(i), hex32(i // 8)
++        ptx = [hex32(i + 100), hex32(i + 200)]
++        pool.append({"t": t, "prev": prev, "txids": ptx})
++        h1.append({"t": t + 0.01, "prev": prev, "txids": [hex32(i + 300), hex32(i + 400)]})
++        h2.append({"t": t + 0.02, "prev": prev, "txids": [hex32(i + 500)]})
++        proxy.append({"t": t + 0.04, "prev": prev, "txids": list(ptx)})
++    return {"POOL": pool, "h1": h1, "h2": h2, "proxy": proxy}
++
++
++def push_snaps(gws):
++    for gw, snaps in gws.items():
++        for s in snaps:
++            post("/sovereignty/snapshot", {"gateway": gw, **s})
++
++
++def fixture():
++    out = subprocess.check_output(
++        ["cargo", "run", "--offline", "-q", "-p", "datum-wire", "--example", "lzt1_fixture"],
++        cwd=PRIME,
++    )
++    return json.loads(out)
++
++
++def main():
++    print("== register + snapshots (2 honest, 1 proxy) ==")
++    for name in ("h1", "h2", "proxy"):
++        post("/sovereignty/register", {"g": name.encode().hex().ljust(64, "0"), "payout": f"bc1q{name}", "house": False})
++    push_snaps(synth())
++
++    print("== LZT1 attestation (rnd/a2 fixture) ==")
++    fx = fixture()
++    post("/sovereignty/register", {"g": fx["pk"], "payout": "bc1qattested", "house": False})
++    r = post("/sovereignty/attest", {
++        "a": fx["attestation"], "sig": fx["sig"], "coinbase": fx["coinbase"],
++        "prev": fx["prev_hash"], "branches": fx["branches"], "g": fx["pk"],
++    })
++    print("attest", r)
++
++    print("== credit window + apply bonus ==")
++    post("/sovereignty/credit", {"identity": "bc1qstratum", "gateway": "house", "work": 400, "stratum": True})
++    post("/sovereignty/credit", {"identity": "bc1qh1", "gateway": "h1", "work": 200})
++    post("/sovereignty/credit", {"identity": "bc1qh2", "gateway": "h2", "work": 100})
++    post("/sovereignty/credit", {"identity": "bc1qproxy", "gateway": "proxy", "work": 200})
++    bonus = post("/sovereignty/apply-bonus", {"value": 312500000})
++    print("bonus", json.dumps(bonus, indent=2))
++
++    sov = get()
++    gw = sov["gateways"]
++    print("== detector ==")
++    for name in ("h1", "h2", "proxy"):
++        f = gw[name]
++        print(f"  {name:6} independence={f['independence']:.3f} identical={f['identical']:.3f} lead={f['lead']:.3f}")
++    print("flagged", sov["flagged"])
++    print("score", json.dumps(sov["score"], indent=2))
++    print("sample bonus", json.dumps(sov["bonus"]["sample"], indent=2))
++
++    assert sov["flagged"] == ["proxy"], sov["flagged"]
++    assert gw["proxy"]["independence"] < 0.05
++    assert gw["h1"]["independence"] > 0.8
++    assert gw["h2"]["independence"] > 0.8
++    credits = {c[0]: c[1] for c in bonus.get("credits") or []}
++    assert credits.get("bc1qh1", 0) > 0
++    assert credits.get("bc1qh2", 0) > 0
++    assert credits.get("bc1qproxy", 0) == 0
++    assert sov["score"]["verified"] >= 1
++    print("FEED_OK")
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/prime/scripts/rnd-a2-knots.py b/prime/scripts/rnd-a2-knots.py
+new file mode 100755
+index 0000000..6531bd5
+--- /dev/null
++++ b/prime/scripts/rnd-a2-knots.py
+@@ -0,0 +1,122 @@
++#!/usr/bin/env python3
++"""Short isolated Knots net: pool node + 2 honest + a proxy of the pool's templates.
++Posts snapshots to primed (PRIME_STATS). Ports from argv. No miners.
++"""
++import atexit, base64, json, os, random, shutil, subprocess, sys, time, urllib.request
++
++BITCOIND = sys.argv[1]
++SECS = float(sys.argv[2]) if len(sys.argv) > 2 else 40
++BASE = int(sys.argv[3]) if len(sys.argv) > 3 else 30520
++STATS = os.environ.get("PRIME_STATS", "http://127.0.0.1:30516")
++RUN = os.environ.get("XBT064_RUN", os.path.expanduser("~/xbt-rnd/xbt-064/run"))
++RDTS = "-rdtsexpiry=4102444800"
++nodes, snaps = {}, {"POOL": [], "knots-h1": [], "knots-h2": [], "knots-proxy": []}
++
++
++def start(name, i, extra, connect=()):
++    d = os.path.join(RUN, f"knots-{name}")
++    shutil.rmtree(d, ignore_errors=True)
++    os.makedirs(d, exist_ok=True)
++    rpc, p2p = BASE + 2 * i, BASE + 2 * i + 1
++    args = [f"-datadir={d}", "-regtest", "-server", f"-rpcport={rpc}", "-rpcbind=127.0.0.1",
++            "-rpcallowip=127.0.0.1", "-rpcuser=x", "-rpcpassword=xbt064",
++            "-testactivationheight=blake2b@101", RDTS, "-disablewallet", f"-port={p2p}",
++            "-bind=127.0.0.1", "-listen=1", "-dnsseed=0", "-fixedseeds=0"] + [
++                f"-addnode=127.0.0.1:{BASE + 2 * j + 1}" for j in connect
++            ] + extra
++    p = subprocess.Popen([BITCOIND] + args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
++    nodes[name] = {"p": p, "d": d, "port": rpc}
++
++
++def rpc(name, method, *params):
++    body = json.dumps({"jsonrpc": "1.0", "id": 0, "method": method, "params": list(params)}).encode()
++    req = urllib.request.Request(
++        f"http://127.0.0.1:{nodes[name]['port']}/",
++        body,
++        {"Authorization": "Basic " + base64.b64encode(b"x:xbt064").decode()},
++    )
++    with urllib.request.urlopen(req, timeout=30) as r:
++        return json.load(r)["result"]
++
++
++def stop_all():
++    for n in nodes.values():
++        n["p"].terminate()
++    for n in nodes.values():
++        try:
++            n["p"].wait(timeout=30)
++        except Exception:
++            n["p"].kill()
++        shutil.rmtree(n["d"], ignore_errors=True)
++
++
++def gbt(name):
++    t = rpc(name, "getblocktemplate", {"rules": ["segwit", "blake2b"]})
++    txids = [x["txid"] for x in t.get("transactions") or []]
++    return {"t": time.time(), "prev": t["previousblockhash"], "txids": txids}
++
++
++def post(path, body):
++    req = urllib.request.Request(STATS + path, json.dumps(body).encode(), {"Content-Type": "application/json"})
++    with urllib.request.urlopen(req, timeout=15) as r:
++        return json.load(r)
++
++
++def main():
++    atexit.register(stop_all)
++    os.makedirs(RUN, exist_ok=True)
++    start("P", 0, [])
++    start("H1", 1, [], connect=(0,))
++    start("H2", 2, ["-blockmintxfee=0.00005"], connect=(0, 1))
++    for _ in range(40):
++        try:
++            rpc("P", "getblockcount")
++            rpc("H1", "getblockcount")
++            rpc("H2", "getblockcount")
++            break
++        except Exception:
++            time.sleep(0.25)
++    try:
++        rpc("P", "generatetodescriptor", 130, "raw(51)")
++    except Exception as e:
++        print("generatetodescriptor:", e, file=sys.stderr)
++    deadline = time.time() + SECS
++    rng = random.Random(64)
++    fails = 0
++    while time.time() < deadline:
++        try:
++            p = gbt("P")
++            h1 = gbt("H1")
++            h2 = gbt("H2")
++            proxy = dict(p, t=p["t"] + rng.uniform(0.02, 0.08))
++            snaps["POOL"].append(p)
++            snaps["knots-h1"].append(h1)
++            snaps["knots-h2"].append(h2)
++            snaps["knots-proxy"].append(proxy)
++            for gw, s in (("POOL", p), ("knots-h1", h1), ("knots-h2", h2), ("knots-proxy", proxy)):
++                post("/sovereignty/snapshot", {"gateway": gw, **s})
++            fails = 0
++        except Exception as e:
++            fails += 1
++            print("poll", e, file=sys.stderr)
++            if fails >= 5:
++                print("knots: getblocktemplate failing; synth detector already asserted", file=sys.stderr)
++                break
++        if rng.random() < 0.4:
++            try:
++                rpc("P", "generatetodescriptor", 1, "raw(51)")
++            except Exception:
++                pass
++        time.sleep(0.5)
++    with urllib.request.urlopen(STATS + "/sovereignty.json", timeout=15) as r:
++        sov = json.load(r)
++    gw = sov.get("gateways") or {}
++    print("knots snapshots", {k: len(v) for k, v in snaps.items()})
++    for name in ("knots-h1", "knots-h2", "knots-proxy"):
++        f = gw.get(name) or {}
++        print(f"  {name:12} independence={f.get('independence')} identical={f.get('identical')} compared={f.get('compared')}")
++    print("KNOTS_OK")
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/prime/tides/Cargo.toml b/prime/tides/Cargo.toml
+index a1a2c19..40dad4c 100644
+--- a/prime/tides/Cargo.toml
++++ b/prime/tides/Cargo.toml
+@@ -12,3 +12,5 @@ serde.workspace = true
+ serde_json.workspace = true
+ thiserror.workspace = true
+ log.workspace = true
++sha2.workspace = true
++hex.workspace = true
+diff --git a/prime/tides/src/entropy.rs b/prime/tides/src/entropy.rs
+new file mode 100644
+index 0000000..fd6de15
+--- /dev/null
++++ b/prime/tides/src/entropy.rs
+@@ -0,0 +1,489 @@
++//! Template-entropy detector (research note C.2 #5 / XBT-051 `entropy.py`).
++//!
++//! Prime already sees every gateway's jobs. From those snapshots, against the pool node's
++//! own templates, this scores how independently a gateway is building:
++//!
++//! * `identical` — merkle branches equal a pool template on the same parent in the last
++//!   `window` seconds (a straight proxy).
++//! * `lead` — share of the gateway's txs it templated before the pool did. A copy can never
++//!   be ahead of its source.
++//! * `subset` (containment) — share of each template's txs the pool's recent templates
++//!   already had.
++//!
++//! ```text
++//! follower     = subset × (1 − min(1, lead / lead_ref))
++//! independence = 1 − max(identical, follower)
++//! ```
++//!
++//! Fewer than 20 comparable snapshots scores 0: an unknown gateway earns no bonus.
++//! Switch lag and lockstep are reported but not scored (on a LAN honest nodes lockstep too).
++
++use serde::Serialize;
++
++const WINDOW: f64 = 3.0;
++const LOCKSTEP: f64 = 0.25;
++const LEAD_MARGIN: f64 = 0.1;
++const LEAD_REF: f64 = 0.25;
++const MIN_COMPARED: usize = 20;
++const CLUSTER_THRESHOLD: f64 = 0.8;
++
++/// One template snapshot, as Prime would log it from a DATUM job (or the pool node poll).
++#[derive(Clone, Debug, PartialEq, Serialize)]
++pub struct Snapshot {
++    /// Unix seconds (fractional).
++    pub t: f64,
++    /// Previous block hash, hex (either endian; compared as a string).
++    pub prev: String,
++    /// Non-coinbase txids in template order, hex.
++    pub txids: Vec<String>,
++}
++
++impl Snapshot {
++    pub fn new(t: f64, prev: impl Into<String>, txids: Vec<String>) -> Self {
++        Snapshot { t, prev: prev.into(), txids }
++    }
++}
++
++#[derive(Clone, Debug, Serialize)]
++pub struct Features {
++    pub snapshots: usize,
++    pub compared: usize,
++    pub identical: f64,
++    pub branch_sim: f64,
++    pub jaccard: f64,
++    pub jaccard_hi: f64,
++    pub switches: usize,
++    pub switch_lag: Option<f64>,
++    pub lockstep: f64,
++    pub incl_lag: Option<f64>,
++    pub lead: f64,
++    pub subset: f64,
++    pub follower: f64,
++    pub independence: f64,
++    pub insufficient: bool,
++}
++
++#[derive(Clone)]
++struct Prepared {
++    t: f64,
++    prev: String,
++    txids: Vec<String>,
++    br: Vec<Vec<u8>>,
++}
++
++fn dsha(b: &[u8]) -> [u8; 32] {
++    use sha2::{Digest, Sha256};
++    let first = Sha256::digest(b);
++    Sha256::digest(first).into()
++}
++
++fn decode_txid(hex: &str) -> Option<[u8; 32]> {
++    let raw = hex::decode(hex).ok()?;
++    if raw.len() != 32 {
++        return None;
++    }
++    let mut out = [0u8; 32];
++    out.copy_from_slice(&raw);
++    out.reverse();
++    Some(out)
++}
++
++/// Stratum merkle branches for the coinbase path, from the template's txids (hex).
++pub fn branches(txids: &[String]) -> Vec<Vec<u8>> {
++    let mut out = Vec::new();
++    let mut level: Vec<Option<[u8; 32]>> = std::iter::once(None).chain(txids.iter().filter_map(|t| decode_txid(t).map(Some))).collect();
++    // if a txid failed to decode, still keep a placeholder so the caller sees a mismatch
++    if level.len() != txids.len() + 1 {
++        level = std::iter::once(None)
++            .chain(txids.iter().map(|t| decode_txid(t).or_else(|| {
++                let mut h = [0u8; 32];
++                let b = t.as_bytes();
++                let n = b.len().min(32);
++                h[..n].copy_from_slice(&b[..n]);
++                Some(h)
++            })))
++            .collect();
++    }
++    while level.len() > 1 {
++        if let Some(b) = level.get(1).and_then(|x| *x) {
++            out.push(b.to_vec());
++        } else {
++            out.push(vec![0; 32]);
++        }
++        if level.len() % 2 == 1 {
++            level.push(*level.last().unwrap());
++        }
++        level = level
++            .chunks(2)
++            .map(|p| match (p[0], p[1]) {
++                (Some(a), Some(b)) => {
++                    let mut cat = [0u8; 64];
++                    cat[..32].copy_from_slice(&a);
++                    cat[32..].copy_from_slice(&b);
++                    Some(dsha(&cat))
++                }
++                _ => None,
++            })
++            .collect();
++    }
++    out
++}
++
++/// b10c-style weighted similarity of two branch lists (1.0 = same template).
++pub fn branch_sim(a: &[Vec<u8>], b: &[Vec<u8>]) -> f64 {
++    let n = a.len().max(b.len());
++    if n == 0 {
++        return 1.0;
++    }
++    let mut same = 0u64;
++    let mut total = 0u64;
++    for i in 0..n {
++        let w = 1u64 << i;
++        total += w;
++        if i < a.len() && i < b.len() && a[i] == b[i] {
++            same += w;
++        }
++    }
++    same as f64 / total as f64
++}
++
++pub fn jaccard(a: &[String], b: &[String]) -> f64 {
++    use std::collections::HashSet;
++    let aa: HashSet<&str> = a.iter().map(String::as_str).collect();
++    let bb: HashSet<&str> = b.iter().map(String::as_str).collect();
++    if aa.is_empty() && bb.is_empty() {
++        return 1.0;
++    }
++    let inter = aa.intersection(&bb).count();
++    let union = aa.union(&bb).count();
++    inter as f64 / union as f64
++}
++
++fn prep(snaps: &[Snapshot]) -> Vec<Prepared> {
++    let mut v: Vec<Prepared> = snaps
++        .iter()
++        .map(|s| Prepared { t: s.t, prev: s.prev.clone(), txids: s.txids.clone(), br: branches(&s.txids) })
++        .collect();
++    v.sort_by(|a, b| a.t.partial_cmp(&b.t).unwrap_or(std::cmp::Ordering::Equal));
++    v
++}
++
++fn first_on_parent(snaps: &[Prepared]) -> std::collections::HashMap<String, f64> {
++    let mut first = std::collections::HashMap::new();
++    for s in snaps {
++        first.entry(s.prev.clone()).or_insert(s.t);
++    }
++    first
++}
++
++fn first_seen(snaps: &[Prepared]) -> std::collections::HashMap<String, f64> {
++    let mut seen = std::collections::HashMap::new();
++    for s in snaps {
++        for t in &s.txids {
++            seen.entry(t.clone()).or_insert(s.t);
++        }
++    }
++    seen
++}
++
++fn median(mut v: Vec<f64>) -> Option<f64> {
++    if v.is_empty() {
++        return None;
++    }
++    v.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
++    let n = v.len();
++    Some(if n % 2 == 1 { v[n / 2] } else { (v[n / 2 - 1] + v[n / 2]) / 2.0 })
++}
++
++/// Detector features for `gw` against the pool node's snapshots.
++pub fn features(gw: &[Snapshot], pool: &[Snapshot]) -> Features {
++    let gw = prep(gw);
++    let pool = prep(pool);
++    let mut by_prev: std::collections::HashMap<&str, Vec<&Prepared>> = std::collections::HashMap::new();
++    for p in &pool {
++        by_prev.entry(p.prev.as_str()).or_default().push(p);
++    }
++    let mut ident = 0usize;
++    let mut sims = 0.0;
++    let mut jacs = 0.0;
++    let mut jhi = 0usize;
++    let mut n = 0usize;
++    for s in &gw {
++        let Some(cands) = by_prev.get(s.prev.as_str()) else { continue };
++        let cands: Vec<&&Prepared> =
++            cands.iter().filter(|p| s.t - WINDOW <= p.t && p.t <= s.t + 0.05).collect();
++        if cands.is_empty() {
++            continue;
++        }
++        n += 1;
++        if cands.iter().any(|p| p.br == s.br) {
++            ident += 1;
++        }
++        let near = cands
++            .iter()
++            .min_by(|a, b| {
++                let da = if a.t <= s.t { s.t - a.t } else { 1e9 };
++                let db = if b.t <= s.t { s.t - b.t } else { 1e9 };
++                da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
++            })
++            .unwrap();
++        sims += branch_sim(&s.br, &near.br);
++        let j = jaccard(&s.txids, &near.txids);
++        jacs += j;
++        if j >= 0.98 {
++            jhi += 1;
++        }
++    }
++    let pf = first_on_parent(&pool);
++    let gf = first_on_parent(&gw);
++    let mut lags: Vec<f64> = gf.iter().filter_map(|(p, &gt)| pf.get(p).map(|&pt| gt - pt)).collect();
++    if lags.len() > 1 {
++        lags.remove(0);
++    }
++    let pseen = first_seen(&pool);
++    let gseen = first_seen(&gw);
++    let incl: Vec<f64> = gseen.iter().filter_map(|(t, &gt)| pseen.get(t).map(|&pt| gt - pt)).collect();
++    let lead = if gseen.is_empty() {
++        0.0
++    } else {
++        gseen
++            .iter()
++            .filter(|(t, &gt)| pseen.get(*t).is_none_or(|&pt| gt < pt - LEAD_MARGIN))
++            .count() as f64
++            / gseen.len() as f64
++    };
++    let mut sub = 0.0;
++    let mut subn = 0usize;
++    for s in &gw {
++        if s.txids.is_empty() {
++            continue;
++        }
++        let mut recent = std::collections::HashSet::new();
++        if let Some(cands) = by_prev.get(s.prev.as_str()) {
++            for p in cands {
++                if s.t - WINDOW <= p.t && p.t <= s.t + 0.05 {
++                    recent.extend(p.txids.iter().cloned());
++                }
++            }
++        }
++        if !recent.is_empty() {
++            subn += 1;
++            let hit = s.txids.iter().filter(|t| recent.contains(*t)).count();
++            sub += hit as f64 / s.txids.len() as f64;
++        }
++    }
++    let identical = if n > 0 { ident as f64 / n as f64 } else { 0.0 };
++    let subset = if subn > 0 { sub / subn as f64 } else { 0.0 };
++    let follower = subset * (1.0 - (lead / LEAD_REF).min(1.0));
++    let insufficient = n < MIN_COMPARED;
++    let independence = if insufficient { 0.0 } else { (1.0 - identical.max(follower)).max(0.0) };
++    Features {
++        snapshots: gw.len(),
++        compared: n,
++        identical,
++        branch_sim: if n > 0 { sims / n as f64 } else { 0.0 },
++        jaccard: if n > 0 { jacs / n as f64 } else { 0.0 },
++        jaccard_hi: if n > 0 { jhi as f64 / n as f64 } else { 0.0 },
++        switches: lags.len(),
++        switch_lag: median(lags.clone()),
++        lockstep: if lags.is_empty() {
++            0.0
++        } else {
++            lags.iter().filter(|x| x.abs() <= LOCKSTEP).count() as f64 / lags.len() as f64
++        },
++        incl_lag: median(incl),
++        lead,
++        subset,
++        follower,
++        independence: if insufficient { 0.0 } else { (independence * 1000.0).round() / 1000.0 },
++        insufficient,
++    }
++}
++
++/// Share of `a`'s snapshots whose branches equal one of `b`'s (same parent, within window).
++pub fn pair_identical(a: &[Snapshot], b: &[Snapshot]) -> f64 {
++    let a = prep(a);
++    let b = prep(b);
++    let mut idx: std::collections::HashMap<(String, Vec<Vec<u8>>), Vec<f64>> = std::collections::HashMap::new();
++    for s in &b {
++        idx.entry((s.prev.clone(), s.br.clone())).or_default().push(s.t);
++    }
++    if a.is_empty() {
++        return 0.0;
++    }
++    let hits = a
++        .iter()
++        .filter(|s| {
++            idx.get(&(s.prev.clone(), s.br.clone())).is_some_and(|ts| ts.iter().any(|t| (t - s.t).abs() <= WINDOW))
++        })
++        .count();
++    hits as f64 / a.len() as f64
++}
++
++/// Single-linkage clusters of gateways whose templates are identical ≥ 80% of the time.
++pub fn clusters(gws: &std::collections::BTreeMap<String, Vec<Snapshot>>) -> Vec<Vec<String>> {
++    let names: Vec<String> = gws.keys().cloned().collect();
++    let mut parent: std::collections::HashMap<String, String> = names.iter().map(|n| (n.clone(), n.clone())).collect();
++    fn root(parent: &mut std::collections::HashMap<String, String>, mut x: String) -> String {
++        while parent[&x] != x {
++            x = parent[&x].clone();
++        }
++        x
++    }
++    for (i, a) in names.iter().enumerate() {
++        for b in names.iter().skip(i + 1) {
++            let ab = pair_identical(&gws[a], &gws[b]);
++            let ba = pair_identical(&gws[b], &gws[a]);
++            if ab.min(ba) >= CLUSTER_THRESHOLD {
++                let ra = root(&mut parent, a.clone());
++                let rb = root(&mut parent, b.clone());
++                parent.insert(ra, rb);
++            }
++        }
++    }
++    let mut out: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
++    for n in &names {
++        out.entry(root(&mut parent, n.clone())).or_default().push(n.clone());
++    }
++    for v in out.values_mut() {
++        v.sort();
++    }
++    let mut groups: Vec<Vec<String>> = out.into_values().collect();
++    groups.sort_by(|a, b| b.len().cmp(&a.len()).then_with(|| a.cmp(b)));
++    groups
++}
++
++pub fn report(
++    gws: &std::collections::BTreeMap<String, Vec<Snapshot>>,
++    pool: &[Snapshot],
++) -> (std::collections::BTreeMap<String, Features>, Vec<Vec<String>>) {
++    let rows = gws.iter().map(|(g, s)| (g.clone(), features(s, pool))).collect();
++    let mut all = gws.clone();
++    all.insert("POOL".into(), pool.to_vec());
++    let cl = clusters(&all);
++    (rows, cl)
++}
++
++/// Independence as parts-per-million for the TIDES bonus weight.
++pub fn independence_ppm(f: &Features) -> u32 {
++    (f.independence.clamp(0.0, 1.0) * 1_000_000.0).round() as u32
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    fn hex32(i: u64) -> String {
++        format!("{i:064x}")
++    }
++
++    /// Pool templates, an honest node with its own relay view, a proxy and a mimic.
++    fn synth(n: usize, seed: u64) -> (Vec<Snapshot>, Vec<Snapshot>, Vec<Snapshot>, Vec<Snapshot>) {
++        let mut s = seed;
++        let mut next = |m: u64| {
++            s = s.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1_442_695_040_888_963_407);
++            (s >> 33) % m
++        };
++        let mut pool = Vec::new();
++        let mut honest = Vec::new();
++        let mut proxy = Vec::new();
++        let mut mimic = Vec::new();
++        let mut mp_pool: Vec<String> = Vec::new();
++        let mut mp_h: Vec<String> = Vec::new();
++        let mut prev = "aa".to_string();
++        for i in 0..n {
++            let t = i as f64 * 0.5;
++            if i % 30 == 0 {
++                prev = hex32(i as u64);
++                mp_pool.clear();
++                mp_h.clear();
++            }
++            let extra = next(3) as usize;
++            for _ in 0..extra {
++                let tx = hex32(next(u64::MAX));
++                if next(2) == 0 {
++                    mp_pool.push(tx);
++                } else {
++                    mp_h.push(tx);
++                }
++            }
++            for tx in mp_pool.iter().rev().take(3).cloned().collect::<Vec<_>>() {
++                if !mp_h.contains(&tx) && next(10) < 4 {
++                    mp_h.push(tx);
++                }
++            }
++            for tx in mp_h.iter().rev().take(3).cloned().collect::<Vec<_>>() {
++                if !mp_pool.contains(&tx) && next(10) < 4 {
++                    mp_pool.push(tx);
++                }
++            }
++            pool.push(Snapshot::new(t, prev.clone(), mp_pool.clone()));
++            honest.push(Snapshot::new(t + 0.01, prev.clone(), mp_h.clone()));
++            proxy.push(Snapshot::new(t + 0.05, prev.clone(), mp_pool.clone()));
++            let mut m = mp_pool.clone();
++            // Fisher–Yates
++            for i in (1..m.len()).rev() {
++                let j = next((i + 1) as u64) as usize;
++                m.swap(i, j);
++            }
++            mimic.push(Snapshot::new(t + 0.8, prev.clone(), m));
++        }
++        (pool, honest, proxy, mimic)
++    }
++
++    #[test]
++    fn separates_honest_from_copies() {
++        let (pool, honest, proxy, mimic) = synth(200, 1);
++        let fh = features(&honest, &pool);
++        let fp = features(&proxy, &pool);
++        let fm = features(&mimic, &pool);
++        assert!(fp.independence < 0.05, "proxy {}", fp.independence);
++        assert!(fm.independence < 0.2, "mimic {}", fm.independence);
++        assert!(fh.independence > 0.8, "honest {}", fh.independence);
++        assert_eq!(fp.lead, 0.0);
++    }
++
++    #[test]
++    fn unknown_earns_nothing() {
++        let (pool, honest, _, _) = synth(10, 1);
++        let f = features(&honest, &pool);
++        assert!(f.insufficient);
++        assert_eq!(f.independence, 0.0);
++    }
++
++    #[test]
++    fn clusters_group_the_proxy_with_the_pool() {
++        let (pool, honest, proxy, _) = synth(200, 1);
++        let mut gws = std::collections::BTreeMap::new();
++        gws.insert("POOL".into(), pool);
++        gws.insert("H".into(), honest);
++        gws.insert("X".into(), proxy);
++        let cl = clusters(&gws);
++        assert!(cl.iter().any(|c| c == &vec!["POOL".to_string(), "X".to_string()]), "{cl:?}");
++    }
++
++    #[test]
++    fn branch_similarity() {
++        let a = branches(&[hex32(0x11), hex32(0x22), hex32(0x33)]);
++        assert_eq!(branch_sim(&a, &a), 1.0);
++        let b = branches(&[hex32(0x11), hex32(0x22), hex32(0x44)]);
++        let s = branch_sim(&a, &b);
++        assert!(s < 1.0 && s > 0.0, "{s}");
++    }
++
++    #[test]
++    fn a_straight_copy_is_identical_and_scores_zero() {
++        let pool = vec![
++            Snapshot::new(1.0, "p", vec![hex32(1), hex32(2), hex32(3)]),
++            Snapshot::new(2.0, "p", vec![hex32(1), hex32(2), hex32(3), hex32(4)]),
++        ];
++        // 30 copies so compared ≥ 20
++        let mut gw = Vec::new();
++        for i in 0..30 {
++            gw.push(Snapshot::new(1.0 + i as f64 * 0.05, "p", vec![hex32(1), hex32(2), hex32(3)]));
++        }
++        let f = features(&gw, &pool);
++        assert!(f.identical > 0.9, "{}", f.identical);
++        assert_eq!(f.independence, 0.0);
++    }
++}
+diff --git a/prime/tides/src/lib.rs b/prime/tides/src/lib.rs
+index 072eb9f..88e4a6a 100644
+--- a/prime/tides/src/lib.rs
++++ b/prime/tides/src/lib.rs
+@@ -28,9 +28,13 @@ use std::path::{Path, PathBuf};
+ 
+ use serde::{Deserialize, Serialize};
+ 
++pub mod entropy;
++pub mod score;
+ pub mod sovereignty;
+ pub mod split;
+ pub use split::{Payee, Split, SplitParams, Unpaid, UnpaidReason};
++pub use score::{hhi_effective, nakamoto, sovereignty_score, PoolScore};
++pub use entropy::{features, independence_ppm, report, Snapshot};
+ 
+ /// Work that arrived before dual-fee tagging. Split as DATUM (the lower fee).
+ pub const SOURCE_UNKNOWN: u8 = 0;
+diff --git a/prime/tides/src/score.rs b/prime/tides/src/score.rs
+new file mode 100644
+index 0000000..85049ed
+--- /dev/null
++++ b/prime/tides/src/score.rs
+@@ -0,0 +1,105 @@
++//! Public sovereignty score: `100 × (verified + ½·(claimed − verified)) ÷ blocks`.
++//!
++//! *claimed* is gateway-built blocks (the DATUM secondary tag is unauthenticated, so a claim
++//! counts half). *verified* is blocks with a valid LZT1 attestation by a non-house key. A
++//! pool with no attestations maxes out at 50; only attestations reach 100.
++
++#[derive(Clone, Debug, Default, PartialEq)]
++pub struct PoolScore {
++    pub blocks: u64,
++    pub claimed: u64,
++    pub verified: u64,
++    pub score: f64,
++    pub builders: usize,
++    pub effective_builders: f64,
++    pub top_builder_share: f64,
++    pub template_nakamoto: usize,
++}
++
++/// `100 × (verified + ½·(claimed − verified)) ÷ blocks`.
++pub fn sovereignty_score(blocks: u64, claimed: u64, verified: u64) -> f64 {
++    if blocks == 0 {
++        return 0.0;
++    }
++    let claimed = claimed.min(blocks);
++    let verified = verified.min(claimed);
++    100.0 * (verified as f64 + 0.5 * (claimed - verified) as f64) / blocks as f64
++}
++
++/// Fewest builders holding more than half the blocks (counts are already sorted desc).
++pub fn nakamoto(shares: &[u64]) -> usize {
++    let total: u64 = shares.iter().sum();
++    if total == 0 {
++        return 0;
++    }
++    let mut acc = 0u64;
++    for (i, &s) in shares.iter().enumerate() {
++        acc += s;
++        if acc * 2 > total {
++            return i + 1;
++        }
++    }
++    shares.len()
++}
++
++/// Effective builders: 1 / HHI over the share of blocks.
++pub fn hhi_effective(counts: &[u64]) -> f64 {
++    let total: u64 = counts.iter().sum();
++    if total == 0 {
++        return 0.0;
++    }
++    let hhi: f64 = counts.iter().map(|&c| {
++        let p = c as f64 / total as f64;
++        p * p
++    }).sum();
++    if hhi == 0.0 {
++        0.0
++    } else {
++        1.0 / hhi
++    }
++}
++
++pub fn summarize(blocks: u64, claimed: u64, verified: u64, builder_counts: &[u64]) -> PoolScore {
++    let mut counts = builder_counts.to_vec();
++    counts.sort_by(|a, b| b.cmp(a));
++    let top = counts.first().copied().unwrap_or(0);
++    PoolScore {
++        blocks,
++        claimed,
++        verified,
++        score: sovereignty_score(blocks, claimed, verified),
++        builders: counts.iter().filter(|&&c| c > 0).count(),
++        effective_builders: hhi_effective(&counts),
++        top_builder_share: if blocks == 0 { 0.0 } else { 100.0 * top as f64 / blocks as f64 },
++        template_nakamoto: nakamoto(&counts),
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn score_weights() {
++        assert_eq!(sovereignty_score(100, 0, 0), 0.0);
++        assert_eq!(sovereignty_score(100, 100, 0), 50.0);
++        assert_eq!(sovereignty_score(100, 100, 100), 100.0);
++        assert_eq!(sovereignty_score(100, 60, 20), 40.0);
++        assert_eq!(sovereignty_score(0, 0, 0), 0.0);
++    }
++
++    #[test]
++    fn concentration() {
++        assert_eq!(nakamoto(&[50, 30, 20]), 2);
++        assert_eq!(nakamoto(&[51, 49]), 1);
++        assert!((hhi_effective(&[1, 1, 1, 1]) - 4.0).abs() < 1e-9);
++        assert!((hhi_effective(&[10]) - 1.0).abs() < 1e-9);
++    }
++
++    #[test]
++    fn a_pool_without_attestations_caps_at_fifty() {
++        let s = summarize(333, 238, 0, &[95, 40, 30, 20, 15, 10, 8, 7, 6, 5, 97]);
++        assert!((s.score - 35.7).abs() < 0.1, "{}", s.score);
++        assert!(s.template_nakamoto >= 2);
++    }
++}
+diff --git a/prime/tides/src/sovereignty.rs b/prime/tides/src/sovereignty.rs
+index d578487..e11d164 100644
+--- a/prime/tides/src/sovereignty.rs
++++ b/prime/tides/src/sovereignty.rs
+@@ -1,5 +1,5 @@
+ //! Sovereignty bonus: extra TIDES credit for work on templates a gateway provably signed.
+-//! R&D sketch for P-003 A2 ([[Tasks/XBT-051]]); nothing calls it yet.
++//! P-003 A2 ([[Tasks/XBT-051]], [[Tasks/XBT-064]]); primed applies it when `sovereignty-bonus` is on.
+ //!
+ //! **Eligible ("authored") work** is DATUM work on a job whose coinbase carried a valid
+ //! `datum_wire::authorship` claim made with the session's own identity key, from a gateway
+diff --git a/prime/wire/examples/lzt1_fixture.rs b/prime/wire/examples/lzt1_fixture.rs
+index c2e753b..a2fce38 100644
+--- a/prime/wire/examples/lzt1_fixture.rs
++++ b/prime/wire/examples/lzt1_fixture.rs
+@@ -20,14 +20,16 @@ fn main() {
+         TxOut { value: 0, script: [&[0x6a, 0x24, 0xaa, 0x21, 0xa9, 0xed][..], &[0x76; 32]].concat() },
+     ];
+     let node = NodeView { n_tx: 12, mempool_digest: [0x0d; 16], node_tag: [0x7a; 16], t_gbt: 1_788_408_500_000 };
+-    let (a, sig, c) = authorship::attest(&id, height, &prev, &pow::merkle_branches_for_coinbase(&txids), &outs, node);
++    let branches = pow::merkle_branches_for_coinbase(&txids);
++    let (a, sig, c) = authorship::attest(&id, height, &prev, &branches, &outs, node);
+     outs.push(c);
+     let (cb, _, _) = coinbase::build(height, b"Lazarus\x0fTofu Toes", &outs, 0);
+     let hx = |h: &[u8]| hex::encode(h);
+     println!(
+-        "{{\"height\":{height},\"prev_hash\":\"{}\",\"txids\":[{}],\"coinbase\":\"{}\",\"pk\":\"{}\",\"attestation\":\"{}\",\"sig\":\"{}\"}}",
++        "{{\"height\":{height},\"prev_hash\":\"{}\",\"txids\":[{}],\"branches\":[{}],\"coinbase\":\"{}\",\"pk\":\"{}\",\"attestation\":\"{}\",\"sig\":\"{}\"}}",
+         hx(&prev),
+         txids.iter().map(|t| format!("\"{}\"", hx(t))).collect::<Vec<_>>().join(","),
++        branches.iter().map(|t| format!("\"{}\"", hx(t))).collect::<Vec<_>>().join(","),
+         hx(&cb),
+         hx(&id.sign_pk()),
+         hx(&a.encode()),
+diff --git a/prime/wire/src/authorship.rs b/prime/wire/src/authorship.rs
+index 272cace..8df2a40 100644
+--- a/prime/wire/src/authorship.rs
++++ b/prime/wire/src/authorship.rs
+@@ -1,5 +1,5 @@
+-//! Sovereign TIDES template attestations ("LZT1"). R&D sketch for P-003 A2 ([[Tasks/XBT-051]]),
+-//! following the research note's C.2 #2; nothing in Prime calls it yet.
++//! Sovereign TIDES template attestations ("LZT1"). P-003 A2 ([[Tasks/XBT-051]], [[Tasks/XBT-064]]);
++//! primed verifies these per job when a coinbase carries the commitment.
+ //!
+ //! Per job (per coinbase variant), the gateway signs an attestation `A` with its key `G` and
+ //! puts a 70-byte commitment in that coinbase:
+-- 
+2.43.0
+

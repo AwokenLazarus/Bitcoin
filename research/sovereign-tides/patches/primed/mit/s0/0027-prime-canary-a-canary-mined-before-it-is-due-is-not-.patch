@@ -1,0 +1,447 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: michael moore <mrmoore27@pm.me>
+Date: Fri, 25 Sep 2026 15:53:59 +0000
+Subject: [PATCH 27/27] prime, canary: a canary mined before it is due is not
+ due; nodes over loopback
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+SOV-012, two gaps SOV-010 found on rnd/sov-s0 before the S3 canary shadow.
+
+1. Mined before due means not due. A canary whose C′ (or C, D, Q) a block
+   confirmed before its first due check (12 s) counted as a miss for an
+   honest gateway: ~2% of canaries on 600 s blocks, more after the pool's
+   own fast blocks. The sidecar now finds the block that settled each
+   canary (gettxout confirmations/bestblock, getblockhash/getblockheader)
+   and posts POST /sovereignty/canary/resolved {txid, confirmed, height,
+   time}; unreported resolutions are retried for a day. tides::Canary gains
+   `mined`, and tally_checks stops a canary's judging span at that block,
+   so checks of jobs first seen after it do not judge it.
+
+2. Node addresses for the sidecar. GET /sovereignty/nodes on the stats
+   listener, loopback peers with the sovereignty token only, returns
+   Engine::active_nodes: exactly what sovereignty-nodes.json holds (what
+   node_of answers). The sidecar reads it with nodes_source = "prime"
+   (default), falling back to nodes_file for the demos. The file stays
+   0600 and the unit no longer needs read access to it.
+
+Tests: tides (mined before/after the first due check, shared too; an honest
+gateway with blocks at +5 s is no longer flagged, a proxy with mempool
+canaries still is), primed unit (note_canary_mined), e2e (the resolved
+route; /sovereignty/nodes 403 without or with a wrong token, superseded and
+revoked keys absent, equal to the file), sidecar (nodes from primed with
+file fallback; resolution reported with its block, retried). cargo test
+280 passed / 0 failed; sidecar 18 OK.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ prime/README.md                       | 21 ++++++-
+ prime/primed/src/sovereignty.rs       | 45 ++++++++++++-
+ prime/primed/src/stats.rs             | 36 ++++++++++-
+ prime/primed/tests/enrol_e2e.rs       | 38 +++++++++++
+ prime/primed/tests/sovereignty_e2e.rs | 12 ++++
+ prime/tides/src/entropy.rs            | 91 ++++++++++++++++++++++++++-
+ prime/tides/src/lib.rs                |  2 +-
+ 7 files changed, 235 insertions(+), 10 deletions(-)
+
+diff --git a/prime/README.md b/prime/README.md
+index 94a8105..dcc3a06 100644
+--- a/prime/README.md
++++ b/prime/README.md
+@@ -378,7 +378,7 @@ gateway's five-second deadline.
+ | `stats.json`, `ledger.json` | mirrors of the HTTP endpoints, rewritten atomically |
+ | `sovereignty.token` | local token for `POST /sovereignty/*`, 0600, made at first start with `sovereignty-mode` on |
+ | `sovereignty-keys.json` | registered gateway keys `G`: registration v1/v2, status (active, superseded, revoked, refused), payout and its binding height, house; never a node address |
+-| `sovereignty-nodes.json` | registered gateways' node addresses (canary delivery), 0600 from creation; never in stats.json, `/sovereignty.json` or the site |
++| `sovereignty-nodes.json` | registered gateways' node addresses (canary delivery), 0600 from creation; never in stats.json, `/sovereignty.json` or the site; the sidecar reads it through `GET /sovereignty/nodes` (loopback + token) |
+ | `sovereignty-blocks.jsonl` | the score's blocks: one line per block candidate, last 2,016 kept |
+ 
+ ## Stats
+@@ -402,8 +402,9 @@ detector and the score):
+ | `observe` | Job snapshots, attestations and blocks are recorded. The detector runs in the background every `sovereignty-recompute-secs` (default 300) on a copy of its store, never under the ledger lock; stats.json and `GET /sovereignty.json` serve the last pass (`compute_ms`, `computed_at`), with `published: false`. |
+ | `publish` | As `observe`, with `published: true` for the pool site. |
+ 
+-`POST /sovereignty/{enrol,attest,canary}` need the mode on and the token from
+-`data-dir/sovereignty.token` in an `X-Sovereignty-Token` header; the other POSTs (the old
++`POST /sovereignty/{enrol,attest,canary,canary/resolved}` need the mode on and the token from
++`data-dir/sovereignty.token` in an `X-Sovereignty-Token` header. So does
++`GET /sovereignty/nodes`, which also answers only loopback peers (403 otherwise). The other POSTs (the old
+ `register`, snapshot, check, credit, observe, apply-bonus) also need `sovereignty-demo = true`
+ (local rnd only).
+ 
+@@ -421,6 +422,20 @@ features but are no canary evidence. One gateway gets at most one canary check p
+ `sovereignty-canary-check-gap-secs` (default 300: a full block is megabytes of upload for it);
+ checks due together are made once. 256 checks are kept per key.
+ 
++**Canaries mined before they are due (SOV-012).** When one of a canary's txs confirms (C or C′,
++D, Q), the sidecar posts `POST /sovereignty/canary/resolved` `{"txid": <the canary's txid>,
++"confirmed": <the tx that confirmed>, "height", "time": <block header time>}`. Checks of jobs
++Prime first saw after that block no longer judge the canary: once C′ is mined an honest node's
++template cannot hold C. A canary a block settles before its first due check is therefore not due
++(neither hit nor miss) instead of an honest miss; on 600 s blocks that was ≈ 2% of canaries. A
++proxy's canaries that stay in the mempool are judged as before. The reply says `known: false` for
++a txid primed no longer holds (evicted, or placed before a restart).
++
++**Node addresses for the sidecar (SOV-012).** `GET /sovereignty/nodes` returns what
++`sovereignty-nodes.json` holds, `{G: {"node", "at_height", "updated"}}` for the keys
++`Engine::node_of` answers (active, with a node; superseded, revoked and refused keys are absent).
++The sidecar reads it (`nodes_source = "prime"`), so the file stays 0600 to primed's user.
++
+ **Registration** (`POST /sovereignty/enrol`, SOV-P-002 §4; public through `pool/server.py`'s
+ rate-limited `POST /api/sovereignty/enrol`). `lazarus-gateway --config … enrol [--version v2
+ --payout ADDR] [--node host:port]` prints the message from the gateway's persisted identity key:
+diff --git a/prime/primed/src/sovereignty.rs b/prime/primed/src/sovereignty.rs
+index 1a5f0d3..fa3f56f 100644
+--- a/prime/primed/src/sovereignty.rs
++++ b/prime/primed/src/sovereignty.rs
+@@ -872,9 +872,7 @@ impl Engine {
+             return;
+         }
+         let _ = std::fs::create_dir_all(&self.dir);
+-        let sorted: BTreeMap<&String, &NodeEntry> =
+-            self.nodes.iter().filter(|(g, _)| self.node_of(g).is_some()).collect();
+-        let Ok(bytes) = serde_json::to_vec_pretty(&sorted) else { return };
++        let Ok(bytes) = serde_json::to_vec_pretty(&self.active_nodes()) else { return };
+         let tmp = self.dir.join(format!("{NODES_FILE}.tmp"));
+         let _ = std::fs::remove_file(&tmp);
+         let mut opts = std::fs::OpenOptions::new();
+@@ -893,6 +891,12 @@ impl Engine {
+         }
+     }
+ 
++    /// Every key [`Engine::node_of`] answers for, with its node entry: the contents of
++    /// `sovereignty-nodes.json` and of `GET /sovereignty/nodes` (SOV-012).
++    pub fn active_nodes(&self) -> BTreeMap<&String, &NodeEntry> {
++        self.nodes.iter().filter(|(g, _)| self.node_of(g).is_some()).collect()
++    }
++
+     /// The node address a registered, active key named (for canary delivery).
+     pub fn node_of(&self, g_hex: &str) -> Option<&str> {
+         let g = g_hex.to_ascii_lowercase();
+@@ -1262,6 +1266,20 @@ impl Engine {
+         self.dirty = true;
+     }
+ 
++    /// SOV-012: the canary `txid` (C of an own canary, D, or Q) was settled by a block at
++    /// `height` with header time `t`, whichever of its txs confirmed. Checks of jobs Prime first
++    /// saw after that no longer judge it (see `entropy::tally_checks`). `false` if no canary on
++    /// file has that txid (evicted, or placed before a restart).
++    pub fn note_canary_mined(&mut self, txid: &str, height: u64, t: f64) -> bool {
++        let txid = txid.to_ascii_lowercase();
++        let Some(c) = self.canaries.values_mut().flat_map(|l| l.list.iter_mut()).find(|c| c.txid == txid) else {
++            return false;
++        };
++        *c = c.clone().mined_at(height, t);
++        self.dirty = true;
++        true
++    }
++
+     /// A live session's job: prev + merkle branches, under [`Engine::track_name`]. The branch
+     /// list stands in for the txid set; `identical` works from branches alone.
+     pub fn note_job(
+@@ -2322,6 +2340,27 @@ mod tests {
+         assert!(s.take_check(&late, now_f64() + 0.1));
+     }
+ 
++    /// SOV-012: a canary a block settled before its first due check is not due, for its own
++    /// gateway (own) or any (shared); an unknown txid changes nothing.
++    #[test]
++    fn a_canary_mined_before_due_is_not_due() {
++        let mut e = engine();
++        let g = "ab".repeat(32);
++        e.register(&g, "", false, None).unwrap();
++        let (c, d) = (format!("{:064x}", 0xc1), format!("{:064x}", 0xd1));
++        e.note_canary(&g, Canary::new(100.0, c.clone()));
++        e.note_canary("", Canary::shared(100.0, d.clone()));
++        // the job checked at +45 is on the block that mined C′ and D: neither is in it
++        e.note_check(&g, false, None, 145.0, &[format!("{:064x}", 5)]);
++        let f = e.detector_rows()[&g].clone();
++        assert_eq!((f.canaries_due, f.canary_hits, f.shared_due), (1, 0, 1), "{f:?}");
++        assert!(!e.note_canary_mined(&"ee".repeat(32), 7, 105.0));
++        assert!(e.note_canary_mined(&c.to_ascii_uppercase(), 7, 105.0));
++        assert!(e.note_canary_mined(&d, 7, 105.0));
++        let f = e.detector_rows()[&g].clone();
++        assert_eq!((f.canaries_due, f.canary_hits, f.shared_due), (0, 0, 0), "{f:?}");
++    }
++
+     /// W8: checks are the canary evidence, bounded per key, and kept under the gateway's track
+     /// name (registered G); the house stratum is never checked.
+     #[test]
+diff --git a/prime/primed/src/stats.rs b/prime/primed/src/stats.rs
+index 9e7a0ce..8c44d5e 100644
+--- a/prime/primed/src/stats.rs
++++ b/prime/primed/src/stats.rs
+@@ -343,7 +343,7 @@ pub async fn serve(shared: Arc<Shared>) {
+     let cache: Arc<tokio::sync::Mutex<[Built; 2]>> = Default::default();
+     let slots = Arc::new(tokio::sync::Semaphore::new(STATS_MAX_CONNECTIONS));
+     loop {
+-        let Ok((mut sock, _)) = listener.accept().await else { continue };
++        let Ok((mut sock, peer)) = listener.accept().await else { continue };
+         let Ok(slot) = slots.clone().try_acquire_owned() else { continue };
+         let shared = shared.clone();
+         let cache = cache.clone();
+@@ -425,6 +425,18 @@ pub async fn serve(shared: Arc<Shared>) {
+                         json!(shared.sovereignty.checks_refused.load(std::sync::atomic::Ordering::Relaxed));
+                     ("200 OK", "application/json", Arc::new(doc.to_string()))
+                 }
++                // SOV-012: the canary sidecar's view of `sovereignty-nodes.json`, which stays 0600
++                // to primed's user. Loopback peers with the token only: node addresses are never
++                // served anywhere else.
++                ("GET", "/sovereignty/nodes") if shared.sovereignty.on() => {
++                    let token = header(&req, crate::sovereignty::TOKEN_HEADER);
++                    if !peer.ip().is_loopback() || !shared.sovereignty.token_ok(token) {
++                        ("403 Forbidden", "application/json", Arc::new(json!({"error": "sovereignty token"}).to_string()))
++                    } else {
++                        let body = serde_json::to_string(&shared.sovereignty.engine().active_nodes()).unwrap_or_default();
++                        ("200 OK", "application/json", Arc::new(body))
++                    }
++                }
+                 ("POST", p) if p.starts_with("/sovereignty/") && shared.sovereignty.on() => {
+                     let token = header(&req, crate::sovereignty::TOKEN_HEADER);
+                     if !shared.sovereignty.token_ok(token) {
+@@ -567,6 +579,28 @@ fn ingest(shared: &Shared, path: &str, body: &str) -> Result<Value, String> {
+             }
+             Ok(json!({"ok": true}))
+         }
++        // SOV-012: the sidecar saw one of a canary's txs confirm (C or C′ of an own canary, D,
++        // or Q). A canary a block settles before its first due check is then not due.
++        "/sovereignty/canary/resolved" => {
++            let hex64 = |k: &str| -> Result<String, String> {
++                let x = v[k].as_str().ok_or(k)?;
++                if x.len() != 64 || !x.bytes().all(|b| b.is_ascii_hexdigit()) {
++                    return Err(format!("{k}: 64 hex"));
++                }
++                Ok(x.to_ascii_lowercase())
++            };
++            let txid = hex64("txid")?;
++            let confirmed = hex64("confirmed")?;
++            let height = v["height"].as_u64().ok_or("height")?;
++            let t = v["time"].as_f64().ok_or("time")?;
++            let known = shared.sovereignty.engine().note_canary_mined(&txid, height, t);
++            log::info!(
++                "sovereignty: canary {} settled by {} at height {height} (known: {known})",
++                &txid[..16],
++                &confirmed[..16]
++            );
++            Ok(json!({"ok": true, "known": known}))
++        }
+         // A template check's transactions, for harnesses with no DATUM session.
+         "/sovereignty/check" => {
+             if !demo {
+diff --git a/prime/primed/tests/enrol_e2e.rs b/prime/primed/tests/enrol_e2e.rs
+index 74a9180..5b672af 100644
+--- a/prime/primed/tests/enrol_e2e.rs
++++ b/prime/primed/tests/enrol_e2e.rs
+@@ -178,6 +178,44 @@ fn registration_over_the_stats_listener() {
+     let r = post(p.stats, "/sovereignty/register", &json!({"g": hex::encode(g1.sign_pk())}), &token);
+     assert!(r["error"].as_str().unwrap().contains("/sovereignty/enrol"), "{r}");
+ 
++    // SOV-012: GET /sovereignty/nodes serves the canary sidecar exactly the nodes file
++    let nodes_get = |token: Option<&str>| {
++        let auth = token.map(|t| format!("X-Sovereignty-Token: {t}\r\n")).unwrap_or_default();
++        get_raw(p.stats, &format!("GET /sovereignty/nodes HTTP/1.0\r\nHost: 127.0.0.1\r\n{auth}\r\n"))
++    };
++    let served = |token: &str| -> Value {
++        let r = nodes_get(Some(token));
++        assert!(r.starts_with("HTTP/1.1 200"), "{r}");
++        serde_json::from_str(r.split("\r\n\r\n").nth(1).unwrap()).unwrap()
++    };
++    let file = || -> Value { serde_json::from_str(&std::fs::read_to_string(p.dir.join("sovereignty-nodes.json")).unwrap()).unwrap() };
++    for bad in [None, Some("wrong"), Some("")] {
++        let r = nodes_get(bad);
++        assert!(r.starts_with("HTTP/1.1 403"), "{bad:?}: {r}");
++        assert!(!r.contains("198.51.100") && !r.contains("203.0.113"), "{r}");
++    }
++    // G1 was superseded by G2 (node none): neither is served
++    assert_eq!(served(&token), json!({}));
++    assert_eq!(served(&token), file());
++    // G3 enrols with a node and is served, then its payout revokes it and it is gone
++    let g3 = Identity::from_secret_bytes(&[0x65; 64]);
++    let g3_hex = hex::encode(g3.sign_pk());
++    let sk3 = [0x66u8; 32];
++    let payout3 = p2tr_address(&sk3);
++    let node3 = "203.0.113.7:8333";
++    let m = msg("v2", &g3, node3, TIP - 1, "XBT", Some(&payout3));
++    let r = enrol(json!({"message": m, "g_sig": g_sig(&g3, &m), "payout_sig": signer::simple_p2tr(&sk3, m.as_bytes(), 0x00)}));
++    assert_eq!(r["status"], "active", "{r}");
++    let v = served(&token);
++    assert_eq!(v.as_object().unwrap().len(), 1, "{v}");
++    assert_eq!(v[&g3_hex]["node"], node3, "{v}");
++    assert_eq!(v, file());
++    let rv = format!("LZT1 revoke v2\npool: lazarus-xbt\nchain: XBT\nG: {g3_hex}\npayout: {payout3}\nat: {TIP} {}", block_hash(TIP));
++    let r = enrol(json!({"message": rv, "payout_sig": signer::simple_p2tr(&sk3, rv.as_bytes(), 0x00)}));
++    assert_eq!(r["ok"].as_bool(), Some(true), "{r}");
++    assert_eq!(served(&token), json!({}));
++    assert_eq!(served(&token), file());
++
+     // the node address is in sovereignty-nodes.json (0600) and nowhere served
+     std::thread::sleep(std::time::Duration::from_millis(5_600)); // a housekeeping pass writes stats.json
+     let sov = get(p.stats, "/sovereignty.json");
+diff --git a/prime/primed/tests/sovereignty_e2e.rs b/prime/primed/tests/sovereignty_e2e.rs
+index c6386c7..c4897b1 100644
+--- a/prime/primed/tests/sovereignty_e2e.rs
++++ b/prime/primed/tests/sovereignty_e2e.rs
+@@ -260,6 +260,18 @@ fn mode_observe_serves_an_unpublished_report() {
+         let r = post(p.stats, "/sovereignty/canary", &bad);
+         assert!(r.get("error").is_some(), "{bad} → {r}");
+     }
++    // SOV-012: the sidecar reports which tx settled a canary, and in which block (token only)
++    let settled = json!({"txid": hex32(7), "confirmed": hex32(70), "height": 120, "time": 1_700_000_000.0});
++    let r = post(p.stats, "/sovereignty/canary/resolved", &settled);
++    assert_eq!((r["ok"].as_bool(), r["known"].as_bool()), (Some(true), Some(true)), "{r}");
++    let r = post(p.stats, "/sovereignty/canary/resolved", &json!({"txid": hex32(99), "confirmed": hex32(70), "height": 1, "time": 1.0}));
++    assert_eq!(r["known"], false, "{r}");
++    for bad in [json!({"txid": hex32(7), "confirmed": "zz", "height": 1, "time": 1.0}), json!({"txid": hex32(7), "confirmed": hex32(70), "time": 1.0})] {
++        let r = post(p.stats, "/sovereignty/canary/resolved", &bad);
++        assert!(r.get("error").is_some(), "{bad} → {r}");
++    }
++    let r = post_with(p.stats, "/sovereignty/canary/resolved", &settled, Some("wrong"));
++    assert_eq!(r["error"], "sovereignty token", "{r}");
+     let (status, body) = request(p.stats, "GET", "/sovereignty.json", "", None);
+     assert!(status.contains("200"), "{status}");
+     let doc: Value = serde_json::from_str(&body).unwrap();
+diff --git a/prime/tides/src/entropy.rs b/prime/tides/src/entropy.rs
+index 6562e4f..3e121ed 100644
+--- a/prime/tides/src/entropy.rs
++++ b/prime/tides/src/entropy.rs
+@@ -121,11 +121,28 @@ pub struct Canary {
+     pub t: f64,
+     pub txid: String,
+     pub kind: CanaryKind,
++    /// SOV-012: when the block that settled it (C, C′, D or Q confirmed) was mined, as the
++    /// sidecar reported it. Template checks of jobs first seen after this say nothing about
++    /// the gateway, so they do not judge the canary.
++    pub mined: Option<Mined>,
++}
++
++/// The block that confirmed one tx of a canary (SOV-012).
++#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
++pub struct Mined {
++    pub height: u64,
++    /// Block header time, unix seconds.
++    pub t: f64,
+ }
+ 
+ impl Canary {
+     pub fn new(t: f64, txid: impl Into<String>) -> Self {
+-        Canary { t, txid: txid.into(), kind: CanaryKind::Own }
++        Canary { t, txid: txid.into(), kind: CanaryKind::Own, mined: None }
++    }
++
++    /// The same canary, settled by a block at `height` with header time `t`.
++    pub fn mined_at(self, height: u64, t: f64) -> Self {
++        Canary { mined: Some(Mined { height, t }), ..self }
+     }
+ 
+     pub fn shared(t: f64, txid: impl Into<String>) -> Self {
+@@ -733,6 +750,10 @@ fn tally_snapshots(gw: &[&Prepared], pool: &PoolView, canaries: &[&Canary]) -> T
+ /// seen between `CANARY_DUE` and `CHECK_WINDOW` s after its delivery, and a hit if one of those
+ /// jobs holds it. A canary with no check in that span is not judged at all (neither hit nor
+ /// miss), so a gateway is never marked down for a check Prime did not make.
++///
++/// SOV-012: the span also ends when a block settled the canary. Once C′ (or C) is mined, an
++/// honest node's next template cannot hold C, so a canary mined before its first due check is
++/// not due. On 600 s blocks that is ≈ 2% of canaries, which were honest misses before.
+ fn tally_checks(checks: &[&Check], pool: &PoolView, canaries: &[&Canary]) -> Tally {
+     let mut checks: Vec<&Check> = checks.to_vec();
+     checks.sort_by(|a, b| a.t.partial_cmp(&b.t).unwrap_or(std::cmp::Ordering::Equal));
+@@ -745,8 +766,9 @@ fn tally_checks(checks: &[&Check], pool: &PoolView, canaries: &[&Canary]) -> Tal
+             leaks += 1;
+         }
+         let (from, to) = (c.t + CANARY_DUE, c.t + CHECK_WINDOW);
++        let mined = c.mined.map_or(f64::INFINITY, |m| m.t);
+         let lo = checks.partition_point(|k| k.t < from);
+-        let judging = checks[lo..].iter().take_while(|k| k.t <= to);
++        let judging = checks[lo..].iter().take_while(|k| k.t <= to && k.t < mined);
+         let mut due = false;
+         let mut hit = false;
+         for k in judging {
+@@ -1516,6 +1538,71 @@ mod tests {
+         assert_eq!((f.canaries_due, f.canary_hits), (1, 0), "{f:?}");
+     }
+ 
++    /// SOV-012: a block that settles a canary ends its judging span. Checks of jobs first seen
++    /// after it do not judge the canary; a canary mined before its first due check is not due.
++    #[test]
++    fn a_canary_mined_before_its_first_due_check_is_not_due() {
++        let empty = PoolView::new(std::iter::empty());
++        let c = Canary::new(1_000.0, hex32(9_000_002));
++        // the gateway's node switched to the block that mined C′: its job at +45 lacks C
++        let k45 = Check::new(c.t + 45.0, &[hex32(5)]);
++        let f = features_checked(&[], &empty, &[&c], &[&k45]);
++        assert_eq!((f.canaries_due, f.canary_hits), (1, 0), "before the fix a miss: {f:?}");
++        for block_at in [5.0, CANARY_DUE, 44.0] {
++            let m = c.clone().mined_at(101, c.t + block_at);
++            let f = features_checked(&[], &empty, &[&m], &[&k45]);
++            assert_eq!((f.canaries_due, f.canary_hits), (0, 0), "block at +{block_at}: {f:?}");
++        }
++        // mined after the first due check: that check still judges it, later ones do not
++        let m = c.clone().mined_at(101, c.t + 60.0);
++        let hit = Check::new(c.t + 45.0, std::slice::from_ref(&c.txid));
++        let after = Check::new(c.t + 90.0, &[hex32(5)]);
++        let f = features_checked(&[], &empty, &[&m], &[&hit, &after]);
++        assert_eq!((f.canaries_due, f.canary_hits), (1, 1), "{f:?}");
++        let f = features_checked(&[], &empty, &[&m], &[&after]);
++        assert_eq!(f.canaries_due, 0, "only a check after the block: {f:?}");
++        // a shared canary D mined early is not due either
++        let d = Canary::shared(1_000.0, hex32(7_000_002)).mined_at(101, 1_005.0);
++        let f = features_checked(&[], &empty, &[&d], &[&k45]);
++        assert_eq!(f.shared_due, 0, "{f:?}");
++    }
++
++    /// SOV-012: an honest gateway whose canaries a block often beats to its first due check is
++    /// no longer flagged for it, and a proxy whose canaries stay in the mempool still is.
++    #[test]
++    fn a_block_at_five_seconds_does_not_penalise_the_honest_gateway() {
++        let empty = PoolView::new(std::iter::empty());
++        // every canary is checked at +45; 12 stay in the mempool, 40 are beaten by a block at +5
++        let mut canaries = Vec::new();
++        let mut honest = Vec::new();
++        let mut proxy = Vec::new();
++        for k in 0..52u64 {
++            let t = 1_000.0 + k as f64 * 300.0;
++            let c = Canary::new(t, hex32(9_100_000 + k));
++            let early = k >= 12;
++            // the honest node templates C unless C′ was mined first; the proxy never has C
++            honest.push(Check::new(t + 45.0, &if early { vec![hex32(5)] } else { vec![c.txid.clone(), hex32(5)] }));
++            proxy.push(Check::new(t + 45.0, &[hex32(5)]));
++            canaries.push((c, early));
++        }
++        let run = |fixed: bool, checks: &[Check]| {
++            let cs: Vec<Canary> = canaries
++                .iter()
++                .map(|(c, early)| if fixed && *early { c.clone().mined_at(100, c.t + 5.0) } else { c.clone() })
++                .collect();
++            features_checked(&[], &empty, &cs.iter().collect::<Vec<_>>(), &checks.iter().collect::<Vec<_>>())
++        };
++        let before = run(false, &honest);
++        assert!(before.flagged && before.canaries_due == 52 && before.canary_hits == 12, "{before:?}");
++        let after = run(true, &honest);
++        assert_eq!((after.canaries_due, after.canary_hits), (12, 12), "{after:?}");
++        assert!(!after.flagged && after.independence == 1.0, "{after:?}");
++        // the proxy: its 12 mempool canaries are still due and still missed
++        let p = run(true, &proxy);
++        assert_eq!((p.canaries_due, p.canary_hits), (12, 0), "{p:?}");
++        assert!(p.flagged && p.flag_reasons == vec!["own-canaries-missed"], "{p:?}");
++    }
++
+     #[test]
+     fn every_canary_kind_clears_the_honest_gateway() {
+         let w = world(240);
+diff --git a/prime/tides/src/lib.rs b/prime/tides/src/lib.rs
+index 7714c4f..062b119 100644
+--- a/prime/tides/src/lib.rs
++++ b/prime/tides/src/lib.rs
+@@ -37,7 +37,7 @@ pub use score::{
+     builder_weight, claim_credit, hhi_effective, nakamoto, sovereignty_score, verified_share, BlockCredit,
+     PoolScore,
+ };
+-pub use entropy::{features, features_with, independence_ppm, report, Canary, CanaryKind, Check, Snapshot};
++pub use entropy::{features, features_with, independence_ppm, report, Canary, CanaryKind, Check, Mined, Snapshot};
+ 
+ /// Work that arrived before dual-fee tagging. Split as DATUM (the lower fee).
+ pub const SOURCE_UNKNOWN: u8 = 0;
+-- 
+2.43.0
+

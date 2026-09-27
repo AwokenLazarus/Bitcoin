@@ -1,0 +1,111 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: michael moore <mrmoore27@pm.me>
+Date: Fri, 25 Sep 2026 09:20:32 +0000
+Subject: [PATCH 19/27] lazarus-canary: the canary sidecar (SOV-P-002 W9)
+
+A Python service outside primed, with a systemd unit that is shipped but
+not installed. Per round it places, for each due gateway with a registered
+node, an own canary C/C' (C deprioritised on the pool node before it
+exists, then pushed over one P2P connection to that node only; C' to the
+pool node), plus one shared canary (market fee, pre-prioritised under the
+pool's -blockmintxfee) and one decoy (zero fee, prioritised on the pool
+node only), and reports each to primed (POST /sovereignty/canary with the
+token and kind). Cadence per SOV-P-002 section 5 from primed's own report.
+
+The canary key signs only on a signer node through signrawtransactionwithkey;
+the RPC clients are allowlisted per role, so the signer can never be asked
+to broadcast and the pool node never gets a key or wallet-signing call.
+Startup and every scan refuse to run if a pool-node wallet knows the canary
+address. Settled pairs return to the UTXO list with their fee booked.
+Shared canaries are released after 600 s so the pool can mine them.
+SOCKS5 (Tor) delivery is written, framing-tested only.
+
+The in-repo A2 feeders post template checks (demo route) now that canary
+evidence comes from checks; rnd-a2-demo.sh takes KNOTS_BASE and RPC_PORT.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ prime/scripts/rnd-a2-demo.sh  |  7 ++++---
+ prime/scripts/rnd-a2-feed.py  |  4 ++++
+ prime/scripts/rnd-a2-knots.py | 11 ++++++++++-
+ 3 files changed, 18 insertions(+), 4 deletions(-)
+
+diff --git a/prime/scripts/rnd-a2-demo.sh b/prime/scripts/rnd-a2-demo.sh
+index b2bc147..5a5a273 100755
+--- a/prime/scripts/rnd-a2-demo.sh
++++ b/prime/scripts/rnd-a2-demo.sh
+@@ -34,7 +34,7 @@ stats-listen = "127.0.0.1:${STATS_PORT}"
+ data-dir = "$RUN/prime"
+ payout-address = "$PAYOUT"
+ network = "mainnet"
+-rpc = "http://127.0.0.1:30532"
++rpc = "http://127.0.0.1:${RPC_PORT:-30532}"
+ poll = 60
+ min-diff = 1
+ fee-bps = 0
+@@ -75,8 +75,9 @@ echo "== feed (honest vs fake, attestation, bonus) =="
+ python3 "$HERE/rnd-a2-feed.py"
+ 
+ if [[ -x "$KNOTS" ]]; then
+-  echo "== Knots 29.4.2: 2 honest (converged mempools) + proxy + mimic, canaries (${KNOTS_SECS:-60}s, ports 30520-30527) =="
+-  python3 "$HERE/rnd-a2-knots.py" "$KNOTS" "${KNOTS_SECS:-60}" 30520
++  KB=${KNOTS_BASE:-30520}
++  echo "== Knots 29.4.2: 2 honest (converged mempools) + proxy + mimic, canaries (${KNOTS_SECS:-60}s, ports $KB-$((KB + 7))) =="
++  python3 "$HERE/rnd-a2-knots.py" "$KNOTS" "${KNOTS_SECS:-60}" "$KB"
+ else
+   echo "== no Knots 29.4.2 at $KNOTS; synth-only detector (still asserted) =="
+ fi
+diff --git a/prime/scripts/rnd-a2-feed.py b/prime/scripts/rnd-a2-feed.py
+index 48d0345..bea42df 100755
+--- a/prime/scripts/rnd-a2-feed.py
++++ b/prime/scripts/rnd-a2-feed.py
+@@ -51,6 +51,10 @@ def push_snaps(gws):
+     for gw in ("h1", "h2", "proxy"):
+         for k in range(0, 17):
+             post("/sovereignty/canary", {"gateway": gw, "t": float(k), "txid": canary_id(gw, k)})
++            # SOV-P-002 W8: the verdict is read from template checks of the gateway's job, about
++            # 13 s after each canary. Honest jobs hold it; the proxy's job is the pool's.
++            job = list(gws["POOL"][k]["txids"]) if gw == "proxy" else [canary_id(gw, k), hex32(k + 300)]
++            post("/sovereignty/check", {"gateway": gw, "t": float(k) + 13.0, "txids": job})
+ 
+ 
+ def fixture():
+diff --git a/prime/scripts/rnd-a2-knots.py b/prime/scripts/rnd-a2-knots.py
+index f56d89f..2528d2f 100755
+--- a/prime/scripts/rnd-a2-knots.py
++++ b/prime/scripts/rnd-a2-knots.py
+@@ -41,6 +41,8 @@ RDTS = "-rdtsexpiry=4102444800"
+ P2WSH_TRUE = b"\x00\x20" + hashlib.sha256(b"\x51").digest()
+ DESC = "raw(" + P2WSH_TRUE.hex() + ")"
+ CANARY_EVERY = float(os.environ.get("XBT064_CANARY_EVERY", "2"))
++BLOCK_MIN = float(os.environ.get("XBT064_BLOCK_MIN", "30"))
++BLOCK_MAX = float(os.environ.get("XBT064_BLOCK_MAX", "50"))
+ TO_POOL = float(os.environ.get("XBT064_TO_POOL", "1.0"))
+ POLL = 0.25
+ CANARY_FEE = 3_000  # ~30 sat/vB: well above any honest node's block min fee
+@@ -219,7 +221,9 @@ def main():
+     finders = []
+ 
+     def blocks():
+-        while not stop.wait(rng.uniform(8, 14)):
++        # a check judges a canary with jobs first seen 12 s or more after it (W8), so blocks
++        # every 8-14 s would clear most canaries first; 30-50 s leaves honest misses near 30 %
++        while not stop.wait(rng.uniform(BLOCK_MIN, BLOCK_MAX)):
+             who = rng.choice(["P", "P", "H1", "H2"])
+             try:
+                 rpc(who, "generatetodescriptor", 1, DESC)
+@@ -260,6 +264,11 @@ def main():
+     for gw, cs in canaries.items():
+         for c in cs:
+             post("/sovereignty/canary", {"gateway": gw, **c})
++    # SOV-P-002 W8: canary hits are read from template checks, not snapshots. This harness has no
++    # DATUM session for primed to check, so every job snapshot of a gateway stands in for a check.
++    for gw in GATEWAYS:
++        for s in snaps[gw]:
++            post("/sovereignty/check", {"gateway": gw, "t": s["t"], "txids": s["txids"]})
+     with urllib.request.urlopen(STATS + "/sovereignty.json", timeout=15) as r:
+         sov = json.load(r)
+     gws = sov.get("gateways") or {}
+-- 
+2.43.0
+

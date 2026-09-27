@@ -1,0 +1,626 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: michael moore <mrmoore27@pm.me>
+Date: Fri, 25 Sep 2026 07:15:44 +0000
+Subject: [PATCH 07/27] prime: catch the hybrid proxy with shared canaries and
+ decoys
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+A gateway that runs the registered node and merges its mempool into
+the pool's template carries its own canaries, so own canaries alone
+passed it (A2 residual #1). Two new canary kinds cover every gateway
+at once:
+
+- shared: in the pool node's mempool (relayed on its base fee) but
+  never in its template. An honest node templates it. A hybrid that
+  follows the pool's exclusions misses it.
+- decoy: zero fee, prioritised on the pool node only, so it is in the
+  pool's template and no honest node ever has it. A hybrid that
+  merges into the pool's template carries it.
+
+Own canaries force a hybrid to take its node's side of a conflict.
+Decoys force T ⊆ L, and shared canaries force T ⊇ L. A template that
+passes all three is its own node's tx set.
+
+Flagged when a must-carry class (own or shared, >= 10 due) is carried
+< 25 % of the time, or when >= 25 % of due decoys are carried. Decoys
+convict but never clear. A flagged gateway's independence is now 0
+(it used to keep hits/due as its bonus weight). The rows publish
+flag_reasons. POST /sovereignty/canary takes an optional kind.
+
+Local research branch rnd/sov-004 (SOV-004); never pushed.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ prime/primed/src/sovereignty.rs |  52 ++++-
+ prime/primed/src/stats.rs       |   7 +-
+ prime/tides/src/entropy.rs      | 348 +++++++++++++++++++++++++++++---
+ prime/tides/src/lib.rs          |   2 +-
+ 4 files changed, 371 insertions(+), 38 deletions(-)
+
+diff --git a/prime/primed/src/sovereignty.rs b/prime/primed/src/sovereignty.rs
+index d6e514c..2ae1f50 100644
+--- a/prime/primed/src/sovereignty.rs
++++ b/prime/primed/src/sovereignty.rs
+@@ -20,7 +20,10 @@ use datum_wire::crypto::{Identity, SIGN_PK, SIG};
+ use datum_wire::pow::Hash;
+ use serde::{Deserialize, Serialize};
+ use serde_json::{json, Value};
+-use tides::entropy::{self, Canary, Snapshot};
++use tides::entropy::{self, Canary, CanaryKind, Snapshot};
++
++/// `canaries` key for shared canaries and decoys (every gateway).
++const ALL: &str = "*";
+ use tides::score::{self, BlockCredit, PoolScore};
+ use tides::sovereignty::{self as bonus, Authored, Bonus, BonusParams, WorkTotals};
+ use tides::Window;
+@@ -67,7 +70,7 @@ pub struct Engine {
+     dir: PathBuf,
+     keys: HashMap<String, KeyRecord>,
+     snapshots: BTreeMap<String, Vec<Snapshot>>,
+-    /// Canary txs handed to each gateway's node (Prime keeps the pool node from templating them).
++    /// Own canaries per gateway; shared canaries and decoys under `ALL`.
+     canaries: BTreeMap<String, Vec<Canary>>,
+     attested: HashMap<String, AttestedJob>,
+     authored: Vec<Authored>,
+@@ -203,10 +206,12 @@ impl Engine {
+         }
+     }
+ 
+-    /// Record a canary handed to `gateway`'s node. The caller must already have told the pool
+-    /// node to never template `txid` (`prioritisetransaction <txid> 0 -100000000`).
++    /// Record a canary. An own canary went to `gateway`'s node, and the caller must already have
++    /// told the pool node never to template it (`prioritisetransaction <txid> 0 -100000000`).
++    /// Shared canaries and decoys bear on every gateway, so `gateway` is ignored.
+     pub fn note_canary(&mut self, gateway: &str, canary: Canary) {
+-        let v = self.canaries.entry(gateway.to_ascii_lowercase()).or_default();
++        let key = if canary.kind == CanaryKind::Own { gateway.to_ascii_lowercase() } else { ALL.to_string() };
++        let v = self.canaries.entry(key).or_default();
+         v.push(canary);
+         if v.len() > 500 {
+             v.drain(..v.len() - 400);
+@@ -214,8 +219,9 @@ impl Engine {
+     }
+ 
+     fn features_of(&self, name: &str, snaps: &[Snapshot]) -> entropy::Features {
+-        let canaries = self.canaries.get(name).map(Vec::as_slice).unwrap_or(&[]);
+-        entropy::features_with(snaps, self.pool_snaps(), canaries)
++        let mut canaries = self.canaries.get(name).cloned().unwrap_or_default();
++        canaries.extend(self.canaries.get(ALL).into_iter().flatten().cloned());
++        entropy::features_with(snaps, self.pool_snaps(), &canaries)
+     }
+ 
+     /// A live session's job: prev + merkle branches. Txids are empty until a validation
+@@ -478,9 +484,16 @@ impl Engine {
+                     "canaries_due": f.canaries_due,
+                     "canary_hits": f.canary_hits,
+                     "canary_rate": f.canary_rate,
++                    "shared_due": f.shared_due,
++                    "shared_hits": f.shared_hits,
++                    "shared_rate": f.shared_rate,
++                    "decoys_due": f.decoys_due,
++                    "decoys_carried": f.decoys_carried,
++                    "decoy_rate": f.decoy_rate,
+                     "canary_pool_leaks": f.canary_pool_leaks,
+                     "evidence": f.evidence,
+                     "flagged": f.flagged,
++                    "flag_reasons": f.flag_reasons,
+                     "subset": f.subset,
+                     "follower": f.follower,
+                     "independence": f.independence,
+@@ -701,6 +714,31 @@ mod tests {
+         e.note_snapshot(gw, Snapshot::new(40.0, format!("{:064x}", 1), vec![]));
+     }
+ 
++    #[test]
++    fn shared_canaries_and_decoys_bear_on_every_gateway() {
++        let mut e = engine();
++        let prev = format!("{:064x}", 1);
++        for k in 0..12u64 {
++            let t = k as f64 * 2.0;
++            let q = format!("{:064x}", 0xd000 + k);
++            let d = format!("{:064x}", 0xe000 + k);
++            // the gateway named with a shared canary or decoy does not matter
++            e.note_canary("whoever", Canary::decoy(t, q.clone()));
++            e.note_canary("", Canary::shared(t, d.clone()));
++            e.note_snapshot("POOL", Snapshot::new(t + 0.1, prev.clone(), vec![q.clone()]));
++            e.note_snapshot("honest", Snapshot::new(t + 1.0, prev.clone(), vec![d.clone()]));
++            e.note_snapshot("naive", Snapshot::new(t + 1.0, prev.clone(), vec![q, d]));
++        }
++        e.note_snapshot("honest", Snapshot::new(60.0, prev.clone(), vec![]));
++        e.note_snapshot("naive", Snapshot::new(60.0, prev, vec![]));
++        let rows = e.detector_rows();
++        assert!(!rows["honest"].flagged && rows["honest"].shared_hits == 12, "{:?}", rows["honest"]);
++        assert_eq!(rows["naive"].flag_reasons, vec!["decoys-carried"]);
++        assert_eq!(e.flagged(), vec!["naive".to_string()]);
++        assert_eq!(e.independence_of("naive"), 0);
++        assert!(e.independence_of("honest") > 900_000);
++    }
++
+     fn twin_of_pool(e: &mut Engine, gw: &str, n: usize) {
+         for i in 0..n as u64 {
+             let t = i as f64;
+diff --git a/prime/primed/src/stats.rs b/prime/primed/src/stats.rs
+index e597f8c..5642048 100644
+--- a/prime/primed/src/stats.rs
++++ b/prime/primed/src/stats.rs
+@@ -490,7 +490,12 @@ fn ingest(shared: &Shared, path: &str, body: &str) -> Result<Value, String> {
+             let gw = v["gateway"].as_str().ok_or("gateway")?;
+             let t = v["t"].as_f64().ok_or("t")?;
+             let txid = v["txid"].as_str().ok_or("txid")?;
+-            shared.sovereignty.lock().unwrap().note_canary(gw, tides::Canary::new(t, txid));
++            let kind = match v["kind"].as_str() {
++                None => tides::CanaryKind::Own,
++                Some(k) => tides::CanaryKind::parse(k).ok_or("kind: own, shared or decoy")?,
++            };
++            let canary = tides::Canary { kind, ..tides::Canary::new(t, txid) };
++            shared.sovereignty.lock().unwrap().note_canary(gw, canary);
+             Ok(json!({"ok": true}))
+         }
+         "/sovereignty/attest" => {
+diff --git a/prime/tides/src/entropy.rs b/prime/tides/src/entropy.rs
+index 490baa2..22e3516 100644
+--- a/prime/tides/src/entropy.rs
++++ b/prime/tides/src/entropy.rs
+@@ -4,13 +4,30 @@
+ //!
+ //! Signals, strongest first:
+ //!
+-//! * **Canaries** (convict *and* clear). Prime hands a unique, valid, low-value tx only to
++//! * **Own canaries** (convict *and* clear). Prime hands a unique, valid, low-value tx only to
+ //!   the gateway's registered node and tells the pool node to never template it
+ //!   (`prioritisetransaction <txid> 0 -1e8`, set before the tx can reach it). An honest
+ //!   gateway's own template picks the canary up; a gateway serving the pool's template (straight,
+ //!   reordered or delayed) never can, because the source never has it. A canary is a *hit*
+ //!   when the gateway templates it within `CANARY_WINDOW` s of delivery and before any pool
+ //!   template has it (margin `LEAD_MARGIN`).
++//! * **Shared canaries** (SOV-004; convict *and* clear). One tx for every gateway: it enters the
++//!   pool node's mempool and relays everywhere, but the pool node never templates it (its
++//!   modified feerate sits under the pool's `-blockmintxfee`, and Knots' coin-age area is off).
++//!   An honest node has it and templates it. A *hybrid* that adds to the pool's template only
++//!   the txs the pool's mempool lacks follows the pool's exclusions and misses it.
++//! * **Decoys** (SOV-004; convict only). One pool-only tx for every gateway: zero fee, prioritised
++//!   on the pool node alone, so the pool templates it and no honest node ever has it (it is
++//!   under every peer's relay floor, and `feefilter` compares the base fee). Any template carrying
++//!   it came from the pool's. A hybrid that merges its own node's mempool into the pool's
++//!   template carries it.
++//!
++//! Together these corner a hybrid (pool template + its own node's mempool). Own canaries force it
++//! to take its node's side of a conflict. Decoys force it to drop what its node lacks (T ⊆ L).
++//! Shared canaries force it to keep what its node has, even where the pool left it out (T ⊇ L).
++//! A template that passes all three is its own node's tx set: the hybrid is reduced to
++//! reordering, and to following a share < `1 − CANARY_FLAG` of the pool's exclusions (§ residuals
++//! in the SOV-004 result).
+ //! * **Timing leads** (clear only). `lead`: share of the gateway's txs it templated before the
+ //!   pool did; `tip_lead`: share of new tips it switched to before the pool did. A copy can
+ //!   never be ahead of its source, so a lead is evidence of an independent view. The absence
+@@ -23,9 +40,12 @@
+ //!
+ //! ```text
+ //! due          = canaries delivered ≥ CANARY_DUE s before the gateway's last template
+-//! canary evidence ⇔ due ≥ CANARY_MIN
+-//!   independence = hits / due                       (bonus weight)
+-//!   flagged      ⇔ hits / due < CANARY_FLAG         (fake-DATUM verdict)
++//! per class (own, shared, decoy): due, and hits (templated in time; for decoys "carried")
++//! canary evidence ⇔ own or shared due ≥ CANARY_MIN, or the decoy rule fires
++//!   flagged ⇔ own hits/due < CANARY_FLAG        (either must-carry class with due ≥ CANARY_MIN)
++//!           ∨ shared hits/due < CANARY_FLAG
++//!           ∨ decoys carried/due ≥ DECOY_FLAG  (decoy due ≥ CANARY_MIN)
++//!   independence = 0 if flagged, else the lowest must-carry hit rate   (bonus weight)
+ //! else if compared ≥ MIN_COMPARED
+ //!   independence = min(1, max(lead / LEAD_REF, tip_lead / TIP_LEAD_REF)),  never flagged
+ //! else insufficient: independence 0 (an unknown gateway earns no bonus), never flagged
+@@ -36,10 +56,14 @@
+ //! pool's, mining the conflicting twin C') landing before the gateway's node refreshes its
+ //! template, so `m ≈ refresh / block interval`: measured m ≈ 0.25 on regtest with 8-14 s
+ //! blocks (→ 4e-4 at due = 10, 2e-6 at due = 20); on 10-minute blocks m ≈ 0.02 (→ ~1e-12).
+-//! A pure proxy (straight, reordered, delayed) scores 0 hits by construction: miss rate 0. A *hybrid* proxy that also runs a node on
+-//! the registered address and merges that node's mempool into the pool's template picks up
+-//! canaries and passes; that residual is out of reach of any template-side test (it is a
+-//! gifted attestation, see A2 note §8) and is priced by key age + the per-gateway cap.
++//! A pure proxy (straight, reordered, delayed) scores 0 hits by construction: miss rate 0. A
++//! *hybrid* that also runs a node on the registered address and merges that node's mempool into
++//! the pool's template picks up own canaries. Shared canaries and decoys catch it (above). An
++//! honest node never has a decoy, so decoys add no honest flag risk. The exception is a node that
++//! runs `-minrelaytxfee=0` and `-blockmintxfee=0` and is reached by zero-fee relay. Shared misses
++//! follow the same `m` as own canaries. Decoys and shared canaries only work
++//! against a template source Prime instructs (the pool's or a house node). A hybrid fed by a
++//! third party's node is out of their reach.
+ 
+ use serde::Serialize;
+ 
+@@ -59,17 +83,53 @@ pub const CANARY_MIN: usize = 10;
+ /// Hit rate below which a gateway with canary evidence is flagged as fake DATUM. A proxy of
+ /// the pool's template hits exactly 0, so the bar can sit low and absorb honest misses.
+ pub const CANARY_FLAG: f64 = 0.25;
++/// Share of due decoys a gateway may carry before it is flagged. An honest node never has a
++/// decoy, so any carried decoy is suspect; the bar leaves room for a misconfigured relay floor.
++pub const DECOY_FLAG: f64 = 0.25;
++
++/// Which node Prime handed a canary to, and so what an honest gateway does with it.
++#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
++#[serde(rename_all = "lowercase")]
++pub enum CanaryKind {
++    /// To one gateway's node, with a conflicting twin to the pool node: that gateway must carry it.
++    #[default]
++    Own,
++    /// Into the pool node's mempool, never its template, relayed to all: every gateway must carry it.
++    Shared,
++    /// Pool node only, under the relay floor, in its template: no gateway may carry it.
++    Decoy,
++}
++
++impl CanaryKind {
++    pub fn parse(s: &str) -> Option<Self> {
++        match s {
++            "own" => Some(Self::Own),
++            "shared" => Some(Self::Shared),
++            "decoy" => Some(Self::Decoy),
++            _ => None,
++        }
++    }
++}
+ 
+-/// A canary tx handed to one gateway's node at `t`; the pool node never templates it.
++/// A canary tx Prime placed at `t` (see [`CanaryKind`] for where).
+ #[derive(Clone, Debug, PartialEq, Serialize)]
+ pub struct Canary {
+     pub t: f64,
+     pub txid: String,
++    pub kind: CanaryKind,
+ }
+ 
+ impl Canary {
+     pub fn new(t: f64, txid: impl Into<String>) -> Self {
+-        Canary { t, txid: txid.into() }
++        Canary { t, txid: txid.into(), kind: CanaryKind::Own }
++    }
++
++    pub fn shared(t: f64, txid: impl Into<String>) -> Self {
++        Canary { kind: CanaryKind::Shared, ..Canary::new(t, txid) }
++    }
++
++    pub fn decoy(t: f64, txid: impl Into<String>) -> Self {
++        Canary { kind: CanaryKind::Decoy, ..Canary::new(t, txid) }
+     }
+ }
+ 
+@@ -106,12 +166,26 @@ pub struct Features {
+     pub tip_lead: f64,
+     pub subset: f64,
+     pub follower: f64,
++    /// Canaries of every kind that bear on this gateway.
+     pub canaries: usize,
++    /// Own canaries judged, carried in time, and the rate.
+     pub canaries_due: usize,
+     pub canary_hits: usize,
+     pub canary_rate: Option<f64>,
+-    /// Canaries a pool template carried (should stay 0: the pool node deprioritises them).
++    /// Shared canaries judged, carried in time, and the rate.
++    pub shared_due: usize,
++    pub shared_hits: usize,
++    pub shared_rate: Option<f64>,
++    /// Decoys judged, carried (a template of this gateway had one), and the rate.
++    pub decoys_due: usize,
++    pub decoys_carried: usize,
++    pub decoy_rate: Option<f64>,
++    /// Own and shared canaries a pool template carried (should stay 0: the pool node never
++    /// templates them).
+     pub canary_pool_leaks: usize,
++    /// Why the gateway is flagged: `own-canaries-missed`, `shared-canaries-missed`,
++    /// `decoys-carried`.
++    pub flag_reasons: Vec<&'static str>,
+     /// `canary`, `timing` or `none`: which rule set `independence`.
+     pub evidence: &'static str,
+     pub independence: f64,
+@@ -352,32 +426,52 @@ pub fn features_with(gw: &[Snapshot], pool: &[Snapshot], canaries: &[Canary]) ->
+     let follower = subset * (1.0 - (lead / LEAD_REF).min(1.0));
+ 
+     let last_gw = gw.last().map(|s| s.t).unwrap_or(f64::NEG_INFINITY);
+-    let mut due = 0usize;
+-    let mut hits = 0usize;
++    // [own, shared, decoy]: (due, hits)
++    let mut tally = [(0usize, 0usize); 3];
+     let mut leaks = 0usize;
+     for c in canaries {
+         let pool_at = first_with(&pool, &c.txid, c.t - WINDOW, f64::INFINITY);
+-        if pool_at.is_some() {
++        if pool_at.is_some() && c.kind != CanaryKind::Decoy {
+             leaks += 1;
+         }
+         if c.t + CANARY_DUE > last_gw {
+             continue;
+         }
+-        due += 1;
++        let (due, hits) = &mut tally[c.kind as usize];
++        *due += 1;
+         if let Some(at) = first_with(&gw, &c.txid, c.t, c.t + CANARY_WINDOW) {
+-            if pool_at.is_none_or(|pt| at < pt - LEAD_MARGIN) {
+-                hits += 1;
++            // a decoy counts however it got there; a must-carry canary only if the pool's
++            // template cannot have been the source
++            if c.kind == CanaryKind::Decoy || pool_at.is_none_or(|pt| at < pt - LEAD_MARGIN) {
++                *hits += 1;
+             }
+         }
+     }
+-    let canary_rate = (due > 0).then(|| hits as f64 / due as f64);
+-    let (evidence, independence, flagged) = if due >= CANARY_MIN {
+-        let r = hits as f64 / due as f64;
+-        ("canary", r, r < CANARY_FLAG)
++    let rate = |(due, hits): (usize, usize)| (due > 0).then(|| hits as f64 / due as f64);
++    let judged = |(due, hits): (usize, usize)| (due >= CANARY_MIN).then(|| hits as f64 / due as f64);
++    let [own, shared, decoy] = tally;
++    let carry: Vec<f64> = [judged(own), judged(shared)].into_iter().flatten().collect();
++    let mut reasons = Vec::new();
++    if judged(own).is_some_and(|r| r < CANARY_FLAG) {
++        reasons.push("own-canaries-missed");
++    }
++    if judged(shared).is_some_and(|r| r < CANARY_FLAG) {
++        reasons.push("shared-canaries-missed");
++    }
++    if judged(decoy).is_some_and(|r| r >= DECOY_FLAG) {
++        reasons.push("decoys-carried");
++    }
++    let flagged = !reasons.is_empty();
++    // Carrying no decoys proves nothing (any source but the pool's carries none), so decoys
++    // alone can convict but never clear.
++    let (evidence, independence) = if flagged {
++        ("canary", 0.0)
++    } else if !carry.is_empty() {
++        ("canary", carry.iter().copied().fold(1.0, f64::min))
+     } else if n >= MIN_COMPARED {
+-        ("timing", (lead / LEAD_REF).max(tip_lead / TIP_LEAD_REF).min(1.0), false)
++        ("timing", (lead / LEAD_REF).max(tip_lead / TIP_LEAD_REF).min(1.0))
+     } else {
+-        ("none", 0.0, false)
++        ("none", 0.0)
+     };
+     Features {
+         snapshots: gw.len(),
+@@ -399,10 +493,17 @@ pub fn features_with(gw: &[Snapshot], pool: &[Snapshot], canaries: &[Canary]) ->
+         subset,
+         follower,
+         canaries: canaries.len(),
+-        canaries_due: due,
+-        canary_hits: hits,
+-        canary_rate,
++        canaries_due: own.0,
++        canary_hits: own.1,
++        canary_rate: rate(own),
++        shared_due: shared.0,
++        shared_hits: shared.1,
++        shared_rate: rate(shared),
++        decoys_due: decoy.0,
++        decoys_carried: decoy.1,
++        decoy_rate: rate(decoy),
+         canary_pool_leaks: leaks,
++        flag_reasons: reasons,
+         evidence,
+         independence: (independence.clamp(0.0, 1.0) * 1000.0).round() / 1000.0,
+         insufficient: evidence == "none",
+@@ -657,15 +758,204 @@ mod tests {
+         assert_eq!(f.canary_pool_leaks, canaries.len());
+     }
+ 
+-    /// Known limit: a proxy that also runs the registered node and merges its mempool into the
+-    /// pool's template carries the canaries. It is only priced by key age and the cap.
++    /// Why SOV-004 exists: own canaries alone cannot see a proxy that also runs the registered node
++    /// and merges its mempool into the pool's template.
+     #[test]
+-    fn hybrid_merging_its_own_node_passes_canaries() {
++    fn own_canaries_alone_miss_the_hybrid() {
+         let (pool, _, _, hybrid, canaries) = converged(200);
+         let f = features_with(&hybrid, &pool, &canaries);
+         assert!(!f.flagged);
+     }
+ 
++    /// Templates in a converged network with every canary kind, `t` every 0.5 s:
++    /// `pool`, `honest`, `proxy`, and three hybrids built from the pool's template `T` and the
++    /// hybrid's own node's mempool `L` (the pool's mempool is `M`):
++    /// `naive` = T ∪ (L∖T), own canaries winning conflicts; `filtered` = (T∩L) ∪ (L∖M);
++    /// `forced` = (T∩L) ∪ (L∖T), which is L: the hybrid's own node's tx set.
++    struct World {
++        pool: Vec<Snapshot>,
++        honest: Vec<Snapshot>,
++        proxy: Vec<Snapshot>,
++        naive: Vec<Snapshot>,
++        filtered: Vec<Snapshot>,
++        forced: Vec<Snapshot>,
++        /// Own canaries of the honest gateway and of the hybrids (same node in this model).
++        own: Vec<Canary>,
++        /// Shared canaries and decoys (every gateway).
++        global: Vec<Canary>,
++    }
++
++    fn world(n: usize) -> World {
++        let mut w = World {
++            pool: vec![],
++            honest: vec![],
++            proxy: vec![],
++            naive: vec![],
++            filtered: vec![],
++            forced: vec![],
++            own: vec![],
++            global: vec![],
++        };
++        // (canary, twin the pool holds instead)
++        let mut own_live: Vec<(String, String)> = vec![];
++        let mut shared_live: Vec<String> = vec![];
++        let mut decoy_live: Vec<String> = vec![];
++        let delivered = |cs: &[Canary], id: &str, t: f64, lag: f64| cs.iter().any(|c| c.txid == id && c.t + lag <= t);
++        for i in 0..n {
++            let t = i as f64 * 0.5;
++            if i % 30 == 0 {
++                // a block: canaries and decoys so far are mined (by whoever)
++                own_live.clear();
++                shared_live.clear();
++                decoy_live.clear();
++            }
++            let prev = hex32(1 + (i / 30) as u64);
++            let common: Vec<String> = (0..5).map(|k| hex32(1_000 + (i / 4 + k) as u64)).collect();
++            if i % 8 == 0 {
++                let c = hex32(9_000_000 + i as u64);
++                w.own.push(Canary::new(t, c.clone()));
++                own_live.push((c, hex32(8_000_000 + i as u64)));
++            }
++            if i % 8 == 3 {
++                let d = hex32(7_000_000 + i as u64);
++                w.global.push(Canary::shared(t, d.clone()));
++                shared_live.push(d);
++            }
++            if i % 8 == 5 {
++                let q = hex32(6_000_000 + i as u64);
++                w.global.push(Canary::decoy(t, q.clone()));
++                decoy_live.push(q);
++            }
++            // pool: template = common + own twins + decoys; mempool additionally the shared ones
++            let mut tp = common.clone();
++            tp.extend(own_live.iter().map(|(_, twin)| twin.clone()));
++            tp.extend(decoy_live.iter().cloned());
++            let mut mp = tp.clone();
++            mp.extend(shared_live.iter().cloned());
++            // the gateway's node: common + its own canaries (2 s to refresh) + shared (1.5 s relay)
++            let mut l = common.clone();
++            l.extend(own_live.iter().filter(|(c, _)| delivered(&w.own, c, t, 2.0)).map(|(c, _)| c.clone()));
++            l.extend(shared_live.iter().filter(|d| delivered(&w.global, d, t, 1.5)).cloned());
++            let lset: std::collections::HashSet<&String> = l.iter().collect();
++            let tset: std::collections::HashSet<&String> = tp.iter().collect();
++            let mset: std::collections::HashSet<&String> = mp.iter().collect();
++            let beaten: std::collections::HashSet<&String> =
++                own_live.iter().filter(|(c, _)| lset.contains(c)).map(|(_, twin)| twin).collect();
++            let mut naive: Vec<String> = tp.iter().filter(|x| !beaten.contains(x)).cloned().collect();
++            naive.extend(l.iter().filter(|x| !tset.contains(x)).cloned());
++            let mut filtered: Vec<String> = tp.iter().filter(|x| lset.contains(x)).cloned().collect();
++            filtered.extend(l.iter().filter(|x| !mset.contains(x)).cloned());
++            let mut forced: Vec<String> = tp.iter().filter(|x| lset.contains(x)).cloned().collect();
++            forced.extend(l.iter().filter(|x| !tset.contains(x)).cloned());
++            w.pool.push(Snapshot::new(t, prev.clone(), tp.clone()));
++            w.honest.push(Snapshot::new(t + 0.01, prev.clone(), l));
++            w.proxy.push(Snapshot::new(t + 0.05, prev.clone(), tp));
++            w.naive.push(Snapshot::new(t + 0.3, prev.clone(), naive));
++            w.filtered.push(Snapshot::new(t + 0.3, prev.clone(), filtered));
++            w.forced.push(Snapshot::new(t + 0.3, prev, forced));
++        }
++        w
++    }
++
++    fn judge(w: &World, s: &[Snapshot]) -> Features {
++        let all: Vec<Canary> = w.own.iter().chain(&w.global).cloned().collect();
++        features_with(s, &w.pool, &all)
++    }
++
++    #[test]
++    fn every_canary_kind_clears_the_honest_gateway() {
++        let w = world(240);
++        let f = judge(&w, &w.honest);
++        assert!(f.canaries_due >= CANARY_MIN && f.shared_due >= CANARY_MIN && f.decoys_due >= CANARY_MIN, "{f:?}");
++        assert_eq!(f.decoys_carried, 0);
++        assert_eq!(f.canary_pool_leaks, 0);
++        assert!(!f.flagged, "{:?}", f.flag_reasons);
++        assert!(f.independence > 0.8, "{}", f.independence);
++    }
++
++    #[test]
++    fn decoys_catch_the_hybrid_that_merges_its_node_into_the_pool_template() {
++        let w = world(240);
++        let f = judge(&w, &w.naive);
++        // it passes both must-carry tests...
++        assert!(f.canary_rate.unwrap() > 0.8 && f.shared_rate.unwrap() > 0.8, "{f:?}");
++        // ...and carries the pool-only decoys
++        assert!(f.flagged);
++        assert_eq!(f.flag_reasons, vec!["decoys-carried"]);
++        assert_eq!(f.independence, 0.0);
++    }
++
++    #[test]
++    fn shared_canaries_catch_the_hybrid_that_follows_the_pools_exclusions() {
++        let w = world(240);
++        let f = judge(&w, &w.filtered);
++        assert_eq!(f.decoys_carried, 0);
++        assert!(f.canary_rate.unwrap() > 0.8, "{f:?}");
++        assert_eq!(f.shared_hits, 0);
++        assert_eq!(f.flag_reasons, vec!["shared-canaries-missed"]);
++        assert_eq!(f.independence, 0.0);
++    }
++
++    /// The bound: a hybrid that passes every kind has built its own node's tx set.
++    #[test]
++    fn a_hybrid_that_passes_every_kind_templates_its_own_nodes_set() {
++        let w = world(240);
++        let f = judge(&w, &w.forced);
++        assert!(!f.flagged, "{:?}", f.flag_reasons);
++        for (h, x) in w.honest.iter().zip(&w.forced) {
++            assert!(jaccard(&h.txids, &x.txids) == 1.0, "{:?} vs {:?}", h.txids, x.txids);
++        }
++    }
++
++    #[test]
++    fn proxies_fail_every_kind() {
++        let w = world(240);
++        let f = judge(&w, &w.proxy);
++        assert_eq!(f.flag_reasons, vec!["own-canaries-missed", "shared-canaries-missed", "decoys-carried"]);
++        assert_eq!(f.independence, 0.0);
++    }
++
++    #[test]
++    fn decoys_alone_convict_but_never_clear() {
++        let w = world(240);
++        let decoys: Vec<Canary> = w.global.iter().filter(|c| c.kind == CanaryKind::Decoy).cloned().collect();
++        let f = features_with(&w.honest, &w.pool, &decoys);
++        assert!(f.decoys_due >= CANARY_MIN && f.decoys_carried == 0);
++        assert_ne!(f.evidence, "canary");
++        let f = features_with(&w.proxy, &w.pool, &decoys);
++        assert!(f.flagged && f.evidence == "canary");
++    }
++
++    /// A gateway that misses most canaries is flagged, and a flagged gateway earns nothing even
++    /// if it carried a few (it used to keep hits/due as its weight).
++    #[test]
++    fn flagged_means_zero_independence() {
++        let w = world(240);
++        // honest templates, but only one own canary in six makes it in
++        let keep: std::collections::HashSet<&str> = w.own.iter().step_by(6).map(|c| c.txid.as_str()).collect();
++        let owned: std::collections::HashSet<&str> = w.own.iter().map(|c| c.txid.as_str()).collect();
++        let sparse: Vec<Snapshot> = w
++            .honest
++            .iter()
++            .map(|s| Snapshot {
++                txids: s.txids.iter().filter(|x| !owned.contains(x.as_str()) || keep.contains(x.as_str())).cloned().collect(),
++                ..s.clone()
++            })
++            .collect();
++        let f = judge(&w, &sparse);
++        assert!(f.canary_hits > 0 && f.canary_rate.unwrap() < CANARY_FLAG, "{f:?}");
++        assert_eq!(f.flag_reasons, vec!["own-canaries-missed"]);
++        assert_eq!(f.independence, 0.0);
++    }
++
++    #[test]
++    fn canary_kinds_parse() {
++        for k in ["own", "shared", "decoy"] {
++            assert_eq!(serde_json::to_value(CanaryKind::parse(k).unwrap()).unwrap(), k);
++        }
++        assert_eq!(CanaryKind::parse("x"), None);
++    }
++
+     #[test]
+     fn a_straight_copy_is_identical_and_scores_zero() {
+         let pool = vec![
+diff --git a/prime/tides/src/lib.rs b/prime/tides/src/lib.rs
+index e589804..87d4de9 100644
+--- a/prime/tides/src/lib.rs
++++ b/prime/tides/src/lib.rs
+@@ -37,7 +37,7 @@ pub use score::{
+     builder_weight, claim_credit, hhi_effective, nakamoto, sovereignty_score, verified_share, BlockCredit,
+     PoolScore,
+ };
+-pub use entropy::{features, features_with, independence_ppm, report, Canary, Snapshot};
++pub use entropy::{features, features_with, independence_ppm, report, Canary, CanaryKind, Snapshot};
+ 
+ /// Work that arrived before dual-fee tagging. Split as DATUM (the lower fee).
+ pub const SOURCE_UNKNOWN: u8 = 0;
+-- 
+2.43.0
+

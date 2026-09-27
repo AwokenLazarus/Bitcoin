@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Mike Moore (AwokenLazarus)
 """World Monte Carlo: Stratum PPS vs DATUM vs censoring vs gifted.
 
 Hashrate is a lottery over who finds each block. Templates/ILs are per agent.

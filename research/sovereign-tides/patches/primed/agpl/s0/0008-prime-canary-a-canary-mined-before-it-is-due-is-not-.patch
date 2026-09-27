@@ -1,0 +1,425 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: michael moore <mrmoore27@pm.me>
+Date: Fri, 25 Sep 2026 15:53:59 +0000
+Subject: [PATCH 8/8] prime, canary: a canary mined before it is due is not
+ due; nodes over loopback
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+SOV-012, two gaps SOV-010 found on rnd/sov-s0 before the S3 canary shadow.
+
+1. Mined before due means not due. A canary whose C′ (or C, D, Q) a block
+   confirmed before its first due check (12 s) counted as a miss for an
+   honest gateway: ~2% of canaries on 600 s blocks, more after the pool's
+   own fast blocks. The sidecar now finds the block that settled each
+   canary (gettxout confirmations/bestblock, getblockhash/getblockheader)
+   and posts POST /sovereignty/canary/resolved {txid, confirmed, height,
+   time}; unreported resolutions are retried for a day. tides::Canary gains
+   `mined`, and tally_checks stops a canary's judging span at that block,
+   so checks of jobs first seen after it do not judge it.
+
+2. Node addresses for the sidecar. GET /sovereignty/nodes on the stats
+   listener, loopback peers with the sovereignty token only, returns
+   Engine::active_nodes: exactly what sovereignty-nodes.json holds (what
+   node_of answers). The sidecar reads it with nodes_source = "prime"
+   (default), falling back to nodes_file for the demos. The file stays
+   0600 and the unit no longer needs read access to it.
+
+Tests: tides (mined before/after the first due check, shared too; an honest
+gateway with blocks at +5 s is no longer flagged, a proxy with mempool
+canaries still is), primed unit (note_canary_mined), e2e (the resolved
+route; /sovereignty/nodes 403 without or with a wrong token, superseded and
+revoked keys absent, equal to the file), sidecar (nodes from primed with
+file fallback; resolution reported with its block, retried). cargo test
+280 passed / 0 failed; sidecar 18 OK.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ lazarus/canary/README.md                   |  18 ++-
+ lazarus/canary/lazarus-canary.service      |   6 +-
+ lazarus/canary/lazarus-canary.toml.example |  13 +-
+ lazarus/canary/lazarus_canary.py           |  77 +++++++++++-
+ lazarus/canary/test_lazarus_canary.py      | 133 ++++++++++++++++++++-
+ 5 files changed, 231 insertions(+), 16 deletions(-)
+
+diff --git a/lazarus/canary/README.md b/lazarus/canary/README.md
+index f145798..3718cf6 100644
+--- a/lazarus/canary/README.md
++++ b/lazarus/canary/README.md
+@@ -50,8 +50,22 @@ and one decoy. Gateways come from `[[gateways]]` (G, node) and `nodes_file`, rea
+ primed's `data-dir/sovereignty-nodes.json` (W10). Primed writes there exactly what
+ `Engine::node_of` answers, so superseded, revoked and refused keys drop out on their own. An
+ unreadable file is logged and the round runs on `[[gateways]]`. A gateway with `node = "none"` is
+-never canaried. Primed creates the file 0600: on the hub the sidecar needs read access to it (an
+-ACL on the file, as for the token), which primed does not set up.
++never canaried.
++
++With `nodes_source = "prime"` (the default, SOV-012) the sidecar reads the same map from primed's
++`GET /sovereignty/nodes` instead: loopback peers with `X-Sovereignty-Token` only (403 otherwise),
++exactly what `sovereignty-nodes.json` holds. That file stays 0600 to primed's user, so the sidecar
++needs only the token. If primed does not answer, the round falls back to `nodes_file` (which the
++demos, running as one user, still read directly) and then to `[[gateways]]`.
++
++## Settled canaries (SOV-012)
++When a canary settles, the sidecar also finds the block that confirmed it (`gettxout`'s
++`confirmations` and `bestblock`, then `getblockhash`/`getblockheader`) and reports it with
++`POST /sovereignty/canary/resolved` `{"txid": C|D|Q, "confirmed": <the tx that confirmed>,
++"height", "time"}` (header time). Primed then ignores template checks of jobs it first saw after that
++block: a canary a block settled before its first due check (12 s) is not due, rather than an honest
++miss. A report primed could not take is kept in `state.json` (`unreported`) and retried every tick
++for a day. The ledger's `resolved` record carries `height` and `block_time` too.
+ 
+ ## Keys and isolation
+ - The canary key is a WIF in `wallet.key_file`. The sidecar refuses a key file readable by group or
+diff --git a/lazarus/canary/lazarus-canary.service b/lazarus/canary/lazarus-canary.service
+index 0d1e742..73a3f34 100644
+--- a/lazarus/canary/lazarus-canary.service
++++ b/lazarus/canary/lazarus-canary.service
+@@ -13,9 +13,9 @@ Restart=on-failure
+ RestartSec=30
+ StateDirectory=lazarus-canary
+ StateDirectoryMode=0700
+-# primed's token file has to be readable by this user (a group ACL, not a world bit)
+-# ... and so does sovereignty-nodes.json, the sidecar's nodes_file (primed writes it 0600)
+-ReadOnlyPaths=/etc/lazarus-canary /var/lib/primed/sovereignty.token /var/lib/primed/sovereignty-nodes.json
++# primed's token file has to be readable by this user (a group ACL, not a world bit). Node
++# addresses come from primed's GET /sovereignty/nodes (SOV-012): sovereignty-nodes.json stays 0600.
++ReadOnlyPaths=/etc/lazarus-canary /var/lib/primed/sovereignty.token
+ NoNewPrivileges=true
+ ProtectSystem=strict
+ ProtectHome=true
+diff --git a/lazarus/canary/lazarus-canary.toml.example b/lazarus/canary/lazarus-canary.toml.example
+index 9fb373f..d9c399e 100644
+--- a/lazarus/canary/lazarus-canary.toml.example
++++ b/lazarus/canary/lazarus-canary.toml.example
+@@ -50,10 +50,15 @@ mode = "direct"                      # direct | socks5 (Tor: proxy = "127.0.0.1:
+ proxy = ""
+ timeout_secs = 20
+ 
+-# Gateways with a registered node (registration v1/v2, W10). nodes_file is read on every round:
+-# primed's data-dir/sovereignty-nodes.json ({"<G hex>": {"node": "host:port", ...}}, active keys
+-# only), or {"<G hex>": "host:port"} / [{"g":..,"node":..}]. [[gateways]] entries win over it.
+-nodes_file = "/var/lib/primed/sovereignty-nodes.json"
++# Gateways with a registered node (registration v1/v2, W10), read on every round.
++# nodes_source = "prime": primed's GET /sovereignty/nodes (loopback, the token above), exactly what
++# its sovereignty-nodes.json holds (active keys only). If primed does not answer, nodes_file is
++# tried. nodes_source = "file": nodes_file only, as the demos do: primed's sovereignty-nodes.json
++# ({"<G hex>": {"node": "host:port", ...}}), or {"<G hex>": "host:port"} / [{"g":..,"node":..}].
++# On the hub that file is 0600 to primed's user, so leave nodes_file unset there.
++# [[gateways]] entries win over both.
++nodes_source = "prime"
++# nodes_file = "/var/lib/primed/sovereignty-nodes.json"
+ # [[gateways]]
+ # g = "<64 hex ed25519 DATUM identity key>"
+ # node = "203.0.113.7:8333"
+diff --git a/lazarus/canary/lazarus_canary.py b/lazarus/canary/lazarus_canary.py
+index e086424..53e3dd7 100644
+--- a/lazarus/canary/lazarus_canary.py
++++ b/lazarus/canary/lazarus_canary.py
+@@ -13,7 +13,13 @@ Per round:
+   decoy   one zero-fee tx Q, pre-prioritised +delta on the pool node only: the pool templates
+           it, no peer accepts it.
+ Every canary is reported to primed (`POST /sovereignty/canary`, `X-Sovereignty-Token`) with its
+-kind; primed checks gateways' jobs for them (W8).
++kind; primed checks gateways' jobs for them (W8). When one of a canary's txs confirms, the sidecar
++reports which, and the block's height and time (`POST /sovereignty/canary/resolved`, SOV-012):
++primed does not count a canary a block settled before its first due check.
++
++Gateways and their nodes come from primed (`GET /sovereignty/nodes`, loopback and token, SOV-012)
++with `nodes_source = "prime"`, or from `nodes_file` (primed's sovereignty-nodes.json, which is 0600
++to primed's user; the demos read it directly). `[[gateways]]` entries win over both.
+ 
+ Keys: the canary key is a WIF in `wallet.key_file` (0600). It is used only in
+ `signrawtransactionwithkey` on the *signer* node, which is never asked to broadcast (its RPC is
+@@ -57,6 +63,7 @@ DEFAULTS = {
+                 "flagged_secs": 1_200, "jitter": 0.5, "shared": True, "decoy": True},
+     "delivery": {"mode": "direct", "proxy": "", "timeout_secs": 20},
+     "gateways": [],
++    "nodes_source": "prime",
+     "nodes_file": "",
+ }
+ 
+@@ -113,7 +120,7 @@ class Rpc:
+ 
+ POOL_METHODS = {"prioritisetransaction", "sendrawtransaction", "getmempoolinfo", "getmempoolentry",
+                 "gettxout", "scantxoutset", "estimatesmartfee", "listwallets", "getaddressinfo",
+-                "getblockcount", "getblocktemplate"}
++                "getblockcount", "getblocktemplate", "getblockhash", "getblockheader"}
+ # the signer never sees sendrawtransaction: it signs and nothing else
+ SIGNER_METHODS = {"signrawtransactionwithkey", "getdescriptorinfo", "deriveaddresses", "validateaddress"}
+ 
+@@ -236,13 +243,29 @@ class Canary:
+         return len(self.state["utxos"])
+ 
+     # gateways and cadence
++    def prime_nodes(self) -> dict:
++        """primed's `GET /sovereignty/nodes`: what `Engine::node_of` answers, as in its nodes file."""
++        token = read_text(self.cfg["prime"]["token_file"]).strip()
++        req = urllib.request.Request(self.cfg["prime"]["url"].rstrip("/") + "/sovereignty/nodes",
++                                     headers={"X-Sovereignty-Token": token})
++        with urllib.request.urlopen(req, timeout=15) as r:
++            data = json.load(r)
++        if not isinstance(data, dict):
++            raise ValueError("not a JSON object")
++        return data
++
+     def gateways(self) -> dict[str, dict]:
+         out = {}
+         for g in self.cfg.get("gateways", []):
+             out[g["g"].lower()] = dict(g)
+         nf = self.cfg.get("nodes_file")
+         data = None
+-        if nf and os.path.exists(nf):
++        if self.cfg.get("nodes_source", "prime") == "prime":
++            try:
++                data = self.prime_nodes()
++            except Exception as e:  # noqa: BLE001
++                log("primed /sovereignty/nodes unavailable" + (", trying nodes_file:" if nf else ":"), e)
++        if data is None and nf and os.path.exists(nf):
+             try:
+                 data = json.loads(read_text(nf))
+             except (OSError, ValueError) as e:
+@@ -329,6 +352,41 @@ class Canary:
+         if not res.get("ok"):
+             raise RuntimeError(f"primed refused the canary: {res}")
+ 
++    def mined_block(self, out: dict) -> tuple[int, int] | None:
++        """(height, header time) of the block that confirmed the output `gettxout` returned."""
++        try:
++            conf, best = int(out["confirmations"]), out["bestblock"]
++            height = int(self.pool.call("getblockheader", best, True)["height"]) - conf + 1
++            h = self.pool.call("getblockhash", height)
++            return height, int(self.pool.call("getblockheader", h, True)["time"])
++        except (KeyError, TypeError, ValueError, RuntimeError) as e:
++            log("could not find the settling block:", e)
++            return None
++
++    def report_resolved(self, rec: dict):
++        token = read_text(self.cfg["prime"]["token_file"]).strip()
++        req = urllib.request.Request(self.cfg["prime"]["url"].rstrip("/") + "/sovereignty/canary/resolved",
++                                     json.dumps(rec).encode(),
++                                     {"Content-Type": "application/json", "X-Sovereignty-Token": token})
++        with urllib.request.urlopen(req, timeout=15) as r:
++            res = json.load(r)
++        if not res.get("ok"):
++            raise RuntimeError(f"primed refused the resolution: {res}")
++
++    def flush_resolved(self):
++        """Tell primed about settled canaries; what it could not take is retried next time (for a
++        day at most: primed forgets canaries long before that)."""
++        keep = []
++        now = time.time()
++        for rec in self.state.get("unreported", []):
++            try:
++                self.report_resolved({k: rec[k] for k in ("txid", "confirmed", "height", "time")})
++            except Exception as e:  # noqa: BLE001
++                if now - rec.get("queued", now) < 86_400:
++                    keep.append(rec)
++                log("resolution not reported yet:", e)
++        self.state["unreported"] = keep[-1000:]
++
+     # one round
+     def own(self, g: str, node: str, rate: float) -> bool:
+         fee = int(rate * CANARY_VSIZE)
+@@ -433,7 +491,7 @@ class Canary:
+             for i, x in enumerate(f["txids"]):
+                 o = self.pool.call("gettxout", x, 0, False)
+                 if o is not None:
+-                    got = (i, x, round(o["value"] * SAT))
++                    got = (i, x, round(o["value"] * SAT), o)
+                     break
+             if got is None:
+                 # the input is spent in the chain but neither output is there (spent already,
+@@ -443,14 +501,21 @@ class Canary:
+                 else:
+                     log(f"{f['kind']} canary {f['txids'][0][:16]}: outcome unknown, dropped")
+                 continue
+-            i, x, value = got
++            i, x, value, out = got
++            block = self.mined_block(out)
++            if block is not None:
++                self.state.setdefault("unreported", []).append(
++                    {"txid": f["txids"][0], "confirmed": x, "height": block[0], "time": block[1], "queued": now})
+             fee = u["value"] - value
+             self.state["utxos"].append({"txid": x, "vout": 0, "value": value})
+             self.state["fees_paid"] += fee
+             self.state["resolved"] += 1
+             self.ledger({"event": "resolved", "kind": f["kind"], "gateway": f["gateway"], "t": f["t"], "confirmed": x,
+-                         "which": ("C", "C'")[i] if f["kind"] == "own" else f["kind"], "fee": fee, "resolved_at": now})
++                         "which": ("C", "C'")[i] if f["kind"] == "own" else f["kind"], "fee": fee, "resolved_at": now,
++                         "height": block and block[0], "block_time": block and block[1]})
+         self.state["inflight"] = keep
++        if self.state.get("unreported"):
++            self.flush_resolved()
+         changed = json.dumps(self.state, sort_keys=True) != before
+         if changed:
+             self.save()
+diff --git a/lazarus/canary/test_lazarus_canary.py b/lazarus/canary/test_lazarus_canary.py
+index 0f1aaa1..fa0e99b 100644
+--- a/lazarus/canary/test_lazarus_canary.py
++++ b/lazarus/canary/test_lazarus_canary.py
+@@ -6,6 +6,7 @@ import struct
+ import tempfile
+ import threading
+ import unittest
++from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+ 
+ import lazarus_canary as lc
+ import xbt_p2p
+@@ -94,7 +95,7 @@ class P2P(unittest.TestCase):
+ class Policy(unittest.TestCase):
+     def svc(self):
+         s = lc.Canary.__new__(lc.Canary)
+-        s.cfg = lc.merged({})
++        s.cfg = lc.merged({"nodes_source": "file"})
+         s.cfg["cadence"]["jitter"] = 0.0
+         s.rng = __import__("random").Random(1)
+         return s
+@@ -145,6 +146,92 @@ class Policy(unittest.TestCase):
+             s.cfg["gateways"] = [{"g": "dd" * 32, "node": "127.0.0.1:18444"}]
+             self.assertEqual(sorted(s.gateways()), ["dd" * 32])
+ 
++class FakePrimed:
++    """primed's stats listener, as far as the sidecar uses it: token-gated nodes and resolutions."""
++
++    def __init__(self, nodes: dict, token: str = "tok"):
++        fake = self
++        self.nodes, self.token, self.posts, self.down = nodes, token, [], False
++
++        class H(BaseHTTPRequestHandler):
++            def log_message(self, *a):
++                pass
++
++            def reply(self, code, obj):
++                body = json.dumps(obj).encode()
++                self.send_response(code)
++                self.send_header("Content-Length", str(len(body)))
++                self.end_headers()
++                self.wfile.write(body)
++
++            def authed(self):
++                return self.headers.get("X-Sovereignty-Token") == fake.token and not fake.down
++
++            def do_GET(self):
++                if self.path == "/sovereignty/nodes" and self.authed():
++                    self.reply(200, fake.nodes)
++                else:
++                    self.reply(403, {"error": "sovereignty token"})
++
++            def do_POST(self):
++                body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
++                if not self.authed():
++                    return self.reply(403, {"error": "sovereignty token"})
++                fake.posts.append((self.path, body))
++                self.reply(200, {"ok": True, "known": True})
++
++        self.srv = ThreadingHTTPServer(("127.0.0.1", 0), H)
++        self.url = f"http://127.0.0.1:{self.srv.server_address[1]}"
++        threading.Thread(target=self.srv.serve_forever, daemon=True).start()
++
++    def close(self):
++        self.srv.shutdown()
++        self.srv.server_close()
++
++
++class NodesFromPrime(unittest.TestCase):
++    """SOV-012: sovereignty-nodes.json stays 0600; the sidecar asks primed instead."""
++
++    def svc(self, d, prime):
++        tf = os.path.join(d, "token")
++        with open(tf, "w") as f:
++            f.write("tok\n")
++        s = lc.Canary.__new__(lc.Canary)
++        s.cfg = lc.merged({"prime": {"url": prime.url, "token_file": tf}})
++        return s
++
++    def test_nodes_come_from_primed_with_the_file_as_fallback(self):
++        prime = FakePrimed({"aa" * 32: {"node": "198.51.100.1:8333", "at_height": 7, "updated": 1}})
++        try:
++            with tempfile.TemporaryDirectory() as d:
++                s = self.svc(d, prime)
++                self.assertEqual(s.cfg["nodes_source"], "prime")
++                nf = os.path.join(d, "sovereignty-nodes.json")
++                with open(nf, "w") as f:
++                    json.dump({"bb" * 32: {"node": "10.0.0.2:8333"}}, f)
++                s.cfg["nodes_file"] = nf
++                self.assertEqual(sorted(s.gateways()), ["aa" * 32])
++                # primed down or refusing: the file (the demos') is the fallback
++                prime.down = True
++                self.assertEqual(sorted(s.gateways()), ["bb" * 32])
++                # nothing but [[gateways]] when neither answers
++                os.chmod(nf, 0)
++                if os.geteuid() != 0:
++                    self.assertEqual(s.gateways(), {})
++                # nodes_source = "file" never asks primed
++                prime.down = False
++                os.chmod(nf, 0o600)
++                s.cfg["nodes_source"] = "file"
++                self.assertEqual(sorted(s.gateways()), ["bb" * 32])
++                # a wrong token is a refusal, not an empty set of gateways
++                s.cfg["nodes_source"], s.cfg["nodes_file"] = "prime", ""
++                with open(s.cfg["prime"]["token_file"], "w") as f:
++                    f.write("wrong")
++                self.assertEqual(s.gateways(), {})
++        finally:
++            prime.close()
++
++
+ class StubPool:
+     def __init__(self):
+         self.calls = []
+@@ -203,6 +290,50 @@ class Settle(unittest.TestCase):
+             self.assertFalse(s.resolve(), "nothing moved: nothing written")
+ 
+ 
++class Resolved(unittest.TestCase):
++    """SOV-012: a settled canary is reported with the block that settled it."""
++
++    class Pool(StubPool):
++        def call(self, method, *params, **kw):
++            self.calls.append((method, params))
++            if method == "gettxout":
++                if params[0] == "bb" * 32:  # C confirmed: 3 confirmations at tip 120 → block 118
++                    return {"value": 0.000189, "confirmations": 3, "bestblock": "0120" * 16}
++                return None
++            if method == "getblockheader":
++                return {"0120" * 16: {"height": 120}, "0118" * 16: {"height": 118, "time": 1_700_000_118}}[params[0]]
++            if method == "getblockhash":
++                return "0118" * 16 if params[0] == 118 else None
++            return None
++
++    def test_a_settled_canary_is_reported_with_its_block_and_retried(self):
++        prime = FakePrimed({})
++        try:
++            with tempfile.TemporaryDirectory() as d:
++                s = NodesFromPrime.svc(None, d, prime)
++                s.pool = self.Pool()
++                s.state_path, s.ledger_path = os.path.join(d, "state.json"), os.path.join(d, "l.jsonl")
++                s.state = s._load()
++                s.state["inflight"] = [{"kind": "own", "gateway": "g", "t": lc.time.time(), "fees": [1100, 1101],
++                                        "input": {"txid": "aa" * 32, "vout": 0, "value": 20_000},
++                                        "txids": ["bb" * 32, "cc" * 32]}]
++                prime.down = True
++                self.assertTrue(s.resolve())
++                self.assertEqual(prime.posts, [])
++                self.assertEqual(len(s.state["unreported"]), 1)
++                prime.down = False
++                s.resolve()
++                self.assertEqual(prime.posts, [("/sovereignty/canary/resolved",
++                                                {"txid": "bb" * 32, "confirmed": "bb" * 32, "height": 118,
++                                                 "time": 1_700_000_118})])
++                self.assertEqual(s.state["unreported"], [])
++                with open(s.ledger_path) as f:
++                    rec = json.loads(f.read())
++                self.assertEqual((rec["which"], rec["height"], rec["block_time"]), ("C", 118, 1_700_000_118))
++        finally:
++            prime.close()
++
++
+ class Isolation(unittest.TestCase):
+     def test_the_signer_can_never_broadcast(self):
+         r = lc.Rpc({"url": "http://127.0.0.1:9", "user": "u", "password": "p"}, lc.SIGNER_METHODS, "signer")
+-- 
+2.43.0
+

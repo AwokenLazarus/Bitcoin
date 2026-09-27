@@ -1,0 +1,148 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: michael moore <mrmoore27@pm.me>
+Date: Sat, 26 Sep 2026 00:57:05 +0000
+Subject: [PATCH 3/4] prime: readiness weighs gateways by accepted share
+ difficulty; a refused gateway's reconnects log once per ten minutes
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ prime/primed/src/readiness.rs | 29 +++++++++++++++++++++++------
+ prime/primed/src/session.rs   | 30 +++++++++++++++++++-----------
+ 2 files changed, 42 insertions(+), 17 deletions(-)
+
+diff --git a/prime/primed/src/readiness.rs b/prime/primed/src/readiness.rs
+index baebb8d..2d8cca0 100644
+--- a/prime/primed/src/readiness.rs
++++ b/prime/primed/src/readiness.rs
+@@ -34,6 +34,8 @@ pub const RATE_WINDOW_SECS: u64 = 3600;
+ const SEEN_WITHIN_SECS: u64 = 24 * 3600;
+ /// Entries the book keeps; the least recently seen goes first.
+ const MAX_ENTRIES: usize = 4096;
++/// How often one gateway's refusal is logged in full (the rest are debug lines).
++const REFUSAL_LOG_EVERY_SECS: u64 = 600;
+ /// Rate samples one gateway keeps (a share is ~ one per second per gateway at most).
+ const MAX_SAMPLES: usize = 8192;
+ 
+@@ -97,8 +99,9 @@ pub struct Entry {
+     pub probes_sent: u64,
+     pub probes_kept: u64,
+     pub probes_dropped: u64,
+-    /// Sessions refused (or served pool-only) because of this status.
++    /// Sessions refused because of this status, and when one was last logged in full.
+     pub refusals: u64,
++    refusal_logged: u64,
+     samples: VecDeque<(u64, u64)>,
+ }
+ 
+@@ -117,6 +120,7 @@ impl Entry {
+             probes_kept: 0,
+             probes_dropped: 0,
+             refusals: 0,
++            refusal_logged: 0,
+             samples: VecDeque::new(),
+         }
+     }
+@@ -131,7 +135,7 @@ impl Entry {
+         changed
+     }
+ 
+-    /// Credited work in the last [`RATE_WINDOW_SECS`], in difficulty-1 units.
++    /// Accepted share difficulty in the last [`RATE_WINDOW_SECS`], in difficulty-1 units.
+     pub fn recent_work(&self, now: u64) -> u64 {
+         let from = now.saturating_sub(RATE_WINDOW_SECS);
+         self.samples.iter().filter(|(t, _)| *t >= from).map(|(_, w)| *w).sum()
+@@ -245,11 +249,19 @@ impl Book {
+         changed.then_some(e.status)
+     }
+ 
+-    pub fn note_refusal(&mut self, gw: &str, now: u64) {
+-        self.entry(gw, now).refusals += 1;
++    /// Count a refusal. True if this one should be logged in full: a refused gateway reconnects
++    /// every few seconds, and the reason does not change.
++    pub fn note_refusal(&mut self, gw: &str, now: u64) -> bool {
++        let e = self.entry(gw, now);
++        e.refusals += 1;
++        let loud = e.refusals == 1 || now.saturating_sub(e.refusal_logged) >= REFUSAL_LOG_EVERY_SECS;
++        if loud {
++            e.refusal_logged = now;
++        }
++        loud
+     }
+ 
+-    /// Credited work from `gw`, for its share of the rate.
++    /// Accepted share difficulty from `gw`, for its share of the hashrate.
+     pub fn note_work(&mut self, gw: &str, work: u64, now: u64) {
+         let e = self.entry(gw, now);
+         match e.samples.back_mut() {
+@@ -264,7 +276,7 @@ impl Book {
+ 
+     /// The readiness metric: gateways and share of recent work that are ready, unready or
+     /// unknown, and how far activation is. `gateways` counts those seen in the last day;
+-    /// `hashrate_share` weighs them by credited work in the last hour.
++    /// `hashrate_share` weighs them by the difficulty of their shares accepted in the last hour.
+     pub fn stats_json(&self, chain: &Chain, policy: &str, probe_every: u64, now: u64) -> Value {
+         let seen: Vec<(&String, &Entry)> =
+             self.map.iter().filter(|(_, e)| now.saturating_sub(e.last_seen) <= SEEN_WITHIN_SECS).collect();
+@@ -401,6 +413,11 @@ mod tests {
+         assert_eq!(b.get("cc").unwrap().evidence, Evidence::Advertised);
+         assert_eq!(b.note_attestation_verdict("cc", false, 10), Some(Status::Unready));
+         assert_eq!(b.status("cc"), Status::Unready);
++        // refusals: the first is logged, the reconnects after it only every ten minutes
++        assert!(b.note_refusal("cc", 100));
++        assert!(!b.note_refusal("cc", 101));
++        assert!(b.note_refusal("cc", 100 + REFUSAL_LOG_EVERY_SECS));
++        assert_eq!(b.get("cc").unwrap().refusals, 3);
+     }
+ 
+     #[test]
+diff --git a/prime/primed/src/session.rs b/prime/primed/src/session.rs
+index 29e0e22..995dc3a 100644
+--- a/prime/primed/src/session.rs
++++ b/prime/primed/src/session.rs
+@@ -953,15 +953,19 @@ impl Session {
+     /// serving its miners, which the operator sees.
+     async fn refuse_unready(&mut self, nta_height: u32, evidence: Evidence) -> Result<(), SessionError> {
+         let text = readiness::refusal_text(nta_height, evidence);
+-        log::warn!(
+-            "[{}] {} gateway={} ua={:?} refused: nta-unready ({}). It cannot carry XBT-NTA attestations, so every block it built from {nta_height} would be invalid; no work is sent to it (nta-unready-policy = refuse). It is served again once it reconnects advertising nta-v1.",
+-            self.id,
+-            self.remote,
+-            self.gateway_hex,
+-            self.hello.user_agent,
+-            evidence.as_str(),
+-        );
+-        self.shared.readiness.lock().unwrap().note_refusal(&self.gateway_hex, now());
++        let loud = self.shared.readiness.lock().unwrap().note_refusal(&self.gateway_hex, now());
++        if loud {
++            log::warn!(
++                "[{}] {} gateway={} ua={:?} refused: nta-unready ({}). It cannot carry XBT-NTA attestations, so every block it built from {nta_height} would be invalid; no work is sent to it (nta-unready-policy = refuse). It is served again once it reconnects advertising nta-v1.",
++                self.id,
++                self.remote,
++                self.gateway_hex,
++                self.hello.user_agent,
++                evidence.as_str(),
++            );
++        } else {
++            log::debug!("[{}] {} gateway={} refused again: nta-unready", self.id, self.remote, self.gateway_hex);
++        }
+         let mut line = text.clone().into_bytes();
+         line.push(0);
+         let payload = self.channel.encrypt(&line);
+@@ -1672,8 +1676,12 @@ impl Session {
+             return self.reject(&s, mining::REJECT_BAD_USERNAME).await;
+         }
+         let nta_unready = self.judge_nta(coinbaser_id, &v, issued_outputs.as_deref());
+-        if v.work > 0 && self.shared.nta_chain().is_some() {
+-            self.shared.readiness.lock().unwrap().note_work(&self.gateway_hex, v.work, ts);
++        if self.shared.nta_chain().is_some() {
++            // Readiness weighs a gateway by the difficulty of the shares it gets accepted, not by
++            // credit: a share whose difficulty is outside its hash is credited by hash alone
++            // (often nothing) but is the same hashrate. A number for a decision, not a payout.
++            let diff = 1u64 << v.target_pot.min(62);
++            self.shared.readiness.lock().unwrap().note_work(&self.gateway_hex, diff, ts);
+         }
+         if self.shared.sovereignty.on() && !self.lzt1.is_empty() {
+             self.decide_lzt1(s.job_id, JobSlot::coinbase_id_for(&s), &v.coinbase);
+-- 
+2.43.0
+

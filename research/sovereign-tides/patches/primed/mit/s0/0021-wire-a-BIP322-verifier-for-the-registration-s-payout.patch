@@ -1,0 +1,2624 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: michael moore <mrmoore27@pm.me>
+Date: Fri, 25 Sep 2026 08:49:47 +0000
+Subject: [PATCH 21/27] wire: a BIP322 verifier for the registration's payout
+ binding
+
+Simple and full formats for P2WPKH, P2TR key path, P2WSH (single key and bare multisig),
+P2SH-P2WPKH, P2SH-P2WSH, P2SH multisig and P2PKH, under standard BIP143/BIP341/legacy
+sighash. Anything else (taproot script paths that commit, timelock scripts, proof of funds)
+is inconclusive, which the BIP allows a verifier without an interpreter to say; it is never
+accepted. SIGHASH_ALL|SIGHASH_UNIFIED (0x21) is checked under Knots' UnifiedSighash only
+with the unified-sighash feature: XBT Knots wallets sign with it by default.
+
+Tested against the official BIP322 vectors (basic and generated) and against XBT vectors
+signed by XBT Knots wallets on regtest, standard and unified.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ prime/Cargo.lock                              |   63 +
+ prime/Cargo.toml                              |    4 +-
+ prime/wire/Cargo.toml                         |   10 +
+ prime/wire/src/bip322.rs                      | 1364 +++++++++++++++++
+ prime/wire/src/lib.rs                         |    1 +
+ prime/wire/tests/bip322_vectors.rs            |  162 ++
+ .../tests/data/bip322-basic-test-vectors.json |  137 ++
+ .../data/bip322-generated-test-vectors.json   |  551 +++++++
+ prime/wire/tests/data/bip322-xbt-vectors.json |  196 +++
+ 9 files changed, 2486 insertions(+), 2 deletions(-)
+ create mode 100644 prime/wire/src/bip322.rs
+ create mode 100644 prime/wire/tests/bip322_vectors.rs
+ create mode 100644 prime/wire/tests/data/bip322-basic-test-vectors.json
+ create mode 100644 prime/wire/tests/data/bip322-generated-test-vectors.json
+ create mode 100644 prime/wire/tests/data/bip322-xbt-vectors.json
+
+diff --git a/prime/Cargo.lock b/prime/Cargo.lock
+index cbe4717..f454ad4 100644
+--- a/prime/Cargo.lock
++++ b/prime/Cargo.lock
+@@ -71,6 +71,12 @@ dependencies = [
+  "windows-sys",
+ ]
+ 
++[[package]]
++name = "arrayvec"
++version = "0.7.8"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "d3fb67a6e08acf24fdeccbac2cb6ac4305825bd1f117462e0e6f2f193345ad56"
++
+ [[package]]
+ name = "base64ct"
+ version = "1.8.3"
+@@ -83,6 +89,42 @@ version = "0.11.1"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "32637268377fc7b10a8c6d51de3e7fba1ce5dd371a96e342b34e6078db558e7f"
+ 
++[[package]]
++name = "bitcoin-consensus-encoding"
++version = "1.2.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "6712f9c6fd6785b3b270884e57c441c403dc5d7e19ca45368c97c7a1de3000ec"
++dependencies = [
++ "bitcoin-internals",
++ "hex-conservative 1.3.0",
++ "serde",
++]
++
++[[package]]
++name = "bitcoin-internals"
++version = "0.6.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "d573f4cf32996a8dce612e4348cece65a241f1882ed594047c9ba348e8869fa5"
++
++[[package]]
++name = "bitcoin-io"
++version = "0.1.101"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "bb5de036369d1ac59d3c1819ebc4d850f89466f5401c571a285b6ed564a4cb78"
++dependencies = [
++ "bitcoin-consensus-encoding",
++]
++
++[[package]]
++name = "bitcoin_hashes"
++version = "0.14.101"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "bca4c7abb40c8817d77403c880988cfd484f23ab2365726afb2f798363e2c4a2"
++dependencies = [
++ "bitcoin-io",
++ "hex-conservative 0.2.3",
++]
++
+ [[package]]
+ name = "bitflags"
+ version = "1.3.2"
+@@ -283,7 +325,10 @@ dependencies = [
+ name = "datum-wire"
+ version = "0.1.0"
+ dependencies = [
++ "bech32",
++ "bitcoin_hashes",
+  "blake2",
++ "bs58",
+  "crypto_box",
+  "ed25519-dalek",
+  "hex",
+@@ -462,6 +507,24 @@ version = "0.4.3"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "7f24254aa9a54b5c858eaee2f5bccdb46aaf0e486a595ed5fd8f86ba55232a70"
+ 
++[[package]]
++name = "hex-conservative"
++version = "0.2.3"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "db3fef046dca3ca91ee1408a8c1b80ab777e80a4d308d1bf4e7adb3fcb047e08"
++dependencies = [
++ "arrayvec",
++]
++
++[[package]]
++name = "hex-conservative"
++version = "1.3.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "271e0d19bcb473b6675739a2b536076b24a082316cb5199ad918edce10c599e8"
++dependencies = [
++ "arrayvec",
++]
++
+ [[package]]
+ name = "indexmap"
+ version = "2.14.1"
+diff --git a/prime/Cargo.toml b/prime/Cargo.toml
+index 3192a12..39e8a43 100644
+--- a/prime/Cargo.toml
++++ b/prime/Cargo.toml
+@@ -27,8 +27,8 @@ tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "time"
+ bech32 = "0.11"
+ bs58 = { version = "0.5", features = ["check"] }
+ thiserror = "1"
+-# XBT-NTA (rnd/sov-002): BIP340 attestations. No rand: signing uses zero aux randomness.
+-secp256k1 = { version = "0.29", default-features = false, features = ["std"] }
++secp256k1 = "0.29"
++bitcoin_hashes = "0.14"
+ 
+ [profile.release]
+ lto = "thin"
+diff --git a/prime/wire/Cargo.toml b/prime/wire/Cargo.toml
+index 24445a3..12fd31c 100644
+--- a/prime/wire/Cargo.toml
++++ b/prime/wire/Cargo.toml
+@@ -16,6 +16,16 @@ rand_core.workspace = true
+ hex.workspace = true
+ thiserror.workspace = true
+ secp256k1.workspace = true
++bitcoin_hashes.workspace = true
++
++[features]
++# Accept SIGHASH_UNIFIED (0x21, Knots `UnifiedSighash`) in BIP322 proofs. Off by default:
++# SOV-P-002 §4.2 verifies BIP322 under standard BIP143/BIP341 sighash.
++unified-sighash = []
++# BIP322 signing helpers, for tests and vector generation only.
++bip322-signer = []
+ 
+ [dev-dependencies]
++bech32.workspace = true
++bs58.workspace = true
+ serde_json.workspace = true
+diff --git a/prime/wire/src/bip322.rs b/prime/wire/src/bip322.rs
+new file mode 100644
+index 0000000..9cacb4f
+--- /dev/null
++++ b/prime/wire/src/bip322.rs
+@@ -0,0 +1,1364 @@
++//! BIP322 generic signed messages: the verifier registration v2 checks the payout owner's
++//! consent with (SOV-P-002 §4.2).
++//!
++//! The verifier has no general script interpreter. It knows the standard templates and says
++//! [`Verdict::Inconclusive`] for anything else, as BIP322 allows a validator without a full
++//! interpreter to do; an inconclusive proof is never accepted.
++//!
++//! | challenge | formats | checked as |
++//! |---|---|---|
++//! | P2WPKH | simple, full | BIP143, SIGHASH_ALL |
++//! | P2TR, key path | simple, full | BIP341, SIGHASH_DEFAULT or SIGHASH_ALL |
++//! | P2WSH: `<pk> CHECKSIG`, `DUP HASH160 <h> EQUALVERIFY CHECKSIG`, bare m-of-n multisig | simple, full | BIP143 |
++//! | P2SH-P2WPKH, P2SH-P2WSH (same witness scripts) | full | BIP143 |
++//! | P2SH with a bare redeem script of the same kinds | full | legacy |
++//! | P2PKH | full | legacy |
++//!
++//! Taproot script paths, annexes, timelock scripts, witness versions above 1 and proof of
++//! funds (`pof`) are inconclusive. The legacy `signmessage` format (P2PKH only) is not here:
++//! Prime checks it with the pool node's `verifymessage`.
++//!
++//! BIP322's to_spend/to_sign are never valid on chain, so standard BIP143/BIP341 sighashes
++//! are what a signature is checked under. With the `unified-sighash` feature, and
++//! [`Options::unified_sighash`], a signature whose hash type is `0x21` (SIGHASH_ALL |
++//! SIGHASH_UNIFIED, Knots `UnifiedSighash`, what Shrike signs with on XBT) is checked under
++//! that message instead.
++//!
++//! XBT addresses use Bitcoin's encodings (`bc`/`tb`/`bcrt`, the same base58 versions), so
++//! the verifier takes the challenge as a scriptPubKey and callers decode addresses as usual.
++
++use bitcoin_hashes::{ripemd160, sha256, Hash as _};
++use secp256k1::{ecdsa, schnorr, Message, PublicKey, Secp256k1, XOnlyPublicKey};
++
++/// BIP340 tag of the message hash.
++pub const MESSAGE_TAG: &[u8] = b"BIP0322-signed-message";
++
++/// SIGHASH_ALL.
++const SIGHASH_ALL: u8 = 0x01;
++/// SIGHASH_ALL | SIGHASH_UNIFIED (Knots).
++pub const SIGHASH_ALL_UNIFIED: u8 = 0x21;
++
++const OP_0: u8 = 0x00;
++const OP_PUSHDATA1: u8 = 0x4c;
++const OP_PUSHDATA2: u8 = 0x4d;
++const OP_PUSHDATA4: u8 = 0x4e;
++const OP_1NEGATE: u8 = 0x4f;
++const OP_1: u8 = 0x51;
++const OP_16: u8 = 0x60;
++const OP_RETURN: u8 = 0x6a;
++const OP_DUP: u8 = 0x76;
++const OP_EQUAL: u8 = 0x87;
++const OP_EQUALVERIFY: u8 = 0x88;
++const OP_HASH160: u8 = 0xa9;
++const OP_CODESEPARATOR: u8 = 0xab;
++const OP_CHECKSIG: u8 = 0xac;
++const OP_CHECKMULTISIG: u8 = 0xae;
++
++// ---------------------------------------------------------------------------------------
++// Transactions
++
++#[derive(Clone, Debug, PartialEq, Eq)]
++pub struct TxIn {
++    /// Internal byte order (as serialized), not the displayed hex.
++    pub prev_txid: [u8; 32],
++    pub vout: u32,
++    pub script_sig: Vec<u8>,
++    pub sequence: u32,
++    pub witness: Vec<Vec<u8>>,
++}
++
++#[derive(Clone, Debug, PartialEq, Eq)]
++pub struct TxOut {
++    pub value: u64,
++    pub script: Vec<u8>,
++}
++
++#[derive(Clone, Debug, PartialEq, Eq)]
++pub struct Tx {
++    pub version: u32,
++    pub inputs: Vec<TxIn>,
++    pub outputs: Vec<TxOut>,
++    pub lock_time: u32,
++}
++
++fn compact_size(out: &mut Vec<u8>, n: usize) {
++    match n {
++        0..=0xfc => out.push(n as u8),
++        0xfd..=0xffff => {
++            out.push(0xfd);
++            out.extend_from_slice(&(n as u16).to_le_bytes());
++        }
++        0x1_0000..=0xffff_ffff => {
++            out.push(0xfe);
++            out.extend_from_slice(&(n as u32).to_le_bytes());
++        }
++        _ => {
++            out.push(0xff);
++            out.extend_from_slice(&(n as u64).to_le_bytes());
++        }
++    }
++}
++
++fn var_bytes(out: &mut Vec<u8>, b: &[u8]) {
++    compact_size(out, b.len());
++    out.extend_from_slice(b);
++}
++
++fn ser_output(out: &mut Vec<u8>, o: &TxOut) {
++    out.extend_from_slice(&o.value.to_le_bytes());
++    var_bytes(out, &o.script);
++}
++
++impl Tx {
++    /// Consensus serialization; with `witness`, BIP144 when any input has one.
++    pub fn serialize(&self, witness: bool) -> Vec<u8> {
++        let segwit = witness && self.inputs.iter().any(|i| !i.witness.is_empty());
++        let mut out = Vec::with_capacity(128);
++        out.extend_from_slice(&self.version.to_le_bytes());
++        if segwit {
++            out.extend_from_slice(&[0x00, 0x01]);
++        }
++        compact_size(&mut out, self.inputs.len());
++        for i in &self.inputs {
++            out.extend_from_slice(&i.prev_txid);
++            out.extend_from_slice(&i.vout.to_le_bytes());
++            var_bytes(&mut out, &i.script_sig);
++            out.extend_from_slice(&i.sequence.to_le_bytes());
++        }
++        compact_size(&mut out, self.outputs.len());
++        for o in &self.outputs {
++            ser_output(&mut out, o);
++        }
++        if segwit {
++            for i in &self.inputs {
++                compact_size(&mut out, i.witness.len());
++                for item in &i.witness {
++                    var_bytes(&mut out, item);
++                }
++            }
++        }
++        out.extend_from_slice(&self.lock_time.to_le_bytes());
++        out
++    }
++
++    /// Txid in internal byte order.
++    pub fn txid(&self) -> [u8; 32] {
++        dsha256(&self.serialize(false))
++    }
++
++    /// Txid as block explorers show it.
++    pub fn txid_hex(&self) -> String {
++        let mut t = self.txid();
++        t.reverse();
++        hex::encode(t)
++    }
++
++    /// Parse a whole transaction; trailing bytes are an error.
++    pub fn parse(b: &[u8]) -> Result<Tx, String> {
++        let mut r = Reader { b, at: 0 };
++        let version = r.u32()?;
++        let mut n_in = r.compact()?;
++        let mut segwit = false;
++        if n_in == 0 {
++            // BIP144 marker, then the flag
++            if r.u8()? != 0x01 {
++                return Err("bad segwit flag".into());
++            }
++            segwit = true;
++            n_in = r.compact()?;
++        }
++        if n_in > 10_000 {
++            return Err("too many inputs".into());
++        }
++        let mut inputs = Vec::with_capacity(n_in);
++        for _ in 0..n_in {
++            let prev_txid: [u8; 32] = r.take(32)?.try_into().unwrap();
++            let vout = r.u32()?;
++            let script_sig = r.var_bytes()?.to_vec();
++            let sequence = r.u32()?;
++            inputs.push(TxIn { prev_txid, vout, script_sig, sequence, witness: Vec::new() });
++        }
++        let n_out = r.compact()?;
++        if n_out > 10_000 {
++            return Err("too many outputs".into());
++        }
++        let mut outputs = Vec::with_capacity(n_out);
++        for _ in 0..n_out {
++            let value = r.u64()?;
++            let script = r.var_bytes()?.to_vec();
++            outputs.push(TxOut { value, script });
++        }
++        if segwit {
++            for i in inputs.iter_mut() {
++                i.witness = r.witness_stack()?;
++            }
++            if inputs.iter().all(|i| i.witness.is_empty()) {
++                return Err("superfluous segwit marker".into());
++            }
++        }
++        let lock_time = r.u32()?;
++        if r.at != b.len() {
++            return Err("trailing bytes".into());
++        }
++        Ok(Tx { version, inputs, outputs, lock_time })
++    }
++}
++
++struct Reader<'a> {
++    b: &'a [u8],
++    at: usize,
++}
++
++impl<'a> Reader<'a> {
++    fn take(&mut self, n: usize) -> Result<&'a [u8], String> {
++        let end = self.at.checked_add(n).filter(|&e| e <= self.b.len()).ok_or("truncated")?;
++        let s = &self.b[self.at..end];
++        self.at = end;
++        Ok(s)
++    }
++    fn u8(&mut self) -> Result<u8, String> {
++        Ok(self.take(1)?[0])
++    }
++    fn u32(&mut self) -> Result<u32, String> {
++        Ok(u32::from_le_bytes(self.take(4)?.try_into().unwrap()))
++    }
++    fn u64(&mut self) -> Result<u64, String> {
++        Ok(u64::from_le_bytes(self.take(8)?.try_into().unwrap()))
++    }
++    /// Canonical compact size, bounded by what is left to read.
++    fn compact(&mut self) -> Result<usize, String> {
++        let n = match self.u8()? {
++            0xfd => {
++                let v = u16::from_le_bytes(self.take(2)?.try_into().unwrap()) as u64;
++                if v < 0xfd {
++                    return Err("non-canonical compact size".into());
++                }
++                v
++            }
++            0xfe => {
++                let v = u32::from_le_bytes(self.take(4)?.try_into().unwrap()) as u64;
++                if v <= 0xffff {
++                    return Err("non-canonical compact size".into());
++                }
++                v
++            }
++            0xff => {
++                let v = self.u64()?;
++                if v <= 0xffff_ffff {
++                    return Err("non-canonical compact size".into());
++                }
++                v
++            }
++            v => v as u64,
++        };
++        if n > (self.b.len() - self.at) as u64 + 1 {
++            return Err("length past the end".into());
++        }
++        Ok(n as usize)
++    }
++    fn var_bytes(&mut self) -> Result<&'a [u8], String> {
++        let n = self.compact()?;
++        self.take(n)
++    }
++    fn witness_stack(&mut self) -> Result<Vec<Vec<u8>>, String> {
++        let n = self.compact()?;
++        let mut items = Vec::with_capacity(n.min(64));
++        for _ in 0..n {
++            items.push(self.var_bytes()?.to_vec());
++        }
++        Ok(items)
++    }
++}
++
++/// Decode a consensus-encoded witness stack (a *simple* signature), all bytes used.
++pub fn parse_witness(b: &[u8]) -> Result<Vec<Vec<u8>>, String> {
++    let mut r = Reader { b, at: 0 };
++    let w = r.witness_stack()?;
++    if r.at != b.len() {
++        return Err("trailing bytes".into());
++    }
++    Ok(w)
++}
++
++pub fn serialize_witness(stack: &[Vec<u8>]) -> Vec<u8> {
++    let mut out = Vec::new();
++    compact_size(&mut out, stack.len());
++    for item in stack {
++        var_bytes(&mut out, item);
++    }
++    out
++}
++
++// ---------------------------------------------------------------------------------------
++// Hashes
++
++pub fn sha256(b: &[u8]) -> [u8; 32] {
++    sha256::Hash::hash(b).to_byte_array()
++}
++
++pub fn dsha256(b: &[u8]) -> [u8; 32] {
++    sha256(&sha256(b))
++}
++
++pub fn hash160(b: &[u8]) -> [u8; 20] {
++    ripemd160::Hash::hash(&sha256(b)).to_byte_array()
++}
++
++/// BIP340 tagged hash.
++pub fn tagged_hash(tag: &[u8], msg: &[u8]) -> [u8; 32] {
++    let t = sha256(tag);
++    let mut pre = Vec::with_capacity(64 + msg.len());
++    pre.extend_from_slice(&t);
++    pre.extend_from_slice(&t);
++    pre.extend_from_slice(msg);
++    sha256(&pre)
++}
++
++pub fn message_hash(message: &[u8]) -> [u8; 32] {
++    tagged_hash(MESSAGE_TAG, message)
++}
++
++// ---------------------------------------------------------------------------------------
++// to_spend / to_sign
++
++pub fn to_spend(challenge: &[u8], message: &[u8]) -> Tx {
++    let mut script_sig = vec![OP_0, 0x20];
++    script_sig.extend_from_slice(&message_hash(message));
++    Tx {
++        version: 0,
++        inputs: vec![TxIn { prev_txid: [0; 32], vout: 0xffff_ffff, script_sig, sequence: 0, witness: Vec::new() }],
++        outputs: vec![TxOut { value: 0, script: challenge.to_vec() }],
++        lock_time: 0,
++    }
++}
++
++/// The unsigned `to_sign` for a `to_spend`, with the default (simple) field values.
++pub fn to_sign(to_spend: &Tx) -> Tx {
++    Tx {
++        version: 0,
++        inputs: vec![TxIn {
++            prev_txid: to_spend.txid(),
++            vout: 0,
++            script_sig: Vec::new(),
++            sequence: 0,
++            witness: Vec::new(),
++        }],
++        outputs: vec![TxOut { value: 0, script: vec![OP_RETURN] }],
++        lock_time: 0,
++    }
++}
++
++// ---------------------------------------------------------------------------------------
++// Base64 (standard alphabet, padded)
++
++const B64: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
++
++pub fn base64_encode(b: &[u8]) -> String {
++    let mut out = String::with_capacity(b.len().div_ceil(3) * 4);
++    for c in b.chunks(3) {
++        let n = (u32::from(c[0]) << 16) | (u32::from(*c.get(1).unwrap_or(&0)) << 8) | u32::from(*c.get(2).unwrap_or(&0));
++        for k in 0..4 {
++            if k <= c.len() {
++                out.push(B64[((n >> (18 - 6 * k)) & 63) as usize] as char);
++            } else {
++                out.push('=');
++            }
++        }
++    }
++    out
++}
++
++pub fn base64_decode(s: &str) -> Option<Vec<u8>> {
++    let s = s.as_bytes();
++    if s.len() % 4 != 0 {
++        return None;
++    }
++    let val = |c: u8| B64.iter().position(|&x| x == c).map(|v| v as u32);
++    let mut out = Vec::with_capacity(s.len() / 4 * 3);
++    for (i, q) in s.chunks(4).enumerate() {
++        let last = i + 1 == s.len() / 4;
++        let pad = q.iter().rev().take_while(|&&c| c == b'=').count();
++        if pad > 2 || (pad > 0 && !last) {
++            return None;
++        }
++        let mut n = 0u32;
++        for &c in &q[..4 - pad] {
++            n = (n << 6) | val(c)?;
++        }
++        n <<= 6 * pad as u32;
++        let bytes = [(n >> 16) as u8, (n >> 8) as u8, n as u8];
++        // non-zero bits under the padding are not canonical
++        if (pad == 1 && bytes[2] != 0) || (pad == 2 && (bytes[1] != 0 || bytes[2] != 0)) {
++            return None;
++        }
++        out.extend_from_slice(&bytes[..3 - pad]);
++    }
++    Some(out)
++}
++
++// ---------------------------------------------------------------------------------------
++// Verdicts
++
++#[derive(Clone, Copy, Debug, PartialEq, Eq)]
++pub enum Format {
++    Simple,
++    Full,
++}
++
++#[derive(Clone, Copy, Debug, PartialEq, Eq)]
++pub enum Kind {
++    P2pkh,
++    P2shP2wpkh,
++    P2shP2wsh,
++    P2sh,
++    P2wpkh,
++    P2wsh,
++    P2tr,
++}
++
++impl Kind {
++    pub fn name(self) -> &'static str {
++        match self {
++            Kind::P2pkh => "p2pkh",
++            Kind::P2shP2wpkh => "p2sh-p2wpkh",
++            Kind::P2shP2wsh => "p2sh-p2wsh",
++            Kind::P2sh => "p2sh",
++            Kind::P2wpkh => "p2wpkh",
++            Kind::P2wsh => "p2wsh",
++            Kind::P2tr => "p2tr",
++        }
++    }
++}
++
++#[derive(Clone, Debug, PartialEq, Eq)]
++pub struct Valid {
++    pub format: Format,
++    pub kind: Kind,
++    /// BIP322 "valid at time T and age S": `to_sign`'s nLockTime and first nSequence.
++    pub lock_time: u32,
++    pub sequence: u32,
++    /// Some signature was checked under `UnifiedSighash` (0x21).
++    pub unified: bool,
++}
++
++impl Valid {
++    /// No timelock: nLockTime 0, and the first input's nSequence either 0 or with the
++    /// relative-lock disable bit set.
++    pub fn untimed(&self) -> bool {
++        self.lock_time == 0 && (self.sequence == 0 || self.sequence & (1 << 31) != 0)
++    }
++}
++
++#[derive(Clone, Debug, PartialEq, Eq)]
++pub enum Verdict {
++    Valid(Valid),
++    /// A check failed.
++    Invalid(String),
++    /// The verifier could not check the scripts (BIP322 "inconclusive"); never accepted.
++    Inconclusive(String),
++}
++
++impl Verdict {
++    pub fn is_valid(&self) -> bool {
++        matches!(self, Verdict::Valid(_))
++    }
++}
++
++#[derive(Clone, Copy, Debug, Default)]
++pub struct Options {
++    /// Accept `0x21` (SIGHASH_ALL | SIGHASH_UNIFIED) signatures. Only honoured when built
++    /// with the `unified-sighash` feature.
++    pub unified_sighash: bool,
++}
++
++enum Fail {
++    Invalid(String),
++    Inconclusive(String),
++}
++
++fn invalid<T>(why: &str) -> Result<T, Fail> {
++    Err(Fail::Invalid(format!("invalid signature: {why}")))
++}
++
++fn inconclusive<T>(why: &str) -> Result<T, Fail> {
++    Err(Fail::Inconclusive(why.to_string()))
++}
++
++// ---------------------------------------------------------------------------------------
++// Verification
++
++/// Verify a BIP322 signature (`smp`/`ful`-prefixed, or unprefixed simple) by the owner of
++/// `challenge` (a scriptPubKey) over `message`.
++pub fn verify(challenge: &[u8], message: &[u8], signature: &str, opts: Options) -> Verdict {
++    let signature = signature.trim();
++    if signature.is_empty() {
++        return Verdict::Invalid("signature too short".into());
++    }
++    let (format, body) = if let Some(rest) = signature.strip_prefix("smp") {
++        (Format::Simple, rest)
++    } else if let Some(rest) = signature.strip_prefix("ful") {
++        (Format::Full, rest)
++    } else if signature.starts_with("pof") {
++        return Verdict::Inconclusive("proof of funds (pof) is not supported".into());
++    } else {
++        // BIP322: before the prefixes, a signature was simple
++        (Format::Simple, signature)
++    };
++    let Some(raw) = base64_decode(body) else {
++        return Verdict::Invalid("error decoding signature as base64".into());
++    };
++    if raw.is_empty() {
++        return Verdict::Invalid("signature too short".into());
++    }
++    let spend = to_spend(challenge, message);
++    let tx = match format {
++        Format::Simple => {
++            let Ok(witness) = parse_witness(&raw) else {
++                return Verdict::Invalid("error parsing signature as simple variant (witness stack)".into());
++            };
++            let mut t = to_sign(&spend);
++            t.inputs[0].witness = witness;
++            t
++        }
++        Format::Full => {
++            let Ok(t) = Tx::parse(&raw) else {
++                return Verdict::Invalid("error parsing signature as full variant".into());
++            };
++            if let Err(e) = check_full_shape(&t, &spend) {
++                return fail_verdict(e);
++            }
++            t
++        }
++    };
++    match check_input(&tx, challenge, opts) {
++        Ok((kind, unified)) => {
++            if format == Format::Simple && !matches!(kind, Kind::P2wpkh | Kind::P2wsh | Kind::P2tr) {
++                return Verdict::Invalid("invalid signature: the simple format is for native segwit only".into());
++            }
++            Verdict::Valid(Valid {
++                format,
++                kind,
++                lock_time: tx.lock_time,
++                sequence: tx.inputs[0].sequence,
++                unified,
++            })
++        }
++        Err(e) => fail_verdict(e),
++    }
++}
++
++fn fail_verdict(f: Fail) -> Verdict {
++    match f {
++        Fail::Invalid(s) => Verdict::Invalid(s),
++        Fail::Inconclusive(s) => Verdict::Inconclusive(s),
++    }
++}
++
++/// A full `to_sign` is the template apart from version, nLockTime, nSequence and scriptSig.
++fn check_full_shape(t: &Tx, spend: &Tx) -> Result<(), Fail> {
++    if t.inputs.is_empty() {
++        return invalid("to_sign has no input");
++    }
++    if t.inputs[0].prev_txid != spend.txid() || t.inputs[0].vout != 0 {
++        return invalid("to_sign does not spend to_spend:0 (wrong message or address)");
++    }
++    if t.inputs.len() > 1 {
++        return inconclusive("to_sign has more inputs: that is a proof of funds (pof)");
++    }
++    if t.outputs.len() != 1 || t.outputs[0].value != 0 || t.outputs[0].script != [OP_RETURN] {
++        return invalid("to_sign must have exactly one output, 0 to OP_RETURN");
++    }
++    if t.version != 0 && t.version != 2 {
++        return inconclusive("to_sign version must be 0 or 2");
++    }
++    Ok(())
++}
++
++/// Input 0 of `tx` spends an output locked by `challenge` of value 0.
++fn check_input(tx: &Tx, challenge: &[u8], opts: Options) -> Result<(Kind, bool), Fail> {
++    let input = &tx.inputs[0];
++    let ctx = Ctx { tx, challenge, opts, unified: std::cell::Cell::new(false) };
++    let kind = match classify(challenge) {
++        Script::P2wpkh(h) => {
++            if !input.script_sig.is_empty() {
++                return invalid("native segwit input with a scriptSig");
++            }
++            ctx.p2wpkh(&h, &input.witness)?;
++            Kind::P2wpkh
++        }
++        Script::P2wsh(h) => {
++            if !input.script_sig.is_empty() {
++                return invalid("native segwit input with a scriptSig");
++            }
++            ctx.p2wsh(&h, &input.witness)?;
++            Kind::P2wsh
++        }
++        Script::P2tr(x) => {
++            if !input.script_sig.is_empty() {
++                return invalid("native segwit input with a scriptSig");
++            }
++            ctx.p2tr(&x, &input.witness)?;
++            Kind::P2tr
++        }
++        Script::P2pkh(h) => {
++            if !input.witness.is_empty() {
++                return invalid("witness on a legacy input");
++            }
++            let pushes = push_only(&input.script_sig)?;
++            if pushes.len() != 2 {
++                return invalid("P2PKH scriptSig must be <sig> <pubkey>");
++            }
++            let pk = &pushes[1];
++            check_pubkey(pk, false)?;
++            if hash160(pk) != h {
++                return invalid("public key does not match the address");
++            }
++            ctx.ecdsa(&pushes[0], pk, challenge, SigVersion::Base)?;
++            Kind::P2pkh
++        }
++        Script::P2sh(h) => {
++            let pushes = push_only(&input.script_sig)?;
++            let Some(redeem) = pushes.last() else { return invalid("P2SH input without a redeem script") };
++            if hash160(redeem) != h {
++                return invalid("redeem script does not match the address");
++            }
++            match classify(redeem) {
++                Script::P2wpkh(h) => {
++                    if pushes.len() != 1 {
++                        return invalid("P2SH-P2WPKH scriptSig must be the redeem script alone");
++                    }
++                    ctx.p2wpkh(&h, &input.witness)?;
++                    Kind::P2shP2wpkh
++                }
++                Script::P2wsh(h) => {
++                    if pushes.len() != 1 {
++                        return invalid("P2SH-P2WSH scriptSig must be the redeem script alone");
++                    }
++                    ctx.p2wsh(&h, &input.witness)?;
++                    Kind::P2shP2wsh
++                }
++                Script::WitnessOther => return inconclusive("P2SH-wrapped witness program the verifier does not know"),
++                _ => {
++                    if !input.witness.is_empty() {
++                        return invalid("witness on a legacy P2SH input");
++                    }
++                    ctx.eval(redeem, &pushes[..pushes.len() - 1], SigVersion::Base)?;
++                    Kind::P2sh
++                }
++            }
++        }
++        Script::WitnessOther => return inconclusive("witness version or program the verifier does not know"),
++        Script::Other => return inconclusive("scriptPubKey the verifier does not know"),
++    };
++    Ok((kind, ctx.unified.get()))
++}
++
++enum Script {
++    P2pkh([u8; 20]),
++    P2sh([u8; 20]),
++    P2wpkh([u8; 20]),
++    P2wsh([u8; 32]),
++    P2tr([u8; 32]),
++    WitnessOther,
++    Other,
++}
++
++fn classify(s: &[u8]) -> Script {
++    match s {
++        [OP_DUP, OP_HASH160, 0x14, h @ .., OP_EQUALVERIFY, OP_CHECKSIG] if h.len() == 20 => Script::P2pkh(h.try_into().unwrap()),
++        [OP_HASH160, 0x14, h @ .., OP_EQUAL] if h.len() == 20 => Script::P2sh(h.try_into().unwrap()),
++        [OP_0, 0x14, h @ ..] if h.len() == 20 => Script::P2wpkh(h.try_into().unwrap()),
++        [OP_0, 0x20, h @ ..] if h.len() == 32 => Script::P2wsh(h.try_into().unwrap()),
++        [OP_1, 0x20, x @ ..] if x.len() == 32 => Script::P2tr(x.try_into().unwrap()),
++        [v, n, p @ ..] if (*v == OP_0 || (OP_1..=OP_16).contains(v)) && (2..=40).contains(n) && p.len() == *n as usize => {
++            Script::WitnessOther
++        }
++        _ => Script::Other,
++    }
++}
++
++/// The pushes of a push-only script, each minimally encoded (MINIMALDATA).
++fn push_only(s: &[u8]) -> Result<Vec<Vec<u8>>, Fail> {
++    let mut out = Vec::new();
++    let mut i = 0;
++    while i < s.len() {
++        let op = s[i];
++        i += 1;
++        let data: Vec<u8> = match op {
++            OP_0 => Vec::new(),
++            0x01..=0x4b => {
++                let n = op as usize;
++                let d = s.get(i..i + n).ok_or(Fail::Invalid("invalid signature: truncated push".into()))?;
++                i += n;
++                d.to_vec()
++            }
++            OP_PUSHDATA1 | OP_PUSHDATA2 | OP_PUSHDATA4 => {
++                let w = match op {
++                    OP_PUSHDATA1 => 1,
++                    OP_PUSHDATA2 => 2,
++                    _ => 4,
++                };
++                let lb = s.get(i..i + w).ok_or(Fail::Invalid("invalid signature: truncated push".into()))?;
++                i += w;
++                let mut n = 0usize;
++                for (k, b) in lb.iter().enumerate() {
++                    n |= (*b as usize) << (8 * k);
++                }
++                let d = s.get(i..i + n).ok_or(Fail::Invalid("invalid signature: truncated push".into()))?;
++                i += n;
++                d.to_vec()
++            }
++            OP_1NEGATE => vec![0x81],
++            OP_1..=OP_16 => vec![op - OP_1 + 1],
++            _ => return invalid("scriptSig is not push-only"),
++        };
++        if !minimal_push(op, &data) {
++            return invalid("non-minimal push (MINIMALDATA)");
++        }
++        out.push(data);
++    }
++    Ok(out)
++}
++
++fn minimal_push(op: u8, d: &[u8]) -> bool {
++    match d.len() {
++        0 => op == OP_0,
++        1 if (1..=16).contains(&d[0]) => op == OP_1 + d[0] - 1,
++        1 if d[0] == 0x81 => op == OP_1NEGATE,
++        n if n <= 75 => op as usize == n,
++        n if n <= 255 => op == OP_PUSHDATA1,
++        n if n <= 65535 => op == OP_PUSHDATA2,
++        _ => true,
++    }
++}
++
++#[derive(Clone, Copy, PartialEq, Eq)]
++enum SigVersion {
++    Base,
++    WitnessV0,
++}
++
++struct Ctx<'a> {
++    tx: &'a Tx,
++    challenge: &'a [u8],
++    opts: Options,
++    unified: std::cell::Cell<bool>,
++}
++
++impl Ctx<'_> {
++    fn p2wpkh(&self, h: &[u8; 20], w: &[Vec<u8>]) -> Result<(), Fail> {
++        if w.len() != 2 {
++            return invalid("P2WPKH witness must be <sig> <pubkey>");
++        }
++        check_pubkey(&w[1], true)?;
++        if hash160(&w[1]) != *h {
++            return invalid("public key does not match the address");
++        }
++        let code = p2pkh_script(h);
++        self.ecdsa(&w[0], &w[1], &code, SigVersion::WitnessV0)
++    }
++
++    fn p2wsh(&self, h: &[u8; 32], w: &[Vec<u8>]) -> Result<(), Fail> {
++        let Some((ws, stack)) = w.split_last() else { return invalid("empty witness") };
++        if sha256(ws) != *h {
++            return invalid("witness script does not match the address");
++        }
++        if w.len() > 100 {
++            return invalid("witness stack too large");
++        }
++        self.eval(ws, stack, SigVersion::WitnessV0)
++    }
++
++    fn p2tr(&self, x: &[u8; 32], w: &[Vec<u8>]) -> Result<(), Fail> {
++        match w {
++            [] => invalid("empty witness"),
++            [sig] => self.schnorr(sig, x),
++            [.., last] if last.first() == Some(&0x50) => inconclusive("taproot annex"),
++            [.., script, control] => {
++                // Check the commitment (consensus, so a failure is invalid); a script path
++                // that does commit is past what this verifier runs.
++                if taproot_commits(x, script, control) {
++                    inconclusive("taproot script path")
++                } else {
++                    invalid("taproot script path does not commit to the output key")
++                }
++            }
++        }
++    }
++
++    /// The standard single-key and multisig scripts, with `stack` the items below the script.
++    fn eval(&self, script: &[u8], stack: &[Vec<u8>], sv: SigVersion) -> Result<(), Fail> {
++        if script.contains(&OP_CODESEPARATOR) && script_ops(script).is_some_and(|ops| ops.contains(&OP_CODESEPARATOR)) {
++            return invalid("OP_CODESEPARATOR is forbidden");
++        }
++        let witness = sv == SigVersion::WitnessV0;
++        // <pk> CHECKSIG
++        if let [n, pk @ .., OP_CHECKSIG] = script {
++            if (*n == 33 || *n == 65) && pk.len() == *n as usize {
++                if stack.len() != 1 {
++                    return invalid("stack must be <sig> (CLEANSTACK)");
++                }
++                check_pubkey(pk, witness)?;
++                return self.ecdsa(&stack[0], pk, script, sv);
++            }
++        }
++        // DUP HASH160 <h> EQUALVERIFY CHECKSIG
++        if let Script::P2pkh(h) = classify(script) {
++            if stack.len() != 2 {
++                return invalid("stack must be <sig> <pubkey> (CLEANSTACK)");
++            }
++            check_pubkey(&stack[1], witness)?;
++            if hash160(&stack[1]) != h {
++                return invalid("public key does not match the script");
++            }
++            return self.ecdsa(&stack[0], &stack[1], script, sv);
++        }
++        if let Some((m, pks)) = multisig(script) {
++            if stack.len() != m + 1 {
++                return invalid("multisig stack must be the dummy and m signatures (CLEANSTACK)");
++            }
++            if !stack[0].is_empty() {
++                return invalid("multisig dummy must be empty (NULLDUMMY)");
++            }
++            let sigs = &stack[1..];
++            let mut k = 0;
++            for (i, sig) in sigs.iter().enumerate() {
++                if sig.is_empty() {
++                    return invalid("empty multisig signature");
++                }
++                loop {
++                    if pks.len() - k < sigs.len() - i {
++                        return invalid("multisig signature does not verify");
++                    }
++                    let pk = pks[k];
++                    k += 1;
++                    check_pubkey(pk, witness)?;
++                    match self.ecdsa(sig, pk, script, sv) {
++                        Ok(()) => break,
++                        Err(Fail::Invalid(_)) => continue,
++                        Err(e) => return Err(e),
++                    }
++                }
++            }
++            return Ok(());
++        }
++        inconclusive("script the verifier does not know (only single-key and bare multisig)")
++    }
++
++    fn ecdsa(&self, sig: &[u8], pk: &[u8], script_code: &[u8], sv: SigVersion) -> Result<(), Fail> {
++        let Some((&ht, der)) = sig.split_last() else { return invalid("empty signature") };
++        let unified = match ht {
++            SIGHASH_ALL => false,
++            SIGHASH_ALL_UNIFIED if unified_allowed(self.opts) => true,
++            SIGHASH_ALL_UNIFIED => return invalid("hash type 0x21 (SIGHASH_UNIFIED) is not accepted"),
++            _ => return invalid("hash type must be SIGHASH_ALL"),
++        };
++        if !valid_der(der) {
++            return invalid("signature is not strict DER");
++        }
++        let Ok(mut s) = ecdsa::Signature::from_der(der) else { return invalid("signature is not DER") };
++        let before = s;
++        s.normalize_s();
++        if s != before {
++            return invalid("high-S signature (LOW_S)");
++        }
++        let Ok(key) = PublicKey::from_slice(pk) else { return invalid("bad public key") };
++        let digest = if unified {
++            self.unified.set(true);
++            self.unified_sighash(ht, Some(script_code), if sv == SigVersion::Base { 0 } else { 1 })
++        } else {
++            match sv {
++                SigVersion::Base => self.legacy_sighash(script_code, ht),
++                SigVersion::WitnessV0 => self.bip143_sighash(script_code, ht),
++            }
++        };
++        let secp = Secp256k1::verification_only();
++        secp.verify_ecdsa(&Message::from_digest(digest), &s, &key)
++            .or_else(|_| invalid("ECDSA signature does not verify"))
++    }
++
++    fn schnorr(&self, sig: &[u8], x: &[u8; 32]) -> Result<(), Fail> {
++        let (bytes, ht) = match sig.len() {
++            64 => (sig, 0x00),
++            65 => (&sig[..64], sig[64]),
++            _ => return invalid("Schnorr signature must be 64 or 65 bytes"),
++        };
++        let digest = match ht {
++            0x00 if sig.len() == 64 => self.bip341_sighash(0x00),
++            SIGHASH_ALL => self.bip341_sighash(SIGHASH_ALL),
++            SIGHASH_ALL_UNIFIED if unified_allowed(self.opts) => {
++                self.unified.set(true);
++                self.unified_sighash(ht, None, 2)
++            }
++            SIGHASH_ALL_UNIFIED => return invalid("hash type 0x21 (SIGHASH_UNIFIED) is not accepted"),
++            _ => return invalid("hash type must be SIGHASH_DEFAULT or SIGHASH_ALL"),
++        };
++        let Ok(key) = XOnlyPublicKey::from_slice(x) else { return invalid("bad x-only key") };
++        let Ok(s) = schnorr::Signature::from_slice(bytes) else { return invalid("bad Schnorr signature") };
++        let secp = Secp256k1::verification_only();
++        secp.verify_schnorr(&s, &Message::from_digest(digest), &key)
++            .or_else(|_| invalid("Schnorr signature does not verify"))
++    }
++
++    /// Original sighash, SIGHASH_ALL, every other input's scriptSig emptied.
++    fn legacy_sighash(&self, script_code: &[u8], ht: u8) -> [u8; 32] {
++        let mut t = self.tx.clone();
++        for (i, input) in t.inputs.iter_mut().enumerate() {
++            input.witness.clear();
++            input.script_sig = if i == 0 { script_code.to_vec() } else { Vec::new() };
++        }
++        let mut pre = t.serialize(false);
++        pre.extend_from_slice(&u32::from(ht).to_le_bytes());
++        dsha256(&pre)
++    }
++
++    /// BIP143 for input 0, SIGHASH_ALL, amount 0.
++    fn bip143_sighash(&self, script_code: &[u8], ht: u8) -> [u8; 32] {
++        let t = self.tx;
++        let mut prevouts = Vec::new();
++        let mut seqs = Vec::new();
++        for i in &t.inputs {
++            prevouts.extend_from_slice(&i.prev_txid);
++            prevouts.extend_from_slice(&i.vout.to_le_bytes());
++            seqs.extend_from_slice(&i.sequence.to_le_bytes());
++        }
++        let mut outs = Vec::new();
++        for o in &t.outputs {
++            ser_output(&mut outs, o);
++        }
++        let i0 = &t.inputs[0];
++        let mut pre = Vec::new();
++        pre.extend_from_slice(&t.version.to_le_bytes());
++        pre.extend_from_slice(&dsha256(&prevouts));
++        pre.extend_from_slice(&dsha256(&seqs));
++        pre.extend_from_slice(&i0.prev_txid);
++        pre.extend_from_slice(&i0.vout.to_le_bytes());
++        var_bytes(&mut pre, script_code);
++        pre.extend_from_slice(&0u64.to_le_bytes());
++        pre.extend_from_slice(&i0.sequence.to_le_bytes());
++        pre.extend_from_slice(&dsha256(&outs));
++        pre.extend_from_slice(&t.lock_time.to_le_bytes());
++        pre.extend_from_slice(&u32::from(ht).to_le_bytes());
++        dsha256(&pre)
++    }
++
++    /// The single-SHA256 aggregates BIP341 and `UnifiedSighash` share: prevouts, amounts,
++    /// spent scripts, sequences, outputs. The only spent output is to_spend's (0, challenge).
++    fn aggregates(&self) -> [[u8; 32]; 5] {
++        let t = self.tx;
++        let mut prevouts = Vec::new();
++        let mut amounts = Vec::new();
++        let mut scripts = Vec::new();
++        let mut seqs = Vec::new();
++        for i in &t.inputs {
++            prevouts.extend_from_slice(&i.prev_txid);
++            prevouts.extend_from_slice(&i.vout.to_le_bytes());
++            amounts.extend_from_slice(&0u64.to_le_bytes());
++            var_bytes(&mut scripts, self.challenge);
++            seqs.extend_from_slice(&i.sequence.to_le_bytes());
++        }
++        let mut outs = Vec::new();
++        for o in &t.outputs {
++            ser_output(&mut outs, o);
++        }
++        [sha256(&prevouts), sha256(&amounts), sha256(&scripts), sha256(&seqs), sha256(&outs)]
++    }
++
++    /// BIP341 key path for input 0, SIGHASH_DEFAULT or SIGHASH_ALL, no annex.
++    fn bip341_sighash(&self, ht: u8) -> [u8; 32] {
++        let t = self.tx;
++        let agg = self.aggregates();
++        let mut pre = vec![0x00, ht];
++        pre.extend_from_slice(&t.version.to_le_bytes());
++        pre.extend_from_slice(&t.lock_time.to_le_bytes());
++        for a in &agg {
++            pre.extend_from_slice(a);
++        }
++        pre.push(0x00); // spend_type: key path, no annex
++        pre.extend_from_slice(&0u32.to_le_bytes());
++        tagged_hash(b"TapSighash", &pre)
++    }
++
++    /// Knots `SignatureHashUnified` for input 0 and SIGHASH_ALL | SIGHASH_UNIFIED:
++    /// `script_type` 0 bare/P2SH, 1 segwit v0, 2 taproot key path.
++    fn unified_sighash(&self, ht: u8, script_code: Option<&[u8]>, script_type: u8) -> [u8; 32] {
++        let t = self.tx;
++        let agg = self.aggregates();
++        let mut pre = vec![0x00, ht];
++        pre.extend_from_slice(&t.version.to_le_bytes());
++        pre.extend_from_slice(&t.lock_time.to_le_bytes());
++        pre.push(0x00); // the fifth locktime byte
++        for a in &agg {
++            pre.extend_from_slice(a); // not ANYONECANPAY, output type ALL: all five
++        }
++        pre.push(script_type);
++        pre.extend_from_slice(&0u32.to_le_bytes());
++        match script_code {
++            Some(code) => var_bytes(&mut pre, code),
++            None => pre.push(0x00), // no annex
++        }
++        tagged_hash(b"UnifiedSighash", &pre)
++    }
++}
++
++/// BIP341: does `control` prove `script` is a leaf of the output key `x`?
++fn taproot_commits(x: &[u8; 32], script: &[u8], control: &[u8]) -> bool {
++    if control.len() < 33 || (control.len() - 33) % 32 != 0 || control.len() > 33 + 32 * 128 {
++        return false;
++    }
++    let mut leaf = vec![control[0] & 0xfe];
++    var_bytes(&mut leaf, script);
++    let mut k = tagged_hash(b"TapLeaf", &leaf);
++    for node in control[33..].chunks(32) {
++        let (a, b) = if k[..] < node[..] { (&k[..], node) } else { (node, &k[..]) };
++        k = tagged_hash(b"TapBranch", &[a, b].concat());
++    }
++    let (Ok(internal), Ok(output)) = (XOnlyPublicKey::from_slice(&control[1..33]), XOnlyPublicKey::from_slice(x)) else {
++        return false;
++    };
++    let Ok(t) = secp256k1::Scalar::from_be_bytes(tagged_hash(b"TapTweak", &[&control[1..33], &k[..]].concat())) else {
++        return false;
++    };
++    let parity = if control[0] & 1 == 1 { secp256k1::Parity::Odd } else { secp256k1::Parity::Even };
++    internal.tweak_add_check(&Secp256k1::verification_only(), &output, parity, t)
++}
++
++fn unified_allowed(opts: Options) -> bool {
++    cfg!(feature = "unified-sighash") && opts.unified_sighash
++}
++
++/// Opcodes of a script, skipping push data; `None` if a push runs off the end.
++fn script_ops(s: &[u8]) -> Option<Vec<u8>> {
++    let mut ops = Vec::new();
++    let mut i = 0;
++    while i < s.len() {
++        let op = s[i];
++        i += 1;
++        let n = match op {
++            0x01..=0x4b => op as usize,
++            OP_PUSHDATA1 => {
++                let n = *s.get(i)? as usize;
++                i += 1;
++                n
++            }
++            OP_PUSHDATA2 => {
++                let n = u16::from_le_bytes(s.get(i..i + 2)?.try_into().ok()?) as usize;
++                i += 2;
++                n
++            }
++            OP_PUSHDATA4 => {
++                let n = u32::from_le_bytes(s.get(i..i + 4)?.try_into().ok()?) as usize;
++                i += 4;
++                n
++            }
++            _ => {
++                ops.push(op);
++                0
++            }
++        };
++        i = i.checked_add(n)?;
++        if i > s.len() {
++            return None;
++        }
++    }
++    Some(ops)
++}
++
++/// `OP_m <pk>... OP_n OP_CHECKMULTISIG` with 1 ≤ m ≤ n ≤ 16.
++fn multisig(s: &[u8]) -> Option<(usize, Vec<&[u8]>)> {
++    let (&first, rest) = s.split_first()?;
++    let (&last, rest) = rest.split_last()?;
++    let (&n_op, mut body) = rest.split_last()?;
++    if last != OP_CHECKMULTISIG || !(OP_1..=OP_16).contains(&first) || !(OP_1..=OP_16).contains(&n_op) {
++        return None;
++    }
++    let (m, n) = ((first - OP_1 + 1) as usize, (n_op - OP_1 + 1) as usize);
++    let mut pks = Vec::new();
++    while let Some((&len, tail)) = body.split_first() {
++        if (len != 33 && len != 65) || tail.len() < len as usize {
++            return None;
++        }
++        pks.push(&tail[..len as usize]);
++        body = &tail[len as usize..];
++    }
++    (m <= n && pks.len() == n).then_some((m, pks))
++}
++
++pub fn p2pkh_script(h: &[u8; 20]) -> Vec<u8> {
++    let mut s = vec![OP_DUP, OP_HASH160, 0x14];
++    s.extend_from_slice(h);
++    s.extend_from_slice(&[OP_EQUALVERIFY, OP_CHECKSIG]);
++    s
++}
++
++/// STRICTENC; WITNESS_PUBKEYTYPE (compressed only) in segwit v0.
++fn check_pubkey(pk: &[u8], witness: bool) -> Result<(), Fail> {
++    let ok = match pk.first() {
++        Some(0x02 | 0x03) => pk.len() == 33,
++        Some(0x04) => pk.len() == 65 && !witness,
++        _ => false,
++    };
++    if ok {
++        Ok(())
++    } else if witness && pk.len() == 65 {
++        invalid("uncompressed public key in segwit (WITNESS_PUBKEYTYPE)")
++    } else {
++        invalid("public key encoding (STRICTENC)")
++    }
++}
++
++/// BIP66 strict DER, without the hash type byte.
++fn valid_der(sig: &[u8]) -> bool {
++    let len = sig.len();
++    if !(8..=72).contains(&len) || sig[0] != 0x30 || sig[1] as usize != len - 2 {
++        return false;
++    }
++    let len_r = sig[3] as usize;
++    if 5 + len_r >= len {
++        return false;
++    }
++    let len_s = sig[5 + len_r] as usize;
++    if len_r + len_s + 6 != len {
++        return false;
++    }
++    if sig[2] != 0x02 || len_r == 0 || sig[4] & 0x80 != 0 {
++        return false;
++    }
++    if len_r > 1 && sig[4] == 0x00 && sig[5] & 0x80 == 0 {
++        return false;
++    }
++    if sig[len_r + 4] != 0x02 || len_s == 0 || sig[len_r + 6] & 0x80 != 0 {
++        return false;
++    }
++    if len_s > 1 && sig[len_r + 6] == 0x00 && sig[len_r + 7] & 0x80 == 0 {
++        return false;
++    }
++    true
++}
++
++// ---------------------------------------------------------------------------------------
++// Signing (tests and vector generation)
++
++#[cfg(any(test, feature = "bip322-signer"))]
++pub mod signer {
++    //! Deterministic BIP322 signing for the handful of templates the tests need.
++    use super::*;
++    use secp256k1::{Keypair, Scalar, SecretKey};
++
++    pub fn pubkey(sk: &[u8; 32]) -> [u8; 33] {
++        let secp = Secp256k1::new();
++        PublicKey::from_secret_key(&secp, &SecretKey::from_slice(sk).unwrap()).serialize()
++    }
++
++    pub fn p2wpkh_script(sk: &[u8; 32]) -> Vec<u8> {
++        let mut s = vec![OP_0, 0x14];
++        s.extend_from_slice(&hash160(&pubkey(sk)));
++        s
++    }
++
++    pub fn p2pkh_script_of(sk: &[u8; 32]) -> Vec<u8> {
++        p2pkh_script(&hash160(&pubkey(sk)))
++    }
++
++    pub fn p2sh_p2wpkh_script(sk: &[u8; 32]) -> Vec<u8> {
++        let mut s = vec![OP_HASH160, 0x14];
++        s.extend_from_slice(&hash160(&p2wpkh_script(sk)));
++        s.push(OP_EQUAL);
++        s
++    }
++
++    /// `<pk> CHECKSIG`
++    pub fn pk_script(sk: &[u8; 32]) -> Vec<u8> {
++        let mut s = vec![33];
++        s.extend_from_slice(&pubkey(sk));
++        s.push(OP_CHECKSIG);
++        s
++    }
++
++    pub fn p2wsh_pk_script(sk: &[u8; 32]) -> Vec<u8> {
++        let mut s = vec![OP_0, 0x20];
++        s.extend_from_slice(&sha256(&pk_script(sk)));
++        s
++    }
++
++    /// BIP86 key-path output key (no script tree).
++    fn tweaked(sk: &[u8; 32]) -> Keypair {
++        let secp = Secp256k1::new();
++        let kp = Keypair::from_secret_key(&secp, &SecretKey::from_slice(sk).unwrap());
++        let (x, _) = kp.x_only_public_key();
++        let t = tagged_hash(b"TapTweak", &x.serialize());
++        kp.add_xonly_tweak(&secp, &Scalar::from_be_bytes(t).unwrap()).unwrap()
++    }
++
++    pub fn p2tr_script(sk: &[u8; 32]) -> Vec<u8> {
++        let mut s = vec![OP_1, 0x20];
++        s.extend_from_slice(&tweaked(sk).x_only_public_key().0.serialize());
++        s
++    }
++
++    fn ctx<'a>(tx: &'a Tx, challenge: &'a [u8]) -> Ctx<'a> {
++        Ctx { tx, challenge, opts: Options { unified_sighash: true }, unified: Default::default() }
++    }
++
++    fn ecdsa_sig(digest: [u8; 32], sk: &[u8; 32], ht: u8) -> Vec<u8> {
++        let secp = Secp256k1::new();
++        let sig = secp.sign_ecdsa(&Message::from_digest(digest), &SecretKey::from_slice(sk).unwrap());
++        let mut v = sig.serialize_der().to_vec();
++        v.push(ht);
++        v
++    }
++
++    /// `smp` P2WPKH signature; `ht` is 0x01, or 0x21 for `UnifiedSighash`.
++    pub fn simple_p2wpkh(sk: &[u8; 32], message: &[u8], ht: u8) -> String {
++        let challenge = p2wpkh_script(sk);
++        let tx = to_sign(&to_spend(&challenge, message));
++        let pk = pubkey(sk);
++        let code = p2pkh_script(&hash160(&pk));
++        let c = ctx(&tx, &challenge);
++        let d = if ht == SIGHASH_ALL_UNIFIED { c.unified_sighash(ht, Some(&code), 1) } else { c.bip143_sighash(&code, ht) };
++        format!("smp{}", base64_encode(&serialize_witness(&[ecdsa_sig(d, sk, ht), pk.to_vec()])))
++    }
++
++    /// `smp` P2WSH `<pk> CHECKSIG` signature.
++    pub fn simple_p2wsh_pk(sk: &[u8; 32], message: &[u8]) -> String {
++        let challenge = p2wsh_pk_script(sk);
++        let tx = to_sign(&to_spend(&challenge, message));
++        let ws = pk_script(sk);
++        let d = ctx(&tx, &challenge).bip143_sighash(&ws, SIGHASH_ALL);
++        format!("smp{}", base64_encode(&serialize_witness(&[ecdsa_sig(d, sk, SIGHASH_ALL), ws])))
++    }
++
++    /// `smp` P2TR key-path signature; `ht` 0x00 (64-byte), 0x01, or 0x21.
++    pub fn simple_p2tr(sk: &[u8; 32], message: &[u8], ht: u8) -> String {
++        let challenge = p2tr_script(sk);
++        let tx = to_sign(&to_spend(&challenge, message));
++        let c = ctx(&tx, &challenge);
++        let d = if ht == SIGHASH_ALL_UNIFIED { c.unified_sighash(ht, None, 2) } else { c.bip341_sighash(ht) };
++        let secp = Secp256k1::new();
++        let sig = secp.sign_schnorr_no_aux_rand(&Message::from_digest(d), &tweaked(sk));
++        let mut v = sig.as_ref().to_vec();
++        if ht != 0x00 {
++            v.push(ht);
++        }
++        format!("smp{}", base64_encode(&serialize_witness(&[v])))
++    }
++
++    /// `ful` P2SH-P2WPKH signature.
++    pub fn full_p2sh_p2wpkh(sk: &[u8; 32], message: &[u8]) -> String {
++        let challenge = p2sh_p2wpkh_script(sk);
++        let mut tx = to_sign(&to_spend(&challenge, message));
++        let redeem = p2wpkh_script(sk);
++        let mut ss = vec![redeem.len() as u8];
++        ss.extend_from_slice(&redeem);
++        tx.inputs[0].script_sig = ss;
++        let pk = pubkey(sk);
++        let d = ctx(&tx, &challenge).bip143_sighash(&p2pkh_script(&hash160(&pk)), SIGHASH_ALL);
++        tx.inputs[0].witness = vec![ecdsa_sig(d, sk, SIGHASH_ALL), pk.to_vec()];
++        format!("ful{}", base64_encode(&tx.serialize(true)))
++    }
++
++    /// `ful` P2PKH signature.
++    pub fn full_p2pkh(sk: &[u8; 32], message: &[u8]) -> String {
++        let challenge = p2pkh_script_of(sk);
++        let mut tx = to_sign(&to_spend(&challenge, message));
++        let d = ctx(&tx, &challenge).legacy_sighash(&challenge, SIGHASH_ALL);
++        let sig = ecdsa_sig(d, sk, SIGHASH_ALL);
++        let pk = pubkey(sk);
++        let mut ss = vec![sig.len() as u8];
++        ss.extend_from_slice(&sig);
++        ss.push(33);
++        ss.extend_from_slice(&pk);
++        tx.inputs[0].script_sig = ss;
++        format!("ful{}", base64_encode(&tx.serialize(true)))
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn base64_round_trip_and_strictness() {
++        for n in 0..40u8 {
++            let b: Vec<u8> = (0..n).map(|i| i.wrapping_mul(37)).collect();
++            assert_eq!(base64_decode(&base64_encode(&b)).unwrap(), b);
++        }
++        assert!(base64_decode("not-valid-base64!!!").is_none());
++        assert!(base64_decode("fooAA==").is_none());
++        assert!(base64_decode("AB==").is_none(), "non-zero bits under padding");
++        assert!(base64_decode("A===").is_none());
++    }
++
++    #[test]
++    fn signer_round_trips() {
++        let sk = [7u8; 32];
++        let m = b"LZT1 register v2";
++        let o = Options { unified_sighash: true };
++        let cases: Vec<(Vec<u8>, String, Kind)> = vec![
++            (signer::p2wpkh_script(&sk), signer::simple_p2wpkh(&sk, m, SIGHASH_ALL), Kind::P2wpkh),
++            (signer::p2wsh_pk_script(&sk), signer::simple_p2wsh_pk(&sk, m), Kind::P2wsh),
++            (signer::p2tr_script(&sk), signer::simple_p2tr(&sk, m, 0x00), Kind::P2tr),
++            (signer::p2tr_script(&sk), signer::simple_p2tr(&sk, m, SIGHASH_ALL), Kind::P2tr),
++            (signer::p2sh_p2wpkh_script(&sk), signer::full_p2sh_p2wpkh(&sk, m), Kind::P2shP2wpkh),
++            (signer::p2pkh_script_of(&sk), signer::full_p2pkh(&sk, m), Kind::P2pkh),
++        ];
++        for (challenge, sig, kind) in cases {
++            match verify(&challenge, m, &sig, o) {
++                Verdict::Valid(v) => assert_eq!(v.kind, kind),
++                other => panic!("{kind:?}: {other:?}"),
++            }
++            assert!(!verify(&challenge, b"other", &sig, o).is_valid(), "{kind:?} wrong message");
++            assert!(!verify(&signer::p2wpkh_script(&[8u8; 32]), m, &sig, o).is_valid(), "{kind:?} wrong key");
++        }
++    }
++
++    #[test]
++    fn unified_sighash_is_behind_the_feature_and_the_option() {
++        let sk = [9u8; 32];
++        let m = b"shrike";
++        for (challenge, sig) in [
++            (signer::p2wpkh_script(&sk), signer::simple_p2wpkh(&sk, m, SIGHASH_ALL_UNIFIED)),
++            (signer::p2tr_script(&sk), signer::simple_p2tr(&sk, m, SIGHASH_ALL_UNIFIED)),
++        ] {
++            assert!(!verify(&challenge, m, &sig, Options::default()).is_valid(), "0x21 without the option");
++            let with = verify(&challenge, m, &sig, Options { unified_sighash: true });
++            if cfg!(feature = "unified-sighash") {
++                assert!(matches!(with, Verdict::Valid(Valid { unified: true, .. })), "{with:?}");
++            } else {
++                assert!(!with.is_valid(), "0x21 without the feature");
++            }
++        }
++    }
++
++    #[test]
++    fn simple_is_for_native_segwit_only() {
++        // a P2PKH challenge given a simple witness: no scriptSig, so it cannot verify
++        let sk = [3u8; 32];
++        let wit = signer::simple_p2wpkh(&sk, b"m", SIGHASH_ALL);
++        assert!(!verify(&signer::p2pkh_script_of(&sk), b"m", &wit, Options::default()).is_valid());
++    }
++
++    #[test]
++    fn high_s_and_non_der_are_invalid() {
++        let sk = [5u8; 32];
++        let challenge = signer::p2wpkh_script(&sk);
++        let sig = signer::simple_p2wpkh(&sk, b"m", SIGHASH_ALL);
++        let mut w = parse_witness(&base64_decode(&sig[3..]).unwrap()).unwrap();
++        // flip S to n - S
++        let der = &w[0][..w[0].len() - 1];
++        let mut s = ecdsa::Signature::from_der(der).unwrap().serialize_compact();
++        let n = hex::decode("FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141").unwrap();
++        let mut borrow = 0i32;
++        for i in (0..32).rev() {
++            let v = n[i] as i32 - s[32 + i] as i32 - borrow;
++            s[32 + i] = v.rem_euclid(256) as u8;
++            borrow = (v < 0) as i32;
++        }
++        let high = ecdsa::Signature::from_compact(&s).unwrap();
++        let mut hs = high.serialize_der().to_vec();
++        hs.push(SIGHASH_ALL);
++        w[0] = hs;
++        let forged = format!("smp{}", base64_encode(&serialize_witness(&w)));
++        assert!(matches!(verify(&challenge, b"m", &forged, Options::default()), Verdict::Invalid(e) if e.contains("LOW_S")));
++    }
++}
+diff --git a/prime/wire/src/lib.rs b/prime/wire/src/lib.rs
+index 55d5444..70da1ea 100644
+--- a/prime/wire/src/lib.rs
++++ b/prime/wire/src/lib.rs
+@@ -25,6 +25,7 @@
+ //!   Prime can see who a share's coinbase actually pays.
+ 
+ pub mod authorship;
++pub mod bip322;
+ pub mod coinbase;
+ pub mod coinbaser;
+ pub mod crypto;
+diff --git a/prime/wire/tests/bip322_vectors.rs b/prime/wire/tests/bip322_vectors.rs
+new file mode 100644
+index 0000000..a08bd4a
+--- /dev/null
++++ b/prime/wire/tests/bip322_vectors.rs
+@@ -0,0 +1,162 @@
++//! The official BIP322 test vectors (bitcoin/bips `bip-0322/*.json`), then the XBT ones
++//! (`bip322-xbt-vectors.json`: made on an XBT Knots regtest node by `gen_xbt_vectors.py`,
++//! SOV-009). XBT addresses use Bitcoin's encodings, so the official vectors apply as they are.
++
++use datum_wire::bip322::{self, Format, Options, Verdict};
++use serde_json::Value;
++
++const BASIC: &str = include_str!("data/bip322-basic-test-vectors.json");
++const GENERATED: &str = include_str!("data/bip322-generated-test-vectors.json");
++const XBT: &str = include_str!("data/bip322-xbt-vectors.json");
++
++/// scriptPubKey of a mainnet/testnet/regtest address.
++fn script_of(addr: &str) -> Vec<u8> {
++    if let Ok((_hrp, ver, prog)) = bech32::segwit::decode(addr) {
++        let v = ver.to_u8();
++        let mut s = vec![if v == 0 { 0 } else { 0x50 + v }, prog.len() as u8];
++        s.extend_from_slice(&prog);
++        return s;
++    }
++    let b = bs58::decode(addr).with_check(None).into_vec().expect("address");
++    match b[0] {
++        0x00 | 0x6f => [&[0x76, 0xa9, 0x14][..], &b[1..], &[0x88, 0xac]].concat(),
++        0x05 | 0xc4 => [&[0xa9, 0x14][..], &b[1..], &[0x87]].concat(),
++        v => panic!("version {v}"),
++    }
++}
++
++/// Needs an interpreter the verifier does not have, so inconclusive (never accepted).
++fn unsupported(kind: &str) -> bool {
++    kind.contains("time-lock")
++}
++
++#[test]
++fn official_basic_tx_hashes() {
++    let v: Value = serde_json::from_str(BASIC).unwrap();
++    for c in v["tx_hashes"].as_array().unwrap() {
++        let msg = c["message"].as_str().unwrap().as_bytes();
++        let challenge = script_of(c["address"].as_str().unwrap());
++        assert_eq!(hex::encode(bip322::message_hash(msg)), c["message_hash"].as_str().unwrap());
++        let spend = bip322::to_spend(&challenge, msg);
++        assert_eq!(spend.txid_hex(), c["to_spend_tx_hash"].as_str().unwrap());
++        assert_eq!(bip322::to_sign(&spend).txid_hex(), c["to_sign_tx_hash"].as_str().unwrap());
++    }
++}
++
++#[test]
++fn official_basic_simple_and_errors() {
++    let v: Value = serde_json::from_str(BASIC).unwrap();
++    let mut n = 0;
++    for c in v["simple"].as_array().unwrap() {
++        let challenge = script_of(c["address"].as_str().unwrap());
++        for sig in c["bip322_signatures"].as_array().unwrap() {
++            let r = bip322::verify(&challenge, c["message"].as_str().unwrap().as_bytes(), sig.as_str().unwrap(), Options::default());
++            assert!(matches!(r, Verdict::Valid(ref ok) if ok.format == Format::Simple && ok.untimed()), "{}: {r:?}", c["type"]);
++            n += 1;
++        }
++    }
++    assert_eq!(n, 6);
++    for c in v["error"].as_array().unwrap() {
++        let r = bip322::verify(
++            &script_of(c["address"].as_str().unwrap()),
++            c["message"].as_str().unwrap().as_bytes(),
++            c["signature"].as_str().unwrap(),
++            Options::default(),
++        );
++        let want = c["error_substr"].as_str().unwrap();
++        assert!(matches!(r, Verdict::Invalid(ref e) if e.contains(want)), "{}: {r:?} (want {want})", c["description"]);
++    }
++}
++
++#[test]
++fn official_generated() {
++    let v: Value = serde_json::from_str(GENERATED).unwrap();
++    let (mut valid, mut inconclusive) = (0, 0);
++    for section in ["simple", "full"] {
++        for c in v[section].as_array().unwrap() {
++            let kind = c["type"].as_str().unwrap();
++            let challenge = script_of(c["address"].as_str().unwrap());
++            for sig in c["bip322_signatures"].as_array().unwrap() {
++                let r = bip322::verify(&challenge, c["message"].as_str().unwrap().as_bytes(), sig.as_str().unwrap(), Options::default());
++                if unsupported(kind) {
++                    assert!(matches!(r, Verdict::Inconclusive(_)), "{section} {kind}: {r:?}");
++                    inconclusive += 1;
++                    continue;
++                }
++                let Verdict::Valid(ok) = r else { panic!("{section} {kind}: {r:?}") };
++                if section == "full" {
++                    // valid at time T and age S
++                    assert_eq!(ok.format, Format::Full);
++                    assert_eq!(u64::from(ok.lock_time), c["lock_time"].as_u64().unwrap(), "{kind}");
++                    assert_eq!(u64::from(ok.sequence), c["sequence"].as_u64().unwrap(), "{kind}");
++                    assert!(!ok.untimed());
++                } else {
++                    assert_eq!(ok.format, Format::Simple);
++                }
++                valid += 1;
++            }
++        }
++    }
++    assert_eq!((valid, inconclusive), (12, 2));
++    for c in v["proof_of_funds"].as_array().unwrap() {
++        let challenge = script_of(c["address"].as_str().unwrap());
++        for sig in c["bip322_signatures"].as_array().unwrap() {
++            let r = bip322::verify(&challenge, c["message"].as_str().unwrap().as_bytes(), sig.as_str().unwrap(), Options::default());
++            assert!(matches!(r, Verdict::Inconclusive(_)), "pof: {r:?}");
++        }
++    }
++    let mut errors = 0;
++    for c in v["error"].as_array().unwrap() {
++        let d = c["description"].as_str().unwrap();
++        let r = bip322::verify(
++            &script_of(c["address"].as_str().unwrap()),
++            c["message"].as_str().unwrap().as_bytes(),
++            c["signature"].as_str().unwrap(),
++            Options::default(),
++        );
++        if unsupported(d) {
++            assert!(!r.is_valid(), "{d}: {r:?}");
++        } else {
++            let want = c["error_substr"].as_str().unwrap();
++            assert!(matches!(r, Verdict::Invalid(ref e) if e.contains(want)), "{d}: {r:?} (want {want})");
++        }
++        errors += 1;
++    }
++    assert_eq!(errors, 28);
++}
++
++/// The XBT vectors: signed by an XBT Knots node's wallet (`signrawtransactionwithwallet` on
++/// `to_sign`, and `signmessage` for the legacy one), for regtest addresses.
++#[test]
++fn xbt_vectors() {
++    let v: Value = serde_json::from_str(XBT).unwrap();
++    let mut seen = std::collections::BTreeSet::new();
++    for c in v["bip322"].as_array().unwrap() {
++        let name = c["name"].as_str().unwrap();
++        let challenge = script_of(c["address"].as_str().unwrap());
++        let unified = c["unified"].as_bool().unwrap_or(false);
++        let r = bip322::verify(&challenge, c["message"].as_str().unwrap().as_bytes(), c["signature"].as_str().unwrap(), Options::default());
++        let r_unified = bip322::verify(
++            &challenge,
++            c["message"].as_str().unwrap().as_bytes(),
++            c["signature"].as_str().unwrap(),
++            Options { unified_sighash: true },
++        );
++        match c["expect"].as_str().unwrap() {
++            "valid" if unified => {
++                assert!(!r.is_valid(), "{name}: 0x21 accepted without the option");
++                assert_eq!(r_unified.is_valid(), cfg!(feature = "unified-sighash"), "{name}: {r_unified:?}");
++            }
++            "valid" => {
++                let Verdict::Valid(ok) = &r else { panic!("{name}: {r:?}") };
++                assert_eq!(ok.kind.name(), c["type"].as_str().unwrap(), "{name}");
++            }
++            "invalid" => assert!(matches!(r, Verdict::Invalid(_)), "{name}: {r:?}"),
++            other => panic!("{name}: expect {other}"),
++        }
++        seen.insert(c["type"].as_str().unwrap().to_string());
++    }
++    for kind in ["p2wpkh", "p2tr", "p2wsh", "p2sh-p2wpkh", "p2pkh"] {
++        assert!(seen.contains(kind), "no XBT vector for {kind}");
++    }
++}
+diff --git a/prime/wire/tests/data/bip322-basic-test-vectors.json b/prime/wire/tests/data/bip322-basic-test-vectors.json
+new file mode 100644
+index 0000000..f32a5bf
+--- /dev/null
++++ b/prime/wire/tests/data/bip322-basic-test-vectors.json
+@@ -0,0 +1,137 @@
++{
++  "tx_hashes": [
++    {
++      "message": "",
++      "address": "bc1q9vza2e8x573nczrlzms0wvx3gsqjx7vavgkx0l",
++      "message_hash": "c90c269c4f8fcbe6880f72a721ddfbf1914268a794cbb21cfafee13770ae19f1",
++      "to_spend_tx_hash": "c5680aa69bb8d860bf82d4e9cd3504b55dde018de765a91bb566283c545a99a7",
++      "to_sign_tx_hash": "1e9654e951a5ba44c8604c4de6c67fd78a27e81dcadcfe1edf638ba3aaebaed6"
++    },
++    {
++      "message": "Hello World",
++      "address": "bc1q9vza2e8x573nczrlzms0wvx3gsqjx7vavgkx0l",
++      "message_hash": "f0eb03b1a75ac6d9847f55c624a99169b5dccba2a31f5b23bea77ba270de0a7a",
++      "to_spend_tx_hash": "b79d196740ad5217771c1098fc4a4b51e0535c32236c71f1ea4d61a2d603352b",
++      "to_sign_tx_hash": "88737ae86f2077145f93cc4b153ae9a1cb8d56afa511988c149c5c8c9d93bddf"
++    },
++    {
++      "message": "UTF-8 support: öäüéàè 测试文本 \uD83D\uDE04",
++      "address": "bc1q9vza2e8x573nczrlzms0wvx3gsqjx7vavgkx0l",
++      "message_hash": "43936b237ea38c7794eb5d755e0d220b6db92ebfc5c8f482759d22b1286376d7",
++      "to_spend_tx_hash": "c8f4f525fe8afb1bc09b44175bd2096f079c98425e8a1be676b712add1fb62f0",
++      "to_sign_tx_hash": "8f488e06b89eafd019ec528109eafaf7f1d1811fd617aa1eeb9658f1c1be6586"
++    }
++  ],
++  "simple": [
++    {
++      "message": "",
++      "private_keys": [
++        "L3VFeEujGtevx9w18HD1fhRbCH67Az2dpCymeRE1SoPK6XQtaN2k"
++      ],
++      "address": "bc1q9vza2e8x573nczrlzms0wvx3gsqjx7vavgkx0l",
++      "type": "p2wpkh",
++      "witness_script": "",
++      "bip322_signatures": [
++        "smpAkcwRAIgM2gBAQqvZX15ZiysmKmQpDrG83avLIT492QBzLnQIxYCIBaTpOaD20qRlEylyxFSeEA2ba9YOixpX8z46TSDtS40ASECx/EgAxlkQpQ9hYjgGu6EBCPMVPwVIVJqO4XCsMvViHI=",
++        "smpAkgwRQIhAPkJ1Q4oYS0htvyuSFHLxRQpFAY56b70UvE7Dxazen0ZAiAtZfFz1S6T6I23MWI2lK/pcNTWncuyL8UL+oMdydVgzAEhAsfxIAMZZEKUPYWI4BruhAQjzFT8FSFSajuFwrDL1Yhy"
++      ]
++    },
++    {
++      "message": "Hello World",
++      "private_keys": [
++        "L3VFeEujGtevx9w18HD1fhRbCH67Az2dpCymeRE1SoPK6XQtaN2k"
++      ],
++      "address": "bc1q9vza2e8x573nczrlzms0wvx3gsqjx7vavgkx0l",
++      "type": "p2wpkh",
++      "witness_script": "",
++      "bip322_signatures": [
++        "smpAkcwRAIgZRfIY3p7/DoVTty6YZbWS71bc5Vct9p9Fia83eRmw2QCICK/ENGfwLtptFluMGs2KsqoNSk89pO7F29zJLUx9a/sASECx/EgAxlkQpQ9hYjgGu6EBCPMVPwVIVJqO4XCsMvViHI=",
++        "smpAkgwRQIhAOzyynlqt93lOKJr+wmmxIens//zPzl9tqIOua93wO6MAiBi5n5EyAcPScOjf1lAqIUIQtr3zKNeavYabHyR8eGhowEhAsfxIAMZZEKUPYWI4BruhAQjzFT8FSFSajuFwrDL1Yhy"
++      ]
++    },
++    {
++      "message": "This will be a p2wsh 3-of-3 multisig BIP 322 signed message",
++      "private_keys": [
++        "L4DksdGZ4KQJfcLHD5Dv25fu8Rxyv7hHi2RjZR4TYzr8c6h9VNrp",
++        "KzSRqnCVwjzY8id2X5oHEJWXkSHwKUYaAXusjwgkES8BuQPJnPNu",
++        "L1zt9Rw7HrU7jaguMbVzhiX8ffuVkmMis5wLHddXYuHWYf8u8uRj"
++      ],
++      "address": "bc1qp0ahvfh83088w49k405szqgg4f3pptr7p2g06tdxfjcd40z4lh4q95lsz9",
++      "type": "p2wsh-multisig-3of3",
++      "witness_script": "5321027568b11f122ff8a7bc1c57e5c7642055bc618967b2f7bfe8e11fe99903c94dd321020a8bdf79cfa421d9655e9282800f115ff1d9db1e721ceb4248a3fcfec7faa67c21030c529e0ea40a00975d202624e39915daf7bdd2b71f31aa08596838781ce5f33a53ae",
++      "bip322_signatures": [
++        "smpBQBHMEQCIFX9aaqPJWq2Ff2kpen5bFDTid+ehgUOpHV0LfjncXy4AiA3GNicF7aKPzdpa9PCpmaYQs3pHd+qbvvhXdxOCKCAMAFIMEUCIQD/ELXg6CNYyUQijCg96JtgvgjZb9dsl1Ctof4QAeyTcQIgVM/1AAblFl/DCt6A1gJg+T/i2qU5SQD09+chFJzolRwBSDBFAiEAlqRfSFyWNVQhvaCnmeV5tyneiCWMTcFbuujoD/pFa3wCIGnZjfQb8NolSYq9asV+ZeBSkCGHJcqnaV4JYS5MYPEGAWlTIQJ1aLEfEi/4p7wcV+XHZCBVvGGJZ7L3v+jhH+mZA8lN0yECCovfec+kIdllXpKCgA8RX/HZ2x5yHOtCSKP8/sf6pnwhAwxSng6kCgCXXSAmJOOZFdr3vdK3HzGqCFloOHgc5fM6U64="
++      ]
++    },
++    {
++      "message": "No prefix fallback",
++      "private_keys": [
++        "KyrSGCFPhqZMjCe5fNTYddiLMp4tMj4gLKuJ26TsB2rvr1VJGPbt"
++      ],
++      "address": "bc1pss0zhytly75awhm6x2hhvd5lnzv3vssgrf9axfheq8ldyzn88ges79fler",
++      "type": "p2tr",
++      "witness_script": "",
++      "bip322_signatures": [
++        "AUCJYOwOjxYAvatTAGYaVlNXBVyFuc4MwNQkOuK2tl8xhfKDONd0NjfYyNSYcRqeCp8hsAnCEPHAVEkO9h6vbQ/R"
++      ]
++    }
++  ],
++  "error": [
++    {
++      "description": "invalid base64 encoding",
++      "message": "",
++      "address": "bc1q9vza2e8x573nczrlzms0wvx3gsqjx7vavgkx0l",
++      "signature": "not-valid-base64!!!",
++      "error_substr": "base64"
++    },
++    {
++      "description": "empty signature",
++      "message": "",
++      "address": "bc1q9vza2e8x573nczrlzms0wvx3gsqjx7vavgkx0l",
++      "signature": "",
++      "error_substr": "signature too short"
++    },
++    {
++      "description": "wrong message for valid simple p2wpkh signature (empty message was signed)",
++      "message": "Wrong message that was not signed",
++      "address": "bc1q9vza2e8x573nczrlzms0wvx3gsqjx7vavgkx0l",
++      "signature": "smpAkcwRAIgM2gBAQqvZX15ZiysmKmQpDrG83avLIT492QBzLnQIxYCIBaTpOaD20qRlEylyxFSeEA2ba9YOixpX8z46TSDtS40ASECx/EgAxlkQpQ9hYjgGu6EBCPMVPwVIVJqO4XCsMvViHI=",
++      "error_substr": "invalid signature"
++    },
++    {
++      "description": "wrong address for valid simple p2wpkh signature (signed for different address)",
++      "message": "",
++      "address": "bc1qp0ahvfh83088w49k405szqgg4f3pptr7p2g06tdxfjcd40z4lh4q95lsz9",
++      "signature": "smpAkcwRAIgM2gBAQqvZX15ZiysmKmQpDrG83avLIT492QBzLnQIxYCIBaTpOaD20qRlEylyxFSeEA2ba9YOixpX8z46TSDtS40ASECx/EgAxlkQpQ9hYjgGu6EBCPMVPwVIVJqO4XCsMvViHI=",
++      "error_substr": "invalid signature"
++    },
++    {
++      "description": "empty witness stack (single zero byte)",
++      "message": "",
++      "address": "bc1q9vza2e8x573nczrlzms0wvx3gsqjx7vavgkx0l",
++      "signature": "smpAA==",
++      "error_substr": "invalid signature"
++    },
++    {
++      "description": "wrong message for valid simple p2wsh 3-of-3 multisig signature",
++      "message": "This is not the message that was signed",
++      "address": "bc1qp0ahvfh83088w49k405szqgg4f3pptr7p2g06tdxfjcd40z4lh4q95lsz9",
++      "signature": "smpBQBHMEQCIFX9aaqPJWq2Ff2kpen5bFDTid+ehgUOpHV0LfjncXy4AiA3GNicF7aKPzdpa9PCpmaYQs3pHd+qbvvhXdxOCKCAMAFIMEUCIQD/ELXg6CNYyUQijCg96JtgvgjZb9dsl1Ctof4QAeyTcQIgVM/1AAblFl/DCt6A1gJg+T/i2qU5SQD09+chFJzolRwBSDBFAiEAlqRfSFyWNVQhvaCnmeV5tyneiCWMTcFbuujoD/pFa3wCIGnZjfQb8NolSYq9asV+ZeBSkCGHJcqnaV4JYS5MYPEGAWlTIQJ1aLEfEi/4p7wcV+XHZCBVvGGJZ7L3v+jhH+mZA8lN0yECCovfec+kIdllXpKCgA8RX/HZ2x5yHOtCSKP8/sf6pnwhAwxSng6kCgCXXSAmJOOZFdr3vdK3HzGqCFloOHgc5fM6U64=",
++      "error_substr": "invalid signature"
++    },
++    {
++      "description": "invalid signature prefix",
++      "message": "",
++      "address": "bc1q9vza2e8x573nczrlzms0wvx3gsqjx7vavgkx0l",
++      "signature": "fooAA==",
++      "error_substr": "error decoding signature as base64"
++    },
++    {
++      "description": "incorrect prefix type",
++      "message": "incorrect prefix",
++      "address": "bc1pyrgrm6cu6n54jrvkdjd9rvyd3xfyu84s2623awu2srn6mxhscwpsm5644w",
++      "signature": "fulAUDZwFXUp+adN+/UZj5dVrGAbB3zKs1Vcalz5fCF9srxS63eSWNGvH1NYbrBkPt1BJDUyWUz9zgUxfc63/QheT6M",
++      "error_substr": "error parsing signature as full variant"
++    }
++  ]
++}
+\ No newline at end of file
+diff --git a/prime/wire/tests/data/bip322-generated-test-vectors.json b/prime/wire/tests/data/bip322-generated-test-vectors.json
+new file mode 100644
+index 0000000..4677eea
+--- /dev/null
++++ b/prime/wire/tests/data/bip322-generated-test-vectors.json
+@@ -0,0 +1,551 @@
++{
++  "simple": [
++    {
++      "message": "2V6TUTMSH4VQ3Z7WZWKYD7DFNH",
++      "private_keys": [
++        "KySmn2yeCukjHXnSu3M6vX7tNok4weu1FKbNEuVvm2b3ZidKhB4L"
++      ],
++      "address": "bc1qqthe0hz8klx90e7stf6shclhsvqd5ly96pn53v",
++      "type": "p2wpkh",
++      "witness_script": "",
++      "bip322_signatures": [
++        "smpAkgwRQIhALC6hdfxNy1n45d7UXSskRBdfZW0Al259E1kDMpipdYkAiAJPfZqb+WurZuf1apU5xeE6Igui9dvt5tihQLDvxlY1AEhAqbnruyo677ktQjio7XOchO3w51Dh9AbRVngha5jtNfT"
++      ]
++    },
++    {
++      "message": "PURVOQ544B6HUATVBJZN5EZJUU",
++      "private_keys": [
++        "L5XqN6ckPPsDiTbRxcsthwiWpDBfWLo4uquUEydsPt8rSMoTpqpc"
++      ],
++      "address": "bc1pcquvhrqv0q68t4m0hfq6tpn006qrskyc7yrqnp2uyrf2emg3wynsdjyk38",
++      "type": "p2tr",
++      "witness_script": "",
++      "bip322_signatures": [
++        "smpAUB6B2Rbupzua8LTQIF06516wzl+cwKy1be8RgoiW0riyXdKwe6GTz/5Hnb37m67pJwIKCh+D5jDueG6KpvYpmu8"
++      ]
++    },
++    {
++      "message": "G7ZTXXOVJFHGDD6XYJAGBAMT5A",
++      "private_keys": [
++        "L1jKMveHa8DnPfPVcVsz5r5FHe3D6KdPyBiQSND14uGyMMc8mAcK",
++        "L3P5FL8vCZLyDYrHekomd76KTFb7dnXiiLHc1dhs4CfKKTa5BSRd"
++      ],
++      "address": "bc1qw6g0rgrpuxvj4edkwtvzpmt3c5m08mhp8nuk3mrk4erufvlczp5ssdscjd",
++      "type": "p2wsh-multisig-2of2",
++      "witness_script": "5221036cbbf3b066eac7bc9328889a120269821cba2a21ce566e587eade93eeeb84048210281856452ca5e031c117cceafe0644184dfe01b14dfa4fa99b8e9412186714c9652ae",
++      "bip322_signatures": [
++        "smpBABIMEUCIQCKl1f9Cj26k0fFWE48+O4ibhYJYPytbDZWJRaaG9BybwIgCbk+3BViWkpuu2RI+41dwtlQ/m/01G860pTFCzDFfokBSDBFAiEA0O77DJsaM7IO+Ht06sp3umzXB64CNNOwf2isZuPfdmwCIGlggOwRSkXsqlPhE1gMdd5hf7ycL33Orfrr4v/XnMGSAUdSIQNsu/OwZurHvJMoiJoSAmmCHLoqIc5Wblh+rek+7rhASCECgYVkUspeAxwRfM6v4GRBhN/gGxTfpPqZuOlBIYZxTJZSrg=="
++      ]
++    },
++    {
++      "message": "Z3SB7SRL555ZGOHVMYT5WG7RIZ",
++      "private_keys": [
++        "L3QqMaMh8XnkLFGe8gAL4J1ko1froHUzFAJBxy4u5QPNf8Cp36if",
++        "L1j2AddkFs9aKz6tCPd99CaYHUVmqVZHt1HHESWajvFsQeTobyJi",
++        "KwEoVwAeuWQBiRhp76wD6siaxkj3rCrjHeG2xRMLtngbZbq8w88a"
++      ],
++      "address": "bc1qazhmhwl9sxgjmwnd96hh926s3x5l0cf64yy6hvyn6qms438x550qy5sgva",
++      "type": "p2wsh-multisig-3of3",
++      "witness_script": "532102a8d34dd98e3f4983f913eec380edc4dd20a9b3b2b218040b8f77d863f0566e1c2102e8175a94cb706e3731daf26355e96fec1266974ad8ed0e737be3d67a7ead6f9b21032b697ab95806cebdb5b9fceadde920da97cb4373b6d2992a2e98f17f944905da53ae",
++      "bip322_signatures": [
++        "smpBQBHMEQCICNI6H6b+VCZV9Z2H6EW5hPrE1buC6SJuy2ljSNmQlGfAiASbm5UrA8KH6TwF6evx7COV+i27ubiq2v9TyLYPOO63gFIMEUCIQCMOFnJbg0sy88G6wUXjv5stjVgfvAokOogWsisdkAnlAIgETfBw7kJhISFu9vIomFcEF/1NsN6c0h3KjNcpmNAZtMBSDBFAiEA/lUU+wBeA3prt8vHRpcQN763OYZ8L61DfN0QI/gkHpMCIB2qHwgoXNTH0sdqeAMD2ah7dSTie2bflax3Q3I/GibQAWlTIQKo003Zjj9Jg/kT7sOA7cTdIKmzsrIYBAuPd9hj8FZuHCEC6BdalMtwbjcx2vJjVelv7BJml0rY7Q5ze+PWen6tb5shAytperlYBs69tbn86t3pINqXy0NzttKZKi6Y8X+USQXaU64="
++      ]
++    }
++  ],
++  "full": [
++    {
++      "message": "MOISC5NCQ42ADH2SUXLELUJOWH",
++      "private_keys": [
++        "L2yn1ozY4azVxNzF2TLzGhmWQXnR2hoCZG5hCppQ4oxLtnq2CpM7"
++      ],
++      "address": "13vU5PUSuArDXJdCWZvUFEbgJ2wcmtSJWn",
++      "type": "p2pkh",
++      "witness_script": "",
++      "bip322_signatures": [
++        "fulAgAAAAGn3Z6t/gsHNyHdgZTOVro0Hej+qbd/ilU1ACalKoHX3gAAAABqRzBEAiB+8t/tm8Jm6zYv9JGZZVlAUjmqg7ZglIA39U+bim8EKQIgDv3E5cHOagN+xYgN3ZQjTYlAJp/WyslwJWuFP1TmM3IBIQJcPK2h9SY+Ki1oussvHnMdFAhJgsYBFPl+rNcMv9P1ROAHAAABAAAAAAAAAAABauAHAAA="
++      ],
++      "sig_script": "",
++      "tx_version": 2,
++      "lock_time": 2016,
++      "sequence": 2016
++    },
++    {
++      "message": "KLE5MMJBTNF4AVZXIO3GIL5UWF",
++      "private_keys": [
++        "L35XkdYZZ9u9hj6hqDzc3iuRGGXx1GhmaMMr6sVAMMrd4AKBkhUp"
++      ],
++      "address": "bc1qrqtlzcq86850yzgsyq9sssawx2qxlx5yq3xpkd",
++      "type": "p2wpkh",
++      "witness_script": "",
++      "bip322_signatures": [
++        "fulAgAAAAABAUrfzHHOLAKmgCIFSTT3krp+cQxj1BDPBN4GBg3tRmFXAAAAAADgBwAAAQAAAAAAAAAAAWoCSDBFAiEAjYj85zyhQKa9DbMO0reDwdhkNwKJkF3q2qFcijXDgMUCIAaQ75s3fwqrCeYIUJugLvhxZFxQIVquGN90vIKCW3QLASEDMurnDzvc0zABUwVwCADfGXoDx/M3SQnYt7e3IHDoU3PgBwAA"
++      ],
++      "sig_script": "",
++      "tx_version": 2,
++      "lock_time": 2016,
++      "sequence": 2016
++    },
++    {
++      "message": "XQMVC3YR6AOGZIHLSUQ2NSSBI2",
++      "private_keys": [
++        "L5CuoheLtRPk2uVtg2Ph55QpJ3Q5yvsM3hm3ThuGdCuBwA1KS6ua"
++      ],
++      "address": "bc1pve87s3l2levjmhetzr2f9xvep3y266xty0hnefmyv8tkxc3e4qssll2kdu",
++      "type": "p2tr",
++      "witness_script": "",
++      "bip322_signatures": [
++        "fulAgAAAAABAROFPNY6Zt8hFK0YQq5Wb6wk/CnUYEPtQ0HTHDyzNROrAAAAAADgBwAAAQAAAAAAAAAAAWoBQNRdLOo5XZY0SBqAsLZNr/z3Bqrmo3OxVn7e4tD/OOD4H9U/L1unq5Nmdz+S1w7SHtt46bFwnd8xnRVan8BofFfgBwAA"
++      ],
++      "sig_script": "",
++      "tx_version": 2,
++      "lock_time": 2016,
++      "sequence": 2016
++    },
++    {
++      "message": "AY2VOQOXYI5CN2EHZKLOX7ZI37",
++      "private_keys": [
++        "Ky3KEGLA6cqhsWeBQkCEi5CjEvEP1BBR9Y5iipU6XEo6UfLXvh3e"
++      ],
++      "address": "bc1p6vffkx7vcyezrjq7pg9qqdjv7vmtanfhk8ukwsn4syejwmarmhxqp0rw5x",
++      "type": "p2tr-time-lock",
++      "witness_script": "6320ad87d784e921d02bf0b89a41f8eded6a5d8409f3b4bfb935fc0e0f4e519c42206702e007b275202632e7e2d979cad802f02353c884d79a0e2bc7d72dc4f79dc1130f101bdfa14068ac",
++      "bip322_signatures": [
++        "fulAgAAAAABAaza7/ukfX9ZdxCUvK7CPJgADDdPdF7ikXVKWctd5EHrAAAAAADgBwAAAQAAAAAAAAAAAWoEQPvuT0enYGwsab2lsPZU0U3OcRkGng+o/PAt4QU2lc8hG7lTUmflkt0To+eoipv2vptf0TlGOBCsKU5xE3kXKcMAS2MgrYfXhOkh0CvwuJpB+O3tal2ECfO0v7k1/A4PTlGcQiBnAuAHsnUgJjLn4tl5ytgC8CNTyITXmg4rx9ctxPedwRMPEBvfoUBorCHBJjLn4tl5ytgC8CNTyITXmg4rx9ctxPedwRMPEBvfoUDgBwAA"
++      ],
++      "sig_script": "",
++      "tx_version": 2,
++      "lock_time": 2016,
++      "sequence": 2016
++    },
++    {
++      "message": "EMYGZHEY3LIANYKCR7XJF3NMFQ",
++      "private_keys": [
++        "L1n3XXc2AAVq8puHyQNL9NmVNRDUox1ENeuk7muALGrEo85wGQag"
++      ],
++      "address": "32Utb7Seg6EXq7UesMNJXhQ1gdohYNyzQ9",
++      "type": "p2sh-p2wpkh",
++      "witness_script": "",
++      "bip322_signatures": [
++        "fulAgAAAAABAe5xLNMlYQH4OGjJ3h4lqQaVp0Cic7mwxkvyWswqFMXeAAAAABcWABSy/hpDH/KLAi4x25Tmb2UaO1xtWeAHAAABAAAAAAAAAAABagJHMEQCIDEleqb0n1R5c21TGkWRXNFae98wbwI0QOyh/YmRuQX1AiAcv1MhyTzPOVgZ1VIwuu0tDxrVJUHK8lhOUOXpsZnGwwEhAsjeDEoWX8hvEC8A/692yGQsPh6JBO8Zf4aITEQsKAcJ4AcAAA=="
++      ],
++      "sig_script": "0014b2fe1a431ff28b022e31db94e66f651a3b5c6d59",
++      "tx_version": 2,
++      "lock_time": 2016,
++      "sequence": 2016
++    },
++    {
++      "message": "MGKMA2MJUBDHT55J7MHOLM7UPE",
++      "private_keys": [
++        "L2FywTTh95vtPd8H2BPxFFAAR4WpuDZKygh3py6KP31zRa99PHDT"
++      ],
++      "address": "bc1qhqcmw7ud03vqde3pe6hzajaylhucmlatrkcztzpnk8vpgvhg9dzq5ydark",
++      "type": "p2wsh-time-lock",
++      "witness_script": "632103ad87d784e921d02bf0b89a41f8eded6a5d8409f3b4bfb935fc0e0f4e519c42206702e007b275210386461afa1d2a0a9e83f6587df9ba9a268a686e7b5640928e6991a6b09afae97268ac",
++      "bip322_signatures": [
++        "fulAgAAAAABAYYJeOOOi3c33O+dholAwiF51Amy/E0qIf3ew2vFtDtTAAAAAADgBwAAAQAAAAAAAAAAAWoDSDBFAiEA64MwD2HkJjPLPAc2u5ia6ZdwCVO3okzVqGPEXnuJGZQCIE27BGOBQTdwJ2M/Wdsm6nFVunqaj+xZBSG/g/64FMbtAQBNYyEDrYfXhOkh0CvwuJpB+O3tal2ECfO0v7k1/A4PTlGcQiBnAuAHsnUhA4ZGGvodKgqeg/ZYffm6miaKaG57VkCSjmmRprCa+ulyaKzgBwAA"
++      ],
++      "sig_script": "",
++      "tx_version": 2,
++      "lock_time": 2016,
++      "sequence": 2016
++    },
++    {
++      "message": "QXYOWYWO7ZGJC4OPNC367HBUQF",
++      "private_keys": [
++        "L14bn1tSDZUKYLLiTConCRHbqzGef8eqB2tU5PBPFBkyPLUyob7V",
++        "KyJnWYygb7P2P8khWyDMW9yFGA3dUe7kpkEHtLbzY6cfvvn9T5CS"
++      ],
++      "address": "bc1qg8r3cl47rrr75dwvr7jhzdukptegnmq8v0nmjd2jdn4qvlczqkts0rqtav",
++      "type": "p2wsh-multisig-2of2",
++      "witness_script": "52210244f7cb842a4ce4f352ce4062ae5e0a5d60d6faa0b07b62c2063484aa5297bbce210234eed6190efc47716b953a050b563f8b2b523addea955ae43351dd2a92aa49f452ae",
++      "bip322_signatures": [
++        "fulAgAAAAABAXshuDM6YKy1LClwk1ZOM5egX7RTFPOCvtxJkYFYk/FEAAAAAADgBwAAAQAAAAAAAAAAAWoEAEgwRQIhAI9uOxvqmBV0pldOoKWnSYhjobNhP4F+gxO0QlOdGtxFAiBROcNruLigZE4lj1DJEh8yGrqS00MeW463EO78TsaRFgFIMEUCIQCAhIqYuU4wDA2AYsU+QDVyucH4Tm/NSDP2+txyPMKEkAIgfuGlSh7ncxb2yV3S3aOF5uwHGqtIZjp3b4HW0d35EckBR1IhAkT3y4QqTOTzUs5AYq5eCl1g1vqgsHtiwgY0hKpSl7vOIQI07tYZDvxHcWuVOgULVj+LK1I63eqVWuQzUd0qkqpJ9FKu4AcAAA=="
++      ],
++      "sig_script": "",
++      "tx_version": 2,
++      "lock_time": 2016,
++      "sequence": 2016
++    },
++    {
++      "message": "3VJANNKSXPLND6YRKG6CUEUZXX",
++      "private_keys": [
++        "L5QcX4UxGQByfgW6YTVWovLUxSSWSyQksGNfAJAhP36hTRRGWyiU",
++        "Kzp3Vm4kEdakPrfPfGDq3SEeSeBhX3GPwqacMf1wLFLPEZaMjy57",
++        "L3xZwreL3S4C5V3wLaNYSFTsZiC2YW7ao94y2omZvpkBEyP5y3PY"
++      ],
++      "address": "bc1q8vy6jhfe8ca0uruvr4aqkjk75dpg5m30rnwatg60uhya00dhlyqs2xvt2a",
++      "type": "p2wsh-multisig-3of3",
++      "witness_script": "5321022506f12c84db93ed3e896b4d58807b341b7d5eb51d79a11763836249b3a1dfe4210305b153afc370cd8f2e522e6a435cf5e9726376bf556752c1a43704956af22305210242f20cbe0540cbe3d1323cf61659f236b89c2ae593ddb7e42080597994d216e053ae",
++      "bip322_signatures": [
++        "fulAgAAAAABAU2vSmP5XYqecVKygaRRribDp5piMoVxUkxUnFSff8kRAAAAAADgBwAAAQAAAAAAAAAAAWoFAEgwRQIhAKBSw74gHlx272y4RzyU/ap7iNO5rmB6XXgBOy3Qsc/EAiBUnSrF/XhvuvAwi/mMme0JDpuCvl+oZ9C4f3H8OemXCAFIMEUCIQDK3wH0l2AvJ5FZ923ZMJkY1z0MBh1Nee9wjK7tVxFz5gIgdC1XBD/IdBPtx1xmyvSFhbIJlvnz98fPTm50K6KaXpEBSDBFAiEAyP3nXTzXrTmzq54x8jAY02ERHycEYzYqT9cpRTeEWg4CIHxRk3e3oPrM9oCZ8xcgNQ3lRhyc+G0qdDIl6qa8SN4AAWlTIQIlBvEshNuT7T6Ja01YgHs0G31etR15oRdjg2JJs6Hf5CEDBbFTr8NwzY8uUi5qQ1z16XJjdr9VZ1LBpDcElWryIwUhAkLyDL4FQMvj0TI89hZZ8ja4nCrlk9235CCAWXmU0hbgU67gBwAA"
++      ],
++      "sig_script": "",
++      "tx_version": 2,
++      "lock_time": 2016,
++      "sequence": 2016
++    },
++    {
++      "message": "NQVRV3DJYLKBANM3OPTNBULEU3",
++      "private_keys": [
++        "L246N8J5x5ehwjoz97ZfHXBCELxGcK2jqRFinReMBcRnqH1X4zdc",
++        "L1WzdMN476EHhwsDLHJwVHZKrwVLFFsdvNoZFsZVk2Mb5rKst2Et"
++      ],
++      "address": "3PGZjFkYBL1m9WBWkWbCW5FEFTaS1Hj4EB",
++      "type": "p2sh-p2wsh-multisig-2of2",
++      "witness_script": "522103fb824153fc000a213c5456d01780d1f292a0cfbfbc5f6f8f1dc713706c5519d12103db88ce9fb8081e50460beb37539741b0667d6f2439dd1ca283d63182421c10b152ae",
++      "bip322_signatures": [
++        "fulAgAAAAABAVscdBvYDFN98A//Rt/fAWcN7mdM0x2yWzBjC33c7X5HAAAAACMiACDkkR/DseXy+GXBPtxHvHehUjHt+9XjRmZAgxuuomAC4eAHAAABAAAAAAAAAAABagQASDBFAiEA47YK5XeIGBMQC9bCfWb+IIfirIWlqAzQVc6E/lgBPZICIA0k/EO2t3YhqmYR5WdXUBGgAzR+IqgZ5/mxvj+4UoDTAUgwRQIhAPCIVZCSoIaOjY9BzYIXWEvbhpOl4JR88p/xYVoZObd6AiADyJXNqpDg/Lc2viPX14N2d0jQdEjamY4SmiU7GNbIOgFHUiED+4JBU/wACiE8VFbQF4DR8pKgz7+8X2+PHccTcGxVGdEhA9uIzp+4CB5QRgvrN1OXQbBmfW8kOd0cooPWMYJCHBCxUq7gBwAA"
++      ],
++      "sig_script": "0020e4911fc3b1e5f2f865c13edc47bc77a15231edfbd5e3466640831baea26002e1",
++      "tx_version": 2,
++      "lock_time": 2016,
++      "sequence": 2016
++    },
++    {
++      "message": "7OKFLKRXSP6J42VQOMSG7MVXEP",
++      "private_keys": [
++        "L5Teubyzf4mFSMHGCzADK42oRi9xz45qhBrYx2Xs8uCY6WyrymT5",
++        "L4HsBh1Rb5DWP5Hf82tPw3whgwFyt8hdRTChxZQE4HzWfdbVgiWT"
++      ],
++      "address": "3Nye4j1GUFqCEBR3do2KEFZAs9oLe8NZ6X",
++      "type": "p2sh-multisig-2of2",
++      "witness_script": "",
++      "bip322_signatures": [
++        "fulAgAAAAEvAyd4zsoz8gcVU5H19GLYokTAN5PxuKCBlEPjODJ86gAAAADaAEcwRAIgT6rcfxgCmG6b3DpzNV6UG0jiCQGclG9sfiSpV45HDXMCIGgtqjFBuJ7rbi+cgnG0TZiKZaxMk0KI+gQd0pHJfEYCAUgwRQIhANCvCLjGMuZMzH+nCEkNhWhR45T6QRYMLin8utpuF9r1AiBTjG2NLjkre7ec+HPg8UUhK1jL1vgq7YKjq5ROv+h07AFHUiEDhKjcb/Pv1/7AYutzOXwgec08wwD/VwiPm58Lc0xjohghAhycjpwdBuP33orQXAH1CAsrgSkuspxM2+FPQ4OCVhQWUq7gBwAAAQAAAAAAAAAAAWrgBwAA"
++      ],
++      "sig_script": "52210384a8dc6ff3efd7fec062eb73397c2079cd3cc300ff57088f9b9f0b734c63a21821021c9c8e9c1d06e3f7de8ad05c01f5080b2b81292eb29c4cdbe14f43838256141652ae",
++      "tx_version": 2,
++      "lock_time": 2016,
++      "sequence": 2016
++    }
++  ],
++  "proof_of_funds": [
++    {
++      "message": "2JNEDD7IJDSYLREMJ6Q7PTCQJD",
++      "private_keys": [
++        "KwJez724aMRgicAjRH5Wn4PGjzt362M4Ce16uyLFrRtefYtjeEpu",
++        "L1eU4opKaCpK3Pu3jp1yvNnCmfAFtgKcmdgapcuGPqB3fwANGTWT",
++        "Kx9Wif4uxmADZ46YBfXwDST1ZkAZFkiRzpPbK3orYGSqaEJPZLKh"
++      ],
++      "address": "1PgwDB9w9vKjqhXMaqDiZyktC4x2eC7Wkw",
++      "type": "p2pkh",
++      "witness_script": "",
++      "bip322_signatures": [
++        "pofcHNidP8BAI8CAAAAA3UzG05Nmq3GQGeM4RuOvKR3OzsxeY3Iv7WeRpsFNQM0AAAAAADIAQAADCbiUkASpwj6kUReXXcYBQYbAO9L5G7WGpFwwoySY+UAAAAAAAAAAAA3p26yqXE6EPnIIn3fG72TA/ogmgx628m04thl4j0g/gAAAAAAAAAAAAEAAAAAAAAAAAFqewAAAAABAHcAAAAAAQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA/////yIAIB2Ij79goPLYV23iushdHloX5BnvTP3sLOG1x4L5uCYKAAAAAAEAAAAAAAAAABl2qRT44D3t4ciLKM9Jqw/cQWbMKcrdMYisAAAAAAEHa0gwRQIhAMQa+hYcQZ+v/rcrR4/cn7MthXgjlI9vdOyWaff0ytI1AiBzwJB5Sa7Gg5o5l1YRo2kvPGVjPEXlcDSRXkY/m5pEGAEhAg/lEKOLDqGSy/dJvtUFqV+b0Ibfnat6xQVm3TFbRMUHAAEAVQAAAAABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABTkYFAAAAAAAZdqkUXAydgFhnOc1o76l++wzhjwbeADKIrAAAAAABB2pHMEQCIEN2q/Y9n1JliYceYA/Lcb+lab84iq5FRGEw0QDZvCthAiBbgsbUfkt5y4PN7iBLpuW8zBARbHVBfsX/vIRcAewd8wEhAl+mkzpSHsor/2HKnlhZQjD88o2fj45Xj+PLeO0vHShBAAEBIE5GBQAAAAAAF6kUmkCp3fSiSKNrfA9wZKySQBbrBJeHAQcXFgAUYWYrEU/y0qj1P/GYS2Yc7nhhe8MBCGsCRzBEAiACr5bTFlzWGiXis1Y01AMVGVlPBEgO8G/g+6c4cNbx5wIgYqXaNnAPVNWVjfaJ8DhIuOiAUiTHeNdjdYH9IpXjK1oBIQMs7LIzDohxaDGLK3Jxlyxu/lnEh3YdmVbtOwi/9/IvuQAA"
++      ],
++      "sig_script": "",
++      "tx_version": 2,
++      "lock_time": 123,
++      "sequence": 456,
++      "additional_inputs": [
++        [
++          {
++            "private_key_index": 1,
++            "type": "p2pkh",
++            "value": 345678,
++            "pk_script": "76a9145c0c9d80586739cd68efa97efb0ce18f06de003288ac"
++          }
++        ],
++        [
++          {
++            "private_key_index": 2,
++            "type": "p2sh-p2wpkh",
++            "value": 345678,
++            "pk_script": "a9149a40a9ddf4a248a36b7c0f7064ac924016eb049787"
++          }
++        ]
++      ]
++    },
++    {
++      "message": "PMRTSXKIH4LZUEK6FSWKNVC5OJ",
++      "private_keys": [
++        "KzsKtEzbNpVXuNNk8RYP7VfmZL9DcvvzcsWCmQgsU24NkJCq2xm1",
++        "KyvKPtWqpTx3kLWcPXnSsReoaarfqEVbobUMwWDEZwwH75dzveWV",
++        "KyYzf9wsAvGPcin5YzUUCRqTHcjoG4DYhRHkwocDb2EgXgeDnPNV",
++        "KxCAEYZ9CocjcmEQzq1x3amDDVjMwiT9U6Y5C5EXmUiwRm5T7qK6",
++        "KwadXBnBmyatFEVWWBZgNpuYzDR6zA8526uDJiz1u3WPBixGUarZ"
++      ],
++      "address": "1FUGbznJZgPPNR49WGpAMWGqd2EJy7L411",
++      "type": "p2pkh",
++      "witness_script": "",
++      "bip322_signatures": [
++        "pofcHNidP8BAOECAAAABUW4YNCHQoyK7F1IWzGg2FITNBQfwfYHqccJdCb5bAXHAAAAAADIAQAA9NbnUz4hFOirIPCfd3puS86Tswp4PpGiajrMV7XvilQAAAAAAAAAAAD01udTPiEU6Ksg8J93em5LzpOzCng+kaJqOsxXte+KVAEAAAAAAAAAAPTW51M+IRToqyDwn3d6bkvOk7MKeD6Romo6zFe174pUAgAAAAAAAAAA9lQ2wLnGe0WMSw2PbknCdByQs2kNLxtiBDM+sQJAJBgAAAAAAAAAAAABAAAAAAAAAAABansAAAAAAQB3AAAAAAEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAP////8iACBS4HdhDkJcNnd/zYxBO18MP4A5XwfMIamCtF1YNPUjwQAAAAABAAAAAAAAAAAZdqkUnroEWW1vPFZWKfJOPc5EO3LAxSCIrAAAAAABB2pHMEQCIDs7N2tmsnkvKuT1I/yNArGthDLEPCxZAp3la3W2Wo0SAiB/KqF79idpHtYTi6zf/s3JR5zHYBmP3fzgpmLxiSCDUwEhAlPjWUeiLVieRuV8JE/trdheywBquxvrxw9CoKp0eWwUAAEAmQAAAAABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADTkYFAAAAAAAZdqkUXRw/3Id1+QdWOglIjBLaBryaNa+IrE5GBQAAAAAAGXapFLiTCxADZJL19c3fKa0A4EwBeL4hiKxORgUAAAAAABl2qRRbIpISPTZsY6A99RjTl/caNrBz64isAAAAAAEHakcwRAIgKV6AGU+4LXwaNsWW6KCEMlYg+ofeoon3ngVHaq+kLn4CIBFHlP9K6vENM5lo3QvM7bITh9jDqzDMeqX3IuLyXDsZASED8CBlrMcXM6gidBwP2HZk8FQ3D2JV4eX5ct3++h7LqT8AAQdrSDBFAiEAxqn43CUk0TCc54a/k4ko++06fDv/CamisK6IdxGowNsCIHDikdfH1lfFO+CBM8nf6bp37gfgQ7GZoaMMbU0Bap7MASECEClqBF8XySkMqIUrrjXIAg/fUHiIjqCH3jDbVTSEUK4AAQdrSDBFAiEAwK0nkBarbo8wdZDg4FVeJIuP6iLp9fApYMhArfPEcfICIGgoPoco1fpw77syuPxvU5HZjYiOl4FChRfZ800L4bKKASECTFBcVWr9yTopKH4A4FZvEvmGXW06MgHwxN58FPvmQRkAAQEgTkYFAAAAAAAXqRQPyvIXY4yAKCGbkYlxD3LPMT/JSocBBxcWABRh7fUdOB8FWstJKAmt5r6qUQzMYgEIbAJIMEUCIQDd0I64asHGizPfnwvUVscgJo+8xZmv+IbtXNBXgLsdqwIgASUwxhy/0TTp/yLygwCfevxbXxoUYbIM2vdomk6jw3gBIQMchUGFw2XkvTvbr64BBBVQHRZdDv+KLY5VWN00qooCiAAA"
++      ],
++      "sig_script": "",
++      "tx_version": 2,
++      "lock_time": 123,
++      "sequence": 456,
++      "additional_inputs": [
++        [
++          {
++            "private_key_index": 1,
++            "type": "p2pkh",
++            "value": 345678,
++            "pk_script": "76a9145d1c3fdc8775f907563a09488c12da06bc9a35af88ac"
++          },
++          {
++            "private_key_index": 2,
++            "type": "p2pkh",
++            "value": 345678,
++            "pk_script": "76a914b8930b10036492f5f5cddf29ad00e04c0178be2188ac"
++          },
++          {
++            "private_key_index": 3,
++            "type": "p2pkh",
++            "value": 345678,
++            "pk_script": "76a9145b2292123d366c63a03df518d397f71a36b073eb88ac"
++          }
++        ],
++        [
++          {
++            "private_key_index": 4,
++            "type": "p2sh-p2wpkh",
++            "value": 345678,
++            "pk_script": "a9140fcaf217638c8028219b9189710f72cf313fc94a87"
++          }
++        ]
++      ]
++    },
++    {
++      "message": "FUYMQWKYGS7HJEN7YFEZU5SNR5",
++      "private_keys": [
++        "L1p7QRghEregYbBvSCp1eW4YJg2RwMYwX2uhR1eAnkVoPJBaJ7Dy",
++        "Kz5jBiqQKoppYvaxtWZJicxGZ3G3iJ4rLqNnv7MaQBusyoE731EJ",
++        "L2fNJduiUkSytUDbxa58ivWoHevB3svcWUJMxMFebdugYP5jgJr1",
++        "KxqVMn81AEYSwYuzBxe6xC4JDAgA2eU2qiNvBAgVZZwRFv1BqN3y"
++      ],
++      "address": "bc1pk3vq3wpn4txexwq4dj0k2dugzp6kfwllvs89w49cvtk3j2cndcds3l9kw9",
++      "type": "p2tr",
++      "witness_script": "",
++      "bip322_signatures": [
++        "pofcHNidP8BALgCAAAABDzMFysa2DX0k4ZymoVfzNzTIL3gsWlu03HcfI+NxhOxAAAAAADIAQAAVd4moQMhq/rd+2ecRsJ0Xeg6/SdhA+owjzyzg/Fqd/oAAAAAAAAAAABuZFRaqjWRO6kKy5hrEHAg+T12/Iuz+FZBwwMt/FQvkgAAAAAAAAAAAG5kVFqqNZE7qQrLmGsQcCD5PXb8i7P4VkHDAy38VC+SAQAAAAAAAAAAAQAAAAAAAAAAAWp7AAAAAAEBKwAAAAAAAAAAIlEgtFgIuDOqzZM4FWyfZTeIEHVku/9kDldUuGLtGSsTbhsBCEIBQKoTEBqEPkib1fLnELbmsbDVlmWGzOdiiN/XJefU3tF9AEi7PszYEPguomxXp7X2rL0dP0xkV6LbBcVz7oAEeKkAAQErTkYFAAAAAAAiUSB4i5DCtSPHOkI30E30ayMoWL47vA5l2NBJp/pZ1XGduAEIQgFAic0muhAJNc4ZlRWeJGRgkN+oE/ptV4Znyli19VAnSsHM/Pb9Mp02dd3zk3RmuT6VgjBxdJn2yURGKOka3l9cugABAStORgUAAAAAACJRIMoNyg9Pai/pn4PHTOMEsDHkuUAHt5riqU81NVVj+fXKAQhCAUCL3W2Jh3ImNRSpbp0bLe+rBE4GJw5AjwJEhakHsm83YfuQKeY1syBFrmNV2ZvLv8R8uTLcmkJ1s/lWUxZ9o4qJAAEBK05GBQAAAAAAIlEgXCutuyDOvc4hiADdov7VmOUfq4ww6HES7JZ6NAucMJkBCEIBQDqu/4oik+J+eAbvUhzzuBkoVoOgD5RySjpvJQqTKNieBda8dMTkH2avx6ghs7zd6puujlBCQw3r/NiG4VX7wAEAAA=="
++      ],
++      "sig_script": "",
++      "tx_version": 2,
++      "lock_time": 123,
++      "sequence": 456,
++      "additional_inputs": [
++        [
++          {
++            "private_key_index": 1,
++            "type": "p2tr",
++            "value": 345678,
++            "pk_script": "5120788b90c2b523c73a4237d04df46b232858be3bbc0e65d8d049a7fa59d5719db8"
++          }
++        ],
++        [
++          {
++            "private_key_index": 2,
++            "type": "p2tr",
++            "value": 345678,
++            "pk_script": "5120ca0dca0f4f6a2fe99f83c74ce304b031e4b94007b79ae2a94f35355563f9f5ca"
++          },
++          {
++            "private_key_index": 3,
++            "type": "p2tr",
++            "value": 345678,
++            "pk_script": "51205c2badbb20cebdce218800dda2fed598e51fab8c30e87112ec967a340b9c3099"
++          }
++        ]
++      ]
++    }
++  ],
++  "error": [
++    {
++      "description": "wrong message for p2wpkh simple signature",
++      "message": "EFGJ4AZYXDV7NDUDSUDB3NCDUC",
++      "address": "bc1qqthe0hz8klx90e7stf6shclhsvqd5ly96pn53v",
++      "signature": "smpAkgwRQIhALC6hdfxNy1n45d7UXSskRBdfZW0Al259E1kDMpipdYkAiAJPfZqb+WurZuf1apU5xeE6Igui9dvt5tihQLDvxlY1AEhAqbnruyo677ktQjio7XOchO3w51Dh9AbRVngha5jtNfT",
++      "error_substr": "invalid signature"
++    },
++    {
++      "description": "wrong signer for p2wpkh simple signature",
++      "message": "2V6TUTMSH4VQ3Z7WZWKYD7DFNH",
++      "address": "bc1qgg6lpr05az2l5kz402ddz5ez7fdu25kgmd40lf",
++      "signature": "smpAkgwRQIhALC6hdfxNy1n45d7UXSskRBdfZW0Al259E1kDMpipdYkAiAJPfZqb+WurZuf1apU5xeE6Igui9dvt5tihQLDvxlY1AEhAqbnruyo677ktQjio7XOchO3w51Dh9AbRVngha5jtNfT",
++      "error_substr": "invalid signature"
++    },
++    {
++      "description": "wrong message for p2tr simple signature",
++      "message": "56VM6YK6Y76XTBXNPITF232EPX",
++      "address": "bc1pcquvhrqv0q68t4m0hfq6tpn006qrskyc7yrqnp2uyrf2emg3wynsdjyk38",
++      "signature": "smpAUB6B2Rbupzua8LTQIF06516wzl+cwKy1be8RgoiW0riyXdKwe6GTz/5Hnb37m67pJwIKCh+D5jDueG6KpvYpmu8",
++      "error_substr": "invalid signature"
++    },
++    {
++      "description": "wrong signer for p2tr simple signature",
++      "message": "PURVOQ544B6HUATVBJZN5EZJUU",
++      "address": "bc1pltvk000nd54v3hrrcn7lsffdra72hphpm40rhzf9hn8arqkgermq2p9029",
++      "signature": "smpAUB6B2Rbupzua8LTQIF06516wzl+cwKy1be8RgoiW0riyXdKwe6GTz/5Hnb37m67pJwIKCh+D5jDueG6KpvYpmu8",
++      "error_substr": "invalid signature"
++    },
++    {
++      "description": "wrong message for p2wsh-multisig-2of2 simple signature",
++      "message": "DL2KXDPQAN63YIQPIP34O3XYVX",
++      "address": "bc1qw6g0rgrpuxvj4edkwtvzpmt3c5m08mhp8nuk3mrk4erufvlczp5ssdscjd",
++      "signature": "smpBABIMEUCIQCKl1f9Cj26k0fFWE48+O4ibhYJYPytbDZWJRaaG9BybwIgCbk+3BViWkpuu2RI+41dwtlQ/m/01G860pTFCzDFfokBSDBFAiEA0O77DJsaM7IO+Ht06sp3umzXB64CNNOwf2isZuPfdmwCIGlggOwRSkXsqlPhE1gMdd5hf7ycL33Orfrr4v/XnMGSAUdSIQNsu/OwZurHvJMoiJoSAmmCHLoqIc5Wblh+rek+7rhASCECgYVkUspeAxwRfM6v4GRBhN/gGxTfpPqZuOlBIYZxTJZSrg==",
++      "error_substr": "invalid signature"
++    },
++    {
++      "description": "wrong signer for p2wsh-multisig-2of2 simple signature",
++      "message": "G7ZTXXOVJFHGDD6XYJAGBAMT5A",
++      "address": "bc1q47vnwr6fsarstmmw89wrkvl89540sn5g79x75ms8aly9rrsnq8eqh3v9gz",
++      "signature": "smpBABIMEUCIQCKl1f9Cj26k0fFWE48+O4ibhYJYPytbDZWJRaaG9BybwIgCbk+3BViWkpuu2RI+41dwtlQ/m/01G860pTFCzDFfokBSDBFAiEA0O77DJsaM7IO+Ht06sp3umzXB64CNNOwf2isZuPfdmwCIGlggOwRSkXsqlPhE1gMdd5hf7ycL33Orfrr4v/XnMGSAUdSIQNsu/OwZurHvJMoiJoSAmmCHLoqIc5Wblh+rek+7rhASCECgYVkUspeAxwRfM6v4GRBhN/gGxTfpPqZuOlBIYZxTJZSrg==",
++      "error_substr": "invalid signature"
++    },
++    {
++      "description": "wrong message for p2wsh-multisig-3of3 simple signature",
++      "message": "UKLIJM5HKKQEIFJ44R7UIQFMYL",
++      "address": "bc1qazhmhwl9sxgjmwnd96hh926s3x5l0cf64yy6hvyn6qms438x550qy5sgva",
++      "signature": "smpBQBHMEQCICNI6H6b+VCZV9Z2H6EW5hPrE1buC6SJuy2ljSNmQlGfAiASbm5UrA8KH6TwF6evx7COV+i27ubiq2v9TyLYPOO63gFIMEUCIQCMOFnJbg0sy88G6wUXjv5stjVgfvAokOogWsisdkAnlAIgETfBw7kJhISFu9vIomFcEF/1NsN6c0h3KjNcpmNAZtMBSDBFAiEA/lUU+wBeA3prt8vHRpcQN763OYZ8L61DfN0QI/gkHpMCIB2qHwgoXNTH0sdqeAMD2ah7dSTie2bflax3Q3I/GibQAWlTIQKo003Zjj9Jg/kT7sOA7cTdIKmzsrIYBAuPd9hj8FZuHCEC6BdalMtwbjcx2vJjVelv7BJml0rY7Q5ze+PWen6tb5shAytperlYBs69tbn86t3pINqXy0NzttKZKi6Y8X+USQXaU64=",
++      "error_substr": "invalid signature"
++    },
++    {
++      "description": "wrong signer for p2wsh-multisig-3of3 simple signature",
++      "message": "Z3SB7SRL555ZGOHVMYT5WG7RIZ",
++      "address": "bc1qnckc2q6804depn2240l66p93e0mscp7vd9ndptfuznex86ehpcvseq6e8a",
++      "signature": "smpBQBHMEQCICNI6H6b+VCZV9Z2H6EW5hPrE1buC6SJuy2ljSNmQlGfAiASbm5UrA8KH6TwF6evx7COV+i27ubiq2v9TyLYPOO63gFIMEUCIQCMOFnJbg0sy88G6wUXjv5stjVgfvAokOogWsisdkAnlAIgETfBw7kJhISFu9vIomFcEF/1NsN6c0h3KjNcpmNAZtMBSDBFAiEA/lUU+wBeA3prt8vHRpcQN763OYZ8L61DfN0QI/gkHpMCIB2qHwgoXNTH0sdqeAMD2ah7dSTie2bflax3Q3I/GibQAWlTIQKo003Zjj9Jg/kT7sOA7cTdIKmzsrIYBAuPd9hj8FZuHCEC6BdalMtwbjcx2vJjVelv7BJml0rY7Q5ze+PWen6tb5shAytperlYBs69tbn86t3pINqXy0NzttKZKi6Y8X+USQXaU64=",
++      "error_substr": "invalid signature"
++    },
++    {
++      "description": "wrong message for p2pkh full signature",
++      "message": "TCHG6CQ5E2T5S4S7DPLAEFVDY2",
++      "address": "13vU5PUSuArDXJdCWZvUFEbgJ2wcmtSJWn",
++      "signature": "fulAgAAAAGn3Z6t/gsHNyHdgZTOVro0Hej+qbd/ilU1ACalKoHX3gAAAABqRzBEAiB+8t/tm8Jm6zYv9JGZZVlAUjmqg7ZglIA39U+bim8EKQIgDv3E5cHOagN+xYgN3ZQjTYlAJp/WyslwJWuFP1TmM3IBIQJcPK2h9SY+Ki1oussvHnMdFAhJgsYBFPl+rNcMv9P1ROAHAAABAAAAAAAAAAABauAHAAA=",
++      "error_substr": "invalid signature"
++    },
++    {
++      "description": "wrong signer for p2pkh full signature",
++      "message": "MOISC5NCQ42ADH2SUXLELUJOWH",
++      "address": "1BxMhvfWLnGLqVhJ3j39oDBk7qf5D86BFe",
++      "signature": "fulAgAAAAGn3Z6t/gsHNyHdgZTOVro0Hej+qbd/ilU1ACalKoHX3gAAAABqRzBEAiB+8t/tm8Jm6zYv9JGZZVlAUjmqg7ZglIA39U+bim8EKQIgDv3E5cHOagN+xYgN3ZQjTYlAJp/WyslwJWuFP1TmM3IBIQJcPK2h9SY+Ki1oussvHnMdFAhJgsYBFPl+rNcMv9P1ROAHAAABAAAAAAAAAAABauAHAAA=",
++      "error_substr": "invalid signature"
++    },
++    {
++      "description": "wrong message for p2wpkh full signature",
++      "message": "VENQMXVEGEJAAXJV5V24T6G5UU",
++      "address": "bc1qrqtlzcq86850yzgsyq9sssawx2qxlx5yq3xpkd",
++      "signature": "fulAgAAAAABAUrfzHHOLAKmgCIFSTT3krp+cQxj1BDPBN4GBg3tRmFXAAAAAADgBwAAAQAAAAAAAAAAAWoCSDBFAiEAjYj85zyhQKa9DbMO0reDwdhkNwKJkF3q2qFcijXDgMUCIAaQ75s3fwqrCeYIUJugLvhxZFxQIVquGN90vIKCW3QLASEDMurnDzvc0zABUwVwCADfGXoDx/M3SQnYt7e3IHDoU3PgBwAA",
++      "error_substr": "invalid signature"
++    },
++    {
++      "description": "wrong signer for p2wpkh full signature",
++      "message": "KLE5MMJBTNF4AVZXIO3GIL5UWF",
++      "address": "bc1q55chmwm4x8aeye0h9c0mryra2ly8k8fh3scqgj",
++      "signature": "fulAgAAAAABAUrfzHHOLAKmgCIFSTT3krp+cQxj1BDPBN4GBg3tRmFXAAAAAADgBwAAAQAAAAAAAAAAAWoCSDBFAiEAjYj85zyhQKa9DbMO0reDwdhkNwKJkF3q2qFcijXDgMUCIAaQ75s3fwqrCeYIUJugLvhxZFxQIVquGN90vIKCW3QLASEDMurnDzvc0zABUwVwCADfGXoDx/M3SQnYt7e3IHDoU3PgBwAA",
++      "error_substr": "invalid signature"
++    },
++    {
++      "description": "wrong message for p2tr full signature",
++      "message": "P2RQWD264CW7Z5ZSSSDRW2JEDB",
++      "address": "bc1pve87s3l2levjmhetzr2f9xvep3y266xty0hnefmyv8tkxc3e4qssll2kdu",
++      "signature": "fulAgAAAAABAROFPNY6Zt8hFK0YQq5Wb6wk/CnUYEPtQ0HTHDyzNROrAAAAAADgBwAAAQAAAAAAAAAAAWoBQNRdLOo5XZY0SBqAsLZNr/z3Bqrmo3OxVn7e4tD/OOD4H9U/L1unq5Nmdz+S1w7SHtt46bFwnd8xnRVan8BofFfgBwAA",
++      "error_substr": "invalid signature"
++    },
++    {
++      "description": "wrong signer for p2tr full signature",
++      "message": "XQMVC3YR6AOGZIHLSUQ2NSSBI2",
++      "address": "bc1py2f3exluva2yqa877qnsj3vk4lm8yatw0up4fhrx04hf8ns87weswck94p",
++      "signature": "fulAgAAAAABAROFPNY6Zt8hFK0YQq5Wb6wk/CnUYEPtQ0HTHDyzNROrAAAAAADgBwAAAQAAAAAAAAAAAWoBQNRdLOo5XZY0SBqAsLZNr/z3Bqrmo3OxVn7e4tD/OOD4H9U/L1unq5Nmdz+S1w7SHtt46bFwnd8xnRVan8BofFfgBwAA",
++      "error_substr": "invalid signature"
++    },
++    {
++      "description": "wrong message for p2tr-time-lock full signature",
++      "message": "ATGH7VC42BMKAAJAMBG3KNGQGR",
++      "address": "bc1p6vffkx7vcyezrjq7pg9qqdjv7vmtanfhk8ukwsn4syejwmarmhxqp0rw5x",
++      "signature": "fulAgAAAAABAaza7/ukfX9ZdxCUvK7CPJgADDdPdF7ikXVKWctd5EHrAAAAAADgBwAAAQAAAAAAAAAAAWoEQPvuT0enYGwsab2lsPZU0U3OcRkGng+o/PAt4QU2lc8hG7lTUmflkt0To+eoipv2vptf0TlGOBCsKU5xE3kXKcMAS2MgrYfXhOkh0CvwuJpB+O3tal2ECfO0v7k1/A4PTlGcQiBnAuAHsnUgJjLn4tl5ytgC8CNTyITXmg4rx9ctxPedwRMPEBvfoUBorCHBJjLn4tl5ytgC8CNTyITXmg4rx9ctxPedwRMPEBvfoUDgBwAA",
++      "error_substr": "invalid signature"
++    },
++    {
++      "description": "wrong signer for p2tr-time-lock full signature",
++      "message": "AY2VOQOXYI5CN2EHZKLOX7ZI37",
++      "address": "bc1pfncmfyycsv5zpnrzy3hj7qna989kymm2ekps7ph2mwwyftjy3d6s2esen0",
++      "signature": "fulAgAAAAABAaza7/ukfX9ZdxCUvK7CPJgADDdPdF7ikXVKWctd5EHrAAAAAADgBwAAAQAAAAAAAAAAAWoEQPvuT0enYGwsab2lsPZU0U3OcRkGng+o/PAt4QU2lc8hG7lTUmflkt0To+eoipv2vptf0TlGOBCsKU5xE3kXKcMAS2MgrYfXhOkh0CvwuJpB+O3tal2ECfO0v7k1/A4PTlGcQiBnAuAHsnUgJjLn4tl5ytgC8CNTyITXmg4rx9ctxPedwRMPEBvfoUBorCHBJjLn4tl5ytgC8CNTyITXmg4rx9ctxPedwRMPEBvfoUDgBwAA",
++      "error_substr": "invalid signature"
++    },
++    {
++      "description": "wrong message for p2sh-p2wpkh full signature",
++      "message": "CPVOBEXDTFAXS6N4YASD753CZV",
++      "address": "32Utb7Seg6EXq7UesMNJXhQ1gdohYNyzQ9",
++      "signature": "fulAgAAAAABAe5xLNMlYQH4OGjJ3h4lqQaVp0Cic7mwxkvyWswqFMXeAAAAABcWABSy/hpDH/KLAi4x25Tmb2UaO1xtWeAHAAABAAAAAAAAAAABagJHMEQCIDEleqb0n1R5c21TGkWRXNFae98wbwI0QOyh/YmRuQX1AiAcv1MhyTzPOVgZ1VIwuu0tDxrVJUHK8lhOUOXpsZnGwwEhAsjeDEoWX8hvEC8A/692yGQsPh6JBO8Zf4aITEQsKAcJ4AcAAA==",
++      "error_substr": "invalid signature"
++    },
++    {
++      "description": "wrong signer for p2sh-p2wpkh full signature",
++      "message": "EMYGZHEY3LIANYKCR7XJF3NMFQ",
++      "address": "3QMEQj2LTUtKKR1UatUK44z1NwrWrcVSGh",
++      "signature": "fulAgAAAAABAe5xLNMlYQH4OGjJ3h4lqQaVp0Cic7mwxkvyWswqFMXeAAAAABcWABSy/hpDH/KLAi4x25Tmb2UaO1xtWeAHAAABAAAAAAAAAAABagJHMEQCIDEleqb0n1R5c21TGkWRXNFae98wbwI0QOyh/YmRuQX1AiAcv1MhyTzPOVgZ1VIwuu0tDxrVJUHK8lhOUOXpsZnGwwEhAsjeDEoWX8hvEC8A/692yGQsPh6JBO8Zf4aITEQsKAcJ4AcAAA==",
++      "error_substr": "invalid signature"
++    },
++    {
++      "description": "wrong message for p2wsh-time-lock full signature",
++      "message": "QMSIBU4KPG4CGHGBGFRFHXVYLR",
++      "address": "bc1qhqcmw7ud03vqde3pe6hzajaylhucmlatrkcztzpnk8vpgvhg9dzq5ydark",
++      "signature": "fulAgAAAAABAYYJeOOOi3c33O+dholAwiF51Amy/E0qIf3ew2vFtDtTAAAAAADgBwAAAQAAAAAAAAAAAWoDSDBFAiEA64MwD2HkJjPLPAc2u5ia6ZdwCVO3okzVqGPEXnuJGZQCIE27BGOBQTdwJ2M/Wdsm6nFVunqaj+xZBSG/g/64FMbtAQBNYyEDrYfXhOkh0CvwuJpB+O3tal2ECfO0v7k1/A4PTlGcQiBnAuAHsnUhA4ZGGvodKgqeg/ZYffm6miaKaG57VkCSjmmRprCa+ulyaKzgBwAA",
++      "error_substr": "invalid signature"
++    },
++    {
++      "description": "wrong signer for p2wsh-time-lock full signature",
++      "message": "MGKMA2MJUBDHT55J7MHOLM7UPE",
++      "address": "bc1qlcg74qa5r0ltu6zruahaap3keqsksad6kpstqyysxu0y7tkz2jlqepjywu",
++      "signature": "fulAgAAAAABAYYJeOOOi3c33O+dholAwiF51Amy/E0qIf3ew2vFtDtTAAAAAADgBwAAAQAAAAAAAAAAAWoDSDBFAiEA64MwD2HkJjPLPAc2u5ia6ZdwCVO3okzVqGPEXnuJGZQCIE27BGOBQTdwJ2M/Wdsm6nFVunqaj+xZBSG/g/64FMbtAQBNYyEDrYfXhOkh0CvwuJpB+O3tal2ECfO0v7k1/A4PTlGcQiBnAuAHsnUhA4ZGGvodKgqeg/ZYffm6miaKaG57VkCSjmmRprCa+ulyaKzgBwAA",
++      "error_substr": "invalid signature"
++    },
++    {
++      "description": "wrong message for p2wsh-multisig-2of2 full signature",
++      "message": "OANRY57VZNHOXZNYGCGZM5ADYG",
++      "address": "bc1qg8r3cl47rrr75dwvr7jhzdukptegnmq8v0nmjd2jdn4qvlczqkts0rqtav",
++      "signature": "fulAgAAAAABAXshuDM6YKy1LClwk1ZOM5egX7RTFPOCvtxJkYFYk/FEAAAAAADgBwAAAQAAAAAAAAAAAWoEAEgwRQIhAI9uOxvqmBV0pldOoKWnSYhjobNhP4F+gxO0QlOdGtxFAiBROcNruLigZE4lj1DJEh8yGrqS00MeW463EO78TsaRFgFIMEUCIQCAhIqYuU4wDA2AYsU+QDVyucH4Tm/NSDP2+txyPMKEkAIgfuGlSh7ncxb2yV3S3aOF5uwHGqtIZjp3b4HW0d35EckBR1IhAkT3y4QqTOTzUs5AYq5eCl1g1vqgsHtiwgY0hKpSl7vOIQI07tYZDvxHcWuVOgULVj+LK1I63eqVWuQzUd0qkqpJ9FKu4AcAAA==",
++      "error_substr": "invalid signature"
++    },
++    {
++      "description": "wrong signer for p2wsh-multisig-2of2 full signature",
++      "message": "QXYOWYWO7ZGJC4OPNC367HBUQF",
++      "address": "bc1qan5sys8u4cpvgutt70fn2tgweu7as9aw0slljuz86x4nyr8myvjsgz3q2v",
++      "signature": "fulAgAAAAABAXshuDM6YKy1LClwk1ZOM5egX7RTFPOCvtxJkYFYk/FEAAAAAADgBwAAAQAAAAAAAAAAAWoEAEgwRQIhAI9uOxvqmBV0pldOoKWnSYhjobNhP4F+gxO0QlOdGtxFAiBROcNruLigZE4lj1DJEh8yGrqS00MeW463EO78TsaRFgFIMEUCIQCAhIqYuU4wDA2AYsU+QDVyucH4Tm/NSDP2+txyPMKEkAIgfuGlSh7ncxb2yV3S3aOF5uwHGqtIZjp3b4HW0d35EckBR1IhAkT3y4QqTOTzUs5AYq5eCl1g1vqgsHtiwgY0hKpSl7vOIQI07tYZDvxHcWuVOgULVj+LK1I63eqVWuQzUd0qkqpJ9FKu4AcAAA==",
++      "error_substr": "invalid signature"
++    },
++    {
++      "description": "wrong message for p2wsh-multisig-3of3 full signature",
++      "message": "UZQGB4YTYIS3PRT3UUOCO3YCX3",
++      "address": "bc1q8vy6jhfe8ca0uruvr4aqkjk75dpg5m30rnwatg60uhya00dhlyqs2xvt2a",
++      "signature": "fulAgAAAAABAU2vSmP5XYqecVKygaRRribDp5piMoVxUkxUnFSff8kRAAAAAADgBwAAAQAAAAAAAAAAAWoFAEgwRQIhAKBSw74gHlx272y4RzyU/ap7iNO5rmB6XXgBOy3Qsc/EAiBUnSrF/XhvuvAwi/mMme0JDpuCvl+oZ9C4f3H8OemXCAFIMEUCIQDK3wH0l2AvJ5FZ923ZMJkY1z0MBh1Nee9wjK7tVxFz5gIgdC1XBD/IdBPtx1xmyvSFhbIJlvnz98fPTm50K6KaXpEBSDBFAiEAyP3nXTzXrTmzq54x8jAY02ERHycEYzYqT9cpRTeEWg4CIHxRk3e3oPrM9oCZ8xcgNQ3lRhyc+G0qdDIl6qa8SN4AAWlTIQIlBvEshNuT7T6Ja01YgHs0G31etR15oRdjg2JJs6Hf5CEDBbFTr8NwzY8uUi5qQ1z16XJjdr9VZ1LBpDcElWryIwUhAkLyDL4FQMvj0TI89hZZ8ja4nCrlk9235CCAWXmU0hbgU67gBwAA",
++      "error_substr": "invalid signature"
++    },
++    {
++      "description": "wrong signer for p2wsh-multisig-3of3 full signature",
++      "message": "3VJANNKSXPLND6YRKG6CUEUZXX",
++      "address": "bc1qma94rw0f5t4l64wc6xfrjuuatqn6klcwmxvls86y9k4rjvva40wqr8u0cq",
++      "signature": "fulAgAAAAABAU2vSmP5XYqecVKygaRRribDp5piMoVxUkxUnFSff8kRAAAAAADgBwAAAQAAAAAAAAAAAWoFAEgwRQIhAKBSw74gHlx272y4RzyU/ap7iNO5rmB6XXgBOy3Qsc/EAiBUnSrF/XhvuvAwi/mMme0JDpuCvl+oZ9C4f3H8OemXCAFIMEUCIQDK3wH0l2AvJ5FZ923ZMJkY1z0MBh1Nee9wjK7tVxFz5gIgdC1XBD/IdBPtx1xmyvSFhbIJlvnz98fPTm50K6KaXpEBSDBFAiEAyP3nXTzXrTmzq54x8jAY02ERHycEYzYqT9cpRTeEWg4CIHxRk3e3oPrM9oCZ8xcgNQ3lRhyc+G0qdDIl6qa8SN4AAWlTIQIlBvEshNuT7T6Ja01YgHs0G31etR15oRdjg2JJs6Hf5CEDBbFTr8NwzY8uUi5qQ1z16XJjdr9VZ1LBpDcElWryIwUhAkLyDL4FQMvj0TI89hZZ8ja4nCrlk9235CCAWXmU0hbgU67gBwAA",
++      "error_substr": "invalid signature"
++    },
++    {
++      "description": "wrong message for p2sh-p2wsh-multisig-2of2 full signature",
++      "message": "FOQHOIFXJVPFSGGBRLAX53D6R2",
++      "address": "3PGZjFkYBL1m9WBWkWbCW5FEFTaS1Hj4EB",
++      "signature": "fulAgAAAAABAVscdBvYDFN98A//Rt/fAWcN7mdM0x2yWzBjC33c7X5HAAAAACMiACDkkR/DseXy+GXBPtxHvHehUjHt+9XjRmZAgxuuomAC4eAHAAABAAAAAAAAAAABagQASDBFAiEA47YK5XeIGBMQC9bCfWb+IIfirIWlqAzQVc6E/lgBPZICIA0k/EO2t3YhqmYR5WdXUBGgAzR+IqgZ5/mxvj+4UoDTAUgwRQIhAPCIVZCSoIaOjY9BzYIXWEvbhpOl4JR88p/xYVoZObd6AiADyJXNqpDg/Lc2viPX14N2d0jQdEjamY4SmiU7GNbIOgFHUiED+4JBU/wACiE8VFbQF4DR8pKgz7+8X2+PHccTcGxVGdEhA9uIzp+4CB5QRgvrN1OXQbBmfW8kOd0cooPWMYJCHBCxUq7gBwAA",
++      "error_substr": "invalid signature"
++    },
++    {
++      "description": "wrong signer for p2sh-p2wsh-multisig-2of2 full signature",
++      "message": "NQVRV3DJYLKBANM3OPTNBULEU3",
++      "address": "3DA7VZKYcuiaJFsDnzWjBDvh4VhBFZk6jg",
++      "signature": "fulAgAAAAABAVscdBvYDFN98A//Rt/fAWcN7mdM0x2yWzBjC33c7X5HAAAAACMiACDkkR/DseXy+GXBPtxHvHehUjHt+9XjRmZAgxuuomAC4eAHAAABAAAAAAAAAAABagQASDBFAiEA47YK5XeIGBMQC9bCfWb+IIfirIWlqAzQVc6E/lgBPZICIA0k/EO2t3YhqmYR5WdXUBGgAzR+IqgZ5/mxvj+4UoDTAUgwRQIhAPCIVZCSoIaOjY9BzYIXWEvbhpOl4JR88p/xYVoZObd6AiADyJXNqpDg/Lc2viPX14N2d0jQdEjamY4SmiU7GNbIOgFHUiED+4JBU/wACiE8VFbQF4DR8pKgz7+8X2+PHccTcGxVGdEhA9uIzp+4CB5QRgvrN1OXQbBmfW8kOd0cooPWMYJCHBCxUq7gBwAA",
++      "error_substr": "invalid signature"
++    },
++    {
++      "description": "wrong message for p2sh-multisig-2of2 full signature",
++      "message": "DAOHN7TAL75XRHJILGIO3RXAEM",
++      "address": "3Nye4j1GUFqCEBR3do2KEFZAs9oLe8NZ6X",
++      "signature": "fulAgAAAAEvAyd4zsoz8gcVU5H19GLYokTAN5PxuKCBlEPjODJ86gAAAADaAEcwRAIgT6rcfxgCmG6b3DpzNV6UG0jiCQGclG9sfiSpV45HDXMCIGgtqjFBuJ7rbi+cgnG0TZiKZaxMk0KI+gQd0pHJfEYCAUgwRQIhANCvCLjGMuZMzH+nCEkNhWhR45T6QRYMLin8utpuF9r1AiBTjG2NLjkre7ec+HPg8UUhK1jL1vgq7YKjq5ROv+h07AFHUiEDhKjcb/Pv1/7AYutzOXwgec08wwD/VwiPm58Lc0xjohghAhycjpwdBuP33orQXAH1CAsrgSkuspxM2+FPQ4OCVhQWUq7gBwAAAQAAAAAAAAAAAWrgBwAA",
++      "error_substr": "invalid signature"
++    },
++    {
++      "description": "wrong signer for p2sh-multisig-2of2 full signature",
++      "message": "7OKFLKRXSP6J42VQOMSG7MVXEP",
++      "address": "3L9uCVRBUfLgKQQK366dmutgsp3GpCwYGE",
++      "signature": "fulAgAAAAEvAyd4zsoz8gcVU5H19GLYokTAN5PxuKCBlEPjODJ86gAAAADaAEcwRAIgT6rcfxgCmG6b3DpzNV6UG0jiCQGclG9sfiSpV45HDXMCIGgtqjFBuJ7rbi+cgnG0TZiKZaxMk0KI+gQd0pHJfEYCAUgwRQIhANCvCLjGMuZMzH+nCEkNhWhR45T6QRYMLin8utpuF9r1AiBTjG2NLjkre7ec+HPg8UUhK1jL1vgq7YKjq5ROv+h07AFHUiEDhKjcb/Pv1/7AYutzOXwgec08wwD/VwiPm58Lc0xjohghAhycjpwdBuP33orQXAH1CAsrgSkuspxM2+FPQ4OCVhQWUq7gBwAAAQAAAAAAAAAAAWrgBwAA",
++      "error_substr": "invalid signature"
++    }
++  ]
++}
+\ No newline at end of file
+diff --git a/prime/wire/tests/data/bip322-xbt-vectors.json b/prime/wire/tests/data/bip322-xbt-vectors.json
+new file mode 100644
+index 0000000..e696cbf
+--- /dev/null
++++ b/prime/wire/tests/data/bip322-xbt-vectors.json
+@@ -0,0 +1,196 @@
++{
++ "about": "XBT BIP322 vectors (SOV-009): signed by XBT Knots 29.4.2 wallets on regtest. 'std' with -walletoldsigs=1 (BIP143/BIP341), 'unified' as shipped (SIGHASH_ALL|SIGHASH_UNIFIED, 0x21: valid only with the verifier's unified-sighash feature). XBT addresses use Bitcoin's encodings, so the official BIP322 vectors apply unchanged.",
++ "knots": "~/lazarus-regtest/b1-xbt402/knots-29.4.2/bitcoind",
++ "bip322": [
++  {
++   "type": "p2wpkh",
++   "address": "bcrt1qhmfg48cstxytm9frdtvqrcp7956er8yfavggml",
++   "unified": false,
++   "name": "std-p2wpkh-valid",
++   "message": "LZT1 register v2\npool: lazarus-xbt\nchain: XBT\nG: abababababababababababababababababababababababababababababababab\nnode: none\ntag: vectors\nat: 150 0000000000000000000000000000000000000000000000000000000000000000\npayout: bcrt1qhmfg48cstxytm9frdtvqrcp7956er8yfavggml",
++   "signature": "smpAkcwRAIgPYcnbDtu9M6CTQlZOPxkQcqM0GKqPAKYLgqEqCIeWjcCICU2/hMAd81lYVHINZXzu0JkGRPsZ8Nlt9of/ghD3iQuASECukrLXzLXS8vC6EfAGBBwhd6ZDcl0Cwtvhpj5jM5ejmw=",
++   "expect": "valid"
++  },
++  {
++   "type": "p2wpkh",
++   "address": "bcrt1qhmfg48cstxytm9frdtvqrcp7956er8yfavggml",
++   "unified": false,
++   "name": "std-p2wpkh-wrong-message",
++   "message": "LZT1 register v2\npool: lazarus-xbt\nchain: XBT\nG: abababababababababababababababababababababababababababababababab\nnode: none\ntag: vectors\nat: 150 0000000000000000000000000000000000000000000000000000000000000000\npayout: bcrt1qhmfg48cstxytm9frdtvqrcp7956er8yfavggml (edited)",
++   "signature": "smpAkcwRAIgPYcnbDtu9M6CTQlZOPxkQcqM0GKqPAKYLgqEqCIeWjcCICU2/hMAd81lYVHINZXzu0JkGRPsZ8Nlt9of/ghD3iQuASECukrLXzLXS8vC6EfAGBBwhd6ZDcl0Cwtvhpj5jM5ejmw=",
++   "expect": "invalid"
++  },
++  {
++   "type": "p2wpkh",
++   "address": "bcrt1qhmfg48cstxytm9frdtvqrcp7956er8yfavggml",
++   "unified": false,
++   "name": "std-p2wpkh-wrong-key",
++   "message": "LZT1 register v2\npool: lazarus-xbt\nchain: XBT\nG: abababababababababababababababababababababababababababababababab\nnode: none\ntag: vectors\nat: 150 0000000000000000000000000000000000000000000000000000000000000000\npayout: bcrt1qhmfg48cstxytm9frdtvqrcp7956er8yfavggml",
++   "signature": "smpAkcwRAIgaJdiYp7KwXagn2P8uHFq6VqIC1bFnpcjS84PbljYOL4CIBi2yvRMhBb4PMDdcvDwYBPCa6OmtzZk3cRe85jGJXXSASECr3vZD+pBAftDNNdkDfWAyGbyhdO8cpELjNXysNoYI1E=",
++   "expect": "invalid"
++  },
++  {
++   "type": "p2tr",
++   "address": "bcrt1p2d6ya5jy3h6hcrdj55lyakc2zur45fdkf5uc3seqjmvu9m58fvhq64w67f",
++   "unified": false,
++   "name": "std-p2tr-valid",
++   "message": "LZT1 register v2\npool: lazarus-xbt\nchain: XBT\nG: abababababababababababababababababababababababababababababababab\nnode: none\ntag: vectors\nat: 150 0000000000000000000000000000000000000000000000000000000000000000\npayout: bcrt1p2d6ya5jy3h6hcrdj55lyakc2zur45fdkf5uc3seqjmvu9m58fvhq64w67f",
++   "signature": "smpAUB1N6dhrDzAo66qFbpbcCVe0rR9DBBcx/++47YOr2rHYTKUa/fH1LFhuHzSeP7YbLMjO6TKVPamvfHvN9y+uFKa",
++   "expect": "valid"
++  },
++  {
++   "type": "p2tr",
++   "address": "bcrt1p2d6ya5jy3h6hcrdj55lyakc2zur45fdkf5uc3seqjmvu9m58fvhq64w67f",
++   "unified": false,
++   "name": "std-p2tr-wrong-message",
++   "message": "LZT1 register v2\npool: lazarus-xbt\nchain: XBT\nG: abababababababababababababababababababababababababababababababab\nnode: none\ntag: vectors\nat: 150 0000000000000000000000000000000000000000000000000000000000000000\npayout: bcrt1p2d6ya5jy3h6hcrdj55lyakc2zur45fdkf5uc3seqjmvu9m58fvhq64w67f (edited)",
++   "signature": "smpAUB1N6dhrDzAo66qFbpbcCVe0rR9DBBcx/++47YOr2rHYTKUa/fH1LFhuHzSeP7YbLMjO6TKVPamvfHvN9y+uFKa",
++   "expect": "invalid"
++  },
++  {
++   "type": "p2tr",
++   "address": "bcrt1p2d6ya5jy3h6hcrdj55lyakc2zur45fdkf5uc3seqjmvu9m58fvhq64w67f",
++   "unified": false,
++   "name": "std-p2tr-wrong-key",
++   "message": "LZT1 register v2\npool: lazarus-xbt\nchain: XBT\nG: abababababababababababababababababababababababababababababababab\nnode: none\ntag: vectors\nat: 150 0000000000000000000000000000000000000000000000000000000000000000\npayout: bcrt1p2d6ya5jy3h6hcrdj55lyakc2zur45fdkf5uc3seqjmvu9m58fvhq64w67f",
++   "signature": "smpAkcwRAIgQ+4crrDgBvFLIsl/bTHJ2XooH7bDhGQl6pwK1izsisgCIEKwtVKIdscowTTtRxjuvZQQYuqkIBoO0+//+9Yo5u+mASECr3vZD+pBAftDNNdkDfWAyGbyhdO8cpELjNXysNoYI1E=",
++   "expect": "invalid"
++  },
++  {
++   "type": "p2wsh",
++   "address": "bcrt1qd4vwz5wa8vcrhm3gxqap0ym5aj9l2759ktrt9ylal4edax0xdehqyee5jk",
++   "unified": false,
++   "name": "std-p2wsh-valid",
++   "message": "LZT1 register v2\npool: lazarus-xbt\nchain: XBT\nG: abababababababababababababababababababababababababababababababab\nnode: none\ntag: vectors\nat: 150 0000000000000000000000000000000000000000000000000000000000000000\npayout: bcrt1qd4vwz5wa8vcrhm3gxqap0ym5aj9l2759ktrt9ylal4edax0xdehqyee5jk",
++   "signature": "smpAkcwRAIgSfKQ9RqEVhvO9fBu08mm1YENZZUUMyX3hrEgeD/dFt0CIGrSeFzvZnfb5Ts6ptCpF9JI+QX94zeH3DUrIDJZeLNdASMhA0byac90sQKeuKPvam2LXG2zs/4KYTVkqCQbBFPr3b/drA==",
++   "expect": "valid"
++  },
++  {
++   "type": "p2wsh",
++   "address": "bcrt1qd4vwz5wa8vcrhm3gxqap0ym5aj9l2759ktrt9ylal4edax0xdehqyee5jk",
++   "unified": false,
++   "name": "std-p2wsh-wrong-message",
++   "message": "LZT1 register v2\npool: lazarus-xbt\nchain: XBT\nG: abababababababababababababababababababababababababababababababab\nnode: none\ntag: vectors\nat: 150 0000000000000000000000000000000000000000000000000000000000000000\npayout: bcrt1qd4vwz5wa8vcrhm3gxqap0ym5aj9l2759ktrt9ylal4edax0xdehqyee5jk (edited)",
++   "signature": "smpAkcwRAIgSfKQ9RqEVhvO9fBu08mm1YENZZUUMyX3hrEgeD/dFt0CIGrSeFzvZnfb5Ts6ptCpF9JI+QX94zeH3DUrIDJZeLNdASMhA0byac90sQKeuKPvam2LXG2zs/4KYTVkqCQbBFPr3b/drA==",
++   "expect": "invalid"
++  },
++  {
++   "type": "p2wsh",
++   "address": "bcrt1qd4vwz5wa8vcrhm3gxqap0ym5aj9l2759ktrt9ylal4edax0xdehqyee5jk",
++   "unified": false,
++   "name": "std-p2wsh-wrong-key",
++   "message": "LZT1 register v2\npool: lazarus-xbt\nchain: XBT\nG: abababababababababababababababababababababababababababababababab\nnode: none\ntag: vectors\nat: 150 0000000000000000000000000000000000000000000000000000000000000000\npayout: bcrt1qd4vwz5wa8vcrhm3gxqap0ym5aj9l2759ktrt9ylal4edax0xdehqyee5jk",
++   "signature": "smpAkcwRAIgQZ4j4wXurOaPNTCAGfn7kQ0bdgEwErGOz1xcFozDU68CID5mbnABVHRr1EqDvPY4uE58SCXFbCbn+ugd628HsDOgASECr3vZD+pBAftDNNdkDfWAyGbyhdO8cpELjNXysNoYI1E=",
++   "expect": "invalid"
++  },
++  {
++   "type": "p2sh-p2wpkh",
++   "address": "2MsSKua5Eehe6u8rrxfE6UMAQe2H9eDs5jR",
++   "unified": false,
++   "name": "std-p2sh-p2wpkh-valid",
++   "message": "LZT1 register v2\npool: lazarus-xbt\nchain: XBT\nG: abababababababababababababababababababababababababababababababab\nnode: none\ntag: vectors\nat: 150 0000000000000000000000000000000000000000000000000000000000000000\npayout: 2MsSKua5Eehe6u8rrxfE6UMAQe2H9eDs5jR",
++   "signature": "fulAAAAAAABAcmaZFgkGYoKD3Ajyy2DAaUZ3C2L0tfe1YXTsmKQ4x+UAAAAABcWABQJnAD6JNXoUOXn+7XdEzKXILcUowAAAAABAAAAAAAAAAABagJHMEQCIAzZr0ETTFD7voXAzo9GhFcGCFQFXRNkrzueNbNYWAsxAiBqSm1nH90GlJBFM4Hw2lLMvEh//PJ3MvKVocDOkb/HsgEhA7liByhFNZbCCEVbOvpDsfmKTzVb81Kn23oHsGfmF0+tAAAAAA==",
++   "expect": "valid"
++  },
++  {
++   "type": "p2sh-p2wpkh",
++   "address": "2MsSKua5Eehe6u8rrxfE6UMAQe2H9eDs5jR",
++   "unified": false,
++   "name": "std-p2sh-p2wpkh-wrong-message",
++   "message": "LZT1 register v2\npool: lazarus-xbt\nchain: XBT\nG: abababababababababababababababababababababababababababababababab\nnode: none\ntag: vectors\nat: 150 0000000000000000000000000000000000000000000000000000000000000000\npayout: 2MsSKua5Eehe6u8rrxfE6UMAQe2H9eDs5jR (edited)",
++   "signature": "fulAAAAAAABAcmaZFgkGYoKD3Ajyy2DAaUZ3C2L0tfe1YXTsmKQ4x+UAAAAABcWABQJnAD6JNXoUOXn+7XdEzKXILcUowAAAAABAAAAAAAAAAABagJHMEQCIAzZr0ETTFD7voXAzo9GhFcGCFQFXRNkrzueNbNYWAsxAiBqSm1nH90GlJBFM4Hw2lLMvEh//PJ3MvKVocDOkb/HsgEhA7liByhFNZbCCEVbOvpDsfmKTzVb81Kn23oHsGfmF0+tAAAAAA==",
++   "expect": "invalid"
++  },
++  {
++   "type": "p2sh-p2wpkh",
++   "address": "2MsSKua5Eehe6u8rrxfE6UMAQe2H9eDs5jR",
++   "unified": false,
++   "name": "std-p2sh-p2wpkh-wrong-key",
++   "message": "LZT1 register v2\npool: lazarus-xbt\nchain: XBT\nG: abababababababababababababababababababababababababababababababab\nnode: none\ntag: vectors\nat: 150 0000000000000000000000000000000000000000000000000000000000000000\npayout: 2MsSKua5Eehe6u8rrxfE6UMAQe2H9eDs5jR",
++   "signature": "smpAkcwRAIgT8f3NalmQDvdosEPh0IJoBK0cY0wIFN5/IHPvVSHjVMCIG/jYc/eb35sPco/REUE17wOcswjtvmU9w1IlVqXDzWBASECr3vZD+pBAftDNNdkDfWAyGbyhdO8cpELjNXysNoYI1E=",
++   "expect": "invalid"
++  },
++  {
++   "type": "p2pkh",
++   "address": "mkA6BQbDSRrc7xcXV53hoBXSzqouyh88Q5",
++   "unified": false,
++   "name": "std-p2pkh-valid",
++   "message": "LZT1 register v2\npool: lazarus-xbt\nchain: XBT\nG: abababababababababababababababababababababababababababababababab\nnode: none\ntag: vectors\nat: 150 0000000000000000000000000000000000000000000000000000000000000000\npayout: mkA6BQbDSRrc7xcXV53hoBXSzqouyh88Q5",
++   "signature": "fulAAAAAAExRK+RSZC8726QNbnhBsgtsyyYzAATtvlRNDK9sE2RFQAAAABqRzBEAiByqW3YarQXEel5z7O3XBg6i9PwIQaiZA0u97okdIOKYAIgTkgjca4DhliJgSugDOLSq9RccDimtcyMBatlwDoNYpoBIQJBqI9xHFZhLCAAfG6MJg6vDPYess7L2njVcnIMY0jBxAAAAAABAAAAAAAAAAABagAAAAA=",
++   "expect": "valid"
++  },
++  {
++   "type": "p2pkh",
++   "address": "mkA6BQbDSRrc7xcXV53hoBXSzqouyh88Q5",
++   "unified": false,
++   "name": "std-p2pkh-wrong-message",
++   "message": "LZT1 register v2\npool: lazarus-xbt\nchain: XBT\nG: abababababababababababababababababababababababababababababababab\nnode: none\ntag: vectors\nat: 150 0000000000000000000000000000000000000000000000000000000000000000\npayout: mkA6BQbDSRrc7xcXV53hoBXSzqouyh88Q5 (edited)",
++   "signature": "fulAAAAAAExRK+RSZC8726QNbnhBsgtsyyYzAATtvlRNDK9sE2RFQAAAABqRzBEAiByqW3YarQXEel5z7O3XBg6i9PwIQaiZA0u97okdIOKYAIgTkgjca4DhliJgSugDOLSq9RccDimtcyMBatlwDoNYpoBIQJBqI9xHFZhLCAAfG6MJg6vDPYess7L2njVcnIMY0jBxAAAAAABAAAAAAAAAAABagAAAAA=",
++   "expect": "invalid"
++  },
++  {
++   "type": "p2pkh",
++   "address": "mkA6BQbDSRrc7xcXV53hoBXSzqouyh88Q5",
++   "unified": false,
++   "name": "std-p2pkh-wrong-key",
++   "message": "LZT1 register v2\npool: lazarus-xbt\nchain: XBT\nG: abababababababababababababababababababababababababababababababab\nnode: none\ntag: vectors\nat: 150 0000000000000000000000000000000000000000000000000000000000000000\npayout: mkA6BQbDSRrc7xcXV53hoBXSzqouyh88Q5",
++   "signature": "smpAkcwRAIgDKErBaKnT0Fi/DWs3n9fcpp244ubhBtM5Qlg8HbiHlECIGgga7Yv2NcpDDKa18b0eJtkCV5MZfmECt5+Ge4WYT/FASECr3vZD+pBAftDNNdkDfWAyGbyhdO8cpELjNXysNoYI1E=",
++   "expect": "invalid"
++  },
++  {
++   "type": "p2wpkh",
++   "address": "bcrt1qhmfg48cstxytm9frdtvqrcp7956er8yfavggml",
++   "unified": true,
++   "name": "unified-p2wpkh-valid",
++   "message": "LZT1 register v2\npool: lazarus-xbt\nchain: XBT\nG: abababababababababababababababababababababababababababababababab\nnode: none\ntag: vectors\nat: 150 0000000000000000000000000000000000000000000000000000000000000000\npayout: bcrt1qhmfg48cstxytm9frdtvqrcp7956er8yfavggml",
++   "signature": "smpAkcwRAIgabytZZSbAsIdlhDSgyVPeqYrdJl0LG6JV7HzgNvf8zYCIAvQ7ghcz2hRZRL4mVpzrUPmormLL/dXS8ABV23IMgiIISECukrLXzLXS8vC6EfAGBBwhd6ZDcl0Cwtvhpj5jM5ejmw=",
++   "expect": "valid"
++  },
++  {
++   "type": "p2tr",
++   "address": "bcrt1p2d6ya5jy3h6hcrdj55lyakc2zur45fdkf5uc3seqjmvu9m58fvhq64w67f",
++   "unified": true,
++   "name": "unified-p2tr-valid",
++   "message": "LZT1 register v2\npool: lazarus-xbt\nchain: XBT\nG: abababababababababababababababababababababababababababababababab\nnode: none\ntag: vectors\nat: 150 0000000000000000000000000000000000000000000000000000000000000000\npayout: bcrt1p2d6ya5jy3h6hcrdj55lyakc2zur45fdkf5uc3seqjmvu9m58fvhq64w67f",
++   "signature": "smpAUFeye+G7Uh6dr2NReLF2EwneNUjRlZGMI3g1qTIztwwCgyOWu12QIzcSd51Kw+CY708hqN58qB04w5wVLKGxvv1IQ==",
++   "expect": "valid"
++  },
++  {
++   "type": "p2wsh",
++   "address": "bcrt1qd4vwz5wa8vcrhm3gxqap0ym5aj9l2759ktrt9ylal4edax0xdehqyee5jk",
++   "unified": true,
++   "name": "unified-p2wsh-valid",
++   "message": "LZT1 register v2\npool: lazarus-xbt\nchain: XBT\nG: abababababababababababababababababababababababababababababababab\nnode: none\ntag: vectors\nat: 150 0000000000000000000000000000000000000000000000000000000000000000\npayout: bcrt1qd4vwz5wa8vcrhm3gxqap0ym5aj9l2759ktrt9ylal4edax0xdehqyee5jk",
++   "signature": "smpAkcwRAIgUnGiOIGzFehjhWYJzxyiJbSzWLgfkrmcB0IhcjIgIhwCIDDp/DqdOAOZKfn0XinxBGekLE1nUOpKYUtBCIT6IaXFISMhA0byac90sQKeuKPvam2LXG2zs/4KYTVkqCQbBFPr3b/drA==",
++   "expect": "valid"
++  },
++  {
++   "type": "p2sh-p2wpkh",
++   "address": "2MsSKua5Eehe6u8rrxfE6UMAQe2H9eDs5jR",
++   "unified": true,
++   "name": "unified-p2sh-p2wpkh-valid",
++   "message": "LZT1 register v2\npool: lazarus-xbt\nchain: XBT\nG: abababababababababababababababababababababababababababababababab\nnode: none\ntag: vectors\nat: 150 0000000000000000000000000000000000000000000000000000000000000000\npayout: 2MsSKua5Eehe6u8rrxfE6UMAQe2H9eDs5jR",
++   "signature": "fulAAAAAAABAcmaZFgkGYoKD3Ajyy2DAaUZ3C2L0tfe1YXTsmKQ4x+UAAAAABcWABQJnAD6JNXoUOXn+7XdEzKXILcUowAAAAABAAAAAAAAAAABagJHMEQCICROQj6Po7KnehDPEYCXT2w1J9pX5PswAJgUphxKKGLmAiBxoIb/WiUdAUn14Co1li40GAiES0sLiB3LAfEHMjQzPCEhA7liByhFNZbCCEVbOvpDsfmKTzVb81Kn23oHsGfmF0+tAAAAAA==",
++   "expect": "valid"
++  },
++  {
++   "type": "p2pkh",
++   "address": "mkA6BQbDSRrc7xcXV53hoBXSzqouyh88Q5",
++   "unified": true,
++   "name": "unified-p2pkh-valid",
++   "message": "LZT1 register v2\npool: lazarus-xbt\nchain: XBT\nG: abababababababababababababababababababababababababababababababab\nnode: none\ntag: vectors\nat: 150 0000000000000000000000000000000000000000000000000000000000000000\npayout: mkA6BQbDSRrc7xcXV53hoBXSzqouyh88Q5",
++   "signature": "fulAAAAAAExRK+RSZC8726QNbnhBsgtsyyYzAATtvlRNDK9sE2RFQAAAABqRzBEAiAOaxxmKNh2dXXPU62VEjsbVxm3yL+SnUSozC3/gnTulAIgM42HXbSK8Tgzoh5lOxrXB+5EtoTd/g0OX5LeQ1omtYchIQJBqI9xHFZhLCAAfG6MJg6vDPYess7L2njVcnIMY0jBxAAAAAABAAAAAAAAAAABagAAAAA=",
++   "expect": "valid"
++  }
++ ],
++ "signmessage": [
++  {
++   "type": "p2pkh",
++   "address": "mkA6BQbDSRrc7xcXV53hoBXSzqouyh88Q5",
++   "message": "LZT1 register v2\npool: lazarus-xbt\nchain: XBT\nG: abababababababababababababababababababababababababababababababab\nnode: none\ntag: vectors\nat: 150 0000000000000000000000000000000000000000000000000000000000000000\npayout: mkA6BQbDSRrc7xcXV53hoBXSzqouyh88Q5",
++   "signature": "IEychA9s5Ck1ADCYI+ilq3yg/ezSnA4VLtkX7zoMasAFNItDkICP51wOiuTMyb67gfvZRG5ViG4tGltNo8vPFzM=",
++   "expect": "valid (verifymessage)",
++   "verifymessage": true
++  }
++ ]
++}
+\ No newline at end of file
+-- 
+2.43.0
+

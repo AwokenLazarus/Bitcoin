@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Mike Moore (AwokenLazarus)
 """Render bip-node-template-attestation.md to a shareable index.html."""
 
 from __future__ import annotations
@@ -21,7 +23,7 @@ TEMPLATE = """<!DOCTYPE html>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Node Template Attestation — soft-fork draft</title>
 <meta name="description" content="Draft Bitcoin soft fork: a block may pay a coinbase address only if that same block carries a grind proving a node-template for that script, and it must include the short list of transactions that template named whenever they still fit and still spend.">
-<link rel="canonical" href="https://github.com/AwokenLazarus/Bitcoin/blob/nta-soft-fork/research/node-template-consensus/bip-node-template-attestation.md">
+<link rel="canonical" href="https://github.com/AwokenLazarus/Bitcoin/blob/main/research/node-template-consensus/bip-node-template-attestation.md">
 <style>
   :root {
     --bg: #f6f1e8;
@@ -166,11 +168,11 @@ TEMPLATE = """<!DOCTYPE html>
 __BODY__
 <footer>
   <p>Canonical markdown:
-    <a href="https://github.com/AwokenLazarus/Bitcoin/blob/nta-soft-fork/research/node-template-consensus/bip-node-template-attestation.md">bip-node-template-attestation.md</a>
+    <a href="https://github.com/AwokenLazarus/Bitcoin/blob/main/research/node-template-consensus/bip-node-template-attestation.md">bip-node-template-attestation.md</a>
     · Reference model:
     <a href="https://github.com/AwokenLazarus/Bitcoin/tree/nta-soft-fork/research/node-template-consensus">node-template-consensus/</a>
   </p>
-  <p>Not a Bitcoin Core or Knots patch. No activation bit. BSD-2-Clause.</p>
+  <p>Not a Bitcoin Core or Knots patch. No activation bit. CC-BY-4.0.</p>
 </footer>
 </div>
 <script type="module">

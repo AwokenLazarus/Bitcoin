@@ -1,0 +1,124 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: michael moore <mrmoore27@pm.me>
+Date: Fri, 25 Sep 2026 11:07:04 +0000
+Subject: [PATCH 7/8] prime, lazarus-canary: the sidecar reads
+ sovereignty-nodes.json
+
+Primed now writes exactly what Engine::node_of answers to
+sovereignty-nodes.json. A refused key's node leaves the file as a
+superseded or revoked one's does, so the canary sidecar, which reads the
+file as its nodes_file every round, canaries only active gateways. The
+sidecar logs an unreadable or torn file and runs the round on
+[[gateways]]. The example config, README and unit point at the file.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ lazarus/canary/README.md                   |  8 ++++++--
+ lazarus/canary/lazarus-canary.service      |  3 ++-
+ lazarus/canary/lazarus-canary.toml.example |  7 ++++---
+ lazarus/canary/lazarus_canary.py           |  7 ++++++-
+ lazarus/canary/test_lazarus_canary.py      | 18 ++++++++++++++++++
+ 5 files changed, 36 insertions(+), 7 deletions(-)
+
+diff --git a/lazarus/canary/README.md b/lazarus/canary/README.md
+index 25b923c..f145798 100644
+--- a/lazarus/canary/README.md
++++ b/lazarus/canary/README.md
+@@ -46,8 +46,12 @@ canaries judged) every `new_secs` (1,200 s); flagged every `flagged_secs` (1,200
+ `clean_min_due` judged, own hit rate ≥ `clean_min_rate`) every `clean_secs` (14,400 s); otherwise
+ `enrolled_secs` (3,600 s). Each interval is drawn from base × (1 ± `jitter`) (0.5). A round runs at
+ most every `round_min_gap_secs` (1,200 s) and takes every gateway due by then, plus one shared canary
+-and one decoy. Gateways come from `[[gateways]]` (G, node) and `nodes_file` (read every round;
+-W10's `sovereignty-nodes.json` once it lands). A gateway with `node = "none"` is never canaried.
++and one decoy. Gateways come from `[[gateways]]` (G, node) and `nodes_file`, read every round: point it at
++primed's `data-dir/sovereignty-nodes.json` (W10). Primed writes there exactly what
++`Engine::node_of` answers, so superseded, revoked and refused keys drop out on their own. An
++unreadable file is logged and the round runs on `[[gateways]]`. A gateway with `node = "none"` is
++never canaried. Primed creates the file 0600: on the hub the sidecar needs read access to it (an
++ACL on the file, as for the token), which primed does not set up.
+ 
+ ## Keys and isolation
+ - The canary key is a WIF in `wallet.key_file`. The sidecar refuses a key file readable by group or
+diff --git a/lazarus/canary/lazarus-canary.service b/lazarus/canary/lazarus-canary.service
+index 0ba0bf2..0d1e742 100644
+--- a/lazarus/canary/lazarus-canary.service
++++ b/lazarus/canary/lazarus-canary.service
+@@ -14,7 +14,8 @@ RestartSec=30
+ StateDirectory=lazarus-canary
+ StateDirectoryMode=0700
+ # primed's token file has to be readable by this user (a group ACL, not a world bit)
+-ReadOnlyPaths=/etc/lazarus-canary /var/lib/primed/sovereignty.token
++# ... and so does sovereignty-nodes.json, the sidecar's nodes_file (primed writes it 0600)
++ReadOnlyPaths=/etc/lazarus-canary /var/lib/primed/sovereignty.token /var/lib/primed/sovereignty-nodes.json
+ NoNewPrivileges=true
+ ProtectSystem=strict
+ ProtectHome=true
+diff --git a/lazarus/canary/lazarus-canary.toml.example b/lazarus/canary/lazarus-canary.toml.example
+index fcedbf0..9fb373f 100644
+--- a/lazarus/canary/lazarus-canary.toml.example
++++ b/lazarus/canary/lazarus-canary.toml.example
+@@ -50,9 +50,10 @@ mode = "direct"                      # direct | socks5 (Tor: proxy = "127.0.0.1:
+ proxy = ""
+ timeout_secs = 20
+ 
+-# Gateways with a registered node (registration v1, W10). nodes_file is read on every round and may
+-# be primed's sovereignty-nodes.json once W10 lands: {"<G hex>": "host:port"} or [{"g":..,"node":..}].
+-nodes_file = ""
++# Gateways with a registered node (registration v1/v2, W10). nodes_file is read on every round:
++# primed's data-dir/sovereignty-nodes.json ({"<G hex>": {"node": "host:port", ...}}, active keys
++# only), or {"<G hex>": "host:port"} / [{"g":..,"node":..}]. [[gateways]] entries win over it.
++nodes_file = "/var/lib/primed/sovereignty-nodes.json"
+ # [[gateways]]
+ # g = "<64 hex ed25519 DATUM identity key>"
+ # node = "203.0.113.7:8333"
+diff --git a/lazarus/canary/lazarus_canary.py b/lazarus/canary/lazarus_canary.py
+index 6c7bfdf..e086424 100644
+--- a/lazarus/canary/lazarus_canary.py
++++ b/lazarus/canary/lazarus_canary.py
+@@ -241,8 +241,13 @@ class Canary:
+         for g in self.cfg.get("gateways", []):
+             out[g["g"].lower()] = dict(g)
+         nf = self.cfg.get("nodes_file")
++        data = None
+         if nf and os.path.exists(nf):
+-            data = json.loads(read_text(nf))
++            try:
++                data = json.loads(read_text(nf))
++            except (OSError, ValueError) as e:
++                log("nodes_file unreadable, using [[gateways]] only:", e)
++        if data:
+             items = data.items() if isinstance(data, dict) else ((d.get("g"), d) for d in data)
+             for g, v in items:
+                 node = v if isinstance(v, str) else (v or {}).get("node")
+diff --git a/lazarus/canary/test_lazarus_canary.py b/lazarus/canary/test_lazarus_canary.py
+index 1122a57..0f1aaa1 100644
+--- a/lazarus/canary/test_lazarus_canary.py
++++ b/lazarus/canary/test_lazarus_canary.py
+@@ -127,6 +127,24 @@ class Policy(unittest.TestCase):
+         self.assertEqual(sorted(gws), sorted(["aa" * 32, "cc" * 32, "dd" * 32]))
+ 
+ 
++    def test_primeds_sovereignty_nodes_json_is_a_nodes_file(self):
++        # SOV-010: primed writes {G: {"node", "at_height", "updated"}} (only active keys)
++        s = self.svc()
++        with tempfile.TemporaryDirectory() as d:
++            nf = os.path.join(d, "sovereignty-nodes.json")
++            with open(nf, "w") as f:
++                json.dump({"aa" * 32: {"node": "198.51.100.1:8333", "at_height": 700, "updated": 1},
++                           "bb" * 32: {"node": "[2001:db8::7]:8333", "at_height": 701, "updated": 2}}, f)
++            s.cfg["nodes_file"] = nf
++            gws = s.gateways()
++            self.assertEqual(gws["aa" * 32]["node"], "198.51.100.1:8333")
++            self.assertEqual(gws["bb" * 32]["node"], "[2001:db8::7]:8333")
++            # an unreadable or torn file costs the round nothing but its gateways
++            with open(nf, "w") as f:
++                f.write("{")
++            s.cfg["gateways"] = [{"g": "dd" * 32, "node": "127.0.0.1:18444"}]
++            self.assertEqual(sorted(s.gateways()), ["dd" * 32])
++
+ class StubPool:
+     def __init__(self):
+         self.calls = []
+-- 
+2.43.0
+

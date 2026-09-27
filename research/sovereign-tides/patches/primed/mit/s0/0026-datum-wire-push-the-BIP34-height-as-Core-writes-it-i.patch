@@ -1,0 +1,99 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: michael moore <mrmoore27@pm.me>
+Date: Fri, 25 Sep 2026 11:07:04 +0000
+Subject: [PATCH 26/27] datum-wire: push the BIP34 height as Core writes it in
+ coinbase::build
+
+The same fix 66f8c4f made in lazarus-protocol: heights 128..=255 and
+32768..=65535 were pushed without the sign byte and 1..=16 as a data
+push, so a fixture coinbase there was bad-cb-height. Fixtures and tools
+only; parse already read every form.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ prime/wire/src/coinbase.rs | 56 ++++++++++++++++++++++++++++++++++----
+ 1 file changed, 50 insertions(+), 6 deletions(-)
+
+diff --git a/prime/wire/src/coinbase.rs b/prime/wire/src/coinbase.rs
+index acb0e03..8020de1 100644
+--- a/prime/wire/src/coinbase.rs
++++ b/prime/wire/src/coinbase.rs
+@@ -271,18 +271,33 @@ pub fn with_witness(legacy: &[u8], parsed: &Coinbase) -> Vec<u8> {
+     v
+ }
+ 
++/// The BIP34 height as Core's `CScript() << nHeight` writes it and `bad-cb-height` checks it:
++/// OP_0 / OP_1..OP_16 for 0..=16, otherwise a minimal CScriptNum push, with a 0x00 byte added
++/// when the top bit of the last byte is set (so 128..=255 is `02 xx 00`, not the negative `01 xx`).
++/// The same encoder as `lazarus-protocol`'s `cbtx::bip34_push` (66f8c4f).
++pub fn bip34_push(height: u32) -> Vec<u8> {
++    match height {
++        0 => vec![0x00],
++        1..=16 => vec![0x50 + height as u8],
++        _ => {
++            let mut n: Vec<u8> = height.to_le_bytes().to_vec();
++            while n.len() > 1 && n[n.len() - 1] == 0 && n[n.len() - 2] & 0x80 == 0 {
++                n.pop();
++            }
++            let mut s = vec![n.len() as u8];
++            s.extend_from_slice(&n);
++            s
++        }
++    }
++}
++
+ /// Build a legacy coinbase for tests and tools, laid out as a stock gateway does: BIP34
+ /// height, the tag push, the unique-id push that opens with the target byte, then a push
+ /// holding the extranonce prefix and the 12-byte zero extranonce slot; then the outputs.
+ /// Returns `(bytes, target_byte_index, slot)`: `coinb1` is `bytes[..slot]` and `coinb2` is
+ /// `bytes[slot + EXTRANONCE_SLOT..]`.
+ pub fn build(height: u32, tag: &[u8], outputs: &[TxOut], lock_time: u32) -> (Vec<u8>, usize, usize) {
+-    let mut sig = Vec::new();
+-    let hb = height.to_le_bytes();
+-    let n = 4 - hb.iter().rev().take_while(|&&b| b == 0).count();
+-    let n = n.max(1);
+-    sig.push(n as u8);
+-    sig.extend_from_slice(&hb[..n]);
++    let mut sig = bip34_push(height);
+     // tag push: primary tag, terminated
+     sig.push(tag.len() as u8 + 1);
+     sig.extend_from_slice(tag);
+@@ -390,6 +405,35 @@ mod tests {
+         assert_eq!(secondary_tag(&[]), "");
+     }
+ 
++    /// Core's `CScript() << n` for the heights `build` used to get wrong (128..=255 and
++    /// 32768..=65535 came out negative, 1..=16 was not the opcode), and that `parse` reads
++    /// every one of them back.
++    #[test]
++    fn build_pushes_the_height_as_core_writes_it() {
++        for (h, want) in [
++            (1u32, "51"),
++            (16, "60"),
++            (17, "0111"),
++            (127, "017f"),
++            (128, "028000"),
++            (131, "028300"),
++            (255, "02ff00"),
++            (256, "020001"),
++            (32_767, "02ff7f"),
++            (32_768, "03008000"),
++            (65_535, "03ffff00"),
++            (65_536, "03000001"),
++            (966_267, "037bbe0e"),
++            (8_388_608, "0400008000"),
++        ] {
++            assert_eq!(hex::encode(bip34_push(h)), want, "height {h}");
++            let (cb, _, _) = build(h, b"Lazarus", &[TxOut { value: 1, script: vec![0x51] }], 0);
++            let p = parse(&cb).unwrap();
++            assert!(p.script_sig.starts_with(&bip34_push(h)), "height {h}");
++            assert_eq!(p.height, Some(h), "height {h}");
++        }
++    }
++
+     #[test]
+     fn bip34_small_heights() {
+         assert_eq!(bip34_height(&[0x51]), Some(1));
+-- 
+2.43.0
+

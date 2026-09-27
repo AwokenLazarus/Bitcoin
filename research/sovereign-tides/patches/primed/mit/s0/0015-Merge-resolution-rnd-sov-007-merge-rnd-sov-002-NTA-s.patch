@@ -1,0 +1,88 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: michael moore <mrmoore27@pm.me>
+Date: Fri, 25 Sep 2026 09:20:30 +0000
+Subject: [PATCH 15/27] Merge resolution: rnd/sov-007: merge rnd/sov-002 (NTA
+ signing) into rnd/sov-006 (S0 rework)
+
+Linearised for publication: the side-branch commits above were replayed onto the
+first parent; this commit brings the tree to exactly 634b572 (the merge).
+---
+ prime/primed/src/main.rs  |  4 +++-
+ prime/primed/src/state.rs |  5 +++--
+ prime/primed/src/stats.rs | 15 ++++++++++-----
+ 3 files changed, 16 insertions(+), 8 deletions(-)
+
+diff --git a/prime/primed/src/main.rs b/prime/primed/src/main.rs
+index 3ef3c20..d247907 100644
+--- a/prime/primed/src/main.rs
++++ b/prime/primed/src/main.rs
+@@ -312,7 +312,7 @@ fn run(cfg: Config) -> i32 {
+         next_client_id: AtomicU64::new(1),
+         coinbaser_base: Mutex::new(None),
+         gateway_payouts: Mutex::new(Shared::load_gateway_payouts(&cfg.data_dir)),
+-        sovereignty: Mutex::new(crate::sovereignty::Engine::from_config(&cfg)),
++        sovereignty: crate::sovereignty::Sovereignty::from_config(&cfg),
+         nta_pool,
+         nta: Mutex::new(Default::default()),
+         cfg,
+@@ -569,6 +569,8 @@ pub fn test_shared(dir: &std::path::Path, extra: &str) -> Shared {
+         coinbaser_base: Mutex::new(None),
+         gateway_payouts: Mutex::new(Default::default()),
+         sovereignty: crate::sovereignty::Sovereignty::from_config(&cfg),
++        nta_pool: None,
++        nta: Mutex::new(Default::default()),
+         cfg,
+     }
+ }
+diff --git a/prime/primed/src/state.rs b/prime/primed/src/state.rs
+index 8be69f7..52d7819 100644
+--- a/prime/primed/src/state.rs
++++ b/prime/primed/src/state.rs
+@@ -425,8 +425,9 @@ pub struct Shared {
+     /// Last known payout script per gateway signing key (64 hex chars). Survives reconnect
+     /// so the first empty job of a returning gateway already pays them.
+     pub gateway_payouts: Mutex<HashMap<String, GatewayPayout>>,
+-    /// Sovereign TIDES: key directory, job snapshots, attestations, detector, bonus.
+-    pub sovereignty: Mutex<crate::sovereignty::Engine>,
++    /// Sovereign TIDES: key directory, job snapshots, attestations, detector, bonus. Inert
++    /// unless `sovereignty-mode` is on.
++    pub sovereignty: crate::sovereignty::Sovereignty,
+     /// rnd/sov-002: the pool payout key when `nta-height` is set, and the attestation book.
+     pub nta_pool: Option<datum_wire::nta::Signer>,
+     pub nta: Mutex<crate::nta::Book>,
+diff --git a/prime/primed/src/stats.rs b/prime/primed/src/stats.rs
+index d6300aa..a62a1d2 100644
+--- a/prime/primed/src/stats.rs
++++ b/prime/primed/src/stats.rs
+@@ -403,7 +403,8 @@ pub async fn serve(shared: Arc<Shared>) {
+                 ("GET", "/" | "/stats.json" | "/stats") => ("200 OK", "application/json", document(0).await),
+                 ("GET", "/ledger.json") => ("200 OK", "application/json", document(1).await),
+                 ("GET", "/healthz") => ("200 OK", "text/plain", plain("ok\n")),
+-                ("GET", "/nta.json" | "/nta") => {
++                // Only with `nta-height` set, so a Prime without NTA serves the old routes.
++                ("GET", "/nta.json" | "/nta") if shared.cfg.nta_height.is_some() => {
+                     let body = shared
+                         .nta
+                         .lock()
+@@ -412,10 +413,14 @@ pub async fn serve(shared: Arc<Shared>) {
+                         .to_string();
+                     ("200 OK", "application/json", Arc::new(body))
+                 }
+-                ("GET", "/sovereignty.json" | "/sovereignty") => {
+-                    let ledger = shared.ledger.lock().unwrap();
+-                    let body = shared.sovereignty.lock().unwrap().stats_json(Some(&ledger.window)).to_string();
+-                    ("200 OK", "application/json", Arc::new(body))
++                // `sovereignty-mode = "off"`: these routes do not exist (the 404 below).
++                ("GET", "/sovereignty.json" | "/sovereignty") if shared.sovereignty.on() => {
++                    let r = shared.sovereignty.report();
++                    // one lock at a time: the window's work (only with the bonus on), then render
++                    let work = r
++                        .needs_window()
++                        .then(|| crate::sovereignty::WindowWork::of(&shared.ledger.lock().unwrap().window));
++                    ("200 OK", "application/json", Arc::new(r.render(work).to_string()))
+                 }
+                 ("POST", p) if p.starts_with("/sovereignty/") && shared.sovereignty.on() => {
+                     let token = header(&req, crate::sovereignty::TOKEN_HEADER);
+-- 
+2.43.0
+

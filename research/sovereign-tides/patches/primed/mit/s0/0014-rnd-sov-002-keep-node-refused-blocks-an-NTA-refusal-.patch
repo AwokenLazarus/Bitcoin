@@ -1,0 +1,247 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: michael moore <mrmoore27@pm.me>
+Date: Fri, 25 Sep 2026 08:06:54 +0000
+Subject: [PATCH 14/27] rnd/sov-002: keep node-refused blocks; an NTA refusal
+ is invalid now
+
+A bad-nta-* verdict judges the coinbase the miner hashed, so the block can never
+become valid: release its books at once, as for high-hash (it is not the
+gateway's template fault). Prime also keeps the bytes of any block its node
+refuses in data-dir/rejected-blocks/<hash>.hex: an invalid block is never
+relayed, and the demo replays it to the other enforcing nodes.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ prime/primed/src/main.rs    |  6 +++++-
+ prime/primed/src/node.rs    | 39 ++++++++++++++++++++++++-------------
+ prime/primed/src/nta.rs     |  2 +-
+ prime/primed/src/session.rs | 25 +++++++++++++++++++++---
+ prime/primed/src/stats.rs   |  7 ++++++-
+ prime/tides/src/split.rs    |  4 +---
+ prime/wire/src/nta.rs       |  8 ++++++--
+ prime/wire/src/verify.rs    |  6 ++++--
+ 8 files changed, 71 insertions(+), 26 deletions(-)
+
+diff --git a/prime/primed/src/main.rs b/prime/primed/src/main.rs
+index 23ee99e..3ef3c20 100644
+--- a/prime/primed/src/main.rs
++++ b/prime/primed/src/main.rs
+@@ -206,7 +206,11 @@ fn load_nta_pool_key(cfg: &Config, pool_script: &[u8]) -> Result<Option<datum_wi
+             cfg.payout_address
+         ));
+     }
+-    log::info!("XBT-NTA from height {h}: pool key {} loaded{}", hex::encode(signer.key()), if cfg.nta_disabled { " (nta-disabled: coinbasers NOT attested, test hook)" } else { "" });
++    log::info!(
++        "XBT-NTA from height {h}: pool key {} loaded{}",
++        hex::encode(signer.key()),
++        if cfg.nta_disabled { " (nta-disabled: coinbasers NOT attested, test hook)" } else { "" }
++    );
+     Ok(Some(signer))
+ }
+ 
+diff --git a/prime/primed/src/node.rs b/prime/primed/src/node.rs
+index f635866..821b219 100644
+--- a/prime/primed/src/node.rs
++++ b/prime/primed/src/node.rs
+@@ -287,17 +287,20 @@ fn settle_confirmed(shared: &Shared, hash: &str) {
+ /// out. `duplicate` and `inconclusive` mean the node already has it, and `rejected: ...` is a
+ /// failure to ask. Anything not listed here waits for `confirm_blocks`, as it always did.
+ pub fn says_invalid(outcome: &str) -> bool {
+-    matches!(
+-        outcome,
+-        "high-hash"
+-            | "bad-diffbits"
+-            | "bad-prevblk"
+-            | "bad-version"
+-            | "bad-cb-height"
+-            | "time-too-old"
+-            | "time-too-new"
+-            | "duplicate-invalid"
+-    )
++    // rnd/sov-002: an XBT-NTA refusal is about the coinbase Prime issued, so the block can
++    // never become valid: release its books now (it is not the gateway's template fault).
++    outcome.trim().starts_with("bad-nta-")
++        || matches!(
++            outcome,
++            "high-hash"
++                | "bad-diffbits"
++                | "bad-prevblk"
++                | "bad-version"
++                | "bad-cb-height"
++                | "time-too-old"
++                | "time-too-new"
++                | "duplicate-invalid"
++        )
+ }
+ 
+ /// Label a recorded block as orphaned, once. Orphans stay unsettled so `confirm_blocks` keeps
+@@ -366,8 +369,18 @@ mod tests {
+     /// around it (from a transaction list the gateway sent later) can be wrong on its own.
+     #[test]
+     fn only_a_verdict_on_the_header_or_coinbase_proves_a_block_invalid() {
+-        for proof in ["high-hash", "bad-diffbits", "bad-prevblk", "bad-cb-height", "duplicate-invalid", "time-too-new"]
+-        {
++        for proof in [
++            "high-hash",
++            "bad-diffbits",
++            "bad-prevblk",
++            "bad-cb-height",
++            "duplicate-invalid",
++            "time-too-new",
++            // rnd/sov-002: XBT-NTA judges the coinbase, which the miner hashed
++            "bad-nta-payee",
++            "bad-nta-count",
++            "bad-nta-sig",
++        ] {
+             assert!(says_invalid(proof), "{proof}");
+         }
+         for not_proof in [
+diff --git a/prime/primed/src/nta.rs b/prime/primed/src/nta.rs
+index 3dc26f7..67989c2 100644
+--- a/prime/primed/src/nta.rs
++++ b/prime/primed/src/nta.rs
+@@ -274,7 +274,7 @@ mod tests {
+             (500, a.script()),
+             (300, pool.script()),
+             (0, vec![0x6a, 0x24, 0xaa, 0x21]), // witness commitment: no attestation
+-            (100, a.script()),                  // repeated script: one attestation
++            (100, a.script()),                 // repeated script: one attestation
+         ];
+         let atts = b.attestations(T, &outs, &pool).unwrap();
+         assert_eq!(atts.len(), 2);
+diff --git a/prime/primed/src/session.rs b/prime/primed/src/session.rs
+index 1da1496..ee23a66 100644
+--- a/prime/primed/src/session.rs
++++ b/prime/primed/src/session.rs
+@@ -812,7 +812,11 @@ impl Session {
+         let from_tip = |shared: &Shared| {
+             let tip = shared.tip_snapshot()?;
+             (tip.hash_le.as_ref() == Some(prev)).then_some(())?;
+-            Some((crate::nta::Target { prev: *prev, height: tip.height + 1, nbits: tip.next_bits? }, tip.seen_at, tip.seen_ts))
++            Some((
++                crate::nta::Target { prev: *prev, height: tip.height + 1, nbits: tip.next_bits? },
++                tip.seen_at,
++                tip.seen_ts,
++            ))
+         };
+         let found = match from_tip(&self.shared) {
+             Some(t) => Some(t),
+@@ -942,7 +946,10 @@ impl Session {
+                 Some(_) => None,
+                 None => {
+                     if next_height >= h {
+-                        log::warn!("[{}] coinbaser for a tip this Prime's node does not have: cannot attest it", self.id);
++                        log::warn!(
++                            "[{}] coinbaser for a tip this Prime's node does not have: cannot attest it",
++                            self.id
++                        );
+                     }
+                     None
+                 }
+@@ -989,7 +996,10 @@ impl Session {
+                     book.note_coinbaser(t, atts.len().saturating_sub(1), carried, pool);
+                     outputs.extend(atts.into_iter().map(|script| Output { sats: 0, script }));
+                 }
+-                None => log::error!("[{}] NTA: a paid script has no attestation; coinbaser will be refused by nodes", self.id),
++                None => log::error!(
++                    "[{}] NTA: a paid script has no attestation; coinbaser will be refused by nodes",
++                    self.id
++                ),
+             }
+         }
+         let encoded = coinbaser::encode_v2(id, &outputs);
+@@ -1777,6 +1787,15 @@ impl Session {
+             shared.totals.add(&shared.totals.blocks_submitted, 1);
+             let invalid = node::says_invalid(&outcome);
+             let height = shared.update_block(&hash_hex, |r| r.submit = outcome).map(|r| r.height);
++            if invalid {
++                // rnd/sov-002: keep the bytes of a block the node refused, so the refusal can be
++                // replayed against other nodes (an invalid block is never relayed) and read later.
++                let dir = shared.cfg.data_dir.join("rejected-blocks");
++                let path = dir.join(format!("{hash_hex}.hex"));
++                if let Err(e) = std::fs::create_dir_all(&dir).and_then(|_| std::fs::write(&path, &hex_block)) {
++                    log::warn!("[{id}] could not keep rejected block {hash_hex}: {e}");
++                }
++            }
+             if let (true, Some(height)) = (invalid, height) {
+                 // The node has looked at the block and said no. There is nothing to wait for:
+                 // what it took off the books goes back now, not six blocks from now.
+diff --git a/prime/primed/src/stats.rs b/prime/primed/src/stats.rs
+index d5ffa83..d6300aa 100644
+--- a/prime/primed/src/stats.rs
++++ b/prime/primed/src/stats.rs
+@@ -404,7 +404,12 @@ pub async fn serve(shared: Arc<Shared>) {
+                 ("GET", "/ledger.json") => ("200 OK", "application/json", document(1).await),
+                 ("GET", "/healthz") => ("200 OK", "text/plain", plain("ok\n")),
+                 ("GET", "/nta.json" | "/nta") => {
+-                    let body = shared.nta.lock().unwrap().stats_json(shared.cfg.nta_height, shared.nta_pool.as_ref()).to_string();
++                    let body = shared
++                        .nta
++                        .lock()
++                        .unwrap()
++                        .stats_json(shared.cfg.nta_height, shared.nta_pool.as_ref())
++                        .to_string();
+                     ("200 OK", "application/json", Arc::new(body))
+                 }
+                 ("GET", "/sovereignty.json" | "/sovereignty") => {
+diff --git a/prime/tides/src/split.rs b/prime/tides/src/split.rs
+index 64c0980..494f299 100644
+--- a/prime/tides/src/split.rs
++++ b/prime/tides/src/split.rs
+@@ -511,9 +511,7 @@ mod tests {
+         assert_eq!(nta.paid_sats() + nta.pool_sats, 1_000_000);
+         assert_eq!(nta.carry_delta(|_| true), vec![("c".to_string(), 200_000)]);
+         // nothing signed: every miner is carried and the pool output takes the value.
+-        let none = compute_payable(
+-            vec![miner("a", 1), miner("b", 1)], 2, 1_000, &p, 0, 0, script, |_| false,
+-        );
++        let none = compute_payable(vec![miner("a", 1), miner("b", 1)], 2, 1_000, &p, 0, 0, script, |_| false);
+         assert!(none.payees.is_empty());
+         assert_eq!(none.pool_sats, 1_000);
+         assert!(none.unpaid.iter().all(|u| u.reason == UnpaidReason::Unattested && u.defers()));
+diff --git a/prime/wire/src/nta.rs b/prime/wire/src/nta.rs
+index 0b05152..a1fd177 100644
+--- a/prime/wire/src/nta.rs
++++ b/prime/wire/src/nta.rs
+@@ -348,7 +348,10 @@ pub(crate) mod tests {
+                 assert_eq!(hex::encode(digest), a["digest"].as_str().unwrap(), "{name}: digest");
+                 let key: [u8; 32] = hx(&a["payee_key"]).try_into().unwrap();
+                 assert_eq!(p2tr(&key), script, "{name}: payee script");
+-                let sig = a["carried_sig"].as_str().and_then(|s| hex::decode(s).ok()).and_then(|b| <[u8; 64]>::try_from(b).ok());
++                let sig = a["carried_sig"]
++                    .as_str()
++                    .and_then(|s| hex::decode(s).ok())
++                    .and_then(|b| <[u8; 64]>::try_from(b).ok());
+                 all_ok &= sig.is_some_and(|sig| verify(&key, height, nbits, &prev, &sig));
+                 // Our signer over the same digest verifies under the payee key when it holds it.
+                 if let Some(sk) = a["signer_seckey"].as_str().and_then(Signer::from_hex) {
+@@ -376,7 +379,8 @@ pub(crate) mod tests {
+                     .collect();
+                 assert_eq!(payees.len(), atts.len(), "{name}: one attestation per distinct payee");
+                 assert_eq!(atts, want.iter().map(|w| w.as_slice()).collect::<Vec<_>>(), "{name}: order");
+-                let order: Vec<Vec<u8>> = v["attestations"].as_array().unwrap().iter().map(|a| hx(&a["payee_script"])).collect();
++                let order: Vec<Vec<u8>> =
++                    v["attestations"].as_array().unwrap().iter().map(|a| hx(&a["payee_script"])).collect();
+                 assert_eq!(payees, order.iter().map(|o| o.as_slice()).collect::<Vec<_>>(), "{name}: payee order");
+             }
+         }
+diff --git a/prime/wire/src/verify.rs b/prime/wire/src/verify.rs
+index a2bb4c4..c2cdba1 100644
+--- a/prime/wire/src/verify.rs
++++ b/prime/wire/src/verify.rs
+@@ -289,8 +289,10 @@ pub fn classify_coinbase(
+         // The pool's own output, if the list names one, takes whatever is left and is never
+         // "short"; only miner outputs are held to their amounts.
+         // Zero-value entries (XBT-NTA attestations, rnd/sov-002) pay nobody: not miners.
+-        let miners: Vec<&Output> =
+-            iss.iter().filter(|i| i.script != pool_script && !(i.sats == 0 && i.script.first() == Some(&0x6a))).collect();
++        let miners: Vec<&Output> = iss
++            .iter()
++            .filter(|i| i.script != pool_script && !(i.sats == 0 && i.script.first() == Some(&0x6a)))
++            .collect();
+         // A gateway whose template is worth less than the value the split was computed
+         // for may scale every output down by the same ratio (lazarus-gateway does; a
+         // stock gateway drops outputs that no longer fit instead). Both keep the split
+-- 
+2.43.0
+

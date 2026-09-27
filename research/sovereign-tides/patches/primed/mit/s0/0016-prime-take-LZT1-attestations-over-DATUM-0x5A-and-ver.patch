@@ -1,0 +1,706 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: michael moore <mrmoore27@pm.me>
+Date: Fri, 25 Sep 2026 09:29:42 +0000
+Subject: [PATCH 16/27] prime: take LZT1 attestations over DATUM (0x5A) and
+ verify them on the first share
+
+SOV-P-002 W7. A gateway sends job_id | variant | A | sig | 0xFE ahead of
+its first share on a job; primed keeps it per job x coinbase variant and
+decides it once, when the first share on that coinbase arrives, with
+authorship::verify against the job and the session's identity key as G.
+A verified attestation from a registered, non-house key joins the
+attested-job set as the HTTP ingest's does. Every verdict is counted in
+/sovereignty.json (attest{received,verified,failed,reasons,last}) and
+appended to sovereignty-attest.jsonl, rotated daily. Nothing happens with
+sovereignty-mode off; older Primes ignore the sub-command.
+
+wire/examples/lzt1_check checks a 0x5A message against its coinbase for
+other gateway implementations.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ prime/primed/src/session.rs       | 102 +++++++++++
+ prime/primed/src/sovereignty.rs   | 291 +++++++++++++++++++++++++++++-
+ prime/wire/examples/lzt1_check.rs |  47 +++++
+ prime/wire/src/authorship.rs      |  71 ++++++++
+ prime/wire/src/mining.rs          |   5 +
+ 5 files changed, 508 insertions(+), 8 deletions(-)
+ create mode 100644 prime/wire/examples/lzt1_check.rs
+
+diff --git a/prime/primed/src/session.rs b/prime/primed/src/session.rs
+index ee23a66..fd5dcd8 100644
+--- a/prime/primed/src/session.rs
++++ b/prime/primed/src/session.rs
+@@ -275,6 +275,17 @@ struct PendingBlock {
+     at: Instant,
+ }
+ 
++/// A DATUM-delivered LZT1 attestation waiting for its coinbase (W7).
++struct PendingLzt1 {
++    msg: datum_wire::authorship::Lzt1Attest,
++    /// BLAKE2b-256(A): what the coinbase's LZT1 output commits to.
++    id: datum_wire::pow::Hash,
++    decided: bool,
++}
++
++/// Per session: job slots × coinbase variants is 256 × 7 at most; a gateway rotates far fewer.
++const MAX_PENDING_LZT1: usize = 512;
++
+ struct Session {
+     shared: Arc<Shared>,
+     id: u64,
+@@ -297,6 +308,10 @@ struct Session {
+     /// the worst outcome), and the gateway's reply names only the job, so keep every candidate
+     /// and submit them all from the one transaction set.
+     pending_blocks: HashMap<u8, Vec<PendingBlock>>,
++    /// W7: LZT1 attestations this gateway sent over DATUM (`0x5A`), by (job id, coinbase
++    /// variant), until the first share on that coinbase decides them. Empty while
++    /// `sovereignty-mode` is off.
++    lzt1: HashMap<(u8, u8), PendingLzt1>,
+     last_send: Instant,
+     last_recv: Instant,
+     gateway_hex: String,
+@@ -464,6 +479,7 @@ pub async fn run(shared: Arc<Shared>, mut stream: TcpStream, remote: SocketAddr)
+         coinbasers: VecDeque::new(),
+         next_coinbaser_id: 1,
+         pending_blocks: HashMap::new(),
++        lzt1: HashMap::new(),
+         last_send: Instant::now(),
+         last_recv: Instant::now(),
+         chain_warned: None,
+@@ -781,6 +797,7 @@ impl Session {
+                     Ok(ClientMsg::Pow(p)) => self.on_pow(*p).await,
+                     Ok(ClientMsg::JobValidation(v)) => self.on_validation(v).await,
+                     Ok(ClientMsg::NtaAttest(a)) => self.on_nta_attest(*a).await,
++                    Ok(ClientMsg::Lzt1Attest(m)) => self.on_lzt1_attest(*m),
+                     Ok(ClientMsg::Unknown(sub)) => {
+                         log::debug!("[{}] ignoring unknown mining sub-command 0x{sub:02x}", self.id);
+                         Ok(())
+@@ -863,6 +880,88 @@ impl Session {
+         Ok(())
+     }
+ 
++    // --- LZT1 over DATUM (SOV-P-002 W7) --------------------------------------------------
++
++    /// Keep a `0x5A` attestation for its (job, variant) until the first share on that coinbase.
++    /// A newer one for the same pair replaces it. Nothing is checked here: the coinbase it
++    /// belongs to has not arrived yet (it comes with the job's first share).
++    fn on_lzt1_attest(&mut self, m: datum_wire::authorship::Lzt1Attest) -> Result<(), SessionError> {
++        if !self.shared.sovereignty.on() {
++            log::debug!("[{}] LZT1 attestation ignored: sovereignty-mode is off", self.id);
++            return Ok(());
++        }
++        self.shared.sovereignty.engine().note_datum_received();
++        if self.lzt1.len() >= MAX_PENDING_LZT1 && !self.lzt1.contains_key(&(m.job_id, m.variant)) {
++            // Decided ones first; a gateway that floods undecided ones loses the oldest slot.
++            self.lzt1.retain(|_, p| !p.decided);
++            if self.lzt1.len() >= MAX_PENDING_LZT1 {
++                self.lzt1.clear();
++            }
++        }
++        log::debug!(
++            "[{}] {} LZT1 attestation job={} variant={} height={}",
++            self.id,
++            self.gateway_hex,
++            m.job_id,
++            m.variant,
++            m.a.height
++        );
++        let id = m.a.id();
++        self.lzt1.insert((m.job_id, m.variant), PendingLzt1 { msg: m, id, decided: false });
++        Ok(())
++    }
++
++    /// The first accepted share on a coinbase with an attestation on file decides it:
++    /// `authorship::verify` against this job's parent and branches, with this session's identity
++    /// key as the only acceptable `G`. An attestation that neither matches the job's template nor
++    /// is what the coinbase commits to is left alone: it is for a job still to come in this
++    /// slot, or for one that is gone.
++    fn decide_lzt1(&mut self, job_id: u8, variant: u8, cb: &datum_wire::coinbase::Coinbase) {
++        let Some(p) = self.lzt1.get_mut(&(job_id, variant)) else { return };
++        if p.decided {
++            return;
++        }
++        let Some(job) = self.slots[usize::from(job_id)].job.as_ref() else { return };
++        let for_this_job = p.msg.a.prev_hash == job.prev_hash
++            && p.msg.a.branches_hash == datum_wire::authorship::branches_hash(&job.merkle_branches);
++        let committed = matches!(datum_wire::authorship::find(&cb.outputs), Ok(Some((_, id, _))) if id == p.id);
++        if !for_this_job && !committed {
++            return;
++        }
++        p.decided = true;
++        let g = self.hello.identity_sign_pk;
++        let result = datum_wire::authorship::verify(cb, &p.msg.a, &p.msg.sig, &job.prev_hash, &job.merkle_branches, Some(&g))
++            .map(|_| ());
++        let (msg, house) = (p.msg.clone(), self.is_house_stratum());
++        match &result {
++            Ok(()) => log::info!(
++                "[{}] {} LZT1 verified job={} variant={} height={}",
++                self.id,
++                self.gateway_hex,
++                msg.job_id,
++                msg.variant,
++                msg.a.height
++            ),
++            Err(e) => log::warn!(
++                "[{}] {} LZT1 attestation failed job={} variant={} height={}: {e:?}",
++                self.id,
++                self.gateway_hex,
++                msg.job_id,
++                msg.variant,
++                msg.a.height
++            ),
++        }
++        self.shared.sovereignty.engine().note_datum_verdict(
++            g,
++            house,
++            msg.job_id,
++            msg.variant,
++            &msg.a,
++            &msg.sig,
++            result,
++        );
++    }
++
+     // --- coinbaser ---------------------------------------------------------------------
+ 
+     async fn on_coinbaser_request(&mut self, value: u64, prev_hash: [u8; 32]) -> Result<(), SessionError> {
+@@ -1357,6 +1456,9 @@ impl Session {
+         if !credited {
+             return self.reject(&s, mining::REJECT_BAD_USERNAME).await;
+         }
++        if self.shared.sovereignty.on() && !self.lzt1.is_empty() {
++            self.decide_lzt1(s.job_id, JobSlot::coinbase_id_for(&s), &v.coinbase);
++        }
+         if !solo && v.work > 0 && self.shared.sovereignty.on() {
+             if let Some(j) = &self.slots[job_id].job {
+                 self.shared.sovereignty.engine().note_share(
+diff --git a/prime/primed/src/sovereignty.rs b/prime/primed/src/sovereignty.rs
+index 44ac5d5..3d00c63 100644
+--- a/prime/primed/src/sovereignty.rs
++++ b/prime/primed/src/sovereignty.rs
+@@ -53,6 +53,12 @@ pub const BLOCK_RING: usize = 2_016;
+ const MAX_ATTESTED: usize = 4_096;
+ const TOKEN_FILE: &str = "sovereignty.token";
+ const BLOCKS_FILE: &str = "sovereignty-blocks.jsonl";
++/// W7 verdicts on LZT1 attestations delivered over DATUM (`0x5A`), one JSON line each. Rotated
++/// daily to `sovereignty-attest.jsonl.<YYYY-MM-DD>`; `ATTEST_KEEP_DAYS` are kept.
++const ATTEST_FILE: &str = "sovereignty-attest.jsonl";
++const ATTEST_KEEP_DAYS: u64 = 14;
++/// Verdicts kept in memory for `/sovereignty.json`.
++const ATTEST_LAST: usize = 32;
+ /// Header a POST to `/sovereignty/*` carries the token in.
+ pub const TOKEN_HEADER: &str = "x-sovereignty-token";
+ 
+@@ -106,6 +112,39 @@ pub struct ObservedBlock {
+     pub job: String,
+ }
+ 
++/// One verdict on a DATUM-delivered attestation (W7), as `sovereignty-attest.jsonl` holds it.
++#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
++pub struct AttestVerdict {
++    pub ts: u64,
++    /// `G`, the session's identity key.
++    pub g: String,
++    pub job_id: u8,
++    pub variant: u8,
++    pub height: u32,
++    pub prev: String,
++    /// The attestation id, BLAKE2b-256(A): what the coinbase commits to.
++    pub id: String,
++    /// `verified`, or the `AttestError` that failed it.
++    pub verdict: String,
++    pub registered: bool,
++    pub house: bool,
++    /// Entered the attested-job set (score and bonus credit): verified, registered, not house.
++    pub attested: bool,
++}
++
++/// W7 counters since start, and the recent verdicts.
++#[derive(Clone, Debug, Default)]
++struct AttestLog {
++    /// `0x5A` messages taken (mode on).
++    received: u64,
++    verified: u64,
++    failed: u64,
++    reasons: BTreeMap<String, u64>,
++    last: VecDeque<AttestVerdict>,
++    /// Day (unix days) of what `ATTEST_FILE` holds; `None` until the first write.
++    day: Option<u64>,
++}
++
+ /// A key's snapshots and when it last sent one.
+ #[derive(Default)]
+ struct Track {
+@@ -150,6 +189,7 @@ struct Inputs {
+     keys: HashMap<String, KeyRecord>,
+     blocks: Vec<ObservedBlock>,
+     authored: Vec<Authored>,
++    datum_attest: AttestLog,
+     params: BonusParams,
+     bonus_on: bool,
+     demo: bool,
+@@ -284,6 +324,14 @@ fn render(inp: &Inputs, r: &Report) -> Value {
+         "recompute_secs": inp.recompute_secs,
+         "store": {"keys": inp.tracks.len(), "snapshots": snapshots, "bytes": bytes},
+         "observed": inp.blocks.len(),
++        // W7: attestations delivered over DATUM (0x5A) and Prime's verdicts on them.
++        "attest": {
++            "received": inp.datum_attest.received,
++            "verified": inp.datum_attest.verified,
++            "failed": inp.datum_attest.failed,
++            "reasons": inp.datum_attest.reasons,
++            "last": inp.datum_attest.last,
++        },
+         "bonus": {
+             "on": inp.bonus_on,
+             "bps": inp.params.bonus_bps,
+@@ -518,6 +566,7 @@ pub struct Engine {
+     blocks: VecDeque<ObservedBlock>,
+     block_jobs: HashSet<String>,
+     blocks_in_file: usize,
++    datum_attest: AttestLog,
+     params: BonusParams,
+     bonus_on: bool,
+     demo: bool,
+@@ -843,14 +892,7 @@ impl Engine {
+             return Err("G is not registered".into());
+         }
+         let key = JobKey { g, prev, branches_hash: authorship::branches_hash(&branches) }.id();
+-        if self.attested.insert(key.clone(), AttestedJob { a, sig }).is_none() {
+-            self.attested_order.push_back(key.clone());
+-            while self.attested_order.len() > MAX_ATTESTED {
+-                if let Some(old) = self.attested_order.pop_front() {
+-                    self.attested.remove(&old);
+-                }
+-            }
+-        }
++        self.insert_attested(key.clone(), a, sig);
+         // The demo has no miners: its attestation stands in for the block found on that job.
+         if self.demo {
+             self.record_block(ObservedBlock {
+@@ -866,6 +908,116 @@ impl Engine {
+         Ok(g_hex)
+     }
+ 
++    fn insert_attested(&mut self, key: String, a: Attestation, sig: [u8; SIG]) {
++        if self.attested.insert(key.clone(), AttestedJob { a, sig }).is_none() {
++            self.attested_order.push_back(key);
++            while self.attested_order.len() > MAX_ATTESTED {
++                if let Some(old) = self.attested_order.pop_front() {
++                    self.attested.remove(&old);
++                }
++            }
++        }
++        self.dirty = true;
++    }
++
++    /// W7: a `0x5A` message arrived on a session.
++    pub fn note_datum_received(&mut self) {
++        self.datum_attest.received += 1;
++    }
++
++    /// W7: Prime's verdict on a DATUM-delivered attestation, reached once per job × variant on
++    /// the first share whose coinbase it belongs to (`authorship::verify` against the job, with
++    /// the session's identity key as `G`). A verified attestation from a registered, non-house
++    /// key enters the attested-job set exactly as the HTTP ingest's does, so the job's shares
++    /// credit authored work and its block counts as verified. Every verdict is logged. Returns
++    /// whether the job entered the set.
++    #[allow(clippy::too_many_arguments)]
++    pub fn note_datum_verdict(
++        &mut self,
++        g: [u8; SIGN_PK],
++        house_session: bool,
++        job_id: u8,
++        variant: u8,
++        a: &Attestation,
++        sig: &[u8; SIG],
++        result: Result<(), AttestError>,
++    ) -> bool {
++        let g_hex = hex::encode(g);
++        let house = house_session || self.is_house(&g_hex);
++        let registered = self.lookup(&g_hex).is_some() || self.demo;
++        let attested = result.is_ok() && registered && !house;
++        if attested {
++            let key = JobKey { g, prev: a.prev_hash, branches_hash: a.branches_hash }.id();
++            self.insert_attested(key, a.clone(), *sig);
++        }
++        let verdict = match result {
++            Ok(()) => {
++                self.datum_attest.verified += 1;
++                "verified".to_string()
++            }
++            Err(e) => {
++                self.datum_attest.failed += 1;
++                let why = attest_err(e);
++                *self.datum_attest.reasons.entry(why.clone()).or_insert(0) += 1;
++                why
++            }
++        };
++        let v = AttestVerdict {
++            ts: now(),
++            g: g_hex,
++            job_id,
++            variant,
++            height: a.height,
++            prev: hex::encode(a.prev_hash),
++            id: hex::encode(a.id()),
++            verdict,
++            registered,
++            house,
++            attested,
++        };
++        self.persist_verdict(&v);
++        self.datum_attest.last.push_back(v);
++        while self.datum_attest.last.len() > ATTEST_LAST {
++            self.datum_attest.last.pop_front();
++        }
++        self.dirty = true;
++        attested
++    }
++
++    /// Append a verdict to `ATTEST_FILE`, rotating it first when the day has changed.
++    fn persist_verdict(&mut self, v: &AttestVerdict) {
++        if !self.persists() {
++            return;
++        }
++        let path = self.dir.join(ATTEST_FILE);
++        let today = v.ts / 86_400;
++        let held = self.datum_attest.day.or_else(|| {
++            let m = std::fs::metadata(&path).and_then(|m| m.modified()).ok()?;
++            Some(m.duration_since(UNIX_EPOCH).ok()?.as_secs() / 86_400)
++        });
++        if let Some(day) = held.filter(|d| *d != today) {
++            let rotated = self.dir.join(format!("{ATTEST_FILE}.{}", ymd(day)));
++            if let Err(e) = std::fs::rename(&path, &rotated) {
++                if e.kind() != std::io::ErrorKind::NotFound {
++                    log::warn!("sovereignty: cannot rotate {}: {e}", path.display());
++                }
++            }
++            if let Some(old) = today.checked_sub(ATTEST_KEEP_DAYS) {
++                let _ = std::fs::remove_file(self.dir.join(format!("{ATTEST_FILE}.{}", ymd(old))));
++            }
++        }
++        self.datum_attest.day = Some(today);
++        let line = serde_json::to_string(v).unwrap_or_default() + "\n";
++        let ok = std::fs::OpenOptions::new()
++            .create(true)
++            .append(true)
++            .open(&path)
++            .and_then(|mut f| f.write_all(line.as_bytes()));
++        if let Err(e) = ok {
++            log::warn!("sovereignty: cannot append to {}: {e}", path.display());
++        }
++    }
++
+     fn job_key(gateway: &str, prev: &Hash, branches: &[Hash]) -> String {
+         JobKey {
+             g: decode_pk(gateway).unwrap_or([0; 32]),
+@@ -995,6 +1147,7 @@ impl Engine {
+             keys: self.keys.clone(),
+             blocks: self.blocks.iter().cloned().collect(),
+             authored: self.authored.clone(),
++            datum_attest: self.datum_attest.clone(),
+             params: self.params,
+             bonus_on: self.bonus_on,
+             demo: self.demo,
+@@ -1109,6 +1262,21 @@ fn decode_hash(s: &str) -> Result<Hash, String> {
+     b.try_into().map_err(|_| "hash must be 32 bytes".into())
+ }
+ 
++/// `YYYY-MM-DD` for a count of days since 1970-01-01 (proleptic Gregorian, UTC).
++fn ymd(days: u64) -> String {
++    // Howard Hinnant's civil_from_days.
++    let z = days as i64 + 719_468;
++    let era = z.div_euclid(146_097);
++    let doe = z.rem_euclid(146_097);
++    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
++    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
++    let mp = (5 * doy + 2) / 153;
++    let d = doy - (153 * mp + 2) / 5 + 1;
++    let m = if mp < 10 { mp + 3 } else { mp - 9 };
++    let y = yoe + era * 400 + i64::from(m <= 2);
++    format!("{y:04}-{m:02}-{d:02}")
++}
++
+ fn attest_err(e: AttestError) -> String {
+     format!("{e:?}")
+ }
+@@ -1759,4 +1927,111 @@ mod tests {
+             fill.as_secs_f64()
+         );
+     }
++
++    /// A DATUM attestation for a fresh job by `g`, and the coinbase it commits to.
++    fn datum_job(g: &Identity, seed: u8) -> (Attestation, [u8; SIG], Coinbase, Hash, Vec<Hash>) {
++        let prev = [seed; 32];
++        let txs: Vec<Hash> = (1..=3u8).map(|i| [i ^ seed; 32]).collect();
++        let branches = datum_wire::pow::merkle_branches_for_coinbase(&txs);
++        let mut outs = sample_outs(312_538_966);
++        let (a, sig, c) = attest(g, 966_267, &prev, &branches, &outs, NodeView::default());
++        outs.push(c);
++        let (bytes, _, _) = coinbase::build(966_267, b"Lazarus", &outs, 0);
++        (a, sig, coinbase::parse(&bytes).unwrap(), prev, branches)
++    }
++
++    /// W7: a verified DATUM attestation from a registered key is an attested job (its shares
++    /// credit, its block counts as verified); unregistered, house and failed ones are only
++    /// logged. Every verdict is counted.
++    #[test]
++    fn datum_attestations_enter_the_set_only_verified_registered_and_not_house() {
++        let dir = std::env::temp_dir().join(format!("sov007-attest-{}", std::process::id()));
++        let _ = std::fs::remove_dir_all(&dir);
++        std::fs::create_dir_all(&dir).unwrap();
++        let mut e = Engine { dir: dir.clone(), ..engine() };
++        let (reg, unreg, house) = (
++            Identity::from_secret_bytes(&[0x61; 64]),
++            Identity::from_secret_bytes(&[0x62; 64]),
++            Identity::from_secret_bytes(&[0x63; 64]),
++        );
++        e.register(&hex::encode(reg.sign_pk()), "bc1qreg", false, None).unwrap();
++        e.register(&hex::encode(house.sign_pk()), "", true, None).unwrap();
++        e.demo = false;
++
++        let (a, sig, cb, prev, branches) = datum_job(&reg, 0x31);
++        let verdict = authorship::verify(&cb, &a, &sig, &prev, &branches, Some(&reg.sign_pk())).map(|_| ());
++        assert!(e.note_datum_verdict(reg.sign_pk(), false, 4, 0, &a, &sig, verdict));
++        let g_hex = hex::encode(reg.sign_pk());
++        e.note_share(&g_hex, false, "bc1qminer", 8, &prev, &branches, 1_000);
++        assert_eq!(e.authored.iter().map(|x| x.work).sum::<u64>(), 8, "shares on the job are attested work");
++        assert!(e.note_block(&g_hex, false, None, &cb, &prev, &branches, 966_267, "bb"));
++        assert!(e.blocks.back().unwrap().verified, "and its block is verified");
++
++        let (a2, sig2, cb2, prev2, br2) = datum_job(&unreg, 0x32);
++        let v2 = authorship::verify(&cb2, &a2, &sig2, &prev2, &br2, Some(&unreg.sign_pk())).map(|_| ());
++        assert!(v2.is_ok());
++        assert!(!e.note_datum_verdict(unreg.sign_pk(), false, 5, 0, &a2, &sig2, v2), "not registered");
++
++        let (a3, sig3, _, _, _) = datum_job(&house, 0x33);
++        assert!(!e.note_datum_verdict(house.sign_pk(), false, 6, 0, &a3, &sig3, Ok(())), "house key");
++        assert!(!e.note_datum_verdict(reg.sign_pk(), true, 6, 1, &a3, &sig3, Ok(())), "house session");
++
++        let (a4, sig4, _, _, _) = datum_job(&reg, 0x34);
++        assert!(!e.note_datum_verdict(reg.sign_pk(), false, 7, 2, &a4, &sig4, Err(AttestError::WrongPayout)));
++
++        let d = &e.datum_attest;
++        assert_eq!((d.verified, d.failed), (4, 1));
++        assert_eq!(d.reasons.get("WrongPayout"), Some(&1));
++        assert_eq!(d.last.len(), 5);
++        let lines: Vec<AttestVerdict> = std::fs::read_to_string(dir.join(ATTEST_FILE))
++            .unwrap()
++            .lines()
++            .map(|l| serde_json::from_str(l).unwrap())
++            .collect();
++        assert_eq!(lines, d.last.iter().cloned().collect::<Vec<_>>(), "every verdict is on disk");
++        assert_eq!(
++            lines.iter().map(|v| (v.verdict.as_str(), v.registered, v.house, v.attested)).collect::<Vec<_>>(),
++            vec![
++                ("verified", true, false, true),
++                ("verified", false, false, false),
++                ("verified", true, true, false),
++                ("verified", true, true, false),
++                ("WrongPayout", true, false, false),
++            ]
++        );
++        let body = compute(&e.inputs(now())).body;
++        assert_eq!(body["attest"]["verified"], 4, "{body}");
++        assert_eq!(body["attest"]["failed"], 1, "{body}");
++        assert_eq!(body["attest"]["reasons"]["WrongPayout"], 1, "{body}");
++        let _ = std::fs::remove_dir_all(&dir);
++    }
++
++    /// W7: `sovereignty-attest.jsonl` rolls over at the first verdict of a new (UTC) day, and
++    /// only `ATTEST_KEEP_DAYS` of old files are kept.
++    #[test]
++    fn the_attest_log_rotates_daily() {
++        assert_eq!(ymd(0), "1970-01-01");
++        assert_eq!(ymd(11_016), "2000-02-29");
++        assert_eq!(ymd(20_721), "2026-09-25");
++        let dir = std::env::temp_dir().join(format!("sov007-rotate-{}", std::process::id()));
++        let _ = std::fs::remove_dir_all(&dir);
++        std::fs::create_dir_all(&dir).unwrap();
++        let mut e = Engine { dir: dir.clone(), ..engine() };
++        let today = now() / 86_400;
++        let stale = dir.join(format!("{ATTEST_FILE}.{}", ymd(today - ATTEST_KEEP_DAYS)));
++        std::fs::write(&stale, "old\n").unwrap();
++        let g = Identity::from_secret_bytes(&[0x64; 64]);
++        let (a, sig, _, _, _) = datum_job(&g, 0x35);
++        std::fs::write(dir.join(ATTEST_FILE), "yesterday\n").unwrap();
++        e.datum_attest.day = Some(today - 1);
++        e.note_datum_verdict(g.sign_pk(), false, 1, 0, &a, &sig, Ok(()));
++        let rolled = std::fs::read_to_string(dir.join(format!("{ATTEST_FILE}.{}", ymd(today - 1)))).unwrap();
++        assert_eq!(rolled, "yesterday\n");
++        assert_eq!(std::fs::read_to_string(dir.join(ATTEST_FILE)).unwrap().lines().count(), 1);
++        assert!(!stale.exists(), "files older than the keep window go");
++        e.note_datum_verdict(g.sign_pk(), false, 2, 0, &a, &sig, Ok(()));
++        assert_eq!(std::fs::read_to_string(dir.join(ATTEST_FILE)).unwrap().lines().count(), 2, "same day: appended");
++        let _ = std::fs::remove_dir_all(&dir);
++    }
+ }
++
+diff --git a/prime/wire/examples/lzt1_check.rs b/prime/wire/examples/lzt1_check.rs
+new file mode 100644
+index 0000000..76ae0f0
+--- /dev/null
++++ b/prime/wire/examples/lzt1_check.rs
+@@ -0,0 +1,47 @@
++//! Check a gateway's LZT1 DATUM message (`0x5A …`) against the coinbase it committed to, with
++//! the verifier Prime runs (`authorship::verify`). For testing other gateways' LZT1 code (the
++//! split-only datum_gateway patch) without a Prime.
++//!
++//! cargo run -q -p datum-wire --example lzt1_check -- <0x5A msg hex> <coinbase hex> <prev hex,
++//! internal order> <G hex> [branch hex, internal order ...]
++//!
++//! Prints `ok job=… variant=… G=…` and exits 0, or the verdict and exits 1.
++
++use datum_wire::authorship::{self, Lzt1Attest, SUB_LZT1_ATTEST};
++use datum_wire::coinbase;
++
++fn h(s: &str, what: &str) -> Vec<u8> {
++    hex::decode(s.trim()).unwrap_or_else(|e| panic!("{what}: {e}"))
++}
++
++fn main() {
++    let args: Vec<String> = std::env::args().skip(1).collect();
++    if args.len() < 4 {
++        eprintln!("usage: lzt1_check <0x5A msg> <coinbase> <prev> <G> [branches...]");
++        std::process::exit(2);
++    }
++    let msg = h(&args[0], "msg");
++    if msg.first() != Some(&SUB_LZT1_ATTEST) {
++        println!("not a 0x5A message");
++        std::process::exit(1);
++    }
++    let m = match Lzt1Attest::decode(&msg[1..]) {
++        Ok(m) => m,
++        Err(e) => {
++            println!("malformed: {e}");
++            std::process::exit(1);
++        }
++    };
++    let cb = coinbase::parse(&h(&args[1], "coinbase")).expect("coinbase");
++    let prev: [u8; 32] = h(&args[2], "prev").try_into().expect("prev is 32 bytes");
++    let g: [u8; 32] = h(&args[3], "G").try_into().expect("G is 32 bytes");
++    let branches: Vec<[u8; 32]> =
++        args[4..].iter().map(|b| h(b, "branch").try_into().expect("branch is 32 bytes")).collect();
++    match authorship::verify(&cb, &m.a, &m.sig, &prev, &branches, Some(&g)) {
++        Ok(g) => println!("ok job={} variant={} G={}", m.job_id, m.variant, hex::encode(g)),
++        Err(e) => {
++            println!("{e:?}");
++            std::process::exit(1);
++        }
++    }
++}
+diff --git a/prime/wire/src/authorship.rs b/prime/wire/src/authorship.rs
+index 8df2a40..246542b 100644
+--- a/prime/wire/src/authorship.rs
++++ b/prime/wire/src/authorship.rs
+@@ -260,6 +260,52 @@ pub fn verify(
+     Ok(a.g)
+ }
+ 
++/// DATUM mining sub-command, gateway → Prime: an LZT1 attestation for one job and coinbase
++/// variant (SOV-P-002 W7). Unused by OCEAN datum_gateway v0.4.1 in either direction (its client
++/// sends 0x10, 0x27 and 0x50; it takes 0x11, 0x50, 0x8F, 0x99 and 0xF9), and beside rnd/sov-002's
++/// 0x4e. A Prime that does not know it ignores it (`ClientMsg::Unknown`).
++pub const SUB_LZT1_ATTEST: u8 = 0x5A;
++/// `0x5A | job_id | variant | A (185) | sig (64) | 0xFE`
++pub const ATTEST_MSG_LEN: usize = 3 + ENCODED_LEN + SIG + 1;
++
++/// `A` and its signature for the coinbase a gateway publishes as `variant` (the share's
++/// coinbase id) of `job_id`. Sent before the first share on that job, so Prime has it when the
++/// coinbase arrives.
++#[derive(Clone, Debug, PartialEq, Eq)]
++pub struct Lzt1Attest {
++    pub job_id: u8,
++    pub variant: u8,
++    pub a: Attestation,
++    pub sig: [u8; SIG],
++}
++
++impl Lzt1Attest {
++    pub fn encode(&self) -> Vec<u8> {
++        let mut o = Vec::with_capacity(ATTEST_MSG_LEN);
++        o.push(SUB_LZT1_ATTEST);
++        o.push(self.job_id);
++        o.push(self.variant);
++        o.extend_from_slice(&self.a.encode());
++        o.extend_from_slice(&self.sig);
++        o.push(0xFE);
++        o
++    }
++
++    /// Parse the body after the sub-command byte.
++    pub fn decode(body: &[u8]) -> crate::Result<Self> {
++        if body.len() < ATTEST_MSG_LEN - 1 {
++            return Err(crate::Error::Short);
++        }
++        if body.len() != ATTEST_MSG_LEN - 1 || body[body.len() - 1] != 0xFE {
++            return Err(crate::Error::Malformed("lzt1 attestation"));
++        }
++        let a = Attestation::decode(&body[2..2 + ENCODED_LEN])
++            .map_err(|_| crate::Error::Malformed("lzt1 attestation version"))?;
++        let sig = body[2 + ENCODED_LEN..2 + ENCODED_LEN + SIG].try_into().unwrap();
++        Ok(Self { job_id: body[0], variant: body[1], a, sig })
++    }
++}
++
+ #[cfg(test)]
+ mod tests {
+     use super::*;
+@@ -437,4 +483,29 @@ mod tests {
+             Ok(id.sign_pk())
+         );
+     }
++
++    #[test]
++    fn the_datum_message_round_trips_and_refuses_other_shapes() {
++        let m = made(&gateway(), &[[1; 32], [2; 32]]);
++        let msg = Lzt1Attest { job_id: 7, variant: 3, a: m.a.clone(), sig: m.sig };
++        let enc = msg.encode();
++        assert_eq!(enc.len(), ATTEST_MSG_LEN);
++        assert_eq!(enc.len(), 253);
++        assert_eq!(enc[0], SUB_LZT1_ATTEST);
++        assert_eq!(Lzt1Attest::decode(&enc[1..]).unwrap(), msg);
++        match crate::mining::parse_client(&enc).unwrap() {
++            crate::mining::ClientMsg::Lzt1Attest(got) => assert_eq!(*got, msg),
++            other => panic!("{other:?}"),
++        }
++        assert!(Lzt1Attest::decode(&enc[1..enc.len() - 1]).is_err());
++        let mut bad = enc.clone();
++        *bad.last_mut().unwrap() = 0;
++        assert!(Lzt1Attest::decode(&bad[1..]).is_err());
++        let mut v2 = enc.clone();
++        v2[3] = 2;
++        assert!(Lzt1Attest::decode(&v2[1..]).is_err());
++        let mut long = enc;
++        long.push(0xFE);
++        assert!(Lzt1Attest::decode(&long[1..]).is_err());
++    }
+ }
+diff --git a/prime/wire/src/mining.rs b/prime/wire/src/mining.rs
+index 65c9997..4b53737 100644
+--- a/prime/wire/src/mining.rs
++++ b/prime/wire/src/mining.rs
+@@ -115,6 +115,8 @@ pub enum ClientMsg {
+     JobValidation(JobValidationReply),
+     /// rnd/sov-002: a gateway's XBT-NTA attestation for a tip, sent ahead of its coinbaser request.
+     NtaAttest(Box<crate::nta::NtaAttest>),
++    /// rnd/sov-007 (SOV-P-002 W7): a gateway's LZT1 attestation for one job and coinbase variant.
++    Lzt1Attest(Box<crate::authorship::Lzt1Attest>),
+     /// A sub-command this Prime does not know. Ignore it; newer clients add optional ones.
+     Unknown(u8),
+ }
+@@ -466,6 +468,9 @@ pub fn parse_client(payload: &[u8]) -> Result<ClientMsg> {
+         SUB_POW => ClientMsg::Pow(Box::new(PowSubmit::decode(body)?)),
+         SUB_JOB_VALIDATION => ClientMsg::JobValidation(JobValidationReply::decode(body)?),
+         crate::nta::SUB_NTA_ATTEST => ClientMsg::NtaAttest(Box::new(crate::nta::NtaAttest::decode(body)?)),
++        crate::authorship::SUB_LZT1_ATTEST => {
++            ClientMsg::Lzt1Attest(Box::new(crate::authorship::Lzt1Attest::decode(body)?))
++        }
+         other => ClientMsg::Unknown(other),
+     })
+ }
+-- 
+2.43.0
+

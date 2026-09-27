@@ -1,0 +1,1584 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: michael moore <mrmoore27@pm.me>
+Date: Fri, 25 Sep 2026 09:35:14 +0000
+Subject: [PATCH 3/8] lazarus-gateway: attest every pooled job with LZT1 and
+ send it to Prime (0x5A)
+
+SOV-P-002 W12. With lzt1_attest (needs identity_key_file), the gateway
+builds A for each pooled job's coinbase (parent, merkle branches, payout
+digest over the final outputs incl. the witness commitment, node view),
+signs it with its DATUM identity key, appends the 70-byte LZT1 commitment
+(79 bytes reserved in the template's weight budget) and sends
+0x5A | job | variant | A | sig on the urgent queue before the notify, so
+Prime has it ahead of the job's first share. lazarus_protocol::lzt1 is
+held byte for byte to prime's authorship fixture. Default off.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ lazarus/gateway/src/main.rs                   |  106 +-
+ .../patches/datum-gateway-split-only.patch    | 1106 ++++++++++++++++-
+ lazarus/protocol/src/lib.rs                   |    1 +
+ lazarus/protocol/src/lzt1.rs                  |  198 +++
+ lazarus/protocol/tests/data/lzt1-fixture.json |    1 +
+ 5 files changed, 1395 insertions(+), 17 deletions(-)
+ create mode 100644 lazarus/protocol/src/lzt1.rs
+ create mode 100644 lazarus/protocol/tests/data/lzt1-fixture.json
+
+diff --git a/lazarus/gateway/src/main.rs b/lazarus/gateway/src/main.rs
+index 527d81a..687e5a9 100644
+--- a/lazarus/gateway/src/main.rs
++++ b/lazarus/gateway/src/main.rs
+@@ -99,6 +99,15 @@ struct GwCfg {
+     /// exactly as a stock gateway.
+     #[serde(default)]
+     nta_key_file: Option<PathBuf>,
++    /// Sovereign TIDES (SOV-P-002 W12): attest every pooled job. The gateway signs an LZT1
++    /// attestation `A` (parent, merkle branches, payout digest, node view) with its DATUM
++    /// identity key, puts the 70-byte commitment output in the job's coinbase, and sends `A`
++    /// and the signature to Prime as mining sub-command `0x5A` before any share on that job.
++    /// Needs `identity_key_file`: an attestation by a key that changes on every restart proves
++    /// nothing. Prime verifies it with `sovereignty-mode` on and ignores it otherwise, so it is
++    /// safe against any Prime; the coinbase is 79 bytes larger. Default off.
++    #[serde(default)]
++    lzt1_attest: bool,
+ }
+ 
+ #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+@@ -881,6 +890,10 @@ struct Shared {
+     nta: Option<lazarus_protocol::nta::Signer>,
+     /// Last (prev, height, nbits) signed, and when the tip was first seen here, for the log.
+     nta_last: Mutex<Option<([u8; 32], u32, u32)>>,
++    /// SOV-P-002 W12: the DATUM identity that signs LZT1 attestations, when `lzt1_attest` is on.
++    lzt1: Option<lazarus_protocol::PoolKeys>,
++    /// The node's version string, hashed: the `node_tag` in each attestation. Read once.
++    lzt1_node_tag: std::sync::OnceLock<[u8; 16]>,
+     /// The last block our node refused (height, reason, block hex), served at `/rejected`: an
+     /// invalid block is never relayed, so this is the only copy anyone can check again.
+     last_rejected: Mutex<Option<(u32, String, String)>>,
+@@ -1186,6 +1199,42 @@ fn build_template(tpl: &Value, tag: &str, coinbase_reserve: u64) -> Option<Templ
+ /// holding a pre-restart id would then be matched to an unrelated template. The high half
+ /// is a per-process salt from extranonce1, the low half the counter. Solo mode issues one
+ /// job per identity per template, so the counter half is 32 bits wide.
++/// SOV-P-002 W12: attest a pooled job's coinbase. Returns the `0x5A` message and the commitment
++/// output to add to `cb` (before the witness commitment, where `cbtx` puts it). `variant` is the
++/// coinbase id the job's shares carry (`cb.id`).
++fn lzt1_attest(
++    st: &Shared,
++    k: &lazarus_protocol::PoolKeys,
++    t: &Template,
++    cb: &CoinbaserV2,
++    job_id: u8,
++) -> (Vec<u8>, CoinbaserOutput) {
++    let node_tag = *st.lzt1_node_tag.get_or_init(|| {
++        let version = cookie_auth(&st.cfg.rpc_cookie)
++            .and_then(|auth| rpc(&st.cfg.rpc, &auth, "getnetworkinfo", json!([])))
++            .and_then(|v| v.get("subversion").and_then(|s| s.as_str()).map(str::to_string))
++            .unwrap_or_default();
++        pow::blake2b_256(version.as_bytes())[..16].try_into().unwrap()
++    });
++    let node = lazarus_protocol::lzt1::NodeView {
++        n_tx: t.txn_count,
++        mempool_digest: [0u8; 16],
++        node_tag,
++        t_gbt: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0),
++    };
++    let (a, sig, out) = lazarus_protocol::lzt1::attest(
++        &k.ed_pk,
++        &k.ed_sk,
++        t.height,
++        &t.prev_block,
++        &t.branches,
++        &cb.outputs,
++        t.witness_commit.as_deref(),
++        node,
++    );
++    (lazarus_protocol::lzt1::message(job_id, cb.id, &a, &sig), out)
++}
++
+ fn job_id_str(extra1: &[u8; 4], seq: u64) -> String {
+     format!("{:04x}{:08x}", u16::from_le_bytes([extra1[0], extra1[1]]), seq & 0xffff_ffff)
+ }
+@@ -2170,15 +2219,36 @@ fn gbt_loop(st: Arc<Shared>) {
+                         // for it; if transactions had to go, their fees are no longer ours
+                         // to pay out and the split is scaled down to the smaller value.
+                         let has_wc = tpl.get("default_witness_commitment").is_some();
+-                        let reserve = coinbase_weight(height as u32, &tag, &st.extra1, &cb, has_wc);
++                        // LZT1: room for the commitment output (79 bytes) in the reserve.
++                        let sized = match st.lzt1 {
++                            Some(_) => {
++                                let mut c = cb.clone();
++                                c.outputs.push(CoinbaserOutput { sats: 0, script: vec![0u8; lazarus_protocol::lzt1::SCRIPT_LEN] });
++                                c
++                            }
++                            None => cb.clone(),
++                        };
++                        let reserve = coinbase_weight(height as u32, &tag, &st.extra1, &sized, has_wc);
++                        let mut attestation = None;
+                         let built = build_template(&tpl, &tag, reserve)
+                             .map(Arc::new)
+                             .and_then(|t| {
+-                                let cb = if cb.value_sum() > t.value { scaled = true; cb.scale_to(t.value) } else { cb };
++                                let mut cb = if cb.value_sum() > t.value { scaled = true; cb.scale_to(t.value) } else { cb };
++                                if let Some(k) = st.lzt1.as_ref() {
++                                    let (msg, out) = lzt1_attest(&st, k, &t, &cb, jid);
++                                    cb.outputs.push(out);
++                                    attestation = Some(msg);
++                                }
+                                 coinbase_job(&t, &st.extra1, cb, jid, seq, None)
+                             });
+                         if let Some(j) = built {
+                             let j = Arc::new(j);
++                            // Ahead of the notify, so Prime has it before the job's first
++                            // share (the urgent queue is drained before shares).
++                            if let Some(msg) = attestation {
++                                send_prime_urgent(&st, msg);
++                                log::info!("lzt1: attested job={} variant={} height={}", j.job_id, j.cb.id, j.height());
++                            }
+                             log::info!("published job height={} txs~{} outputs={} value={}{}{}", j.height(), j.txn_count(), j.outputs(), j.tpl.value,
+                                 if scaled { " (scaled)" } else { "" },
+                                 if j.tpl.trimmed_txs > 0 { format!(" (trimmed {} txs, {} sat)", j.tpl.trimmed_txs, j.tpl.trimmed_fees) } else { String::new() });
+@@ -2258,19 +2328,31 @@ fn main() {
+     }
+     // prime_port 0 means standalone: solo needs nothing from Prime (it builds its own
+     // coinbase and submits its own blocks), and a pooled gateway cannot work without it.
+-    if let Some(path) = &cfg.identity_key_file {
+-        match load_or_create_pool_keys(path) {
+-            Ok(k) => log::info!(
++    let identity = cfg.identity_key_file.as_ref().map(|path| match load_or_create_pool_keys(path) {
++        Ok(k) => {
++            log::info!(
+                 "DATUM identity {} (key file {}); this is the entry for Prime's house-gateways",
+                 hex::encode(k.ed_pk),
+                 path.display()
+-            ),
+-            Err(e) => {
+-                log::error!("identity_key_file {}: {e}", path.display());
+-                std::process::exit(2);
+-            }
++            );
++            k
+         }
+-    }
++        Err(e) => {
++            log::error!("identity_key_file {}: {e}", path.display());
++            std::process::exit(2);
++        }
++    });
++    let lzt1 = match (cfg.lzt1_attest, identity) {
++        (false, _) => None,
++        (true, None) => {
++            log::error!("lzt1_attest needs identity_key_file (an attestation by a key that changes on restart proves nothing)");
++            std::process::exit(2);
++        }
++        (true, Some(k)) => {
++            log::info!("LZT1 attestations on: G={} signs every pooled job and sends it to Prime (0x5A)", hex::encode(k.ed_pk));
++            Some(k)
++        }
++    };
+     let nta = cfg.nta_key_file.as_ref().map(|path| match load_nta_key(path) {
+         Ok(k) => {
+             log::info!(
+@@ -2314,7 +2396,7 @@ fn main() {
+     let (utx, urx) = mpsc::channel();
+     let st = Arc::new(Shared {
+         cfg: cfg.clone(), mode,
+-        nta, nta_last: Mutex::new(None), last_rejected: Mutex::new(None),
++        nta, nta_last: Mutex::new(None), lzt1, lzt1_node_tag: std::sync::OnceLock::new(), last_rejected: Mutex::new(None),
+         tpl: Mutex::new(None),
+         solo_fee_script: fee_script, solo_fee_bps: fee_bps,
+         solo: Mutex::new(load_solo_book(solo_dir.as_ref())),
+diff --git a/lazarus/patches/datum-gateway-split-only.patch b/lazarus/patches/datum-gateway-split-only.patch
+index cc3ee55..73e030d 100644
+--- a/lazarus/patches/datum-gateway-split-only.patch
++++ b/lazarus/patches/datum-gateway-split-only.patch
+@@ -9,6 +9,7 @@
+ #   cd datum_gateway
+ #   patch -p1 < datum-gateway-split-only.patch
+ #   cmake . && make
++#   ./datum_gateway --test        # includes the LZT1/identity/NTA tests below
+ #
+ # Hello UA becomes v0.4.1-beta+lazarus-split so Prime accepts it when
+ # require-split-gateway is on. Stock OCEAN / unpatched FlyTheElephant1
+@@ -22,6 +23,67 @@
+ #   - never sends type-0 mining.notify on pooled BLAKE2b jobs
+ #   - sends clean_jobs=true on the first split notify of a new height
+ #
++# Sovereign TIDES (SOV-P-002 W12), src/datum_lzt1.[ch]:
++#
++#   Persisted identity. datum.identity_key_file (string, default "") names a
++#   file holding the DATUM identity keys (the ed25519 key of the handshake
++#   hello plus the x25519 pair, i.e. local_datum_keys). Missing: new keys are
++#   generated and written with O_CREAT|O_EXCL, mode 0600. Present: loaded;
++#   the gateway refuses to start (DLOG_FATAL, exit 1) if the file is group- or
++#   world-accessible, not a regular file, or malformed (including key halves
++#   that do not re-derive from the seeds). Format, text, five lines:
++#       datum-identity-v1
++#       ed25519_pk <64 hex>
++#       ed25519_sk <128 hex>     (libsodium form: seed || pk)
++#       x25519_pk  <64 hex>      (one space after the name)
++#       x25519_sk  <64 hex>
++#   Unset: a fresh key every start, as stock.
++#
++#   LZT1 template attestations. datum.lzt1_attest (bool, default true), live
++#   only with a persisted identity key (otherwise one WARN at startup and
++#   nothing is emitted or reserved). Per pooled job, every coinbase variant
++#   built from the coinbaser (types 1-5, and type 0 = copy of type 4) gets one
++#   zero-value output, inserted right before the witness commitment:
++#       OP_RETURN PUSH68 "LZT1" BLAKE2b-256(A) G     (70-byte script, 79 bytes)
++#   G = the identity ed25519 key. A (185 bytes) is datum-wire authorship.rs:
++#   v=1 | G | height | prev (internal order, as the job section) |
++#   BLAKE2b-256(the job's merkle branches as sent to Prime) | sum of the
++#   variant's output values | n_tx (template txs + 1) | mempool_digest (zero)
++#   | node_tag (zero) | t_gbt (job creation time, unix ms) | payout_digest
++#   (SHA256d of compactsize(n-1) || every other output, in final order).
++#   A is computed from the serialized coinbase (coinb1 || 12 zero bytes ||
++#   coinb2, exactly what Prime assembles) and the id is written into coinb2.
++#   79 bytes per variant are added to each variant's fixed byte budget
++#   (cb_req_sz), so the size/weight fit and the per-type caps account for it.
++#   On SHA256d jobs a variant whose extranonce sits in an OP_RETURN output
++#   (type 2 always; all types if the scriptSig is too long) varies per share
++#   and is left unattested. BLAKE2b jobs zero that slot, so all are attested.
++#   Before a job is released (coinbaser thread, before need_coinbaser=false)
++#   the gateway sends, via datum_protocol_mining_cmd, one 253-byte message
++#       0x5A | datum job id | coinbase id | A | ed25519 sig | 0xFE
++#   per published variant (BLAKE2b: blake2b_coinbase_index only; SHA256d: all
++#   attested variants). sig = crypto_sign_detached over
++#   "XBT-SOVEREIGN-TIDES/1\0" || A. Setting DATUM_LZT1_DUMP=<file> appends,
++#   per variant, the arguments of prime's lzt1_check
++#   (<msg> <coinbase> <prev> <G> <branches...>).
++#
++#   XBT-NTA coinbaser shape. datum_coinbaser_v2_parse also accepts a script of
++#   exactly 70 bytes starting 6a 44 'N' 'T' 'A' 02 with value 0; the output
++#   buffer grows to 70. Any other script over 64 bytes still voids the list.
++#
++diff --git a/CMakeLists.txt b/CMakeLists.txt
++index ed47e49..a615652 100644
++--- a/CMakeLists.txt
+++++ b/CMakeLists.txt
++@@ -26,6 +26,8 @@ add_executable(datum_gateway
++ 	src/datum_gateway.c
++ 	src/datum_jsonrpc.c
++ 	src/datum_logger.c
+++	src/datum_lzt1.c
+++	src/datum_lzt1_tests.c
++ 	src/datum_pow.c
++ 	src/datum_protocol.c
++ 	src/datum_queue.c
+ diff --git a/src/datum_blocktemplates.c b/src/datum_blocktemplates.c
+ index 601c462..2d36da8 100644
+ --- a/src/datum_blocktemplates.c
+@@ -77,10 +139,63 @@ index 601c462..2d36da8 100644
+  						if (was_notified) {
+  							// we got a notification of a new block, but there doesn't seem to actually be a new block.
+ diff --git a/src/datum_coinbaser.c b/src/datum_coinbaser.c
+-index 00fbb54..508fba2 100644
++index 00fbb54..51a5954 100644
+ --- a/src/datum_coinbaser.c
+ +++ b/src/datum_coinbaser.c
+-@@ -582,7 +582,8 @@ void generate_coinbase_txns_for_stratum_job(T_DATUM_STRATUM_JOB *s, bool empty_o
++@@ -53,6 +53,7 @@
++ #include "datum_jsonrpc.h"
++ #include "datum_protocol.h"
++ #include "datum_coinbaser.h"
+++#include "datum_lzt1.h"
++ 
++ CURL *coinbaser_curl = NULL;
++ 
++@@ -242,6 +243,7 @@ void generate_coinbase_txns_for_stratum_job_subtypebysize(T_DATUM_STRATUM_JOB *s
++ 	uint64_t mval = 0;
++ 	bool c1full = false;
++ 	bool en_done = false;
+++	bool lzt1 = false;
++ 	// chicken and egg problem.  we need to know the output count before we can close off coinb1 if !space_for_en_in_coinbase
++ 	// either way, we want to start out coinb2 with outputs
++ 	i = remaining_size;
++@@ -251,6 +253,16 @@ void generate_coinbase_txns_for_stratum_job_subtypebysize(T_DATUM_STRATUM_JOB *s
++ 		if (i2 < 0) i2 = 0;
++ 		space_for_en_in_coinbase = false;
++ 	}
+++	// LZT1: the attestation commits to every other output, so it needs outputs
+++	// that do not vary per share. On BLAKE2b the extranonce slot is always zero;
+++	// on SHA256d it must live in the scriptSig, not in an OP_RETURN output.
+++	if (s->lzt1_on) {
+++		if (space_for_en_in_coinbase || (s->block_template && s->block_template->header_version >= 2)) {
+++			lzt1 = true;
+++		} else {
+++			DLOG_DEBUG("LZT1: coinbase type %d carries the extranonce in an output on a SHA256d job; not attesting it", coinbase_index);
+++		}
+++	}
++ 	m = 0;
++ 	mval = 0;
++ 	// technically an output script could be > 0x4B, meaning an extra byte would be eaten here... but that's not currently the standard
++@@ -275,6 +287,7 @@ void generate_coinbase_txns_for_stratum_job_subtypebysize(T_DATUM_STRATUM_JOB *s
++ 	}
++ 	
++ 	// "m" outputs fit
+++	if (lzt1) m++; // the LZT1 commitment
++ 	if (space_for_en_in_coinbase) {
++ 		// we'll start the empty coinb2 with the "sequence"
++ 		m+=2; // pool addr + witness
++@@ -357,6 +370,11 @@ void generate_coinbase_txns_for_stratum_job_subtypebysize(T_DATUM_STRATUM_JOB *s
++ 		cb2idx[coinbase_index] += sprintf(&s->coinbase[coinbase_index].coinb2[cb2idx[coinbase_index]], "0000000000000000036a0100"); // TODO: Is a naked OP_RETURN without any bytes after safe?  Above TODO is probably better than investigating.
++ 	}
++ 	
+++	if (lzt1) {
+++		// LZT1 commitment (79 bytes, reserved in cb_req_sz); its id is filled in by datum_lzt1_finalize_job()
+++		datum_lzt1_append_placeholder(s, coinbase_index, cb2idx);
+++	}
+++	
++ 	// witness commit output costs 46 bytes
++ 	// append the default_witness_commitment
++ 	cb2idx[coinbase_index] += sprintf(&s->coinbase[coinbase_index].coinb2[cb2idx[coinbase_index]], "0000000000000000%2.2x%s", (unsigned int)strlen(s->block_template->default_witness_commitment)>>1, s->block_template->default_witness_commitment);
++@@ -582,7 +600,8 @@ void generate_coinbase_txns_for_stratum_job(T_DATUM_STRATUM_JOB *s, bool empty_o
+  		memcpy(&s->pool_addr_script[0], datum_config.override_mining_pool_scriptsig, datum_config.override_mining_pool_scriptsig_len);
+  		s->is_datum_job = true;
+  		if (s->available_coinbase_outputs_count == 0) {
+@@ -90,7 +205,33 @@ index 00fbb54..508fba2 100644
+  		}
+  	} else {
+  		// No pool
+-@@ -780,6 +781,12 @@ void generate_coinbase_txns_for_stratum_job(T_DATUM_STRATUM_JOB *s, bool empty_o
++@@ -590,6 +609,11 @@ void generate_coinbase_txns_for_stratum_job(T_DATUM_STRATUM_JOB *s, bool empty_o
++ 		s->is_datum_job = false;
++ 		empty_only = true;
++ 	}
+++	
+++	// LZT1 template attestation: pooled coinbases with a split, persisted key only
+++	memset(s->lzt1_has, 0, sizeof(s->lzt1_has));
+++	memset(s->lzt1_ready, 0, sizeof(s->lzt1_ready));
+++	s->lzt1_on = !empty_only && datum_lzt1_active();
++ 	if (!s->pool_addr_script_len) {
++ 		DLOG_FATAL("Could not generate output script for pool addr! Perhaps invalid? This is bad.");
++ 		panic_from_thread(__LINE__);
++@@ -761,6 +785,13 @@ void generate_coinbase_txns_for_stratum_job(T_DATUM_STRATUM_JOB *s, bool empty_o
++ 			cb_req_sz[2] += 10; // always OP_RETURN extranonce for type 2
++ 		}
++ 		
+++		if (s->lzt1_on) {
+++			// one LZT1 commitment output per variant: 8 value + 1 len + 70 script
+++			for(i=1;i<MAX_COINBASE_TYPES;i++) {
+++				cb_req_sz[i] += LZT1_OUTPUT_BYTES;
+++			}
+++		}
+++		
++ 		// TYPE 1 - "Nicehash" friendly, max 500 bytes
++ 		i = datum_stratum_coinbase_fit_to_template(500, cb_req_sz[1], s);
++ 		generate_coinbase_txns_for_stratum_job_subtypebysize(s, 1, i, space_for_en_in_coinbase, cb1idx, cb2idx, false);
++@@ -780,6 +811,14 @@ void generate_coinbase_txns_for_stratum_job(T_DATUM_STRATUM_JOB *s, bool empty_o
+  		// TYPE 2 - Older Antminer stock (S19)
+  		i = datum_stratum_coinbase_fit_to_template(755, cb_req_sz[2], s);
+  		generate_coinbase_txns_for_stratum_job_subtypebysize(s, 2, i, false, cb1idx, cb2idx, true);
+@@ -100,10 +241,37 @@ index 00fbb54..508fba2 100644
+ +		// into it so a miner that still picks type 0 pays TIDES.
+ +		strcpy(s->coinbase[0].coinb1, s->coinbase[4].coinb1);
+ +		strcpy(s->coinbase[0].coinb2, s->coinbase[4].coinb2);
+++		s->lzt1_has[0] = s->lzt1_has[4];
+++		s->lzt1_cb2_off[0] = s->lzt1_cb2_off[4];
+  	}
+  	
+  	// prep binary versions of the coinbase for speeding up later
+-@@ -926,7 +933,7 @@ void *datum_coinbaser_thread(void *ptr) {
++@@ -813,6 +852,12 @@ void generate_coinbase_txns_for_stratum_job(T_DATUM_STRATUM_JOB *s, bool empty_o
++ 		}
++ 	}
++ 
+++	// LZT1: fill in each variant's attestation id now that its outputs are final,
+++	// before the BLAKE2b commitment below hashes the coinbase.
+++	if (s->lzt1_on) {
+++		datum_lzt1_finalize_job(s);
+++	}
+++	
++ 	// A BLAKE2b job commits every client to one coinbase, so commit to the
++ 	// one that carries the pool's payout outputs when there are any. Type 4
++ 	// has the largest budget, and the Sia hasher never parses the Bitcoin
++@@ -863,7 +908,10 @@ int datum_coinbaser_v2_parse(T_DATUM_STRATUM_JOB *s, unsigned char *coinbaser, i
++ 			break;
++ 		}
++ 		slen = coinbaser[cidx]; cidx++;
++-		if (slen < 2 || slen > 64 || cidx + slen > cblen) {
+++		// 2..64 bytes; or exactly a 70-byte zero-value XBT-NTA attestation
+++		// (6a 44 "NTA" 02 sig64), which Prime sends once nta is active
+++		if ((slen < 2 || slen > DATUM_COINBASER_MAX_SCRIPT || cidx + slen > cblen) &&
+++		    !(cidx + slen <= cblen && outval == 0 && datum_coinbaser_script_is_nta(&coinbaser[cidx], slen))) {
++ 			DLOG_ERROR("Script length (%d) is invalid. Using default/empty", slen);
++ 			s->available_coinbase_outputs_count = 0;
++ 			return 0;
++@@ -926,9 +974,15 @@ void *datum_coinbaser_thread(void *ptr) {
+  				s->available_coinbase_outputs_count = 0;
+  				i = 0;
+  			}
+@@ -111,8 +279,16 @@ index 00fbb54..508fba2 100644
+ +			if (i >= 1 || !datum_protocol_is_active()) {
+  				DLOG_DEBUG("Generating coinbases for up to %d outputs", i);
+  				generate_coinbase_txns_for_stratum_job(s, false);
+++				// LZT1 attestations go to Prime before the job is released to
+++				// miners, so they precede the job's first share on the wire.
+++				if (s->lzt1_on) {
+++					i = datum_lzt1_send_job(s);
+++					DLOG_DEBUG("LZT1: sent %d attestation%s for job %u", i, (i==1)?"":"s", (unsigned int)s->datum_job_idx);
+++				}
+  				if (need_coinbaser_rwlocks_init_done) {
+-@@ -936,6 +943,8 @@ void *datum_coinbaser_thread(void *ptr) {
++ 					pthread_rwlock_wrlock(&need_coinbaser_rwlocks[sjob]);
++ 					s->need_coinbaser = false;
++@@ -936,6 +990,8 @@ void *datum_coinbaser_thread(void *ptr) {
+  					need_coinbaser = false;
+  				}
+  				DLOG_DEBUG("Generated and notified.");
+@@ -121,6 +297,890 @@ index 00fbb54..508fba2 100644
+  			}
+  		}
+  		
++diff --git a/src/datum_conf.c b/src/datum_conf.c
++index ba4a651..0a98280 100644
++--- a/src/datum_conf.c
+++++ b/src/datum_conf.c
++@@ -214,6 +214,10 @@ const T_DATUM_CONFIG_ITEM datum_config_options[] = {
++ 		.required = false, .ptr = &datum_config.datum_pooled_mining_only, 	.default_bool = true },
++ 	{ .var_type = DATUM_CONF_INT, 		.category = "datum", 		.name = "protocol_global_timeout",		.description = "If no valid messages are received from the DATUM server in this many seconds, give up and try to reconnect",
++ 		.required = false, .ptr = &datum_config.datum_protocol_global_timeout, 	.default_int = 60 },
+++	{ .var_type = DATUM_CONF_STRING, 	.category = "datum", 		.name = "identity_key_file",			.description = "File holding this gateway's DATUM identity keys (created 0600 if missing). Empty = a new key every start",
+++		.required = false, .ptr = datum_config.datum_identity_key_file,		.default_string[0] = "", .max_string_len = sizeof(datum_config.datum_identity_key_file) },
+++	{ .var_type = DATUM_CONF_BOOL, 		.category = "datum", 		.name = "lzt1_attest",					.description = "Sign an LZT1 template attestation per coinbase and commit to it in the coinbase (needs identity_key_file)",
+++		.required = false, .ptr = &datum_config.datum_lzt1_attest, 	.default_bool = true },
++ };
++ 
++ #define NUM_CONFIG_ITEMS (sizeof(datum_config_options) / sizeof(datum_config_options[0]))
++diff --git a/src/datum_conf.h b/src/datum_conf.h
++index e81215d..afd52e0 100644
++--- a/src/datum_conf.h
+++++ b/src/datum_conf.h
++@@ -171,6 +171,8 @@ typedef struct {
++ 	char datum_pool_pubkey[1024];
++ 	int datum_protocol_global_timeout;
++ 	uint64_t datum_protocol_global_timeout_ms;
+++	char datum_identity_key_file[1024];
+++	bool datum_lzt1_attest;
++ 	
++ 	uint32_t prime_id;
++ 	unsigned char override_mining_pool_scriptsig[256];
++diff --git a/src/datum_gateway.c b/src/datum_gateway.c
++index 8ca1c4d..28aaccb 100644
++--- a/src/datum_gateway.c
+++++ b/src/datum_gateway.c
++@@ -86,6 +86,7 @@ void datum_stratum_tests(void);
++ void datum_conf_tests(void);
++ void datum_utils_tests(void);
++ void datum_submitblock_tests(void);
+++void datum_lzt1_tests(void);
++ 
++ static error_t parse_opt(int key, char *arg, struct argp_state *state) {
++ 	struct arguments *arguments = state->input;
++@@ -110,6 +111,7 @@ static error_t parse_opt(int key, char *arg, struct argp_state *state) {
++ 			datum_coinbaser_tests();
++ 			datum_stratum_tests();
++ 			datum_submitblock_tests();
+++			datum_lzt1_tests();
++ 			exit(datum_test_failed);
++ 		default:
++ 			return ARGP_ERR_UNKNOWN;
++diff --git a/src/datum_lzt1.c b/src/datum_lzt1.c
++new file mode 100644
++index 0000000..b5a994e
++--- /dev/null
+++++ b/src/datum_lzt1.c
++@@ -0,0 +1,441 @@
+++/*
+++ *
+++ * DATUM Gateway
+++ * Decentralized Alternative Templates for Universal Mining
+++ *
+++ * This file is part of the DATUM Gateway and is distributed under the
+++ * same MIT license as the rest of the project. See LICENSE.
+++ *
+++ * Lazarus: persisted DATUM identity key and LZT1 template attestations.
+++ *
+++ * Per published coinbase variant of a pooled job the gateway signs an
+++ * attestation A with its DATUM identity key G (the ed25519 key of the
+++ * handshake), commits to it in that coinbase with one zero-value output
+++ *
+++ *     OP_RETURN PUSH68 "LZT1" BLAKE2b-256(A) G           (70-byte script)
+++ *
+++ * and sends A and its signature to Prime as mining sub-command 0x5A before
+++ * the job is notified. The layout is datum-wire's authorship.rs, byte for
+++ * byte (Prime runs authorship::verify on it).
+++ *
+++ */
+++
+++#include <errno.h>
+++#include <fcntl.h>
+++#include <inttypes.h>
+++#include <stdatomic.h>
+++#include <stdio.h>
+++#include <stdlib.h>
+++#include <string.h>
+++#include <sys/stat.h>
+++#include <sys/types.h>
+++#include <unistd.h>
+++
+++#include <sodium.h>
+++
+++#include "datum_conf.h"
+++#include "datum_utils.h"
+++#include "datum_stratum.h"
+++#include "datum_protocol.h"
+++#include "datum_coinbaser.h"
+++#include "datum_lzt1.h"
+++
+++extern DATUM_ENC_KEYS local_datum_keys;
+++extern atomic_int datum_protocol_client_active;
+++int datum_protocol_mining_cmd(void *data, int len);
+++
+++bool datum_identity_persisted = false;
+++
+++#define IDENTITY_MAGIC "datum-identity-v1"
+++
+++////////////////////////////////////////////////////////////////////////////////
+++// identity key file
+++//
+++// Text, five lines:
+++//   datum-identity-v1
+++//   ed25519_pk <64 hex>
+++//   ed25519_sk <128 hex>   (libsodium form: seed || pk)
+++//   x25519_pk <64 hex>
+++//   x25519_sk <64 hex>
+++// Must not be group/world accessible.
+++////////////////////////////////////////////////////////////////////////////////
+++
+++static int lzt1_unhex(const char *in, size_t hexlen, unsigned char *out) {
+++	size_t i;
+++	for (i = 0; i < hexlen; i++) {
+++		const char c = in[i];
+++		if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F'))) return -1;
+++	}
+++	for (i = 0; i < hexlen; i += 2) {
+++		out[i >> 1] = hex2bin_uchar(&in[i]);
+++	}
+++	return 0;
+++}
+++
+++static void lzt1_hex(char *out, const unsigned char *in, size_t len) {
+++	size_t i;
+++	for (i = 0; i < len; i++) {
+++		uchar_to_hex(&out[i << 1], in[i]);
+++	}
+++	out[len << 1] = 0;
+++}
+++
+++// "name <hex of len bytes>\n" at *p; advances *p.
+++static int identity_field(const char **p, const char *name, unsigned char *out, size_t len) {
+++	const size_t nl = strlen(name);
+++	const char *q = *p;
+++	if (strncmp(q, name, nl) || q[nl] != ' ') return -1;
+++	q += nl + 1;
+++	if (strlen(q) < len * 2) return -1;
+++	if (lzt1_unhex(q, len * 2, out)) return -1;
+++	q += len * 2;
+++	if (*q == '\r') q++;
+++	if (*q == '\n') {
+++		q++;
+++	} else if (*q != 0) {
+++		return -1;
+++	}
+++	*p = q;
+++	return 0;
+++}
+++
+++static int identity_parse(const char *buf, DATUM_ENC_KEYS *keys) {
+++	const char *p = buf;
+++	unsigned char check[crypto_sign_PUBLICKEYBYTES];
+++	unsigned char seed[crypto_sign_SEEDBYTES];
+++	unsigned char sk[crypto_sign_SECRETKEYBYTES];
+++	const size_t ml = strlen(IDENTITY_MAGIC);
+++
+++	if (strncmp(p, IDENTITY_MAGIC, ml)) return -1;
+++	p += ml;
+++	if (*p == '\r') p++;
+++	if (*p != '\n') return -1;
+++	p++;
+++	if (identity_field(&p, "ed25519_pk", keys->pk_ed25519, crypto_sign_PUBLICKEYBYTES)) return -1;
+++	if (identity_field(&p, "ed25519_sk", keys->sk_ed25519, crypto_sign_SECRETKEYBYTES)) return -1;
+++	if (identity_field(&p, "x25519_pk", keys->pk_x25519, crypto_box_PUBLICKEYBYTES)) return -1;
+++	if (identity_field(&p, "x25519_sk", keys->sk_x25519, crypto_box_SECRETKEYBYTES)) return -1;
+++	while (*p == '\n' || *p == '\r' || *p == ' ') p++;
+++	if (*p) return -1;
+++
+++	// the halves must belong together: re-derive both from the seed
+++	if (crypto_sign_ed25519_sk_to_seed(seed, keys->sk_ed25519) != 0) return -1;
+++	if (crypto_sign_seed_keypair(check, sk, seed) != 0) return -1;
+++	sodium_memzero(seed, sizeof(seed));
+++	if (memcmp(check, keys->pk_ed25519, crypto_sign_PUBLICKEYBYTES) || sodium_memcmp(sk, keys->sk_ed25519, crypto_sign_SECRETKEYBYTES)) {
+++		sodium_memzero(sk, sizeof(sk));
+++		return -1;
+++	}
+++	sodium_memzero(sk, sizeof(sk));
+++	if (crypto_scalarmult_base(check, keys->sk_x25519) != 0) return -1;
+++	if (memcmp(check, keys->pk_x25519, crypto_box_PUBLICKEYBYTES)) return -1;
+++	keys->is_remote = false;
+++	return 0;
+++}
+++
+++static int identity_create(const char *path, DATUM_ENC_KEYS *keys) {
+++	char buf[512];
+++	char h[crypto_sign_SECRETKEYBYTES * 2 + 1];
+++	int n, fd;
+++	ssize_t w;
+++
+++	if (datum_encrypt_generate_keys(keys) != 0) {
+++		DLOG_FATAL("Could not generate DATUM identity keys");
+++		return -1;
+++	}
+++	n = snprintf(buf, sizeof(buf), "%s\n", IDENTITY_MAGIC);
+++	lzt1_hex(h, keys->pk_ed25519, crypto_sign_PUBLICKEYBYTES);
+++	n += snprintf(&buf[n], sizeof(buf) - n, "ed25519_pk %s\n", h);
+++	lzt1_hex(h, keys->sk_ed25519, crypto_sign_SECRETKEYBYTES);
+++	n += snprintf(&buf[n], sizeof(buf) - n, "ed25519_sk %s\n", h);
+++	lzt1_hex(h, keys->pk_x25519, crypto_box_PUBLICKEYBYTES);
+++	n += snprintf(&buf[n], sizeof(buf) - n, "x25519_pk %s\n", h);
+++	lzt1_hex(h, keys->sk_x25519, crypto_box_SECRETKEYBYTES);
+++	n += snprintf(&buf[n], sizeof(buf) - n, "x25519_sk %s\n", h);
+++	sodium_memzero(h, sizeof(h));
+++
+++	fd = open(path, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
+++	if (fd < 0) {
+++		sodium_memzero(buf, sizeof(buf));
+++		if (errno == EEXIST) return 1; // someone else made it: load that one
+++		DLOG_FATAL("Could not create DATUM identity key file %s: %s", path, strerror(errno));
+++		return -1;
+++	}
+++	if (fchmod(fd, 0600) != 0) {
+++		DLOG_FATAL("Could not set mode 0600 on DATUM identity key file %s: %s", path, strerror(errno));
+++		close(fd);
+++		sodium_memzero(buf, sizeof(buf));
+++		return -1;
+++	}
+++	w = write(fd, buf, n);
+++	sodium_memzero(buf, sizeof(buf));
+++	if (w != n || fsync(fd) != 0) {
+++		DLOG_FATAL("Could not write DATUM identity key file %s", path);
+++		close(fd);
+++		unlink(path);
+++		return -1;
+++	}
+++	close(fd);
+++	DLOG_INFO("Created DATUM identity key file %s (mode 0600)", path);
+++	return 0;
+++}
+++
+++int datum_identity_load_or_create(const char *path, DATUM_ENC_KEYS *keys) {
+++	char buf[1024];
+++	struct stat st;
+++	ssize_t r;
+++	int fd, i;
+++
+++	for (i = 0; i < 2; i++) {
+++		fd = open(path, O_RDONLY | O_CLOEXEC);
+++		if (fd < 0) {
+++			if (errno != ENOENT) {
+++				DLOG_FATAL("Could not open DATUM identity key file %s: %s", path, strerror(errno));
+++				return -1;
+++			}
+++			const int c = identity_create(path, keys);
+++			if (c <= 0) return c;
+++			continue; // lost a creation race; load the winner's
+++		}
+++		if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode)) {
+++			DLOG_FATAL("DATUM identity key file %s is not a regular file", path);
+++			close(fd);
+++			return -1;
+++		}
+++		if (st.st_mode & (S_IRWXG | S_IRWXO)) {
+++			DLOG_FATAL("DATUM identity key file %s is accessible by group/others (mode %04o); chmod 600 it", path, (unsigned int)(st.st_mode & 07777));
+++			close(fd);
+++			return -1;
+++		}
+++		r = read(fd, buf, sizeof(buf) - 1);
+++		close(fd);
+++		if (r <= 0 || r >= (ssize_t)sizeof(buf) - 1) {
+++			sodium_memzero(buf, sizeof(buf));
+++			DLOG_FATAL("DATUM identity key file %s is malformed (size)", path);
+++			return -1;
+++		}
+++		buf[r] = 0;
+++		i = identity_parse(buf, keys);
+++		sodium_memzero(buf, sizeof(buf));
+++		if (i != 0) {
+++			memset(keys, 0, sizeof(*keys));
+++			DLOG_FATAL("DATUM identity key file %s is malformed", path);
+++			return -1;
+++		}
+++		DLOG_INFO("Loaded DATUM identity key from %s", path);
+++		return 0;
+++	}
+++	DLOG_FATAL("Could not load DATUM identity key file %s", path);
+++	return -1;
+++}
+++
+++////////////////////////////////////////////////////////////////////////////////
+++// coinbaser shapes
+++////////////////////////////////////////////////////////////////////////////////
+++
+++bool datum_coinbaser_script_is_nta(const unsigned char *script, int len) {
+++	static const unsigned char prefix[6] = { 0x6a, 0x44, 'N', 'T', 'A', 0x02 };
+++	return len == DATUM_COINBASER_NTA_SCRIPT_LEN && !memcmp(script, prefix, sizeof(prefix));
+++}
+++
+++bool datum_lzt1_active(void) {
+++	return datum_config.datum_lzt1_attest && datum_identity_persisted && datum_protocol_is_active();
+++}
+++
+++////////////////////////////////////////////////////////////////////////////////
+++// attestation
+++////////////////////////////////////////////////////////////////////////////////
+++
+++// hex chars from the start of the output to the 32-byte id: value 8, len 1, 6a 44 "LZT1"
+++#define LZT1_ID_HEX_OFF ((8 + 1 + 2 + 4) * 2)
+++
+++int datum_lzt1_append_placeholder(T_DATUM_STRATUM_JOB *s, int k, int *cb2idx) {
+++	char *o = &s->coinbase[k].coinb2[cb2idx[k]];
+++	int n;
+++
+++	n = sprintf(o, "0000000000000000%02x6a444c5a5431", LZT1_SCRIPT_LEN);
+++	memset(&o[n], '0', 64); n += 64;
+++	lzt1_hex(&o[n], local_datum_keys.pk_ed25519, 32); n += 64;
+++	s->lzt1_cb2_off[k] = cb2idx[k];
+++	s->lzt1_has[k] = true;
+++	cb2idx[k] += n;
+++	return n;
+++}
+++
+++static bool lzt1_varint(const unsigned char *b, size_t len, size_t *pos, uint64_t *v) {
+++	size_t p = *pos;
+++	if (p >= len) return false;
+++	if (b[p] < 0xfd) {
+++		*v = b[p]; *pos = p + 1; return true;
+++	}
+++	if (b[p] == 0xfd) {
+++		if (p + 3 > len) return false;
+++		*v = (uint64_t)b[p+1] | ((uint64_t)b[p+2] << 8); *pos = p + 3; return true;
+++	}
+++	if (b[p] == 0xfe) {
+++		if (p + 5 > len) return false;
+++		*v = upk_u32le(b, (int)p + 1); *pos = p + 5; return true;
+++	}
+++	if (p + 9 > len) return false;
+++	*v = upk_u64le(b, (int)p + 1); *pos = p + 9; return true;
+++}
+++
+++static size_t lzt1_put_varint(unsigned char *b, uint64_t v) {
+++	if (v < 0xfd) { b[0] = (unsigned char)v; return 1; }
+++	if (v <= 0xffff) { b[0] = 0xfd; b[1] = v & 0xff; b[2] = (v >> 8) & 0xff; return 3; }
+++	b[0] = 0xfe; pk_u32le(b, 1, (uint32_t)v); return 5;
+++}
+++
+++static void lzt1_dump(const T_DATUM_STRATUM_JOB *s, const unsigned char *msg, const unsigned char *tx, size_t tx_len) {
+++	// DATUM_LZT1_DUMP=<file>: append the arguments of prime's lzt1_check, one line per variant:
+++	//   <0x5A msg> <coinbase> <prev> <G> [branches...]
+++	const char *path = getenv("DATUM_LZT1_DUMP");
+++	char h[65];
+++	char *txh;
+++	FILE *f;
+++	int i;
+++
+++	if (!path || !path[0]) return;
+++	txh = malloc(tx_len * 2 + 1);
+++	if (!txh) return;
+++	f = fopen(path, "a");
+++	if (!f) {
+++		free(txh);
+++		return;
+++	}
+++	lzt1_hex(txh, msg, LZT1_MSG_LEN);
+++	fputs(txh, f);
+++	lzt1_hex(txh, tx, tx_len);
+++	fprintf(f, " %s", txh);
+++	lzt1_hex(h, s->prevhash_bin, 32);
+++	fprintf(f, " %s", h);
+++	lzt1_hex(h, local_datum_keys.pk_ed25519, 32);
+++	fprintf(f, " %s", h);
+++	for (i = 0; i < s->merklebranch_count; i++) {
+++		lzt1_hex(h, s->merklebranches_bin[i], 32);
+++		fprintf(f, " %s", h);
+++	}
+++	fputc('\n', f);
+++	fclose(f);
+++	free(txh);
+++}
+++
+++static bool lzt1_finalize_variant(T_DATUM_STRATUM_JOB *s, int k) {
+++	T_DATUM_STRATUM_COINBASE *cb = &s->coinbase[k];
+++	unsigned char tx[MAX_COINBASE_TXN_SIZE_BYTES];
+++	unsigned char payout[MAX_COINBASE_TXN_SIZE_BYTES + 16];
+++	unsigned char a[LZT1_ATTESTATION_LEN];
+++	unsigned char signed_msg[LZT1_DOMAIN_LEN + LZT1_ATTESTATION_LEN];
+++	unsigned char id[32], digest[32], branches_hash[32];
+++	unsigned char *msg = s->lzt1_msg[k];
+++	size_t tx_len, pos, lzt_pos, out_start, pn;
+++	uint64_t n_out, v, slen, value_sum = 0;
+++	bool found = false;
+++	uint64_t o;
+++	char idh[65];
+++
+++	tx_len = (size_t)cb->coinb1_len + 12 + (size_t)cb->coinb2_len;
+++	if (cb->coinb1_len < 1 || tx_len > sizeof(tx) || (s->lzt1_cb2_off[k] & 1)) return false;
+++
+++	// As Prime assembles a share's coinbase: coinb1 || 12 zero bytes || coinb2.
+++	// On BLAKE2b the gateway hashes that too; on SHA256d the extranonce lives
+++	// in the scriptSig for every variant that carries an LZT1 output.
+++	memcpy(tx, cb->coinb1_bin, cb->coinb1_len);
+++	memset(&tx[cb->coinb1_len], 0, 12);
+++	memcpy(&tx[cb->coinb1_len + 12], cb->coinb2_bin, cb->coinb2_len);
+++	lzt_pos = (size_t)cb->coinb1_len + 12 + (size_t)(s->lzt1_cb2_off[k] >> 1);
+++
+++	// walk: version, 1 input (prevout, scriptSig, sequence), outputs
+++	if (tx_len < 5 + 36 || tx[4] != 1) return false;
+++	pos = 5 + 36;
+++	if (!lzt1_varint(tx, tx_len, &pos, &slen) || pos + slen + 4 > tx_len) return false;
+++	pos += slen + 4;
+++	if (!lzt1_varint(tx, tx_len, &pos, &n_out) || n_out < 2) return false;
+++
+++	pn = lzt1_put_varint(payout, n_out - 1);
+++	for (o = 0; o < n_out; o++) {
+++		out_start = pos;
+++		if (pos + 8 > tx_len) return false;
+++		v = upk_u64le(tx, (int)pos);
+++		pos += 8;
+++		if (!lzt1_varint(tx, tx_len, &pos, &slen) || pos + slen > tx_len) return false;
+++		pos += slen;
+++		value_sum += v;
+++		if (out_start == lzt_pos) {
+++			if (found || v != 0 || slen != LZT1_SCRIPT_LEN) return false;
+++			found = true;
+++			continue;
+++		}
+++		memcpy(&payout[pn], &tx[out_start], pos - out_start);
+++		pn += pos - out_start;
+++	}
+++	if (!found || pos + 4 != tx_len) return false;
+++
+++	crypto_hash_sha256(digest, payout, pn);
+++	crypto_hash_sha256(digest, digest, 32);
+++
+++	// branches exactly as the job section of a share carries them
+++	crypto_generichash(branches_hash, 32, s->merklebranch_count ? s->merklebranches_bin[0] : branches_hash, (size_t)s->merklebranch_count * 32, NULL, 0);
+++
+++	memset(a, 0, sizeof(a));
+++	a[0] = LZT1_VERSION;
+++	memcpy(&a[1], local_datum_keys.pk_ed25519, 32);
+++	pk_u32le(a, 33, (uint32_t)s->height);
+++	memcpy(&a[37], s->prevhash_bin, 32);
+++	memcpy(&a[69], branches_hash, 32);
+++	pk_u64le(a, 101, value_sum);
+++	pk_u32le(a, 109, s->block_template->txn_count + 1);
+++	// 113: mempool_digest (16) and 129: node_tag (16) stay zero
+++	pk_u64le(a, 145, s->tsms);
+++	memcpy(&a[153], digest, 32);
+++
+++	crypto_generichash(id, 32, a, sizeof(a), NULL, 0);
+++
+++	// commit: the id into the output, hex and binary
+++	lzt1_hex(idh, id, 32);
+++	memcpy(&cb->coinb2[s->lzt1_cb2_off[k] + LZT1_ID_HEX_OFF], idh, 64);
+++	memcpy(&cb->coinb2_bin[(s->lzt1_cb2_off[k] + LZT1_ID_HEX_OFF) >> 1], id, 32);
+++	memcpy(&tx[lzt_pos + (LZT1_ID_HEX_OFF >> 1)], id, 32);
+++
+++	memcpy(signed_msg, LZT1_DOMAIN, LZT1_DOMAIN_LEN); // includes the NUL
+++	memcpy(&signed_msg[LZT1_DOMAIN_LEN], a, sizeof(a));
+++
+++	msg[0] = LZT1_SUBCMD;
+++	msg[1] = s->datum_job_idx;
+++	msg[2] = (unsigned char)k;
+++	memcpy(&msg[3], a, sizeof(a));
+++	if (crypto_sign_detached(&msg[3 + LZT1_ATTESTATION_LEN], NULL, signed_msg, sizeof(signed_msg), local_datum_keys.sk_ed25519) != 0) return false;
+++	msg[LZT1_MSG_LEN - 1] = 0xFE;
+++
+++	DLOG_DEBUG("LZT1: job %u variant %d id %s (%"PRIu64" outputs, %"PRIu64" sats)", (unsigned int)s->datum_job_idx, k, idh, n_out, value_sum);
+++	lzt1_dump(s, msg, tx, tx_len);
+++	return true;
+++}
+++
+++void datum_lzt1_finalize_job(T_DATUM_STRATUM_JOB *s) {
+++	int k;
+++	for (k = 0; k < MAX_COINBASE_TYPES; k++) {
+++		s->lzt1_ready[k] = false;
+++		if (!s->lzt1_has[k]) continue;
+++		s->lzt1_ready[k] = lzt1_finalize_variant(s, k);
+++		if (!s->lzt1_ready[k]) {
+++			DLOG_ERROR("LZT1: could not attest coinbase variant %d of job %u", k, (unsigned int)s->datum_job_idx);
+++		}
+++	}
+++}
+++
+++int datum_lzt1_send_job(T_DATUM_STRATUM_JOB *s) {
+++	unsigned char buf[LZT1_MSG_LEN + crypto_box_MACBYTES];
+++	const bool blake2b = s->block_template && s->block_template->header_version >= 2;
+++	int k, sent = 0;
+++
+++	if (!s->lzt1_on || datum_protocol_client_active != 3) return 0;
+++	for (k = 0; k < MAX_COINBASE_TYPES; k++) {
+++		if (!s->lzt1_ready[k]) continue;
+++		// a pooled BLAKE2b job publishes only the one coinbase every client shares
+++		if (blake2b && k != s->blake2b_coinbase_index) continue;
+++		memcpy(buf, s->lzt1_msg[k], LZT1_MSG_LEN); // encrypted in place
+++		if (datum_protocol_mining_cmd(buf, LZT1_MSG_LEN) == 0) sent++;
+++	}
+++	return sent;
+++}
++diff --git a/src/datum_lzt1.h b/src/datum_lzt1.h
++new file mode 100644
++index 0000000..cda4088
++--- /dev/null
+++++ b/src/datum_lzt1.h
++@@ -0,0 +1,68 @@
+++/*
+++ *
+++ * DATUM Gateway
+++ * Decentralized Alternative Templates for Universal Mining
+++ *
+++ * This file is part of the DATUM Gateway and is distributed under the
+++ * same MIT license as the rest of the project. See LICENSE.
+++ *
+++ * Lazarus: persisted DATUM identity key and LZT1 template attestations
+++ * (Sovereign TIDES, SOV-P-002). Byte layout matches datum-wire's
+++ * authorship.rs (Prime's verifier).
+++ *
+++ */
+++
+++#ifndef _DATUM_LZT1_H_
+++#define _DATUM_LZT1_H_
+++
+++#include <stdbool.h>
+++#include <stdint.h>
+++#include <stddef.h>
+++
+++#include "datum_protocol.h"
+++#include "datum_stratum.h"
+++
+++// OP_RETURN PUSH68 "LZT1" BLAKE2b-256(A) G
+++#define LZT1_SCRIPT_LEN 70
+++// value (8) + script length (1) + script (70)
+++#define LZT1_OUTPUT_BYTES 79
+++// v | G | height | prev | branches_hash | coinbase_value | n_tx | mempool_digest | node_tag | t_gbt | payout_digest
+++#define LZT1_ATTESTATION_LEN 185
+++#define LZT1_SIG_LEN 64
+++// 0x5A | job_id | variant | A | sig | 0xFE
+++#define LZT1_MSG_LEN (3 + LZT1_ATTESTATION_LEN + LZT1_SIG_LEN + 1)
+++#define LZT1_SUBCMD 0x5A
+++#define LZT1_VERSION 0x01
+++#define LZT1_DOMAIN "XBT-SOVEREIGN-TIDES/1" // signed with its terminating NUL (22 bytes)
+++#define LZT1_DOMAIN_LEN 22
+++
+++// Set once the identity keys came from datum.identity_key_file.
+++extern bool datum_identity_persisted;
+++
+++// Load the DATUM identity keys from path, or create the file (0600) with new
+++// keys if it does not exist. Refuses a group/world-accessible or malformed file.
+++// Returns 0 on success.
+++int datum_identity_load_or_create(const char *path, DATUM_ENC_KEYS *keys);
+++
+++// Whether new pooled jobs carry LZT1 commitments: datum.lzt1_attest is on,
+++// the identity key is persisted, and the DATUM connection is up.
+++bool datum_lzt1_active(void);
+++
+++// An XBT-NTA attestation output script: exactly 70 bytes, 6a 44 'N' 'T' 'A' 02.
+++bool datum_coinbaser_script_is_nta(const unsigned char *script, int len);
+++
+++// Append the LZT1 output (value 0, id zeroed, key G filled in) to coinb2 hex
+++// of coinbase k at cb2idx[k], remembering where it went. Returns hex chars written.
+++int datum_lzt1_append_placeholder(T_DATUM_STRATUM_JOB *s, int k, int *cb2idx);
+++
+++// Fill in the attestation id of every placeholder in s's coinbases (hex and
+++// binary), sign, and stage the 0x5A message per variant. Call once the
+++// coinbases' binary forms are final.
+++void datum_lzt1_finalize_job(T_DATUM_STRATUM_JOB *s);
+++
+++// Send the staged 0x5A messages for the variants this job publishes.
+++int datum_lzt1_send_job(T_DATUM_STRATUM_JOB *s);
+++
+++void datum_lzt1_tests(void);
+++
+++#endif
++diff --git a/src/datum_lzt1_tests.c b/src/datum_lzt1_tests.c
++new file mode 100644
++index 0000000..567c6d7
++--- /dev/null
+++++ b/src/datum_lzt1_tests.c
++@@ -0,0 +1,273 @@
+++/*
+++ *
+++ * DATUM Gateway
+++ * Decentralized Alternative Templates for Universal Mining
+++ *
+++ * This file is part of the DATUM Gateway and is distributed under the
+++ * same MIT license as the rest of the project. See LICENSE.
+++ *
+++ * Lazarus: tests for the identity key file, the NTA coinbaser shape and
+++ * LZT1 attestations on real coinbases. With DATUM_LZT1_DUMP=<file> set, the
+++ * coinbase tests append prime's lzt1_check arguments per variant.
+++ *
+++ */
+++
+++#include <stdatomic.h>
+++#include <stdbool.h>
+++#include <stdio.h>
+++#include <stdlib.h>
+++#include <string.h>
+++#include <sys/stat.h>
+++#include <unistd.h>
+++
+++#include <sodium.h>
+++
+++#include "datum_conf.h"
+++#include "datum_utils.h"
+++#include "datum_stratum.h"
+++#include "datum_protocol.h"
+++#include "datum_coinbaser.h"
+++#include "datum_lzt1.h"
+++
+++extern DATUM_ENC_KEYS local_datum_keys;
+++extern atomic_int datum_protocol_client_active;
+++
+++static void lzt1_tests_identity(void) {
+++	char dir[] = "/tmp/datum-lzt1-test-XXXXXX";
+++	char path[128];
+++	DATUM_ENC_KEYS a, b;
+++	struct stat st;
+++	FILE *f;
+++
+++	if (!mkdtemp(dir)) {
+++		datum_test(false);
+++		return;
+++	}
+++	snprintf(path, sizeof(path), "%s/identity.key", dir);
+++
+++	// missing: created 0600, then loads to the same keys
+++	memset(&a, 0, sizeof(a));
+++	memset(&b, 0, sizeof(b));
+++	datum_test(datum_identity_load_or_create(path, &a) == 0);
+++	datum_test(stat(path, &st) == 0 && (st.st_mode & 0777) == 0600);
+++	datum_test(datum_identity_load_or_create(path, &b) == 0);
+++	datum_test(!memcmp(&a, &b, sizeof(a)));
+++
+++	// group/world readable: refused
+++	chmod(path, 0640);
+++	datum_test(datum_identity_load_or_create(path, &b) != 0);
+++	chmod(path, 0604);
+++	datum_test(datum_identity_load_or_create(path, &b) != 0);
+++	chmod(path, 0600);
+++	datum_test(datum_identity_load_or_create(path, &b) == 0);
+++
+++	// malformed: refused
+++	f = fopen(path, "w");
+++	if (f) {
+++		fputs("datum-identity-v1\ned25519_pk 00\n", f);
+++		fclose(f);
+++	}
+++	datum_test(datum_identity_load_or_create(path, &b) != 0);
+++
+++	// keys that do not belong together: refused
+++	f = fopen(path, "w");
+++	if (f) {
+++		char h[129];
+++		int i;
+++		fputs("datum-identity-v1\n", f);
+++		for(i=0;i<32;i++) uchar_to_hex(&h[i<<1], a.pk_ed25519[i]);
+++		h[64] = 0; fprintf(f, "ed25519_pk %s\n", h);
+++		for(i=0;i<64;i++) uchar_to_hex(&h[i<<1], a.sk_ed25519[i] ^ (i == 0));
+++		h[128] = 0; fprintf(f, "ed25519_sk %s\n", h);
+++		for(i=0;i<32;i++) uchar_to_hex(&h[i<<1], a.pk_x25519[i]);
+++		h[64] = 0; fprintf(f, "x25519_pk %s\n", h);
+++		for(i=0;i<32;i++) uchar_to_hex(&h[i<<1], a.sk_x25519[i]);
+++		h[64] = 0; fprintf(f, "x25519_sk %s\n", h);
+++		fclose(f);
+++	}
+++	datum_test(datum_identity_load_or_create(path, &b) != 0);
+++
+++	unlink(path);
+++	rmdir(dir);
+++}
+++
+++static int lzt1_put_output(unsigned char *b, uint64_t sats, const unsigned char *script, int len) {
+++	pk_u64le(b, 0, sats);
+++	b[8] = (unsigned char)len;
+++	memcpy(&b[9], script, len);
+++	return 9 + len;
+++}
+++
+++static void lzt1_nta_script(unsigned char *s, unsigned char fill) {
+++	s[0] = 0x6a; s[1] = 0x44; s[2] = 'N'; s[3] = 'T'; s[4] = 'A'; s[5] = 0x02;
+++	memset(&s[6], fill, 64);
+++}
+++
+++static void lzt1_p2tr(unsigned char *s, unsigned char k) {
+++	s[0] = 0x51; s[1] = 0x20;
+++	memset(&s[2], k, 32);
+++}
+++
+++static void lzt1_tests_nta_parse(T_DATUM_STRATUM_JOB *s) {
+++	unsigned char *cb = malloc(4096);
+++	unsigned char script[70];
+++	int n;
+++
+++	if (!cb) return;
+++	s->coinbase_value = 312500000;
+++
+++	// payee, its NTA attestation, another payee
+++	n = 0; cb[n++] = 7;
+++	lzt1_p2tr(script, 0x11); n += lzt1_put_output(&cb[n], 100000000, script, 34);
+++	lzt1_nta_script(script, 0xa5); n += lzt1_put_output(&cb[n], 0, script, 70);
+++	lzt1_p2tr(script, 0x22); n += lzt1_put_output(&cb[n], 50000000, script, 34);
+++	datum_test(datum_coinbaser_v2_parse(s, cb, n, false) == 3);
+++	datum_test(s->available_coinbase_outputs[1].output_script_len == 70);
+++	datum_test(s->available_coinbase_outputs[1].value_sats == 0);
+++	datum_test(datum_coinbaser_script_is_nta(s->available_coinbase_outputs[1].output_script, 70));
+++	datum_test(s->available_coinbase_outputs[2].output_script_len == 34);
+++
+++	// 70 bytes but not NTA: the whole list is refused, as before
+++	n = 0; cb[n++] = 7;
+++	lzt1_nta_script(script, 0xa5); script[4] = 'B';
+++	n += lzt1_put_output(&cb[n], 0, script, 70);
+++	datum_test(datum_coinbaser_v2_parse(s, cb, n, false) == 0);
+++
+++	// NTA shape carrying value: refused
+++	n = 0; cb[n++] = 7;
+++	lzt1_nta_script(script, 0xa5);
+++	n += lzt1_put_output(&cb[n], 1, script, 70);
+++	datum_test(datum_coinbaser_v2_parse(s, cb, n, false) == 0);
+++
+++	// 65..69 and 71: still refused
+++	n = 0; cb[n++] = 7;
+++	lzt1_nta_script(script, 0xa5);
+++	n += lzt1_put_output(&cb[n], 0, script, 69);
+++	datum_test(datum_coinbaser_v2_parse(s, cb, n, false) == 0);
+++
+++	free(cb);
+++}
+++
+++static void lzt1_tests_job(T_DATUM_TEMPLATE_DATA *t, T_DATUM_STRATUM_JOB *s, uint32_t header_version) {
+++	unsigned char cbr[2048];
+++	unsigned char script[70];
+++	int n, k, i;
+++
+++	memset(t, 0, sizeof(*t));
+++	memset(s, 0, sizeof(*s));
+++	t->header_version = header_version;
+++	t->height = 966267;
+++	t->coinbasevalue = 312512345;
+++	t->curtime = 1788408500;
+++	t->sizelimit = 4000000;
+++	t->weightlimit = 4000000;
+++	t->txn_count = 5;
+++	t->txn_total_size = 1500;
+++	t->txn_total_weight = 6000;
+++	strcpy(t->default_witness_commitment, "6a24aa21a9ed");
+++	for(i=0;i<32;i++) uchar_to_hex(&t->default_witness_commitment[12 + (i<<1)], (unsigned char)(0x40 + i));
+++	t->default_witness_commitment[76] = 0;
+++	for(i=0;i<32;i++) t->previousblockhash_bin[i] = (unsigned char)(0x77 ^ i);
+++
+++	s->block_template = t;
+++	s->height = t->height;
+++	s->coinbase_value = t->coinbasevalue;
+++	memcpy(s->prevhash_bin, t->previousblockhash_bin, 32);
+++	s->enprefix = 0xB10C;
+++	s->tsms = 1788408500123ULL;
+++	s->datum_job_idx = 5;
+++	s->merklebranch_count = 3;
+++	for(k=0;k<3;k++) for(i=0;i<32;i++) s->merklebranches_bin[k][i] = (unsigned char)(k * 31 + i);
+++
+++	// Prime's coinbaser: a few payees and an NTA attestation
+++	n = 0; cbr[n++] = 9;
+++	for(k=0;k<6;k++) {
+++		lzt1_p2tr(script, (unsigned char)(0x10 + k));
+++		n += lzt1_put_output(&cbr[n], 20000000 + k, script, 34);
+++		if (k == 1) {
+++			lzt1_nta_script(script, 0x5c);
+++			n += lzt1_put_output(&cbr[n], 0, script, 70);
+++		}
+++	}
+++	datum_test(datum_coinbaser_v2_parse(s, cbr, n, false) == 7);
+++
+++	generate_coinbase_txns_for_stratum_job(s, false);
+++}
+++
+++static void lzt1_tests_msgs(T_DATUM_STRATUM_JOB *s, bool sha256d) {
+++	unsigned char signed_msg[LZT1_DOMAIN_LEN + LZT1_ATTESTATION_LEN];
+++	int k;
+++
+++	datum_test(s->lzt1_on);
+++	for(k=0;k<MAX_COINBASE_TYPES;k++) {
+++		if (sha256d && k == 2) {
+++			// type 2 always carries the extranonce in an OP_RETURN output: not attested
+++			datum_test(!s->lzt1_has[k] && !s->lzt1_ready[k]);
+++			continue;
+++		}
+++		datum_test(s->lzt1_ready[k]);
+++		if (!s->lzt1_ready[k]) continue;
+++		datum_test(s->lzt1_msg[k][0] == 0x5A && s->lzt1_msg[k][1] == 5 && s->lzt1_msg[k][2] == k && s->lzt1_msg[k][LZT1_MSG_LEN-1] == 0xFE);
+++		datum_test(s->lzt1_msg[k][3] == 1 && !memcmp(&s->lzt1_msg[k][4], local_datum_keys.pk_ed25519, 32));
+++		memcpy(signed_msg, LZT1_DOMAIN, LZT1_DOMAIN_LEN);
+++		memcpy(&signed_msg[LZT1_DOMAIN_LEN], &s->lzt1_msg[k][3], LZT1_ATTESTATION_LEN);
+++		datum_test(crypto_sign_verify_detached(&s->lzt1_msg[k][3 + LZT1_ATTESTATION_LEN], signed_msg, sizeof(signed_msg), local_datum_keys.pk_ed25519) == 0);
+++		// the coinbase carries the placeholder's id, filled in
+++		datum_test(strstr(s->coinbase[k].coinb2, "466a444c5a5431") != NULL);
+++	}
+++}
+++
+++void datum_lzt1_tests(void) {
+++	T_DATUM_TEMPLATE_DATA *t;
+++	T_DATUM_STRATUM_JOB *s;
+++	const int saved_active = datum_protocol_client_active;
+++	const bool saved_attest = datum_config.datum_lzt1_attest;
+++	const bool saved_persisted = datum_identity_persisted;
+++	const unsigned char p2wpkh[22] = { 0x00, 0x14, 1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20 };
+++
+++	if (sodium_init() < 0) {
+++		datum_test(false);
+++		return;
+++	}
+++	t = calloc(1, sizeof(*t));
+++	s = calloc(1, sizeof(*s));
+++	if (!t || !s) {
+++		datum_test(false);
+++		free(t); free(s);
+++		return;
+++	}
+++
+++	lzt1_tests_identity();
+++	lzt1_tests_nta_parse(s);
+++
+++	// pooled, persisted key, attestation on
+++	datum_encrypt_generate_keys(&local_datum_keys);
+++	datum_identity_persisted = true;
+++	datum_config.datum_lzt1_attest = true;
+++	datum_protocol_client_active = 3;
+++	memcpy(datum_config.override_mining_pool_scriptsig, p2wpkh, sizeof(p2wpkh));
+++	datum_config.override_mining_pool_scriptsig_len = sizeof(p2wpkh);
+++	strcpy(datum_config.override_mining_coinbase_tag_primary, "Lazarus");
+++
+++	// BLAKE2b job: every variant attested
+++	lzt1_tests_job(t, s, 2);
+++	lzt1_tests_msgs(s, false);
+++	datum_test(s->blake2b_coinbase_index == 4);
+++
+++	// SHA256d job: type 2 keeps its extranonce in an output and is skipped
+++	lzt1_tests_job(t, s, 0);
+++	lzt1_tests_msgs(s, true);
+++
+++	// no persisted key: nothing reserved, nothing emitted
+++	datum_identity_persisted = false;
+++	lzt1_tests_job(t, s, 2);
+++	datum_test(!s->lzt1_on && !s->lzt1_ready[4]);
+++	datum_test(strstr(s->coinbase[4].coinb2, "466a444c5a5431") == NULL);
+++
+++	datum_protocol_client_active = saved_active;
+++	datum_config.datum_lzt1_attest = saved_attest;
+++	datum_identity_persisted = saved_persisted;
+++	memset(&local_datum_keys, 0, sizeof(local_datum_keys));
+++	free(t);
+++	free(s);
+++}
++diff --git a/src/datum_protocol.c b/src/datum_protocol.c
++index 39d2433..43eb4e6 100644
++--- a/src/datum_protocol.c
+++++ b/src/datum_protocol.c
++@@ -75,6 +75,7 @@
++ #include "datum_coinbaser.h"
++ #include "datum_queue.h"
++ #include "datum_pow.h"
+++#include "datum_lzt1.h"
++ #include "git_version.h"
++ 
++ atomic_int datum_protocol_client_active = 0;
++@@ -2055,10 +2056,22 @@ int datum_protocol_init(void) {
++ 	memset(&pool_keys, 0, sizeof(DATUM_ENC_KEYS));
++ 	memset(&session_datum_keys, 0, sizeof(DATUM_ENC_KEYS));
++ 	
++-	if (datum_encrypt_generate_keys(&local_datum_keys) != 0) {
+++	if (datum_config.datum_identity_key_file[0]) {
+++		// Lazarus: a persisted identity, so Prime (and LZT1 attestations) see the same key across restarts
+++		if (datum_identity_load_or_create(datum_config.datum_identity_key_file, &local_datum_keys) != 0) {
+++			DLOG_FATAL("Refusing to start without the DATUM identity key in %s", datum_config.datum_identity_key_file);
+++			return -1;
+++		}
+++		datum_identity_persisted = true;
+++	} else if (datum_encrypt_generate_keys(&local_datum_keys) != 0) {
++ 		DLOG_FATAL("Could not generate our keys");
++ 		return -1;
++ 	}
+++	if (datum_config.datum_lzt1_attest && !datum_identity_persisted) {
+++		DLOG_WARN("LZT1 template attestations are off: datum.identity_key_file is not set, and an ephemeral identity key changes on every restart");
+++	} else if (datum_config.datum_lzt1_attest) {
+++		DLOG_INFO("LZT1 template attestations are on");
+++	}
++ 	
++ 	DLOG_INFO("Our public keys:");
++ 	datum_encrypt_log_pubkeys(&local_datum_keys);
+ diff --git a/src/datum_protocol.h b/src/datum_protocol.h
+ index 706f41d..057ea0e 100644
+ --- a/src/datum_protocol.h
+@@ -187,3 +1247,39 @@ index 36df144..5f0ba4d 100644
+  		cbselect = full_coinbase ? (unsigned int)j->blake2b_coinbase_index : 0;
+  	} else {
+  		if (full_coinbase) {
++diff --git a/src/datum_stratum.h b/src/datum_stratum.h
++index 89c0211..2be6932 100644
++--- a/src/datum_stratum.h
+++++ b/src/datum_stratum.h
++@@ -112,8 +112,12 @@ typedef struct {
++ 	int coinb2_len;
++ } T_DATUM_STRATUM_COINBASE;
++ 
+++// A coinbaser script is 2..64 bytes, or exactly an XBT-NTA attestation (70).
+++#define DATUM_COINBASER_MAX_SCRIPT 64
+++#define DATUM_COINBASER_NTA_SCRIPT_LEN 70
+++
++ typedef struct {
++-	unsigned char output_script[64];
+++	unsigned char output_script[DATUM_COINBASER_NTA_SCRIPT_LEN];
++ 	int output_script_len;
++ 	uint64_t value_sats;
++ 	int sigops;
++@@ -180,6 +184,17 @@ typedef struct {
++ 	bool is_datum_job;
++ 	unsigned char datum_job_idx;
++ 	unsigned char datum_coinbaser_id;
+++	
+++	// LZT1 template attestation (datum_lzt1.c), one per coinbase variant.
+++	// lzt1_on: the coinbases of this job reserve and carry the commitment.
+++	// lzt1_cb2_off[k]: hex offset in coinbase[k].coinb2 where the LZT1
+++	// output starts (valid when lzt1_has[k]). lzt1_msg[k]: the 0x5A DATUM
+++	// message for variant k (valid when lzt1_ready[k]).
+++	bool lzt1_on;
+++	bool lzt1_has[MAX_COINBASE_TYPES];
+++	bool lzt1_ready[MAX_COINBASE_TYPES];
+++	int lzt1_cb2_off[MAX_COINBASE_TYPES];
+++	unsigned char lzt1_msg[MAX_COINBASE_TYPES][253];
++ } T_DATUM_STRATUM_JOB;
++ 
++ typedef struct T_DATUM_STRATUM_THREADPOOL_DATA {
+diff --git a/lazarus/protocol/src/lib.rs b/lazarus/protocol/src/lib.rs
+index aaf1d04..113a41f 100644
+--- a/lazarus/protocol/src/lib.rs
++++ b/lazarus/protocol/src/lib.rs
+@@ -19,6 +19,7 @@ pub mod coinbaser;
+ pub mod handshake;
+ pub mod header;
+ pub mod keys;
++pub mod lzt1;
+ pub mod mining;
+ pub mod nta;
+ pub mod nacl;
+diff --git a/lazarus/protocol/src/lzt1.rs b/lazarus/protocol/src/lzt1.rs
+new file mode 100644
+index 0000000..a527b04
+--- /dev/null
++++ b/lazarus/protocol/src/lzt1.rs
+@@ -0,0 +1,198 @@
++//! Sovereign TIDES template attestations (LZT1), gateway side: build `A` for a coinbase the
++//! gateway is about to publish, sign it with the DATUM identity key, put the 70-byte commitment
++//! in that coinbase, and send `A` and the signature to Prime as mining sub-command `0x5A`
++//! (SOV-P-002 W7/W12). Byte for byte the layout `prime/wire/src/authorship.rs` verifies; the
++//! test below holds it to that crate's fixture (`cargo run -p datum-wire --example lzt1_fixture`).
++//!
++//! ```text
++//! A   = v (1) | G (32) | height (u32) | prev_hash (32) | branches_hash (32) | coinbase_value (u64)
++//!       | n_tx (u32) | mempool_digest (16) | node_tag (16) | t_gbt (u64) | payout_digest (32)
++//! sig = ed25519_G("XBT-SOVEREIGN-TIDES/1\0" || A)
++//! out = 0 sat, OP_RETURN PUSH68 "LZT1" || BLAKE2b-256(A) || G          (70-byte script)
++//! msg = 0x5A | job_id | variant | A | sig | 0xFE                          (253 bytes)
++//! ```
++//!
++//! `payout_digest` is SHA256d over the coinbase's outputs other than the commitment, as
++//! serialized in the transaction (witness commitment included), so `A` cannot be lifted onto a
++//! coinbase that pays someone else.
++
++use crate::coinbaser::CoinbaserOutput;
++use crate::nacl;
++use crate::pow;
++
++pub const SUB_LZT1_ATTEST: u8 = 0x5A;
++pub const MAGIC: [u8; 4] = *b"LZT1";
++pub const DOMAIN: &[u8] = b"XBT-SOVEREIGN-TIDES/1\0";
++pub const VERSION: u8 = 1;
++pub const ENCODED_LEN: usize = 1 + 32 + 4 + 32 + 32 + 8 + 4 + 16 + 16 + 8 + 32;
++/// The commitment's scriptPubKey: under RDTS's 83-byte coinbase OP_RETURN cap.
++pub const SCRIPT_LEN: usize = 70;
++/// What one commitment adds to a coinbase: value, script length, script.
++pub const OUTPUT_LEN: usize = 8 + 1 + SCRIPT_LEN;
++pub const MSG_LEN: usize = 3 + ENCODED_LEN + 64 + 1;
++
++/// What the gateway says about its own node (fed to Prime's template-entropy detector; not
++/// checked by the verifier).
++#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
++pub struct NodeView {
++    /// Transactions in the block, coinbase included.
++    pub n_tx: u32,
++    pub mempool_digest: [u8; 16],
++    pub node_tag: [u8; 16],
++    /// When the node produced the template (unix ms).
++    pub t_gbt: u64,
++}
++
++#[derive(Clone, Debug, PartialEq, Eq)]
++pub struct Attestation {
++    pub g: [u8; 32],
++    pub height: u32,
++    /// Internal byte order, as the DATUM job section carries it.
++    pub prev_hash: [u8; 32],
++    pub branches_hash: [u8; 32],
++    pub coinbase_value: u64,
++    pub node: NodeView,
++    pub payout_digest: [u8; 32],
++}
++
++fn compact(buf: &mut Vec<u8>, n: u64) {
++    buf.extend_from_slice(&crate::cbtx::compact(n));
++}
++
++/// BLAKE2b-256 over the job's merkle branches, concatenated (internal byte order).
++pub fn branches_hash(branches: &[[u8; 32]]) -> [u8; 32] {
++    pow::blake2b_256(&branches.concat())
++}
++
++/// SHA256d over `(value, script)` outputs in transaction order.
++pub fn payout_digest<'a>(outputs: impl ExactSizeIterator<Item = (u64, &'a [u8])>) -> [u8; 32] {
++    let mut buf = Vec::new();
++    compact(&mut buf, outputs.len() as u64);
++    for (value, script) in outputs {
++        buf.extend_from_slice(&value.to_le_bytes());
++        compact(&mut buf, script.len() as u64);
++        buf.extend_from_slice(script);
++    }
++    pow::sha256d(&buf)
++}
++
++impl Attestation {
++    pub fn encode(&self) -> Vec<u8> {
++        let mut b = Vec::with_capacity(ENCODED_LEN);
++        b.push(VERSION);
++        b.extend_from_slice(&self.g);
++        b.extend_from_slice(&self.height.to_le_bytes());
++        b.extend_from_slice(&self.prev_hash);
++        b.extend_from_slice(&self.branches_hash);
++        b.extend_from_slice(&self.coinbase_value.to_le_bytes());
++        b.extend_from_slice(&self.node.n_tx.to_le_bytes());
++        b.extend_from_slice(&self.node.mempool_digest);
++        b.extend_from_slice(&self.node.node_tag);
++        b.extend_from_slice(&self.node.t_gbt.to_le_bytes());
++        b.extend_from_slice(&self.payout_digest);
++        debug_assert_eq!(b.len(), ENCODED_LEN);
++        b
++    }
++
++    /// BLAKE2b-256(A): what the coinbase commits to.
++    pub fn id(&self) -> [u8; 32] {
++        pow::blake2b_256(&self.encode())
++    }
++
++    pub fn sign(&self, ed_sk: &[u8; 64]) -> [u8; 64] {
++        nacl::sign_detached(&[DOMAIN, &self.encode()].concat(), ed_sk).expect("ed25519 sign")
++    }
++
++    pub fn commitment_script(&self) -> Vec<u8> {
++        let mut s = Vec::with_capacity(SCRIPT_LEN);
++        s.extend_from_slice(&[0x6a, 68]);
++        s.extend_from_slice(&MAGIC);
++        s.extend_from_slice(&self.id());
++        s.extend_from_slice(&self.g);
++        s
++    }
++}
++
++/// The `0x5A` mining sub-command for `variant` (the share's coinbase id) of `job_id`.
++pub fn message(job_id: u8, variant: u8, a: &Attestation, sig: &[u8; 64]) -> Vec<u8> {
++    let mut m = Vec::with_capacity(MSG_LEN);
++    m.push(SUB_LZT1_ATTEST);
++    m.push(job_id);
++    m.push(variant);
++    m.extend_from_slice(&a.encode());
++    m.extend_from_slice(sig);
++    m.push(0xFE);
++    m
++}
++
++/// Attest a coinbase whose outputs, in order, are `outputs` then the witness commitment (if
++/// any): fill in `A`, sign it with the identity key `(ed_pk, ed_sk)`, and return it with its
++/// signature and the commitment output to append to `outputs` (before the witness commitment,
++/// which is where `cbtx` puts the pool's outputs).
++#[allow(clippy::too_many_arguments)]
++pub fn attest(
++    ed_pk: &[u8; 32],
++    ed_sk: &[u8; 64],
++    height: u32,
++    prev_hash: &[u8; 32],
++    branches: &[[u8; 32]],
++    outputs: &[CoinbaserOutput],
++    witness_commitment: Option<&[u8]>,
++    node: NodeView,
++) -> (Attestation, [u8; 64], CoinbaserOutput) {
++    let paid = outputs.iter().map(|o| (o.sats, o.script.as_slice()));
++    let wit = witness_commitment.map(|w| (0u64, w));
++    let all: Vec<(u64, &[u8])> = paid.chain(wit).collect();
++    let a = Attestation {
++        g: *ed_pk,
++        height,
++        prev_hash: *prev_hash,
++        branches_hash: branches_hash(branches),
++        coinbase_value: outputs.iter().map(|o| o.sats).sum(),
++        node,
++        payout_digest: payout_digest(all.into_iter()),
++    };
++    let sig = a.sign(ed_sk);
++    let out = CoinbaserOutput { sats: 0, script: a.commitment_script() };
++    (a, sig, out)
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    fn h(s: &str) -> Vec<u8> {
++        hex::decode(s).unwrap()
++    }
++
++    fn h32(s: &str) -> [u8; 32] {
++        h(s).try_into().unwrap()
++    }
++
++    /// The fixture Prime's verifier crate prints (fixed key: an ed25519 seed of 32 × 0x42).
++    #[test]
++    fn matches_primes_fixture_byte_for_byte() {
++        let fx: serde_json::Value =
++            serde_json::from_str(include_str!("../tests/data/lzt1-fixture.json")).unwrap();
++        let signing = ed25519_dalek::SigningKey::from_bytes(&[0x42; 32]);
++        let (ed_pk, ed_sk) = (signing.verifying_key().to_bytes(), signing.to_keypair_bytes());
++        assert_eq!(hex::encode(ed_pk), fx["pk"].as_str().unwrap());
++        let branches: Vec<[u8; 32]> =
++            fx["branches"].as_array().unwrap().iter().map(|b| h32(b.as_str().unwrap())).collect();
++        let outs = vec![
++            CoinbaserOutput { sats: 200_000_000, script: [&[0x00, 0x14][..], &[0x11; 20]].concat() },
++            CoinbaserOutput { sats: 112_538_966, script: [&[0x00, 0x20][..], &[0x5d; 32]].concat() },
++        ];
++        let wit = [&[0x6a, 0x24, 0xaa, 0x21, 0xa9, 0xed][..], &[0x76; 32]].concat();
++        let node = NodeView { n_tx: 12, mempool_digest: [0x0d; 16], node_tag: [0x7a; 16], t_gbt: 1_788_408_500_000 };
++        let prev = h32(fx["prev_hash"].as_str().unwrap());
++        let height = fx["height"].as_u64().unwrap() as u32;
++        let (a, sig, out) = attest(&ed_pk, &ed_sk, height, &prev, &branches, &outs, Some(&wit), node);
++        assert_eq!(hex::encode(a.encode()), fx["attestation"].as_str().unwrap());
++        assert_eq!(hex::encode(sig), fx["sig"].as_str().unwrap());
++        assert_eq!(out.script.len(), SCRIPT_LEN);
++        assert!(fx["coinbase"].as_str().unwrap().contains(&hex::encode(&out.script)), "same commitment");
++        let m = message(9, 0, &a, &sig);
++        assert_eq!((m.len(), m[0], m[1], m[2], m[m.len() - 1]), (MSG_LEN, 0x5A, 9, 0, 0xFE));
++    }
++}
+diff --git a/lazarus/protocol/tests/data/lzt1-fixture.json b/lazarus/protocol/tests/data/lzt1-fixture.json
+new file mode 100644
+index 0000000..ffb77db
+--- /dev/null
++++ b/lazarus/protocol/tests/data/lzt1-fixture.json
+@@ -0,0 +1 @@
++{"height":974100,"prev_hash":"998d7346314e5fe6b5d61cf8981207bf01feb07455a5e48434865ed5177d5fa7","txids":["8cb9012517c817fead650287d61bdd9c68803b6bf9c64133dcab3e65b5a50cb9","41f758f2e5cc078d3795b4fc0cb60c2d735fa92cc020572bdc982dd2d564d11b","f9e00e3113f3bfd7653e049d899e5f3c917d020780128ff686e37ce215ab74fe","9953051d0daf36399447027f1ff4ceee27161c808c610b3f961ea3805ab3e793","a14e2895f7b9e1e7b37f82b38e345462a36edfa6dbce70939cc1bfc6a74ddd5e","5b0f32b53f5bba2e091aa7bec8e8286595b5fd5918968e660e434edd12cd5f1c","ebb9b6236a142b3ab6a7beb5d35d1f9be9939340e7539069a049767744682c7e","172e6946b30b642d49b7ad0f4bbb3883ff815dc6adfc9371bac36110f5fc9c10","ca9edcf330694832bc3dbd444e8a7d2383a2fee6061fed4482fe70bfd745ca21","3acf35b9aa868a7f88c98c204eb8501b5592d39d3b6b328d66388f22b6bc062a","3b334c798d2d9093cc5c9eadb5808e4ff86e9f27639f34a27af121e1d5c842d5"],"branches":["8cb9012517c817fead650287d61bdd9c68803b6bf9c64133dcab3e65b5a50cb9","494c9c623bffa28edd2211dc1a9d364fd298f2906c85c5f8947e4a6396cf6472","3f87f7ada25d515e9d69ae47dcfa5c54747d0f6a918080dabf327f585eaf7a18","22df2103ff2da2889bafd629cd231bad1f636cc7eff2bfbda773bb64e1f08636"],"coinbase":"01000000010000000000000000000000000000000000000000000000000000000000000000ffffffff2e0314dd0e124c617a617275730f546f667520546f65730007ff0000010000000e0000000000000000000000000000ffffffff0400c2eb0b0000000016001411111111111111111111111111111111111111115635b506000000002200205d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d0000000000000000266a24aa21a9ed76767676767676767676767676767676767676767676767676767676767676760000000000000000466a444c5a54314ab3169edc3b45abb25a36550b703f35e3f82cd45c75af48522066fa6cdb1bd12152f8d19b791d24453242e15f2eab6cb7cffa7b6a5ed30097960e069881db1200000000","pk":"2152f8d19b791d24453242e15f2eab6cb7cffa7b6a5ed30097960e069881db12","attestation":"012152f8d19b791d24453242e15f2eab6cb7cffa7b6a5ed30097960e069881db1214dd0e00998d7346314e5fe6b5d61cf8981207bf01feb07455a5e48434865ed5177d5fa7356c7f156ea41e10f0a88f45ea81c56fbc2baa88e3af389e6027229e9aca3b6256f7a012000000000c0000000d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a200f7465a0010000ed8e5163c73047e0511df55159ea5077cc524960ac1b7a91b4dc46318ed2640e","sig":"5be5d522a5ad0936248b5550d0a36916ccd068955cfe40fee6273a00ee14ae534107c12bb31557bd89deae0c943fd232a50647522da86ef8dd170fec3c135105"}
+-- 
+2.43.0
+

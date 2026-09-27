@@ -1,0 +1,274 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: michael moore <mrmoore27@pm.me>
+Date: Fri, 25 Sep 2026 09:02:36 +0000
+Subject: [PATCH 23/27] gateway, pool: lazarus-gateway enrol and the public
+ enrol route
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+lazarus-gateway --config … enrol prints SOV-P-002 §4's LZT1 register v1|v2 from the gateway's
+persisted identity key (never a new one), at the node's tip, with G's signature and the JSON
+body the site takes; v2 needs --payout and leaves the payout signature to the wallet.
+
+pool/server.py: POST /api/sovereignty/enrol rate-limits per client IP and per G (every attempt
+counts), bounds the body to 8 KB, forwards only the fields primed reads to its loopback
+/sovereignty/enrol with the local token, and answers 503 when enrolment is shut (mode off, no
+token). The client is CF-Connecting-IP or the first X-Forwarded-For hop only from a trusted
+proxy. Nothing here stores or returns node addresses.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ pool/config.example.json |   6 +-
+ pool/server.py           | 143 +++++++++++++++++++++++++++++++++++++++
+ prime/README.md          |  51 +++++++++-----
+ 3 files changed, 181 insertions(+), 19 deletions(-)
+
+diff --git a/pool/config.example.json b/pool/config.example.json
+index fceff0c..40b26b1 100644
+--- a/pool/config.example.json
++++ b/pool/config.example.json
+@@ -14,5 +14,9 @@
+   "public_url": "https://pool.example.com",
+   "datum_prime_host": "stratum.example.com",
+   "datum_prime_port": 28915,
+-  "datum_prime_stats": "http://127.0.0.1:28916/stats.json"
++  "datum_prime_stats": "http://127.0.0.1:28916/stats.json",
++  "sovereignty_token_file": "/var/lib/primed/sovereignty.token",
++  "sovereignty_enrol_per_ip": [10, 3600],
++  "sovereignty_enrol_per_g": [6, 3600],
++  "trusted_proxies": ["127.0.0.1", "::1"]
+ }
+diff --git a/pool/server.py b/pool/server.py
+index 5579d20..60f83ad 100644
+--- a/pool/server.py
++++ b/pool/server.py
+@@ -5508,6 +5508,115 @@ _CHEAP_PATHS = frozenset(
+ )
+ 
+ 
++# --- Sovereign TIDES registration (SOV-P-002 §4, W10) ---------------------------------------
++# POST /api/sovereignty/enrol takes a gateway's `LZT1 register v1|v2` (or `LZT1 revoke v2`) with
++# its signatures and hands it to primed's loopback ingest, which checks everything (G's
++# signature, `at` against the node, BIP322 / signmessage / enrol-by-spend) and holds the
++# directory. This side only rate-limits (per client IP and per key G), bounds the body and
++# forwards the fields primed reads, with primed's local token. Node addresses stay in primed's
++# sovereignty-nodes.json; nothing here stores or returns them.
++SOV_ENROL_URL = CONF.get("sovereignty_enrol_url") or PRIME_STATS.rsplit("/", 1)[0] + "/sovereignty/enrol"
++SOV_TOKEN_FILE = Path(CONF.get("sovereignty_token_file", "/var/lib/primed/sovereignty.token"))
++# (attempts, seconds): every attempt counts, accepted or not
++SOV_ENROL_PER_IP = tuple(CONF.get("sovereignty_enrol_per_ip", (10, 3600)))
++SOV_ENROL_PER_G = tuple(CONF.get("sovereignty_enrol_per_g", (6, 3600)))
++# Behind the site's proxy (cloudflared/NPM on loopback) the client is in CF-Connecting-IP or the
++# first X-Forwarded-For hop; from anywhere else those headers are the client's to invent.
++SOV_TRUSTED_PROXIES = frozenset(CONF.get("trusted_proxies", ["127.0.0.1", "::1"]))
++_SOV_FIELDS = ("message", "g_sig", "payout_sig", "proof", "spend_txid", "spend_block")
++_SOV_MAX_BODY = 8192
++_SOV_G_RE = re.compile(r"^G: ([0-9a-f]{64})$", re.M)
++_sov_hits = {}
++_sov_hits_lock = threading.Lock()
++_sov_token = {"mtime": None, "value": ""}
++
++
++def sov_rate_ok(key, limit):
++    """Sliding-window limiter: True and counted, or False once `key` has `limit[0]` attempts in
++    the last `limit[1]` seconds. Keys are bounded, so a flood of new ones cannot grow memory."""
++    n, span = int(limit[0]), float(limit[1])
++    now = time.time()
++    with _sov_hits_lock:
++        if len(_sov_hits) > 20000:
++            for k in [k for k, q in _sov_hits.items() if not q or q[-1] < now - span]:
++                del _sov_hits[k]
++            if len(_sov_hits) > 20000:
++                return False
++        q = _sov_hits.setdefault(key, deque())
++        while q and q[0] < now - span:
++            q.popleft()
++        if len(q) >= n:
++            return False
++        q.append(now)
++        return True
++
++
++def sov_token():
++    """primed's ingest token (data-dir/sovereignty.token), re-read when the file changes."""
++    try:
++        mtime = SOV_TOKEN_FILE.stat().st_mtime
++    except OSError:
++        return ""
++    if mtime != _sov_token["mtime"]:
++        try:
++            _sov_token.update(mtime=mtime, value=SOV_TOKEN_FILE.read_text().strip())
++        except OSError:
++            return ""
++    return _sov_token["value"]
++
++
++def sov_enrol(body, client_ip):
++    """(status, reply) for one enrol POST body."""
++    try:
++        doc = json.loads(body)
++    except ValueError:
++        return 400, {"error": "body must be JSON"}
++    if not isinstance(doc, dict) or not isinstance(doc.get("message"), str):
++        return 400, {"error": "message is required"}
++    fwd = {}
++    for k in _SOV_FIELDS:
++        v = doc.get(k)
++        if v is None:
++            continue
++        if not isinstance(v, str) or len(v) > 4096:
++            return 400, {"error": f"{k} must be a string"}
++        fwd[k] = v
++    if len(fwd["message"]) > 1024:
++        return 400, {"error": "message too long"}
++    m = _SOV_G_RE.search(fwd["message"])
++    if not m:
++        return 400, {"error": "message has no G line"}
++    if not sov_rate_ok(("ip", client_ip), SOV_ENROL_PER_IP):
++        return 429, {"error": "too many enrolment attempts from this address; try again later"}
++    if not sov_rate_ok(("g", m.group(1)), SOV_ENROL_PER_G):
++        return 429, {"error": "too many enrolment attempts for this key; try again later"}
++    token = sov_token()
++    if not token:
++        return 503, {"error": "enrolment is not open"}
++    import urllib.error
++    import urllib.request
++
++    req = urllib.request.Request(
++        SOV_ENROL_URL,
++        json.dumps(fwd).encode(),
++        {"Content-Type": "application/json", "X-Sovereignty-Token": token},
++    )
++    try:
++        with urllib.request.urlopen(req, timeout=30) as r:
++            return 200, json.loads(r.read(65536) or b"{}")
++    except urllib.error.HTTPError as e:
++        if e.code == 400:
++            try:
++                err = json.loads(e.read(65536)).get("error") or "refused"
++            except ValueError:
++                err = "refused"
++            return 400, {"error": str(err)[:300]}
++        # 403 (token) and 404 (sovereignty-mode off) both mean the door is shut
++        return 503, {"error": "enrolment is not open"}
++    except (OSError, ValueError):
++        return 503, {"error": "enrolment is not open"}
++
++
+ class Handler(BaseHTTPRequestHandler):
+     # Socket timeout per request: a client that opens a connection and trickles bytes
+     # (slowloris) otherwise holds a thread forever on this thread-per-connection server.
+@@ -5642,6 +5751,40 @@ class Handler(BaseHTTPRequestHandler):
+         finally:
+             self._head_only = False
+ 
++    def client_ip(self):
++        peer = self.client_address[0]
++        if peer in SOV_TRUSTED_PROXIES:
++            fwd = self.headers.get("CF-Connecting-IP") or (self.headers.get("X-Forwarded-For") or "").split(",")[0]
++            if fwd.strip():
++                return fwd.strip()
++        return peer
++
++    def do_POST(self):
++        """Only the enrol route takes a POST (SOV-P-002 §4)."""
++        try:
++            path = urlparse(self.path).path
++            if path != "/api/sovereignty/enrol":
++                self.send_json({"error": "not found"}, 404)
++                return
++            try:
++                n = int(self.headers.get("Content-Length") or "0")
++            except ValueError:
++                n = -1
++            if n < 0 or n > _SOV_MAX_BODY:
++                self.close_connection = True
++                self.send_json({"error": "body too large"}, 413)
++                return
++            code, reply = sov_enrol(self.rfile.read(n).decode("utf-8", "replace"), self.client_ip())
++            self.send_json(reply, code)
++        except (BrokenPipeError, ConnectionResetError, TimeoutError):
++            raise
++        except Exception as e:
++            print("enrol", type(e).__name__, str(e)[:160], flush=True)
++            try:
++                self.send_json({"error": "server"}, 500)
++            except Exception:
++                pass
++
+     def do_GET(self):
+         # Anything a handler did not expect (`/static/%00` made pathlib raise) used to drop the
+         # connection and write a traceback to the log, once per request, for as long as asked.
+diff --git a/prime/README.md b/prime/README.md
+index ae1537f..a1a786b 100644
+--- a/prime/README.md
++++ b/prime/README.md
+@@ -377,7 +377,8 @@ gateway's five-second deadline.
+ | `blocks.jsonl` | one JSON line per block event (candidate, submit outcome, settled/orphaned) |
+ | `stats.json`, `ledger.json` | mirrors of the HTTP endpoints, rewritten atomically |
+ | `sovereignty.token` | local token for `POST /sovereignty/*`, 0600, made at first start with `sovereignty-mode` on |
+-| `sovereignty-keys.json` | registered gateway keys `G` (payout, first seen, house) |
++| `sovereignty-keys.json` | registered gateway keys `G`: registration v1/v2, status (active, superseded, revoked, refused), payout and its binding height, house; never a node address |
++| `sovereignty-nodes.json` | registered gateways' node addresses (canary delivery), 0600 from creation; never in stats.json, `/sovereignty.json` or the site |
+ | `sovereignty-blocks.jsonl` | the score's blocks: one line per block candidate, last 2,016 kept |
+ 
+ ## Stats
+@@ -401,23 +402,37 @@ detector and the score):
+ | `observe` | Job snapshots, attestations and blocks are recorded. The detector runs in the background every `sovereignty-recompute-secs` (default 300) on a copy of its store, never under the ledger lock; stats.json and `GET /sovereignty.json` serve the last pass (`compute_ms`, `computed_at`), with `published: false`. |
+ | `publish` | As `observe`, with `published: true` for the pool site. |
+ 
+-`POST /sovereignty/{register,attest,canary}` need the mode on and the token from
+-`data-dir/sovereignty.token` in an `X-Sovereignty-Token` header; the other POSTs (snapshot,
+-check, credit, observe, apply-bonus) also need `sovereignty-demo = true` (local rnd only).
+-
+-**Canary evidence comes from canary checks (SOV-P-002 W8).** The canary sidecar
+-(`lazarus/canary/`, W9) reports each canary it places with `POST /sovereignty/canary`
+-`{"gateway": G, "t": <delivered, unix s>, "txid": <hex>, "kind": "own"|"shared"|"decoy"}`.
+-An own canary schedules one extra check of that gateway `sovereignty-canary-check-secs`
+-(default 45) later: on its next 5 s tick the session sends `request_full_block` for the newest
+-job the gateway has sent (whatever its shares scored). The reply counts only if its transactions hash to that job's merkle branches, so a
+-gateway cannot answer with a list its miners are not hashing (refusals are logged and counted
+-in `/sovereignty.json` `store.checks_refused`). A canary is judged by the checks of jobs Prime
+-first saw 12–180 s after its delivery, and hit if one of them holds it; shared canaries and
+-decoys are read from the same job lists. Job snapshots still feed the timing and cluster
+-features but are no canary evidence. One gateway gets at most one canary check per
+-`sovereignty-canary-check-gap-secs` (default 300: a full block is megabytes of upload for it);
+-checks due together are made once. 256 checks are kept per key.
++`POST /sovereignty/{enrol,attest}` need the mode on and the token from
++`data-dir/sovereignty.token` in an `X-Sovereignty-Token` header; the other POSTs (the old
++`register`, snapshot, canary, credit, observe, apply-bonus) also need `sovereignty-demo = true`
++(local rnd only).
++
++**Registration** (`POST /sovereignty/enrol`, SOV-P-002 §4; public through `pool/server.py`'s
++rate-limited `POST /api/sovereignty/enrol`). `lazarus-gateway --config … enrol [--version v2
++--payout ADDR] [--node host:port]` prints the message from the gateway's persisted identity key:
++
++```
++LZT1 register v1|v2
++pool: lazarus-xbt
++chain: XBT
++G: <64 hex>
++node: <host:port | xxx.onion:port | none>
++tag: <≤ 32 chars>
++at: <height> <block hash>
++payout: <address>          (v2 only, last line)
++```
++
++Body `{"message", "g_sig", "payout_sig"?, "proof"?: "bip322"|"signmessage"|"spend",
++"spend_txid"?, "spend_block"?}`. `g_sig` is ed25519 by `G` over
++`"XBT-SOVEREIGN-TIDES/register\0" ‖ message`. `at` must be one of the pool node's last 144
++blocks and newer than the key's last accepted message. v2's payout proof: BIP322 simple or full
++(`datum_wire::bip322`; 0x21 `UnifiedSighash` signatures only with the `unified-sighash` feature),
++`signmessage` for a P2PKH payout (the node's `verifymessage`), or a confirmed tx from the payout
++to itself with `OP_RETURN "LZT1E" ‖ SHA256(message)[0..16]`. The payout must match
++`gateway-scripts.json`, or the gateway's first split coinbase confirms it (paying elsewhere
++refuses the key). A new `G` from the same payout supersedes the old one for good; `LZT1 revoke v2`
++(lines `pool`, `chain`, `G`, `payout`, `at`), signed by the payout, ends a binding. Key age
++(`sovereignty-min-key-age-secs`) counts from the first v2's `at` block.
+ `sovereignty-bonus` pays nothing unless the mode is on. `authored` and `directory` (payout
+ addresses) appear in the report only with the bonus on; node addresses never do.
+ 
+-- 
+2.43.0
+

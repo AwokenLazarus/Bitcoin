@@ -1,0 +1,96 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: michael moore <mrmoore27@pm.me>
+Date: Fri, 25 Sep 2026 09:58:19 +0000
+Subject: [PATCH 4/8] lazarus-protocol: push the BIP34 height as Core writes it
+
+Heights 128..=255 and 32768..=65535 were pushed without the sign byte
+(a negative number to CScriptNum), and 1..=16 as a data push rather than
+OP_n, so a block found there was bad-cb-height. Mainnet heights (3 bytes,
+top bit clear) are unchanged. Found by the SOV-007 demo at regtest height
+131; SOV-002 stopped at 124.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ lazarus/protocol/src/cbtx.rs | 60 +++++++++++++++++++++++++++++-------
+ 1 file changed, 49 insertions(+), 11 deletions(-)
+
+diff --git a/lazarus/protocol/src/cbtx.rs b/lazarus/protocol/src/cbtx.rs
+index afb2dd2..04c87ee 100644
+--- a/lazarus/protocol/src/cbtx.rs
++++ b/lazarus/protocol/src/cbtx.rs
+@@ -21,19 +21,28 @@ pub fn compact(n: u64) -> Vec<u8> {
+     }
+ }
+ 
++/// The BIP34 height as Core's `CScript() << nHeight` writes it and `bad-cb-height` checks it:
++/// OP_0 / OP_1..OP_16 for 0..=16, otherwise a minimal CScriptNum push, with a 0x00 byte added
++/// when the top bit of the last byte is set (so 128..=255 is `02 xx 00`, not the negative `01 xx`).
++pub fn bip34_push(height: u32) -> Vec<u8> {
++    match height {
++        0 => vec![0x00],
++        1..=16 => vec![0x50 + height as u8],
++        _ => {
++            let mut n: Vec<u8> = height.to_le_bytes().to_vec();
++            while n.len() > 1 && n[n.len() - 1] == 0 && n[n.len() - 2] & 0x80 == 0 {
++                n.pop();
++            }
++            let mut s = vec![n.len() as u8];
++            s.extend_from_slice(&n);
++            s
++        }
++    }
++}
++
+ /// BIP34 height push, then the pool tag, then extranonce bytes.
+ pub fn scriptsig(height: u32, tag: &str, extra: &[u8]) -> Vec<u8> {
+-    let mut s = Vec::new();
+-    if height < 0x100 {
+-        s.push(1);
+-        s.push(height as u8);
+-    } else if height < 0x10000 {
+-        s.push(2);
+-        s.extend_from_slice(&(height as u16).to_le_bytes());
+-    } else {
+-        s.push(3);
+-        s.extend_from_slice(&height.to_le_bytes()[..3]);
+-    }
++    let mut s = bip34_push(height);
+     s.push(tag.len() as u8);
+     s.extend_from_slice(tag.as_bytes());
+     s.extend_from_slice(extra);
+@@ -138,3 +147,32 @@ mod tests {
+         assert_eq!(b.height, Some(962_049));
+     }
+ }
++
++#[cfg(test)]
++mod bip34_tests {
++    use super::bip34_push;
++
++    /// Core's `CScript() << n` for the heights that used to be wrong here (128..=255 and
++    /// 32768..=65535 came out negative, 1..=16 was not the opcode) and the ones that were right.
++    #[test]
++    fn heights_push_as_core_writes_them() {
++        for (h, want) in [
++            (1u32, "51"),
++            (16, "60"),
++            (17, "0111"),
++            (127, "017f"),
++            (128, "028000"),
++            (131, "028300"),
++            (255, "02ff00"),
++            (256, "020001"),
++            (32_767, "02ff7f"),
++            (32_768, "03008000"),
++            (65_535, "03ffff00"),
++            (65_536, "03000001"),
++            (970_000, "0310cd0e"),
++            (8_388_608, "0400008000"),
++        ] {
++            assert_eq!(hex::encode(bip34_push(h)), want, "height {h}");
++        }
++    }
++}
+-- 
+2.43.0
+

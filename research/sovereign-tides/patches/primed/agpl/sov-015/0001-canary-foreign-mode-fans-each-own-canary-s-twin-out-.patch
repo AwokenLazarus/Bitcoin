@@ -1,0 +1,590 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: michael moore <mrmoore27@pm.me>
+Date: Sat, 26 Sep 2026 00:51:49 +0000
+Subject: [PATCH] canary: foreign mode fans each own canary's twin out to other
+ gateways' nodes (SOV-015)
+
+lazarus-canary [foreign]: enabled, fanout (0 = all), order (own-ack |
+pipelined), max_lag_secs (0.05). Connections to G's node and every target are
+opened first; C goes out, then every twin at once. A target is reported
+("foreign": [...]) only if it acked C' within max_lag_secs of C being sent.
+No extra fee. xbt_p2p gains a kept-open Peer; deliver() is built on it.
+Status and ledger count twins, in-time, late and failed, with per-target lags.
+
+primed: a check scheduled within 30 s of one already due is that one. A
+round's fan-out schedules a check of every target at once, and the bounded
+queue kept dropping the soonest.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ lazarus/canary/README.md                   |  40 +++++-
+ lazarus/canary/lazarus-canary.toml.example |  13 ++
+ lazarus/canary/lazarus_canary.py           | 139 +++++++++++++++++++--
+ lazarus/canary/test_lazarus_canary.py      | 123 ++++++++++++++++++
+ lazarus/canary/xbt_p2p.py                  | 111 ++++++++++------
+ 5 files changed, 378 insertions(+), 48 deletions(-)
+
+diff --git a/lazarus/canary/README.md b/lazarus/canary/README.md
+index 3718cf6..c005ff8 100644
+--- a/lazarus/canary/README.md
++++ b/lazarus/canary/README.md
+@@ -97,13 +97,49 @@ from the pool's own IP is recognisable, so production should use `mode = "socks5
+ and unit-tested for its framing only; it has not been run against Tor** (SOV-008 used direct P2P on
+ regtest). Nodes that only speak BIP324 v2 are not supported.
+ 
++## Foreign canaries (SOV-015)
++With `[foreign] enabled = true`, an own canary's twin C′ also goes to the registered nodes of the
++other gateways (every one, or a random `fanout` of them), and primed learns which ones:
++`POST /sovereignty/canary {..., "foreign": [G2, G3, ...]}`. Those nodes hold C′ and reject C when it
++relays in (C′ pays 1 sat more than C, far under the replacement bump, and C never signals RBF), so an
++honest G2 never templates C. A G2 whose checked job carries C builds from a source that got C, the
++same source as G's node; primed joins such gateways into a `shared-template-source` cluster and
++splits one builder's independence across it (`prime/tides/src/entropy.rs`, `shared_sources`).
++
++Order within one own canary:
++1. `prioritisetransaction C 0 -1e8` on the pool node;
++2. open and handshake the P2P connection to G's node **and** to every target, in parallel (an
++   unreachable target is dropped, the canary still goes ahead);
++3. `order = "own-ack"` (default): push C to G's node and wait for its `pong`, then push C′ on every
++   target connection at once; `order = "pipelined"`: push C and every C′ back to back, then collect
++   the pongs;
++4. `sendrawtransaction C′` on the pool node.
++
++A target is reported only if its `pong` for C′ came back within `max_lag_secs` (0.05) of C being
++sent: the window in which C, relayed out of G's node, could reach it first. G's node announces C
++after a random trickle (Poisson, mean 2 s to its outbound peers, 5 s to its inbound ones); a node
++that G's node connected to also waits 2 s before it asks an inbound announcer for the tx. So the
++worst case is a target that connected to G's node: the race is lost with probability about
++`lag / 5 s`, ≈ 1% at 50 ms. Measured on Knots 29.4.2 (SOV-015 `race_probe.py`, 40 trials per lag):
++0/80 at ≤ 0.1 s for both kinds of peer; 3/40 at 0.25 s and 5/40 at 1 s for a node that connected to
++G's node; 0/40 up to 2 s for a node G's node connected to. The sidecar's loopback fan-out acks in ≈ 1
++ms. `own-ack` makes one node behind several addresses (the SOV-015 farm) take C before its own
++twin; `pipelined` is for slow links (Tor), where the extra round trip would push every twin past
++`max_lag_secs`.
++
++Cost: no fee (only one of C/C′ confirms, and C′ only 1 sat more), one extra P2P connection per
++target per own canary (`n·k` per round for `n` due gateways and fan-out `k`), and each target's node
++learns one more canary twin. `status` counts `foreign.twins`, `in_time`, `late`, `failed`; the
++ledger's `placed` record carries `foreign` and every target's `foreign_lags`.
++
+ ## Files
+ | Path | What |
+ |---|---|
+ | `lazarus_canary.py` | the service and CLI |
+-| `xbt_p2p.py` | one-shot P2P delivery (and SOCKS5) |
++| `xbt_p2p.py` | P2P delivery: one-shot, or a kept-open `Peer` (and SOCKS5) |
+ | `lazarus-canary.toml.example` | every config key with its default |
+ | `lazarus-canary.service` | systemd unit (not installed) |
+ | `test_lazarus_canary.py` | unit tests |
+ 
+-Demo: `~/xbt-rnd/sov-008/canary-sidecar-demo.sh` (SOV-008).
++Demos: `~/xbt-rnd/sov-008/canary-sidecar-demo.sh` (SOV-008), `~/xbt-rnd/sov-015/foreign-canary-demo.sh`
++(SOV-015, foreign canaries).
+diff --git a/lazarus/canary/lazarus-canary.toml.example b/lazarus/canary/lazarus-canary.toml.example
+index d9c399e..0f9923d 100644
+--- a/lazarus/canary/lazarus-canary.toml.example
++++ b/lazarus/canary/lazarus-canary.toml.example
+@@ -50,6 +50,19 @@ mode = "direct"                      # direct | socks5 (Tor: proxy = "127.0.0.1:
+ proxy = ""
+ timeout_secs = 20
+ 
++# SOV-015 foreign canaries: each own canary's twin C' also goes to other gateways' registered
++# nodes, so gateways built from one shared template source carry each other's canaries (primed
++# clusters them: shared-template-source). No extra fee (only one of C/C' confirms); one extra P2P
++# connection per target per canary.
++[foreign]
++enabled = false
++fanout = 0                           # 0 = every other gateway with a node; N = a random N of them
++order = "own-ack"                    # own-ack: C's pong, then the twins (a node behind two
++                                     #   addresses takes C first); pipelined: twins right behind C
++                                     #   without waiting (slow links, Tor)
++max_lag_secs = 0.05                  # a target counts only if it acked C' this soon after C was
++                                     #   sent: the window in which C could win a relay race there
++
+ # Gateways with a registered node (registration v1/v2, W10), read on every round.
+ # nodes_source = "prime": primed's GET /sovereignty/nodes (loopback, the token above), exactly what
+ # its sovereignty-nodes.json holds (active keys only). If primed does not answer, nodes_file is
+diff --git a/lazarus/canary/lazarus_canary.py b/lazarus/canary/lazarus_canary.py
+index 53e3dd7..683c8be 100644
+--- a/lazarus/canary/lazarus_canary.py
++++ b/lazarus/canary/lazarus_canary.py
+@@ -12,6 +12,13 @@ Per round:
+           it on its base fee; the pool node keeps it and never templates it.
+   decoy   one zero-fee tx Q, pre-prioritised +delta on the pool node only: the pool templates
+           it, no peer accepts it.
++  foreign (SOV-015, `[foreign] enabled`) C′ also goes, right behind C, to the registered nodes of
++          other gateways (all, or a sample of `fanout`). Their nodes then hold C′ and reject C
++          when it relays in, so no honest gateway templates C; a gateway that does shares G's
++          template source. Connections are opened first; C goes out, then every twin at once.
++          A target counts only if its node acknowledged C′ within `max_lag_secs` of C being sent
++          (the window in which C could win a relay race there). It costs no fee: only one of
++          C/C′ ever confirms.
+ Every canary is reported to primed (`POST /sovereignty/canary`, `X-Sovereignty-Token`) with its
+ kind; primed checks gateways' jobs for them (W8). When one of a canary's txs confirms, the sidecar
+ reports which, and the block's height and time (`POST /sovereignty/canary/resolved`, SOV-012):
+@@ -37,6 +44,7 @@ import random
+ import stat
+ import sys
+ import time
++import threading
+ import tomllib
+ import urllib.error
+ import urllib.request
+@@ -62,6 +70,7 @@ DEFAULTS = {
+                 "enrolled_secs": 3_600, "clean_secs": 14_400, "clean_min_due": 100, "clean_min_rate": 0.8,
+                 "flagged_secs": 1_200, "jitter": 0.5, "shared": True, "decoy": True},
+     "delivery": {"mode": "direct", "proxy": "", "timeout_secs": 20},
++    "foreign": {"enabled": False, "fanout": 0, "order": "own-ack", "max_lag_secs": 0.05},
+     "gateways": [],
+     "nodes_source": "prime",
+     "nodes_file": "",
+@@ -216,7 +225,8 @@ class Canary:
+         except (OSError, ValueError):
+             return {"utxos": [], "inflight": [], "rounds": 0, "last_round": 0, "next_due": {}, "fees_planned": 0,
+                     "fees_paid": 0, "resolved": 0, "delivered": {"own": 0, "shared": 0, "decoy": 0},
+-                    "delivery_failed": 0, "leaks": 0}
++                    "delivery_failed": 0, "leaks": 0,
++                    "foreign": {"twins": 0, "in_time": 0, "late": 0, "failed": 0}}
+ 
+     def save(self):
+         tmp = self.state_path + ".tmp"
+@@ -342,9 +352,12 @@ class Canary:
+         signed = bytes.fromhex(res["hex"])
+         return signed, txid_of(signed)
+ 
+-    def report(self, gateway: str, t: float, txid: str, kind: str):
++    def report(self, gateway: str, t: float, txid: str, kind: str, foreign: list[str] | None = None):
+         token = read_text(self.cfg["prime"]["token_file"]).strip()
+-        body = json.dumps({"gateway": gateway, "t": t, "txid": txid, "kind": kind}).encode()
++        rec = {"gateway": gateway, "t": t, "txid": txid, "kind": kind}
++        if foreign:
++            rec["foreign"] = foreign
++        body = json.dumps(rec).encode()
+         req = urllib.request.Request(self.cfg["prime"]["url"].rstrip("/") + "/sovereignty/canary", body,
+                                      {"Content-Type": "application/json", "X-Sovereignty-Token": token})
+         with urllib.request.urlopen(req, timeout=15) as r:
+@@ -388,7 +401,74 @@ class Canary:
+         self.state["unreported"] = keep[-1000:]
+ 
+     # one round
+-    def own(self, g: str, node: str, rate: float) -> bool:
++    def foreign_targets(self, g: str, node: str, gws: dict) -> dict[str, str]:
++        """Other gateways whose nodes get G's twin: every one, or a random `fanout` of them. A
++        gateway registered at G's own node address is left out (C′ would only conflict there)."""
++        f = self.cfg["foreign"]
++        if not f.get("enabled"):
++            return {}
++        out = {o: v["node"] for o, v in gws.items() if o != g and v.get("node") and v["node"] != node}
++        k = int(f.get("fanout") or 0)
++        if 0 < k < len(out):
++            out = {o: out[o] for o in self.rng.sample(sorted(out), k)}
++        return out
++
++    def peer(self, node: str) -> xbt_p2p.Peer:
++        d = self.cfg["delivery"]
++        return xbt_p2p.Peer(node, network=self.net, proxy=(d["proxy"] or None) if d["mode"] == "socks5" else None,
++                            timeout=float(d["timeout_secs"]))
++
++    def open_peers(self, targets: dict[str, str]) -> dict[str, "xbt_p2p.Peer"]:
++        """Handshaken connections to every target, opened in parallel; the unreachable are dropped."""
++        peers: dict[str, xbt_p2p.Peer] = {}
++        lock = threading.Lock()
++
++        def one(o, node):
++            try:
++                p = self.peer(node)
++            except xbt_p2p.DeliveryError as e:
++                log(f"foreign target {o[:16]} unreachable: {e}")
++                with lock:
++                    self.state["foreign"]["failed"] += 1
++                return
++            with lock:
++                peers[o] = p
++
++        ths = [threading.Thread(target=one, args=(o, n), daemon=True) for o, n in targets.items()]
++        for th in ths:
++            th.start()
++        for th in ths:
++            th.join()
++        return peers
++
++    def fan_out(self, peers: dict, twin_raw: bytes, c_sent: float) -> dict[str, float | None]:
++        """Push the twin to every open peer at once and collect acknowledgements. Returns each
++        target's lag (its pong after C was sent, s), or None if it never acknowledged."""
++        nonces = {}
++        for o, p in peers.items():
++            try:
++                nonces[o] = p.send_tx(twin_raw)
++            except xbt_p2p.DeliveryError as e:
++                log(f"twin to {o[:16]} not sent: {e}")
++        lags: dict[str, float | None] = {o: None for o in peers}
++        lock = threading.Lock()
++
++        def wait(o):
++            try:
++                t = peers[o].wait_pong(nonces[o])
++                with lock:
++                    lags[o] = round(t - c_sent, 4)
++            except xbt_p2p.DeliveryError as e:
++                log(f"twin to {o[:16]} not acknowledged: {e}")
++
++        ths = [threading.Thread(target=wait, args=(o,), daemon=True) for o in nonces]
++        for th in ths:
++            th.start()
++        for th in ths:
++            th.join()
++        return lags
++
++    def own(self, g: str, node: str, rate: float, gws: dict | None = None) -> bool:
+         fee = int(rate * CANARY_VSIZE)
+         u = self.take_utxo(fee + self.cfg["wallet"]["min_utxo_sats"])
+         if u is None:
+@@ -397,26 +477,63 @@ class Canary:
+         extra = int(self.cfg["fees"]["twin_extra_sats"])
+         c_raw, c = self.sign(u, u["value"] - fee)
+         twin_raw, twin = self.sign(u, u["value"] - fee - extra)
++        fcfg = self.cfg["foreign"]
++        targets = self.foreign_targets(g, node, gws or {})
+         # the pool node must never template C: set the delta before C exists anywhere
+         self.pool.call("prioritisetransaction", c, 0, -SAT)
+-        d = self.cfg["delivery"]
++        peers: dict = {}
++        try:
++            me = self.peer(node)
++        except xbt_p2p.DeliveryError as e:
++            log(f"own canary for {g[:16]} not delivered ({e}); its UTXO is kept")
++            self.pool.call("prioritisetransaction", c, 0, SAT)
++            self.state["utxos"].append(u)
++            self.state["delivery_failed"] += 1
++            return False
++        lags: dict[str, float | None] = {}
+         try:
+-            t = xbt_p2p.deliver(node, c_raw, network=self.net, proxy=(d["proxy"] or None) if d["mode"] == "socks5" else None,
+-                                timeout=float(d["timeout_secs"]))
++            # connections first, so nothing but the sends sits between C and its twins
++            peers = self.open_peers(targets) if targets else {}
++            c_sent = time.time()
++            nonce = me.send_tx(c_raw)
++            if fcfg.get("order") == "pipelined":
++                # over slow links (Tor): twins right behind C, without waiting for C's pong
++                lags = self.fan_out(peers, twin_raw, c_sent) if peers else {}
++                t = me.wait_pong(nonce)
++            else:
++                # own-ack: a node reached under two addresses takes C before its own twin
++                t = me.wait_pong(nonce)
++                lags = self.fan_out(peers, twin_raw, c_sent) if peers else {}
+         except xbt_p2p.DeliveryError as e:
+             log(f"own canary for {g[:16]} not delivered ({e}); its UTXO is kept")
+             self.pool.call("prioritisetransaction", c, 0, SAT)
+             self.state["utxos"].append(u)
+             self.state["delivery_failed"] += 1
+             return False
++        finally:
++            me.close()
++            for p in peers.values():
++                p.close()
+         try:
+             self.pool.call("sendrawtransaction", twin_raw.hex())
+         except RuntimeError as e:
+             # C reached the pool first (relayed from G's node, deprioritised there) and C' lost:
+             # the canary still stands, the pool just has no twin to mine
+             log(f"twin for {g[:16]} refused by the pool node: {e}")
+-        self.report(g, t, c, "own")
+-        self.ledger({"event": "placed", "kind": "own", "gateway": g, "t": t, "txid": c, "twin": twin, "fee": fee})
++        max_lag = float(fcfg.get("max_lag_secs", 0.05))
++        in_time = sorted(o for o, lag in lags.items() if lag is not None and lag <= max_lag)
++        late = sorted(o for o, lag in lags.items() if lag is not None and lag > max_lag)
++        fs = self.state.setdefault("foreign", {"twins": 0, "in_time": 0, "late": 0, "failed": 0})
++        fs["twins"] += len(lags)
++        fs["in_time"] += len(in_time)
++        fs["late"] += len(late)
++        fs["failed"] += sum(1 for lag in lags.values() if lag is None)
++        self.report(g, t, c, "own", foreign=in_time)
++        rec = {"event": "placed", "kind": "own", "gateway": g, "t": t, "txid": c, "twin": twin, "fee": fee}
++        if targets:
++            rec["foreign"] = in_time
++            rec["foreign_lags"] = lags
++        self.ledger(rec)
+         self.state["inflight"].append({"kind": "own", "gateway": g, "t": t, "input": u, "txids": [c, twin],
+                                        "fees": [fee, fee + extra]})
+         self.state["fees_planned"] += fee + extra
+@@ -546,7 +663,7 @@ class Canary:
+         placed = {"own": 0, "shared": 0, "decoy": 0}
+         planned_before = self.state["fees_planned"]
+         for g in due:
+-            if self.own(g, gws[g]["node"], rate):
++            if self.own(g, gws[g]["node"], rate, gws):
+                 placed["own"] += 1
+             self.state["next_due"][g] = now + self.interval(rows.get(g))
+         for kind in ("shared", "decoy"):
+@@ -586,7 +703,7 @@ class Canary:
+         return {"address": self.address, "utxos": len(s["utxos"]), "utxo_sats": sum(u["value"] for u in s["utxos"]),
+                 "inflight": len(s["inflight"]), "rounds": s["rounds"], "delivered": s["delivered"],
+                 "delivery_failed": s["delivery_failed"], "fees_planned": s["fees_planned"], "fees_paid": s["fees_paid"],
+-                "resolved": s["resolved"], "leaks": s["leaks"]}
++                "resolved": s["resolved"], "leaks": s["leaks"], "foreign": s.get("foreign")}
+ 
+ 
+ def main():
+diff --git a/lazarus/canary/test_lazarus_canary.py b/lazarus/canary/test_lazarus_canary.py
+index fa0e99b..b4a8d96 100644
+--- a/lazarus/canary/test_lazarus_canary.py
++++ b/lazarus/canary/test_lazarus_canary.py
+@@ -334,6 +334,129 @@ class Resolved(unittest.TestCase):
+             prime.close()
+ 
+ 
++class FakeNode:
++    """A P2P listener that answers the handshake and pings and logs every tx it gets, with the
++    time it read it."""
++
++    def __init__(self, delay: float = 0.0):
++        self.magic = xbt_p2p.MAGIC["regtest"]
++        self.srv = socket.socket()
++        self.srv.bind(("127.0.0.1", 0))
++        self.srv.listen(8)
++        self.addr = f"127.0.0.1:{self.srv.getsockname()[1]}"
++        self.txs = []
++        self.delay = delay
++        threading.Thread(target=self.serve, daemon=True).start()
++
++    def serve(self):
++        while True:
++            try:
++                c, _ = self.srv.accept()
++            except OSError:
++                return
++            threading.Thread(target=self.conn, args=(c,), daemon=True).start()
++
++    def conn(self, c):
++        c.settimeout(5)
++        try:
++            while True:
++                cmd, payload = xbt_p2p.read_message(c, self.magic)
++                if cmd == "version":
++                    c.sendall(xbt_p2p.message(self.magic, "version", xbt_p2p.version_payload(1)))
++                    c.sendall(xbt_p2p.message(self.magic, "verack", b""))
++                elif cmd == "tx":
++                    self.txs.append((lc.time.time(), payload))
++                elif cmd == "ping":
++                    lc.time.sleep(self.delay)
++                    c.sendall(xbt_p2p.message(self.magic, "pong", payload))
++        except (xbt_p2p.DeliveryError, OSError):
++            pass
++        finally:
++            c.close()
++
++    def close(self):
++        self.srv.close()
++
++
++class Foreign(unittest.TestCase):
++    """SOV-015: an own canary's twin fanned out to other gateways' nodes."""
++
++    def svc(self, d, **foreign):
++        s = lc.Canary.__new__(lc.Canary)
++        s.cfg = lc.merged({"foreign": {"enabled": True, **foreign}, "delivery": {"timeout_secs": 5}})
++        s.net = "regtest"
++        s.pool = StubPool()
++        s.rng = __import__("random").Random(3)
++        s.state_path, s.ledger_path = os.path.join(d, "state.json"), os.path.join(d, "l.jsonl")
++        s.state = s._load()
++        s.state["utxos"] = [{"txid": "aa" * 32, "vout": 0, "value": 20_000}]
++        s.sign = lambda u, value: (bytes([value % 256]) * 60, f"{value:064x}")
++        s.reported = []
++        s.report = lambda g, t, txid, kind, foreign=None: s.reported.append((g, txid, kind, foreign))
++        return s
++
++    def test_targets_are_the_other_nodes_or_a_sample(self):
++        with tempfile.TemporaryDirectory() as d:
++            s = self.svc(d)
++            gws = {"g1": {"node": "h:1"}, "g2": {"node": "h:2"}, "g3": {"node": "h:3"}, "g4": {"node": "h:1"}, "g5": {}}
++            self.assertEqual(s.foreign_targets("g1", "h:1", gws), {"g2": "h:2", "g3": "h:3"},
++                             "not itself, not a gateway at the same address, not one without a node")
++            s.cfg["foreign"]["fanout"] = 1
++            self.assertEqual(len(s.foreign_targets("g1", "h:1", gws)), 1)
++            s.cfg["foreign"]["enabled"] = False
++            self.assertEqual(s.foreign_targets("g1", "h:1", gws), {})
++
++    def test_c_then_every_twin_and_only_timely_targets_are_reported(self):
++        own, fast, slow = FakeNode(), FakeNode(), FakeNode(delay=0.3)
++        try:
++            with tempfile.TemporaryDirectory() as d:
++                s = self.svc(d, max_lag_secs=0.2)
++                gws = {"g": {"node": own.addr}, "fast": {"node": fast.addr}, "slow": {"node": slow.addr},
++                       "gone": {"node": "127.0.0.1:1"}}
++                self.assertTrue(s.own("g", own.addr, 10.0, gws))
++                c_raw, twin_raw = bytes([(20_000 - 1100) % 256]) * 60, bytes([(20_000 - 1101) % 256]) * 60
++                self.assertEqual([p for _, p in own.txs], [c_raw], "C to G's node only")
++                self.assertEqual([p for _, p in fast.txs], [twin_raw])
++                self.assertEqual([p for _, p in slow.txs], [twin_raw])
++                self.assertLessEqual(own.txs[0][0], fast.txs[0][0], "own-ack: C before any twin")
++                g, txid, kind, foreign = s.reported[0]
++                self.assertEqual((g, kind, foreign), ("g", "own", ["fast"]), "slow acked too late, gone never")
++                with open(s.ledger_path) as f:
++                    rec = json.loads(f.read())
++                self.assertEqual(rec["foreign"], ["fast"])
++                self.assertGreater(rec["foreign_lags"]["slow"], 0.2)
++                self.assertEqual(s.state["foreign"], {"twins": 2, "in_time": 1, "late": 1, "failed": 1})
++                # the pool gets C's delta before anything, then its twin
++                self.assertEqual([m for m, _ in s.pool.calls], ["prioritisetransaction", "sendrawtransaction"])
++        finally:
++            for n in (own, fast, slow):
++                n.close()
++
++    def test_pipelined_sends_twins_without_waiting_for_cs_pong(self):
++        own, other = FakeNode(delay=0.3), FakeNode()
++        try:
++            with tempfile.TemporaryDirectory() as d:
++                s = self.svc(d, order="pipelined")
++                self.assertTrue(s.own("g", own.addr, 10.0, {"g": {"node": own.addr}, "o": {"node": other.addr}}))
++                self.assertLess(other.txs[0][0] - own.txs[0][0], 0.2)
++                self.assertEqual(s.reported[0][3], ["o"])
++        finally:
++            own.close()
++            other.close()
++
++    def test_an_unreachable_own_node_keeps_the_utxo_and_sends_no_twin(self):
++        other = FakeNode()
++        try:
++            with tempfile.TemporaryDirectory() as d:
++                s = self.svc(d)
++                self.assertFalse(s.own("g", "127.0.0.1:1", 10.0, {"o": {"node": other.addr}}))
++                self.assertEqual(other.txs, [])
++                self.assertEqual(len(s.state["utxos"]), 1)
++                self.assertEqual(s.pool.calls[-1], ("prioritisetransaction", (f"{20_000 - 1100:064x}", 0, lc.SAT)))
++        finally:
++            other.close()
++
++
+ class Isolation(unittest.TestCase):
+     def test_the_signer_can_never_broadcast(self):
+         r = lc.Rpc({"url": "http://127.0.0.1:9", "user": "u", "password": "p"}, lc.SIGNER_METHODS, "signer")
+diff --git a/lazarus/canary/xbt_p2p.py b/lazarus/canary/xbt_p2p.py
+index 764363c..1d1577d 100644
+--- a/lazarus/canary/xbt_p2p.py
++++ b/lazarus/canary/xbt_p2p.py
+@@ -106,44 +106,85 @@ def socks5_connect(proxy: str, host: str, port: int, timeout: float) -> socket.s
+     return s
+ 
+ 
++class Peer:
++    """One P2P connection, handshaken and kept open, so a tx can be pushed the moment it is due
++    (SOV-015: a foreign canary's twin must land right behind C). `rtt` is the handshake's round
++    trip. Send with `send_tx` (tx + ping), then `wait_pong` for the node's acknowledgement."""
++
++    def __init__(self, node: str, *, network: str = "regtest", proxy: str | None = None, timeout: float = 20.0):
++        self.node = node
++        self.magic = MAGIC[network]
++        self.timeout = timeout
++        host, port = split_hostport(node)
++        if host.endswith(".onion") and not proxy:
++            raise DeliveryError("an .onion node needs delivery.proxy (Tor SOCKS5)")
++        t0 = time.monotonic()
++        deadline = t0 + timeout
++        try:
++            self.sock = socks5_connect(proxy, host, port, timeout) if proxy else socket.create_connection((host, port), timeout=timeout)
++        except OSError as e:
++            raise DeliveryError(f"connect {node}: {e}") from None
++        try:
++            self.sock.settimeout(timeout)
++            sent = time.monotonic()
++            self.sock.sendall(message(self.magic, "version", version_payload(int.from_bytes(os.urandom(8), "little"))))
++            got_version = got_verack = False
++            self.rtt = None
++            while not (got_version and got_verack):
++                if time.monotonic() > deadline:
++                    raise DeliveryError("handshake timed out")
++                cmd, _ = read_message(self.sock, self.magic)
++                if cmd == "version":
++                    got_version = True
++                    self.rtt = time.monotonic() - sent
++                    self.sock.sendall(message(self.magic, "verack", b""))
++                elif cmd == "verack":
++                    got_verack = True
++        except (OSError, socket.timeout) as e:
++            self.close()
++            raise DeliveryError(f"{node}: {e}") from None
++        except DeliveryError:
++            self.close()
++            raise
++
++    def send_tx(self, raw_tx: bytes) -> bytes:
++        """Push the tx and a ping behind it; returns the ping nonce. Raises DeliveryError."""
++        nonce = os.urandom(8)
++        try:
++            self.sock.sendall(message(self.magic, "tx", raw_tx) + message(self.magic, "ping", nonce))
++        except OSError as e:
++            raise DeliveryError(f"{self.node}: {e}") from None
++        return nonce
++
++    def wait_pong(self, nonce: bytes, timeout: float | None = None) -> float:
++        """Unix time the node answered the ping (so had processed the tx). Raises DeliveryError."""
++        deadline = time.monotonic() + (self.timeout if timeout is None else timeout)
++        try:
++            while True:
++                if time.monotonic() > deadline:
++                    raise DeliveryError("no pong after the tx")
++                self.sock.settimeout(max(0.01, deadline - time.monotonic()))
++                cmd, payload = read_message(self.sock, self.magic)
++                if cmd == "pong" and payload == nonce:
++                    return time.time()
++                if cmd == "ping":
++                    self.sock.sendall(message(self.magic, "pong", payload))
++        except (OSError, socket.timeout) as e:
++            raise DeliveryError(f"{self.node}: {e}") from None
++
++    def close(self):
++        try:
++            self.sock.close()
++        except (OSError, AttributeError):
++            pass
++
++
+ def deliver(node: str, raw_tx: bytes, *, network: str = "regtest", proxy: str | None = None,
+             timeout: float = 20.0) -> float:
+     """Push `raw_tx` to `node` (host:port) over one fresh P2P connection. Returns the unix time the
+     node acknowledged (its `pong`, sent after it processed the `tx`). Raises DeliveryError."""
+-    magic = MAGIC[network]
+-    host, port = split_hostport(node)
+-    if host.endswith(".onion") and not proxy:
+-        raise DeliveryError("an .onion node needs delivery.proxy (Tor SOCKS5)")
+-    deadline = time.monotonic() + timeout
++    peer = Peer(node, network=network, proxy=proxy, timeout=timeout)
+     try:
+-        sock = socks5_connect(proxy, host, port, timeout) if proxy else socket.create_connection((host, port), timeout=timeout)
+-    except OSError as e:
+-        raise DeliveryError(f"connect {node}: {e}") from None
+-    try:
+-        sock.settimeout(timeout)
+-        sock.sendall(message(magic, "version", version_payload(int.from_bytes(os.urandom(8), "little"))))
+-        got_version = got_verack = False
+-        while not (got_version and got_verack):
+-            if time.monotonic() > deadline:
+-                raise DeliveryError("handshake timed out")
+-            cmd, _ = read_message(sock, magic)
+-            if cmd == "version":
+-                got_version = True
+-                sock.sendall(message(magic, "verack", b""))
+-            elif cmd == "verack":
+-                got_verack = True
+-        sock.sendall(message(magic, "tx", raw_tx))
+-        nonce = os.urandom(8)
+-        sock.sendall(message(magic, "ping", nonce))
+-        while True:
+-            if time.monotonic() > deadline:
+-                raise DeliveryError("no pong after the tx")
+-            cmd, payload = read_message(sock, magic)
+-            if cmd == "pong" and payload == nonce:
+-                return time.time()
+-            if cmd == "ping":
+-                sock.sendall(message(magic, "pong", payload))
+-    except (OSError, socket.timeout) as e:
+-        raise DeliveryError(f"{node}: {e}") from None
++        return peer.wait_pong(peer.send_tx(raw_tx))
+     finally:
+-        sock.close()
++        peer.close()
+-- 
+2.43.0
+

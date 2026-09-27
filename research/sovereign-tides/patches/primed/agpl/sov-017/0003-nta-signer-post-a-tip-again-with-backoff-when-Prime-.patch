@@ -1,0 +1,84 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: michael moore <mrmoore27@pm.me>
+Date: Sat, 26 Sep 2026 04:52:40 +0000
+Subject: [PATCH 3/3] nta-signer: post a tip again (with backoff) when Prime
+ says the key is not a payee yet (AGP-011)
+
+Found by flagship-pww-nta: a pay-with-work provider becomes a TIDES payee with its first
+credited share, which on a quiet pool is often the share that found the block. The signer
+posts the new tip ~1 ms later, before Prime's payee set holds the provider, gets 403 "not a live
+TIDES payee" and gave the tip up, so the provider sat out the next block (carried). It now
+re-posts after 1, 2, 3, 5, 8, 15, 30, 60 s while the tip is current. Prime does not count
+NotPayee refusals against nta-attest-per-tip, and a newer tip still cancels the retries.
+
+For sov-lead: this is a change to SOV-017's signer, on rnd/agp-011 only.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+(cherry picked from commit 91b2d8b6b79de28b58c1fe2cbca5e2bed1bd20c1)
+---
+ lazarus/nta-signer/src/main.rs | 28 +++++++++++++++++++++++++++-
+ 1 file changed, 27 insertions(+), 1 deletion(-)
+
+diff --git a/lazarus/nta-signer/src/main.rs b/lazarus/nta-signer/src/main.rs
+index ec2379d..cf2e252 100644
+--- a/lazarus/nta-signer/src/main.rs
++++ b/lazarus/nta-signer/src/main.rs
+@@ -258,6 +258,17 @@ const COUNTED_TRIES: u32 = 2;
+ /// Retries while Prime cannot be reached at all (those do not count against its limit).
+ const UNREACHABLE_TRIES: u32 = 30;
+ 
++/// AGP-011: seconds to wait before re-posting a tip Prime refused with 403 because the script is
++/// not (yet) a live payee in its window. A pay-with-work provider becomes a payee when its first
++/// share is credited, which is often the share that found the block: the signer's post for the new
++/// tip lands ~1 ms after it, before Prime's payee set includes the provider, and without a retry the
++/// provider sat out the whole tip. Prime does not count these refusals against the per-tip limit.
++/// Retries stop when a newer tip arrives.
++fn not_payee_backoff(refusals: u32) -> Option<u64> {
++    const SCHEDULE: [u64; 8] = [1, 2, 3, 5, 8, 15, 30, 60];
++    SCHEDULE.get(refusals.saturating_sub(1) as usize).copied()
++}
++
+ fn body_of(s: &Signer, t: &Target) -> Result<String, String> {
+     let mut prev_le: [u8; 32] = hex::decode(&t.prev).ok().and_then(|r| r.try_into().ok()).ok_or("prev")?;
+     prev_le.reverse();
+@@ -281,7 +292,7 @@ fn post_one(s: &Signer, t: &Target, url: &str, token: Option<&str>, seen: Instan
+         Err(e) => return log::error!("height={} key={key}: {e}", t.height),
+     };
+     let signed_ms = seen.elapsed().as_secs_f64() * 1e3;
+-    let (mut counted, mut unreachable) = (0u32, 0u32);
++    let (mut counted, mut unreachable, mut not_payee) = (0u32, 0u32, 0u32);
+     loop {
+         if current.lock().unwrap().as_ref() != Some(t) {
+             return log::info!("height={} key={key} prime={url}: superseded by a newer tip", t.height);
+@@ -307,6 +318,14 @@ fn post_one(s: &Signer, t: &Target, url: &str, token: Option<&str>, seen: Instan
+                     std::thread::sleep(Duration::from_millis(250));
+                     continue;
+                 }
++                if r.status_code == 403 && what.contains("not a live TIDES payee") {
++                    counted -= 1; // Prime does not count this refusal either
++                    not_payee += 1;
++                    if let Some(secs) = not_payee_backoff(not_payee) {
++                        std::thread::sleep(Duration::from_secs(secs));
++                        continue;
++                    }
++                }
+                 return;
+             }
+             Err(e) => {
+@@ -409,6 +428,13 @@ fn run(a: RunArgs) -> i32 {
+ 
+ #[cfg(test)]
+ mod tests {
++    #[test]
++    fn a_tip_refused_for_not_being_a_payee_yet_is_posted_again_with_backoff() {
++        assert_eq!(not_payee_backoff(1), Some(1));
++        assert_eq!((1..=8).map(|n| not_payee_backoff(n).unwrap()).sum::<u64>(), 124);
++        assert_eq!(not_payee_backoff(9), None, "gives the tip up after ~2 minutes");
++    }
++
+     use super::*;
+ 
+     /// BIP341 wallet test vectors, `keyPathSpending` inputs with no script tree: the tweaked
+-- 
+2.43.0
+

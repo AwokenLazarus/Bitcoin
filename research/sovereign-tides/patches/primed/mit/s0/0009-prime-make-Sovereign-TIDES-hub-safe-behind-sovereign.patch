@@ -1,0 +1,2571 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: michael moore <mrmoore27@pm.me>
+Date: Fri, 25 Sep 2026 08:11:19 +0000
+Subject: [PATCH 09/27] prime: make Sovereign TIDES hub-safe behind
+ sovereignty-mode
+
+S0 of SOV-P-002 (W1-W5, W11, M2, M5), from rnd/sov-004:
+
+- sovereignty-mode = off | observe | publish, default off. Off builds
+  nothing: no job or share telemetry, no sovereignty object in
+  stats.json, 404 on /sovereignty*, no files, and the stats listener
+  of f14bb4c. POST /sovereignty/* also needs the local token in
+  data-dir/sovereignty.token.
+- The detector runs in the background every sovereignty-recompute-secs
+  (300) on a copy of the snapshot store. stats.json and
+  /sovereignty.json serve the last pass and never hold the ledger lock
+  and the engine's at once. The report publishes compute_ms.
+- The score records blocks, once per job, in a ring of 2,016 persisted
+  to sovereignty-blocks.jsonl. Shares only credit attested work.
+- Snapshots are keyed by registered G, else by payout script, with a
+  24 h idle expiry and a cap of 512 keys.
+- pool_clustered zeroes a builder only when it has no canary hit.
+- authored and directory appear only with the bonus on; key lookup is
+  exact.
+
+Bench at 250 gateways x 2,000 snapshots: detector pass 425 ms, and a
+stats build holds the ledger lock about 1 ms.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ prime/README.md                       |   29 +
+ prime/primed/src/config.rs            |   61 ++
+ prime/primed/src/main.rs              |   76 +-
+ prime/primed/src/session.rs           |   47 +-
+ prime/primed/src/sovereignty.rs       | 1446 ++++++++++++++++++++-----
+ prime/primed/src/state.rs             |    5 +-
+ prime/primed/src/stats.rs             |  145 ++-
+ prime/primed/tests/sovereignty_e2e.rs |   89 +-
+ prime/tides/src/entropy.rs            |   45 +-
+ 9 files changed, 1595 insertions(+), 348 deletions(-)
+
+diff --git a/prime/README.md b/prime/README.md
+index 5892b11..f6d2c69 100644
+--- a/prime/README.md
++++ b/prime/README.md
+@@ -376,6 +376,9 @@ gateway's five-second deadline.
+ | `window.json` | window target work and lifetime counters |
+ | `blocks.jsonl` | one JSON line per block event (candidate, submit outcome, settled/orphaned) |
+ | `stats.json`, `ledger.json` | mirrors of the HTTP endpoints, rewritten atomically |
++| `sovereignty.token` | local token for `POST /sovereignty/*`, 0600, made at first start with `sovereignty-mode` on |
++| `sovereignty-keys.json` | registered gateway keys `G` (payout, first seen, house) |
++| `sovereignty-blocks.jsonl` | the score's blocks: one line per block candidate, last 2,016 kept |
+ 
+ ## Stats
+ 
+@@ -387,6 +390,32 @@ pool UI reads: `pool` (pubkey, fee, window multiple, advertise address, uptime),
+ `pool_only_shares`), `blocks`, `owed`, `totals`. `/ledger.json` is the previous Prime's credits view for the UI's
+ hashrate graph; `/healthz` returns `ok`.
+ 
++### Sovereign TIDES (`sovereignty-mode`)
++
++`sovereignty-mode` is the master switch for the A2 code (the LZT1 attestations, the canary
++detector and the score):
++
++| Mode | What runs |
++|---|---|
++| `off` (default) | Nothing. No job or share telemetry, no `sovereignty` object in stats.json, 404 on `/sovereignty*`, no files. This is the Prime from before A2 (`f14bb4c`). |
++| `observe` | Job snapshots, attestations and blocks are recorded. The detector runs in the background every `sovereignty-recompute-secs` (default 300) on a copy of its store, never under the ledger lock; stats.json and `GET /sovereignty.json` serve the last pass (`compute_ms`, `computed_at`), with `published: false`. |
++| `publish` | As `observe`, with `published: true` for the pool site. |
++
++`POST /sovereignty/{register,attest}` need the mode on and the token from
++`data-dir/sovereignty.token` in an `X-Sovereignty-Token` header; the other POSTs (snapshot,
++canary, credit, observe, apply-bonus) also need `sovereignty-demo = true` (local rnd only).
++`sovereignty-bonus` pays nothing unless the mode is on. `authored` and `directory` (payout
++addresses) appear in the report only with the bonus on; node addresses never do.
++
++Snapshots are kept per registered `G`, else per payout script (stock `datum_gateway` makes a new
++`G` at every start), at most 2,000 per key and 512 keys, and a key unseen for 24 h is dropped.
++
++**Rollback trap (M1).** `Config` refuses unknown keys, so a Prime older than this one does not
++start with any `sovereignty-*` key in `prime.toml`. Ship the binary first with no new key (the
++mode defaults to `off`), upgrade the standby's binary before adding a key, and keep
++`prime.toml.pre-sov-<stage>` next to each change so a binary rollback can take the old toml
++with it.
++
+ ## Tests
+ 
+ ```bash
+diff --git a/prime/primed/src/config.rs b/prime/primed/src/config.rs
+index 62ee52b..a8a1b59 100644
+--- a/prime/primed/src/config.rs
++++ b/prime/primed/src/config.rs
+@@ -153,7 +153,19 @@ pub struct Config {
+     /// this true.
+     #[serde(default)]
+     pub require_split_gateway: bool,
++    /// Sovereign TIDES master switch (SOV-P-002 W1). `off` (default) is the pre-A2 Prime: no
++    /// job or share telemetry, no `sovereignty` object in stats.json, and 404 on
++    /// `/sovereignty*`. `observe` records jobs, attestations and blocks and serves
++    /// `/sovereignty.json`; `publish` also marks the report `published` for the pool site.
++    /// Every `sovereignty-*` key is refused by a Prime older than this one (see README).
++    #[serde(default)]
++    pub sovereignty_mode: SovereigntyMode,
++    /// Seconds between detector passes. The pass runs in the background on a copy of the
++    /// snapshot store; stats.json serves the last one.
++    #[serde(default = "d_sov_recompute_secs")]
++    pub sovereignty_recompute_secs: u64,
+     /// Pay the Sovereign TIDES bonus (stratum-fee pot, independence-weighted). Default off.
++    /// Ignored while `sovereignty-mode` is `off`.
+     #[serde(default)]
+     pub sovereignty_bonus: bool,
+     /// Bonus out of the stratum fee, basis points. Clamped to fee − rebate. Ignored unless
+@@ -257,6 +269,29 @@ fn d_solo_tag() -> String {
+ fn d_sov_bonus_bps() -> u32 {
+     500
+ }
++fn d_sov_recompute_secs() -> u64 {
++    300
++}
++
++/// `sovereignty-mode`: see [`Config::sovereignty_mode`].
++#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, serde::Serialize)]
++#[serde(rename_all = "lowercase")]
++pub enum SovereigntyMode {
++    #[default]
++    Off,
++    Observe,
++    Publish,
++}
++
++impl SovereigntyMode {
++    pub fn as_str(self) -> &'static str {
++        match self {
++            Self::Off => "off",
++            Self::Observe => "observe",
++            Self::Publish => "publish",
++        }
++    }
++}
+ 
+ impl Config {
+     /// `stale-after-days` in seconds; 0 when the rule is off.
+@@ -318,6 +353,9 @@ impl Config {
+         if c.empty_solo_fee_bps > 10_000 {
+             return Err("empty-solo-fee-bps cannot exceed 10000".into());
+         }
++        if c.sovereignty_recompute_secs == 0 {
++            return Err("sovereignty-recompute-secs must be at least 1".into());
++        }
+         if c.sovereignty_bonus_bps > 10_000 {
+             return Err("sovereignty-bonus-bps cannot exceed 10000".into());
+         }
+@@ -418,6 +456,8 @@ require-split-gateway = true
+         assert!(c.require_split_gateway);
+         assert!(!c.sovereignty_bonus);
+         assert!(!c.sovereignty_demo);
++        assert_eq!(c.sovereignty_mode, SovereigntyMode::Off);
++        assert_eq!(c.sovereignty_recompute_secs, 300);
+         assert_eq!(c.sovereignty_bonus_bps, 500);
+         // a data dir the old Prime left behind keeps its key, hence its pubkey
+         std::fs::write(dir.join("lazarus-prime.key"), "00").unwrap();
+@@ -449,6 +489,27 @@ require-split-gateway = true
+         std::fs::remove_dir_all(&dir).unwrap();
+     }
+ 
++    #[test]
++    fn sovereignty_mode_parses_and_defaults_off() {
++        let dir = std::env::temp_dir().join(format!("primed-cfg-sov-{}", std::process::id()));
++        std::fs::create_dir_all(&dir).unwrap();
++        let p = dir.join("prime.toml");
++        let base = LEGACY.replace("/home/umbrel/blake2b/lazarus-prime", dir.to_str().unwrap());
++        let load = |extra: &str| {
++            std::fs::write(&p, format!("{base}\n{extra}\n")).unwrap();
++            Config::load(&p)
++        };
++        assert_eq!(load("").unwrap().sovereignty_mode, SovereigntyMode::Off);
++        for (text, mode) in [("off", SovereigntyMode::Off), ("observe", SovereigntyMode::Observe), ("publish", SovereigntyMode::Publish)] {
++            let c = load(&format!("sovereignty-mode = \"{text}\"\nsovereignty-recompute-secs = 60")).unwrap();
++            assert_eq!((c.sovereignty_mode, c.sovereignty_recompute_secs), (mode, 60));
++            assert_eq!(mode.as_str(), text);
++        }
++        assert!(load("sovereignty-mode = \"on\"").is_err());
++        assert!(load("sovereignty-recompute-secs = 0").unwrap_err().contains("sovereignty-recompute-secs"));
++        std::fs::remove_dir_all(&dir).unwrap();
++    }
++
+     #[test]
+     fn unknown_keys_are_still_errors() {
+         let dir = std::env::temp_dir().join(format!("primed-cfg-u-{}", std::process::id()));
+diff --git a/prime/primed/src/main.rs b/prime/primed/src/main.rs
+index dc9b529..1354aec 100644
+--- a/prime/primed/src/main.rs
++++ b/prime/primed/src/main.rs
+@@ -282,19 +282,27 @@ fn run(cfg: Config) -> i32 {
+         next_client_id: AtomicU64::new(1),
+         coinbaser_base: Mutex::new(None),
+         gateway_payouts: Mutex::new(Shared::load_gateway_payouts(&cfg.data_dir)),
+-        sovereignty: Mutex::new(crate::sovereignty::Engine::from_config(&cfg)),
++        sovereignty: crate::sovereignty::Sovereignty::from_config(&cfg),
+         cfg,
+     });
+     log::info!("pool pubkey {}", shared.pool.public_hex());
+     log::info!(
+-        "payout {} fee {}bps stratum {}bps window {}x min-diff {} sovereignty-bonus={}",
++        "payout {} fee {}bps stratum {}bps window {}x min-diff {}",
+         shared.cfg.payout_address,
+         shared.cfg.fee_bps,
+         shared.cfg.stratum_fee_bps,
+         shared.cfg.window,
+-        shared.cfg.min_diff,
+-        shared.cfg.sovereignty_bonus
++        shared.cfg.min_diff
+     );
++    if shared.sovereignty.on() {
++        log::info!(
++            "sovereignty mode={} recompute={}s bonus={} demo={}",
++            shared.cfg.sovereignty_mode.as_str(),
++            shared.sovereignty.recompute.as_secs(),
++            shared.cfg.sovereignty_bonus,
++            shared.cfg.sovereignty_demo
++        );
++    }
+ 
+     let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build().expect("tokio runtime");
+     rt.block_on(async move {
+@@ -309,6 +317,9 @@ fn run(cfg: Config) -> i32 {
+         tokio::spawn(node::run(shared.clone()));
+         tokio::spawn(stats::serve(shared.clone()));
+         tokio::spawn(stats::housekeeping(shared.clone()));
++        if shared.sovereignty.on() {
++            tokio::spawn(sovereignty::recompute_loop(shared.clone()));
++        }
+ 
+         let accept = {
+             let shared = shared.clone();
+@@ -472,3 +483,60 @@ async fn shutdown_signal() {
+         let _ = tokio::signal::ctrl_c().await;
+     }
+ }
++
++/// A `Shared` for in-process tests and benches: `extra` toml on top of a loopback config in
++/// `dir`, no node (rpc points nowhere).
++#[cfg(test)]
++pub fn test_shared(dir: &std::path::Path, extra: &str) -> Shared {
++    std::fs::create_dir_all(dir).unwrap();
++    let p = dir.join("prime.toml");
++    std::fs::write(
++        &p,
++        format!(
++            "listen = \"127.0.0.1:1\"\nstats-listen = \"127.0.0.1:1\"\ndata-dir = \"{}\"\n\
++             payout-address = \"bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4\"\nnetwork = \"mainnet\"\n\
++             rpc = \"http://127.0.0.1:9\"\n{extra}\n",
++            dir.display()
++        ),
++    )
++    .unwrap();
++    let cfg = Config::load(&p).unwrap();
++    let (network, pool_script) = pool_payout_script(&cfg).unwrap();
++    let (tip_tx, tip) = watch::channel(None);
++    let (notify, _) = broadcast::channel(64);
++    Shared {
++        split_params: SplitParams {
++            fee_bps: cfg.fee_bps,
++            stratum_fee_bps: cfg.stratum_fee_bps,
++            datum_rebate_bps: cfg.datum_rebate_bps,
++            min_payout: cfg.min_payout,
++            max_outputs: 511,
++            output_budget_bytes: 14_000 - 9 - 64,
++            stale_after: 0,
++            stale_min_payout: cfg.stale_min_payout,
++            stale_max_outputs: cfg.stale_per_block,
++        },
++        pool_script,
++        pool: load_or_create_key(&cfg).unwrap(),
++        network,
++        ledger: Mutex::new(Ledger::open(&cfg.data_dir).unwrap()),
++        blocks: Mutex::new(Vec::new()),
++        block_log: BlockLog::open(&cfg.data_dir),
++        clients: Mutex::new(Default::default()),
++        seen: Mutex::new(Default::default()),
++        connections: Mutex::new(Default::default()),
++        tip_tx,
++        tip,
++        notify,
++        rpc: rpc::Rpc::new(&cfg.rpc, None, None, None).unwrap(),
++        refresh: Default::default(),
++        totals: Totals::default(),
++        started: Instant::now(),
++        started_ts: now(),
++        next_client_id: AtomicU64::new(1),
++        coinbaser_base: Mutex::new(None),
++        gateway_payouts: Mutex::new(Default::default()),
++        sovereignty: crate::sovereignty::Sovereignty::from_config(&cfg),
++        cfg,
++    }
++}
+diff --git a/prime/primed/src/session.rs b/prime/primed/src/session.rs
+index 35fac16..0d944d1 100644
+--- a/prime/primed/src/session.rs
++++ b/prime/primed/src/session.rs
+@@ -1065,14 +1065,17 @@ impl Session {
+         if absorbed.job_changed {
+             self.touch_slot(job_id);
+             self.coinbase_bytes = self.slots.iter().map(JobSlot::coinbase_bytes).sum();
+-            if let Some(j) = &self.slots[job_id].job {
+-                let name = if self.is_house_stratum() { "POOL".to_string() } else { self.gateway_key_hex() };
+-                self.shared.sovereignty.lock().unwrap().note_job(
+-                    &name,
+-                    crate::sovereignty::now_f64(),
+-                    &j.prev_hash,
+-                    &j.merkle_branches,
+-                );
++            if self.shared.sovereignty.on() {
++                if let Some(j) = &self.slots[job_id].job {
++                    self.shared.sovereignty.engine().note_job(
++                        &self.gateway_key_hex(),
++                        self.is_house_stratum(),
++                        self.gateway_script.as_deref(),
++                        crate::sovereignty::now_f64(),
++                        &j.prev_hash,
++                        &j.merkle_branches,
++                    );
++                }
+             }
+         } else {
+             let held_after = self.slots[job_id].coinbase_bytes();
+@@ -1249,14 +1252,13 @@ impl Session {
+         if !credited {
+             return self.reject(&s, mining::REJECT_BAD_USERNAME).await;
+         }
+-        if !solo && v.work > 0 {
++        if !solo && v.work > 0 && self.shared.sovereignty.on() {
+             if let Some(j) = &self.slots[job_id].job {
+-                self.shared.sovereignty.lock().unwrap().note_share(
++                self.shared.sovereignty.engine().note_share(
+                     &self.gateway_key_hex(),
+                     self.is_house_stratum(),
+                     &identity,
+                     v.work,
+-                    &v.coinbase,
+                     &j.prev_hash,
+                     &j.merkle_branches,
+                     ts as u32,
+@@ -1486,6 +1488,20 @@ impl Session {
+         self.candidate_at = Some(Instant::now());
+         self.shared.totals.add(&self.shared.totals.block_candidates, 1);
+         self.shared.client_update(self.id, |c| c.block_candidates += 1);
++        if self.shared.sovereignty.on() {
++            if let Some(j) = &self.slots[usize::from(s.job_id)].job {
++                self.shared.sovereignty.engine().note_block(
++                    &self.gateway_key_hex(),
++                    self.is_house_stratum(),
++                    self.gateway_script.as_deref(),
++                    &v.coinbase,
++                    &j.prev_hash,
++                    &j.merkle_branches,
++                    v.height,
++                    &hash_hex,
++                );
++            }
++        }
+ 
+         // what the window is owed if this coinbase did not pay the full split
+         let job_cb = self.slots[usize::from(s.job_id)].job.as_ref().map(|j| (j.coinbaser_id, j.prev_hash, j.height));
+@@ -1536,11 +1552,10 @@ impl Session {
+         let Settlement { kind, owed, split, carry_paid, mut carry_delta, rebate_credited, rebate_delta } =
+             settle(&v.coinbase_kind, cb, v.coinbase_value, |script| v.coinbase.paid_to(script));
+         let _ = fee;
+-        if self.shared.cfg.sovereignty_bonus {
+-            let extra = {
+-                let ledger = self.shared.ledger.lock().unwrap();
+-                self.shared.sovereignty.lock().unwrap().bonus_for_block(v.coinbase_value, &ledger.window)
+-            };
++        if self.shared.sovereignty.on() && self.shared.cfg.sovereignty_bonus {
++            // one lock at a time: the window's work, then the engine's authored work
++            let work = crate::sovereignty::WindowWork::of(&self.shared.ledger.lock().unwrap().window);
++            let extra = self.shared.sovereignty.engine().bonus_for_block(v.coinbase_value, work);
+             for (id, sats) in extra {
+                 if sats > 0 {
+                     carry_delta.push((id, sats as i64));
+diff --git a/prime/primed/src/sovereignty.rs b/prime/primed/src/sovereignty.rs
+index 2ae1f50..44ac5d5 100644
+--- a/prime/primed/src/sovereignty.rs
++++ b/prime/primed/src/sovereignty.rs
+@@ -1,36 +1,61 @@
+-//! Primed side of Sovereign TIDES (P-003 A2 / XBT-064).
++//! Primed side of Sovereign TIDES (P-003 A2 / XBT-064), hub-safe (SOV-P-002 S0).
+ //!
++//! * `sovereignty-mode` is the master switch. `off` builds nothing here: no telemetry, no files,
++//!   no routes (see [`Sovereignty`]).
+ //! * Directory of registered gateway keys `G`.
+-//! * Per-job LZT1 attestation check (once, when the coinbase is absorbed).
+-//! * Template-entropy detector over job snapshots (Rust port of `~/xbt-rnd/XBT-051/entropy.py`).
++//! * Per-job LZT1 attestations, and the pool's blocks, recorded once per block (a ring of the
++//!   last [`BLOCK_RING`], persisted to `sovereignty-blocks.jsonl`).
++//! * Template-entropy detector over job snapshots, run in the background every
++//!   `sovereignty-recompute-secs` on a copy of the snapshot store. Share crediting and stats
++//!   read the last [`Report`]; nothing on the share path or under the ledger lock runs it.
++//! * Snapshots are kept per registered `G`, else per payout script (a stock gateway makes a new
++//!   `G` at every start), at most [`MAX_KEYS`] keys, each dropped after [`KEY_TTL_SECS`] unseen.
+ //! * Sovereignty score and the TIDES bonus pot (flag, default off).
+ //!
+-//! The DATUM sub-command that will carry `A`+sig is not in stock gateways yet. Until it is,
+-//! attestations and extra snapshots arrive over the stats HTTP ingest (only when
+-//! `sovereignty-demo` is on). Live sessions still record job snapshots from the job section
+-//! (prev + merkle branches) so a straight proxy is visible from Prime's own telemetry.
++//! The DATUM sub-command that will carry `A`+sig is not in stock gateways yet (W7). Until it is,
++//! attestations arrive over the stats HTTP ingest, which needs the local token in
++//! `data-dir/sovereignty.token`; snapshots, canaries and credits also need `sovereignty-demo`.
+ 
+-use std::collections::{BTreeMap, HashMap, HashSet};
+-use std::path::{Path, PathBuf};
+-use std::time::{SystemTime, UNIX_EPOCH};
++use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
++use std::io::Write as _;
++use std::path::PathBuf;
++use std::sync::{Arc, Mutex, MutexGuard, RwLock};
++use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+ 
+-use datum_wire::authorship::{self, Attestation, AttestError};
++use datum_wire::authorship::{self, AttestError, Attestation};
+ use datum_wire::coinbase::Coinbase;
+-use datum_wire::crypto::{Identity, SIGN_PK, SIG};
++use datum_wire::crypto::{Identity, SIG, SIGN_PK};
+ use datum_wire::pow::Hash;
+ use serde::{Deserialize, Serialize};
+ use serde_json::{json, Value};
+-use tides::entropy::{self, Canary, CanaryKind, Snapshot};
+-
+-/// `canaries` key for shared canaries and decoys (every gateway).
+-const ALL: &str = "*";
++use tides::entropy::{self, Canary, CanaryKind, Features, PoolView, Prepared, Snapshot};
+ use tides::score::{self, BlockCredit, PoolScore};
+-use tides::sovereignty::{self as bonus, Authored, Bonus, BonusParams, WorkTotals};
++use tides::sovereignty::{self as bonus, Authored, BonusParams, WorkTotals};
+ use tides::Window;
+ 
+-use crate::config::Config;
++use crate::config::{Config, SovereigntyMode};
+ use crate::state::now;
+ 
++/// `canaries` key for shared canaries and decoys (every gateway).
++const ALL: &str = "*";
++/// The pool node's own templates (house stratum sessions).
++const POOL: &str = "POOL";
++/// Snapshots kept per key: past this many the oldest are dropped down to `SNAPSHOTS_KEEP`.
++pub const MAX_SNAPSHOTS: usize = 2_000;
++const SNAPSHOTS_KEEP: usize = 1_500;
++/// Gateway keys in the snapshot store (and canary keys), besides `POOL`.
++pub const MAX_KEYS: usize = 512;
++/// A key not seen for this long is dropped.
++pub const KEY_TTL_SECS: u64 = 24 * 3600;
++/// Blocks kept for the score: about two weeks of 10-minute blocks.
++pub const BLOCK_RING: usize = 2_016;
++/// Attested jobs kept for share and block lookups.
++const MAX_ATTESTED: usize = 4_096;
++const TOKEN_FILE: &str = "sovereignty.token";
++const BLOCKS_FILE: &str = "sovereignty-blocks.jsonl";
++/// Header a POST to `/sovereignty/*` carries the token in.
++pub const TOKEN_HEADER: &str = "x-sovereignty-token";
++
+ const REGISTER_PREFIX: &[u8] = b"LZT1 register G=";
+ const REGISTER_SUFFIX: &[u8] = b" pool=lazarus";
+ 
+@@ -65,29 +90,450 @@ struct AttestedJob {
+     sig: [u8; SIG],
+ }
+ 
++/// One block for the score, as `sovereignty-blocks.jsonl` holds it.
++#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
++pub struct ObservedBlock {
++    pub ts: u64,
++    #[serde(default)]
++    pub height: u32,
++    #[serde(default)]
++    pub hash: String,
++    pub builder: String,
++    pub claimed: bool,
++    pub verified: bool,
++    /// The attested-job key the block was deduplicated on; empty for demo observations.
++    #[serde(default)]
++    pub job: String,
++}
++
++/// A key's snapshots and when it last sent one.
++#[derive(Default)]
++struct Track {
++    snaps: VecDeque<Arc<Prepared>>,
++    last_seen: u64,
++}
++
++#[derive(Default)]
++struct CanaryList {
++    list: Vec<Canary>,
++    last_seen: u64,
++}
++
++/// A detector pass: what stats.json and `/sovereignty.json` serve, and what share crediting
++/// reads a gateway's independence from.
++#[derive(Default)]
++pub struct Report {
++    pub computed_at: u64,
++    pub compute_ms: u64,
++    pub rows: BTreeMap<String, Features>,
++    pub clusters: Vec<Vec<String>>,
++    pub pool_cluster: HashSet<String>,
++    pub score: PoolScore,
++    independence_ppm: HashMap<String, u32>,
++    /// Weight per builder for the score (W5 applied).
++    weights: HashMap<String, f64>,
++    authored: Vec<Authored>,
++    params: BonusParams,
++    bonus_on: bool,
++    /// The `sovereignty` object, `bonus.sample` still null.
++    body: Value,
++}
++
++/// Everything a detector pass reads, copied out from under the engine lock. Snapshots are shared
++/// (`Arc`), so the copy is one reference count per snapshot.
++struct Inputs {
++    at: u64,
++    mode: SovereigntyMode,
++    recompute_secs: u64,
++    tracks: Vec<(String, Vec<Arc<Prepared>>)>,
++    canaries: HashMap<String, Vec<Canary>>,
++    keys: HashMap<String, KeyRecord>,
++    blocks: Vec<ObservedBlock>,
++    authored: Vec<Authored>,
++    params: BonusParams,
++    bonus_on: bool,
++    demo: bool,
++    min_key_age_secs: u32,
++}
++
++/// Does the pool-cluster rule zero this builder? Only with no canary hit (XBT-073): an honest
++/// node on a quiet chain often builds exactly the pool's template, and its canaries say so.
++pub fn pool_clustered(in_pool_cluster: bool, f: &Features) -> bool {
++    in_pool_cluster && f.canary_hits + f.shared_hits == 0
++}
++
++fn compute(inp: &Inputs) -> Report {
++    let started = Instant::now();
++    let empty = Vec::new();
++    let pool: &Vec<Arc<Prepared>> = inp.tracks.iter().find(|(n, _)| n == POOL).map(|(_, v)| v).unwrap_or(&empty);
++    let view = PoolView::new(pool.iter().map(|a| &**a));
++    let shared: Vec<&Canary> = inp.canaries.get(ALL).map(|v| v.iter().collect()).unwrap_or_default();
++    let mut rows = BTreeMap::new();
++    for (name, snaps) in &inp.tracks {
++        if name == POOL {
++            continue;
++        }
++        let mut canaries: Vec<&Canary> = inp.canaries.get(name).map(|v| v.iter().collect()).unwrap_or_default();
++        canaries.extend(shared.iter().copied());
++        let refs: Vec<&Prepared> = snaps.iter().map(|a| &**a).collect();
++        rows.insert(name.clone(), entropy::features_prepared(&refs, &view, &canaries));
++    }
++    let named: Vec<(String, Vec<&Prepared>)> =
++        inp.tracks.iter().map(|(n, v)| (n.clone(), v.iter().map(|a| &**a).collect())).collect();
++    let clusters = entropy::clusters_prepared(&named);
++    let pool_cluster: HashSet<String> = clusters
++        .iter()
++        .find(|c| c.iter().any(|n| n == POOL))
++        .into_iter()
++        .flatten()
++        .filter(|n| *n != POOL)
++        .cloned()
++        .collect();
++    let weights: HashMap<String, f64> = rows
++        .iter()
++        .map(|(n, f)| {
++            let clustered = pool_clustered(pool_cluster.contains(n), f);
++            (n.clone(), score::builder_weight(f.independence, f.flagged, clustered, f.insufficient))
++        })
++        .collect();
++    let credits: Vec<BlockCredit> = inp
++        .blocks
++        .iter()
++        .map(|b| BlockCredit { builder: b.builder.clone(), claimed: b.claimed, verified: b.verified })
++        .collect();
++    let pool_score = score::summarize(&credits, |b| weights.get(b).copied().unwrap_or(0.0));
++    let independence_ppm = rows.iter().map(|(n, f)| (n.clone(), entropy::independence_ppm(f))).collect();
++    let mut report = Report {
++        computed_at: inp.at,
++        rows,
++        clusters,
++        pool_cluster,
++        score: pool_score,
++        independence_ppm,
++        weights,
++        authored: inp.authored.clone(),
++        params: inp.params,
++        bonus_on: inp.bonus_on,
++        ..Report::default()
++    };
++    report.compute_ms = started.elapsed().as_millis() as u64;
++    report.body = render(inp, &report);
++    report
++}
++
++fn render(inp: &Inputs, r: &Report) -> Value {
++    let mut gw_blocks: HashMap<&str, u64> = HashMap::new();
++    for b in &inp.blocks {
++        *gw_blocks.entry(b.builder.as_str()).or_insert(0) += 1;
++    }
++    let snapshots: usize = inp.tracks.iter().map(|(_, v)| v.len()).sum();
++    let bytes: usize = inp.tracks.iter().flat_map(|(_, v)| v.iter()).map(|p| p.heap_bytes()).sum();
++    let gateways: BTreeMap<&String, Value> = r
++        .rows
++        .iter()
++        .map(|(n, f)| {
++            let key = inp.keys.get(n);
++            (
++                n,
++                json!({
++                    "snapshots": f.snapshots,
++                    "compared": f.compared,
++                    "identical": f.identical,
++                    "branch_sim": f.branch_sim,
++                    "jaccard": f.jaccard,
++                    "lead": f.lead,
++                    "tip_lead": f.tip_lead,
++                    "lockstep": f.lockstep,
++                    "switch_lag": f.switch_lag,
++                    "incl_lag": f.incl_lag,
++                    "canaries": f.canaries,
++                    "canaries_due": f.canaries_due,
++                    "canary_hits": f.canary_hits,
++                    "canary_rate": f.canary_rate,
++                    "shared_due": f.shared_due,
++                    "shared_hits": f.shared_hits,
++                    "shared_rate": f.shared_rate,
++                    "decoys_due": f.decoys_due,
++                    "decoys_carried": f.decoys_carried,
++                    "decoy_rate": f.decoy_rate,
++                    "canary_pool_leaks": f.canary_pool_leaks,
++                    "evidence": f.evidence,
++                    "flagged": f.flagged,
++                    "flag_reasons": f.flag_reasons,
++                    "subset": f.subset,
++                    "follower": f.follower,
++                    "independence": f.independence,
++                    "insufficient": f.insufficient,
++                    "independence_ppm": entropy::independence_ppm(f),
++                    "weight": r.weights.get(n).copied().unwrap_or(0.0),
++                    "pool_clustered": pool_clustered(r.pool_cluster.contains(n), f),
++                    "in_pool_cluster": r.pool_cluster.contains(n),
++                    "blocks": gw_blocks.get(n.as_str()).copied().unwrap_or(0),
++                    "house": key.is_some_and(|k| k.house),
++                    "registered": key.is_some(),
++                }),
++            )
++        })
++        .collect();
++    let s = &r.score;
++    let mut body = json!({
++        "mode": inp.mode.as_str(),
++        "published": inp.mode == SovereigntyMode::Publish,
++        "computed_at": r.computed_at,
++        "compute_ms": r.compute_ms,
++        "recompute_secs": inp.recompute_secs,
++        "store": {"keys": inp.tracks.len(), "snapshots": snapshots, "bytes": bytes},
++        "observed": inp.blocks.len(),
++        "bonus": {
++            "on": inp.bonus_on,
++            "bps": inp.params.bonus_bps,
++            "effective_bps": inp.params.effective_bonus_bps(),
++            "diff_bps": inp.params.diff_bps,
++            "cap_per_gateway_bps": inp.params.cap_per_gateway_bps,
++            "min_key_age_secs": inp.min_key_age_secs,
++            "sample": null,
++        },
++        "score": {
++            "blocks": s.blocks,
++            "claimed": s.claimed,
++            "verified": s.verified,
++            "verified_share": s.verified_share,
++            "score": s.score,
++            "builders": s.builders,
++            "effective_builders": s.effective_builders,
++            "top_builder_share": s.top_builder_share,
++            "template_nakamoto": s.template_nakamoto,
++        },
++        "gateways": gateways,
++        "clusters": r.clusters,
++        "flagged": r.rows.iter().filter(|(_, f)| f.flagged).map(|(n, _)| n).collect::<Vec<_>>(),
++        "demo": inp.demo,
++    });
++    // W11: who earns what, and payout addresses, only when there is a bonus to explain. Node
++    // addresses never appear here.
++    if inp.bonus_on {
++        body["authored"] = json!(inp
++            .authored
++            .iter()
++            .map(|a| json!({
++                "identity": a.identity,
++                "gateway": a.gateway,
++                "work": a.work,
++                "independence_ppm": a.independence_ppm,
++            }))
++            .collect::<Vec<_>>());
++        let mut dir: Vec<&KeyRecord> = inp.keys.values().collect();
++        dir.sort_by(|a, b| a.g.cmp(&b.g));
++        body["directory"] = json!(dir
++            .iter()
++            .map(|k| json!({
++                "g": k.g, "payout": k.payout, "first_seen": k.first_seen, "house": k.house,
++            }))
++            .collect::<Vec<_>>());
++    }
++    body
++}
++
++/// Window work by kind, read under the ledger lock (O(miners)); the bonus sample adds authored
++/// work to it outside the lock.
++#[derive(Clone, Copy, Debug, Default)]
++pub struct WindowWork {
++    pub total: u64,
++    pub stratum: u64,
++    pub datum: u64,
++}
++
++impl WindowWork {
++    pub fn of(w: &Window) -> Self {
++        let mut stratum = 0u64;
++        let mut datum = 0u64;
++        for m in w.miners() {
++            stratum = stratum.saturating_add(m.stratum_work);
++            datum = datum.saturating_add(m.work.saturating_sub(m.stratum_work));
++        }
++        WindowWork { total: w.total_work(), stratum, datum }
++    }
++
++    fn with(self, authored: &[Authored]) -> WorkTotals {
++        let authored: u64 = authored.iter().map(|a| a.work).sum::<u64>().min(self.datum);
++        WorkTotals {
++            total: self.total,
++            stratum: self.stratum,
++            unauthored_datum: self.datum.saturating_sub(authored),
++            authored,
++        }
++    }
++}
++
++impl Report {
++    /// The `sovereignty` object. `work` (read under the ledger lock by the caller, which must
++    /// have let go of it by now) fills in the bonus sample when the bonus is on.
++    pub fn render(&self, work: Option<WindowWork>) -> Value {
++        let mut body = self.body.clone();
++        if let (true, Some(work)) = (self.bonus_on, work) {
++            let b = bonus::compute(312_500_000, work.with(&self.authored), self.params, &self.authored);
++            body["bonus"]["sample"] = json!({
++                "from_stratum": b.from_stratum,
++                "from_diff": b.from_diff,
++                "credits": b.credits,
++                "to_pool": b.to_pool,
++                "diff_waived": b.diff_waived,
++            });
++        }
++        body
++    }
++
++    pub fn needs_window(&self) -> bool {
++        self.bonus_on
++    }
++}
++
++/// `Shared::sovereignty`: the mode, the engine and the last report.
++pub struct Sovereignty {
++    pub mode: SovereigntyMode,
++    pub recompute: Duration,
++    /// `sovereignty-demo`: reads rerun a stale pass (under the engine lock).
++    demo: bool,
++    token: String,
++    engine: Mutex<Engine>,
++    report: RwLock<Arc<Report>>,
++}
++
++impl Sovereignty {
++    pub fn from_config(cfg: &Config) -> Self {
++        let mode = cfg.sovereignty_mode;
++        let (engine, token) = if mode == SovereigntyMode::Off {
++            (Engine::default(), String::new())
++        } else {
++            (Engine::from_config(cfg), load_or_make_token(&cfg.data_dir))
++        };
++        let s = Sovereignty {
++            mode,
++            recompute: Duration::from_secs(cfg.sovereignty_recompute_secs.max(1)),
++            demo: mode != SovereigntyMode::Off && cfg.sovereignty_demo,
++            token,
++            engine: Mutex::new(engine),
++            report: RwLock::new(Arc::new(Report::default())),
++        };
++        if s.on() {
++            s.recompute_now();
++        }
++        s
++    }
++
++    pub fn on(&self) -> bool {
++        self.mode != SovereigntyMode::Off
++    }
++
++    pub fn engine(&self) -> MutexGuard<'_, Engine> {
++        self.engine.lock().unwrap()
++    }
++
++    /// The last detector pass. With `sovereignty-demo` on, a pass is run first if anything
++    /// changed since the last one, so a demo reads what it just posted.
++    pub fn report(&self) -> Arc<Report> {
++        let fresh = self.demo.then(|| {
++            let mut e = self.engine();
++            e.dirty.then(|| e.refresh())
++        });
++        match fresh.flatten() {
++            Some(r) => {
++                *self.report.write().unwrap() = r.clone();
++                r
++            }
++            None => self.report.read().unwrap().clone(),
++        }
++    }
++
++    /// One background pass: copy the inputs under the engine lock (no ledger lock), compute
++    /// without any lock, publish.
++    pub fn recompute_now(&self) -> Arc<Report> {
++        let inputs = self.engine().inputs(now());
++        let r = Arc::new(compute(&inputs));
++        self.engine().set_report(r.clone());
++        *self.report.write().unwrap() = r.clone();
++        r
++    }
++
++    /// Does the request carry the local token? Compared in constant time.
++    pub fn token_ok(&self, presented: Option<&str>) -> bool {
++        let Some(p) = presented else { return false };
++        let (a, b) = (self.token.as_bytes(), p.trim().as_bytes());
++        !a.is_empty() && a.len() == b.len() && a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
++    }
++}
++
++/// The background detector pass, every `sovereignty-recompute-secs`.
++pub async fn recompute_loop(shared: Arc<crate::state::Shared>) {
++    loop {
++        tokio::time::sleep(shared.sovereignty.recompute).await;
++        let s = shared.clone();
++        match tokio::task::spawn_blocking(move || s.sovereignty.recompute_now()).await {
++            Ok(r) => log::debug!("sovereignty: detector pass in {} ms", r.compute_ms),
++            Err(e) => log::error!("sovereignty: detector pass failed: {e}"),
++        }
++    }
++}
++
++fn load_or_make_token(dir: &std::path::Path) -> String {
++    let path = dir.join(TOKEN_FILE);
++    if let Ok(t) = std::fs::read_to_string(&path) {
++        let t = t.trim().to_string();
++        if t.len() >= 32 {
++            return t;
++        }
++    }
++    use rand_core::{OsRng, RngCore};
++    let mut b = [0u8; 32];
++    OsRng.fill_bytes(&mut b);
++    let t = hex::encode(b);
++    let _ = std::fs::create_dir_all(dir);
++    let mut opts = std::fs::OpenOptions::new();
++    opts.write(true).create(true).truncate(true);
++    #[cfg(unix)]
++    {
++        use std::os::unix::fs::OpenOptionsExt;
++        opts.mode(0o600);
++    }
++    match opts.open(&path).and_then(|mut f| f.write_all(t.as_bytes())) {
++        Ok(()) => log::info!("sovereignty: wrote the ingest token to {}", path.display()),
++        Err(e) => log::warn!("sovereignty: cannot write {}: {e}; ingest is closed until it can", path.display()),
++    }
++    t
++}
++
+ #[derive(Default)]
+ pub struct Engine {
+     dir: PathBuf,
++    mode: SovereigntyMode,
++    recompute_secs: u64,
+     keys: HashMap<String, KeyRecord>,
+-    snapshots: BTreeMap<String, Vec<Snapshot>>,
++    tracks: HashMap<String, Track>,
+     /// Own canaries per gateway; shared canaries and decoys under `ALL`.
+-    canaries: BTreeMap<String, Vec<Canary>>,
++    canaries: HashMap<String, CanaryList>,
+     attested: HashMap<String, AttestedJob>,
++    attested_order: VecDeque<String>,
+     authored: Vec<Authored>,
+-    /// Observed blocks for the public score (demo + any LZT1-verified job).
+-    observed: Vec<BlockCredit>,
+-    builder_counts: HashMap<String, u64>,
++    /// The last `BLOCK_RING` blocks, oldest first, and the attested jobs among them.
++    blocks: VecDeque<ObservedBlock>,
++    block_jobs: HashSet<String>,
++    blocks_in_file: usize,
+     params: BonusParams,
+     bonus_on: bool,
+     demo: bool,
+     min_key_age_secs: u32,
+     started_ts: u64,
++    report: Arc<Report>,
++    /// Something changed since the last pass (demo mode reruns it on read).
++    dirty: bool,
+ }
+ 
+ impl Engine {
+     pub fn from_config(cfg: &Config) -> Self {
+         let mut e = Engine {
+             dir: cfg.data_dir.clone(),
++            mode: cfg.sovereignty_mode,
++            recompute_secs: cfg.sovereignty_recompute_secs,
+             params: BonusParams {
+                 stratum_fee_bps: cfg.stratum_fee_bps,
+                 datum_rebate_bps: cfg.datum_rebate_bps,
+@@ -102,18 +548,22 @@ impl Engine {
+             ..Engine::default()
+         };
+         e.load_keys();
++        e.load_blocks();
+         for h in &cfg.house_gateways {
+             if h.is_empty() {
+                 continue;
+             }
+             let g = h.to_ascii_lowercase();
+-            e.keys.entry(g.clone()).or_insert(KeyRecord {
+-                g: g.clone(),
+-                payout: String::new(),
+-                first_seen: e.started_ts,
+-                house: true,
+-                node_tag: "house".into(),
+-            }).house = true;
++            e.keys
++                .entry(g.clone())
++                .or_insert(KeyRecord {
++                    g: g.clone(),
++                    payout: String::new(),
++                    first_seen: e.started_ts,
++                    house: true,
++                    node_tag: "house".into(),
++                })
++                .house = true;
+         }
+         e
+     }
+@@ -127,6 +577,10 @@ impl Engine {
+         self.bonus_on
+     }
+ 
++    fn persists(&self) -> bool {
++        !self.dir.as_os_str().is_empty()
++    }
++
+     fn load_keys(&mut self) {
+         let path = self.dir.join("sovereignty-keys.json");
+         let Ok(bytes) = std::fs::read(&path) else { return };
+@@ -137,7 +591,7 @@ impl Engine {
+     }
+ 
+     fn persist_keys(&self) {
+-        if self.dir.as_os_str().is_empty() {
++        if !self.persists() {
+             return;
+         }
+         let _ = std::fs::create_dir_all(&self.dir);
+@@ -151,11 +605,73 @@ impl Engine {
+         }
+     }
+ 
++    fn load_blocks(&mut self) {
++        let Ok(text) = std::fs::read_to_string(self.dir.join(BLOCKS_FILE)) else { return };
++        let mut n = 0;
++        for line in text.lines() {
++            n += 1;
++            if let Ok(b) = serde_json::from_str::<ObservedBlock>(line) {
++                self.push_block(b);
++            }
++        }
++        self.blocks_in_file = n;
++    }
++
++    /// Append one block (already in the ring) to `sovereignty-blocks.jsonl`; rewrite the file
++    /// to the ring once it holds twice as many.
++    fn persist_block(&mut self, b: &ObservedBlock) {
++        if !self.persists() {
++            return;
++        }
++        let path = self.dir.join(BLOCKS_FILE);
++        if self.blocks_in_file >= 2 * BLOCK_RING {
++            let mut text = String::new();
++            for b in &self.blocks {
++                text.push_str(&serde_json::to_string(b).unwrap_or_default());
++                text.push('\n');
++            }
++            let tmp = path.with_extension("jsonl.tmp");
++            if std::fs::write(&tmp, text).and_then(|_| std::fs::rename(&tmp, &path)).is_ok() {
++                self.blocks_in_file = self.blocks.len();
++            }
++            return;
++        }
++        let line = serde_json::to_string(b).unwrap_or_default() + "\n";
++        let ok = std::fs::OpenOptions::new()
++            .create(true)
++            .append(true)
++            .open(&path)
++            .and_then(|mut f| f.write_all(line.as_bytes()));
++        match ok {
++            Ok(()) => self.blocks_in_file += 1,
++            Err(e) => log::warn!("sovereignty: cannot append to {}: {e}", path.display()),
++        }
++    }
++
++    fn push_block(&mut self, b: ObservedBlock) {
++        if !b.job.is_empty() {
++            self.block_jobs.insert(b.job.clone());
++        }
++        self.blocks.push_back(b);
++        while self.blocks.len() > BLOCK_RING {
++            if let Some(old) = self.blocks.pop_front() {
++                self.block_jobs.remove(&old.job);
++            }
++        }
++        self.dirty = true;
++    }
++
+     /// Register `G`. Proof of possession is an ed25519 signature by `G` over
+     /// `LZT1 register G=<hex> pool=lazarus` (BIP322 binding to the payout address is the
+     /// production path; this is the pool-side check that the caller holds the DATUM key).
+     /// `sovereignty-demo` may omit the signature.
+-    pub fn register(&mut self, g_hex: &str, payout: &str, house: bool, sig_hex: Option<&str>) -> Result<KeyRecord, String> {
++    pub fn register(
++        &mut self,
++        g_hex: &str,
++        payout: &str,
++        house: bool,
++        sig_hex: Option<&str>,
++    ) -> Result<KeyRecord, String> {
+         let g_hex = g_hex.to_ascii_lowercase();
+         let g = decode_pk(&g_hex)?;
+         if !self.demo {
+@@ -175,12 +691,13 @@ impl Engine {
+         };
+         self.keys.insert(g_hex, rec.clone());
+         self.persist_keys();
++        self.dirty = true;
+         Ok(rec)
+     }
+ 
++    /// The key record for exactly this `G` (M5: no prefix matching).
+     pub fn lookup(&self, g_hex: &str) -> Option<&KeyRecord> {
+-        let g = g_hex.to_ascii_lowercase();
+-        self.keys.get(&g).or_else(|| self.keys.values().find(|r| g.starts_with(&r.g) || r.g.starts_with(&g)))
++        self.keys.get(&g_hex.to_ascii_lowercase())
+     }
+ 
+     fn is_house(&self, g_hex: &str) -> bool {
+@@ -197,13 +714,62 @@ impl Engine {
+         }
+     }
+ 
++    /// The snapshot-store key for a live gateway: `POOL` for the house stratum, its `G` when
++    /// registered, else its payout script (stock gateways make a new `G` at every start), else
++    /// none yet (no share, so no payout learned).
++    pub fn track_name(&self, g_hex: &str, house: bool, payout_script: Option<&[u8]>) -> Option<String> {
++        if house {
++            return Some(POOL.into());
++        }
++        let g = g_hex.to_ascii_lowercase();
++        if self.keys.contains_key(&g) {
++            return Some(g);
++        }
++        payout_script.filter(|s| !s.is_empty()).map(|s| format!("s:{}", hex::encode(s)))
++    }
++
++    fn name_of(gateway: &str) -> String {
++        if gateway.eq_ignore_ascii_case("pool") {
++            POOL.to_string()
++        } else {
++            gateway.to_ascii_lowercase()
++        }
++    }
++
+     pub fn note_snapshot(&mut self, gateway: &str, snap: Snapshot) {
+-        let name = if gateway.eq_ignore_ascii_case("pool") { "POOL".to_string() } else { gateway.to_ascii_lowercase() };
+-        let v = self.snapshots.entry(name).or_default();
+-        v.push(snap);
+-        if v.len() > 2_000 {
+-            v.drain(..v.len() - 1_500);
++        self.note_prepared(&Self::name_of(gateway), Prepared::new(&snap), now());
++    }
++
++    fn note_prepared(&mut self, name: &str, p: Prepared, seen: u64) {
++        if !self.tracks.contains_key(name) {
++            self.evict(seen);
++            if name != POOL && self.tracks.len() - usize::from(self.tracks.contains_key(POOL)) >= MAX_KEYS {
++                let lru = self
++                    .tracks
++                    .iter()
++                    .filter(|(n, _)| *n != POOL)
++                    .min_by_key(|(_, t)| t.last_seen)
++                    .map(|(n, _)| n.clone());
++                if let Some(n) = lru {
++                    self.tracks.remove(&n);
++                }
++            }
++        }
++        let t = self.tracks.entry(name.to_string()).or_default();
++        t.last_seen = t.last_seen.max(seen);
++        t.snaps.push_back(Arc::new(p));
++        if t.snaps.len() > MAX_SNAPSHOTS {
++            let drop = t.snaps.len() - SNAPSHOTS_KEEP;
++            t.snaps.drain(..drop);
+         }
++        self.dirty = true;
++    }
++
++    /// Drop snapshot and canary keys unseen for `KEY_TTL_SECS`.
++    fn evict(&mut self, now_s: u64) {
++        let live = |seen: u64| seen.saturating_add(KEY_TTL_SECS) >= now_s;
++        self.tracks.retain(|n, t| n == POOL || live(t.last_seen));
++        self.canaries.retain(|n, c| n == ALL || live(c.last_seen));
+     }
+ 
+     /// Record a canary. An own canary went to `gateway`'s node, and the caller must already have
+@@ -211,26 +777,41 @@ impl Engine {
+     /// Shared canaries and decoys bear on every gateway, so `gateway` is ignored.
+     pub fn note_canary(&mut self, gateway: &str, canary: Canary) {
+         let key = if canary.kind == CanaryKind::Own { gateway.to_ascii_lowercase() } else { ALL.to_string() };
+-        let v = self.canaries.entry(key).or_default();
+-        v.push(canary);
+-        if v.len() > 500 {
+-            v.drain(..v.len() - 400);
++        let seen = now();
++        if !self.canaries.contains_key(&key) && key != ALL && self.canaries.len() > MAX_KEYS {
++            let lru = self
++                .canaries
++                .iter()
++                .filter(|(n, _)| *n != ALL)
++                .min_by_key(|(_, c)| c.last_seen)
++                .map(|(n, _)| n.clone());
++            if let Some(n) = lru {
++                self.canaries.remove(&n);
++            }
+         }
++        let c = self.canaries.entry(key).or_default();
++        c.last_seen = seen;
++        c.list.push(canary);
++        if c.list.len() > 500 {
++            c.list.drain(..c.list.len() - 400);
++        }
++        self.dirty = true;
+     }
+ 
+-    fn features_of(&self, name: &str, snaps: &[Snapshot]) -> entropy::Features {
+-        let mut canaries = self.canaries.get(name).cloned().unwrap_or_default();
+-        canaries.extend(self.canaries.get(ALL).into_iter().flatten().cloned());
+-        entropy::features_with(snaps, self.pool_snaps(), &canaries)
+-    }
+-
+-    /// A live session's job: prev + merkle branches. Txids are empty until a validation
+-    /// reply or an HTTP ingest fills them in; `identical` still works from branches alone
+-    /// if we store the branch list as a synthetic txid set.
+-    pub fn note_job(&mut self, gateway: &str, t: f64, prev: &Hash, branches: &[Hash]) {
+-        let prev_hex = hex::encode(prev);
+-        let txids = branches.iter().map(hex::encode).collect();
+-        self.note_snapshot(gateway, Snapshot::new(t, prev_hex, txids));
++    /// A live session's job: prev + merkle branches, under [`Engine::track_name`]. The branch
++    /// list stands in for the txid set; `identical` works from branches alone.
++    pub fn note_job(
++        &mut self,
++        gateway: &str,
++        house: bool,
++        payout_script: Option<&[u8]>,
++        t: f64,
++        prev: &Hash,
++        branches: &[Hash],
++    ) {
++        let Some(name) = self.track_name(gateway, house, payout_script) else { return };
++        let txids: Vec<String> = branches.iter().map(hex::encode).collect();
++        self.note_prepared(&name, Prepared::from_parts(t, &hex::encode(prev), &txids), t as u64);
+     }
+ 
+     pub fn ingest_attest(
+@@ -262,67 +843,114 @@ impl Engine {
+             return Err("G is not registered".into());
+         }
+         let key = JobKey { g, prev, branches_hash: authorship::branches_hash(&branches) }.id();
+-        self.attested.insert(key, AttestedJob { a, sig });
+-        self.observe_block(&g_hex, true, true);
++        if self.attested.insert(key.clone(), AttestedJob { a, sig }).is_none() {
++            self.attested_order.push_back(key.clone());
++            while self.attested_order.len() > MAX_ATTESTED {
++                if let Some(old) = self.attested_order.pop_front() {
++                    self.attested.remove(&old);
++                }
++            }
++        }
++        // The demo has no miners: its attestation stands in for the block found on that job.
++        if self.demo {
++            self.record_block(ObservedBlock {
++                ts: now(),
++                height: 0,
++                hash: String::new(),
++                builder: g_hex.clone(),
++                claimed: true,
++                verified: true,
++                job: key,
++            });
++        }
+         Ok(g_hex)
+     }
+ 
+-    /// Verify a live share's coinbase against a stored attestation for this job, or just
+-    /// record the job as claimed.
++    fn job_key(gateway: &str, prev: &Hash, branches: &[Hash]) -> String {
++        JobKey {
++            g: decode_pk(gateway).unwrap_or([0; 32]),
++            prev: *prev,
++            branches_hash: authorship::branches_hash(branches),
++        }
++        .id()
++    }
++
++    /// An accepted share: credit authored work when its job is attested. The score is not
++    /// touched here (blocks are, in [`Engine::note_block`]).
++    #[allow(clippy::too_many_arguments)]
+     pub fn note_share(
+         &mut self,
+         gateway: &str,
+         house: bool,
+         identity: &str,
+         work: u64,
+-        cb: &Coinbase,
+         prev: &Hash,
+         branches: &[Hash],
+         ts: u32,
+     ) {
+-        if work == 0 || house {
++        if work == 0 || house || self.attested.is_empty() {
+             return;
+         }
+         let g_hex = gateway.to_ascii_lowercase();
+-        let claimed = authorship::find(&cb.outputs).ok().flatten().is_some();
+-        let key = JobKey {
+-            g: decode_pk(&g_hex).unwrap_or([0; 32]),
+-            prev: *prev,
+-            branches_hash: authorship::branches_hash(branches),
+-        }
+-        .id();
+-        let verified = self.attested.contains_key(&key)
++        let verified = self.attested.contains_key(&Self::job_key(&g_hex, prev, branches))
+             && !self.is_house(&g_hex)
+             && self.key_old_enough(&g_hex, u64::from(ts));
+-        if claimed || verified {
+-            self.observe_block(&g_hex, claimed, verified);
+-        }
+-        if !verified {
+-            return;
+-        }
+-        let ppm = self.independence_of(&g_hex);
+-        match self.authored.iter_mut().find(|a| a.identity == identity && a.gateway == g_hex) {
+-            Some(a) => {
+-                a.work = a.work.saturating_add(work);
+-                a.independence_ppm = ppm;
+-            }
+-            None => self.authored.push(Authored {
+-                identity: identity.to_string(),
+-                gateway: g_hex,
+-                work,
+-                independence_ppm: ppm,
+-            }),
++        if verified {
++            self.credit(identity, &g_hex, work);
+         }
+     }
+ 
+-    fn observe_block(&mut self, builder: &str, claimed: bool, verified: bool) {
+-        let builder = builder.to_ascii_lowercase();
+-        self.observed.push(BlockCredit { builder: builder.clone(), claimed, verified });
+-        *self.builder_counts.entry(builder).or_insert(0) += 1;
++    /// A block candidate our node holds to the chain: one score entry per block, once per job.
++    /// Returns whether it was recorded.
++    #[allow(clippy::too_many_arguments)]
++    pub fn note_block(
++        &mut self,
++        gateway: &str,
++        house: bool,
++        payout_script: Option<&[u8]>,
++        cb: &Coinbase,
++        prev: &Hash,
++        branches: &[Hash],
++        height: u32,
++        hash_hex: &str,
++    ) -> bool {
++        let g_hex = gateway.to_ascii_lowercase();
++        let job = Self::job_key(&g_hex, prev, branches);
++        let attested = !house && self.attested.contains_key(&job);
++        let claimed = !house && authorship::find(&cb.outputs).ok().flatten().is_some();
++        let verified = attested && !self.is_house(&g_hex) && self.key_old_enough(&g_hex, now());
++        let builder = if attested { g_hex } else { self.track_name(gateway, house, payout_script).unwrap_or(g_hex) };
++        self.record_block(ObservedBlock {
++            ts: now(),
++            height,
++            hash: hash_hex.to_string(),
++            builder,
++            claimed,
++            verified,
++            job,
++        })
++    }
++
++    fn record_block(&mut self, b: ObservedBlock) -> bool {
++        if !b.job.is_empty() && self.block_jobs.contains(&b.job) {
++            return false;
++        }
++        self.push_block(b.clone());
++        self.persist_block(&b);
++        true
+     }
+ 
++    /// Demo ingest: a block for the score with no job behind it.
+     pub fn observe(&mut self, builder: &str, claimed: bool, verified: bool) {
+-        self.observe_block(builder, claimed, verified);
++        self.record_block(ObservedBlock {
++            ts: now(),
++            height: 0,
++            hash: String::new(),
++            builder: builder.to_ascii_lowercase(),
++            claimed,
++            verified,
++            job: String::new(),
++        });
+     }
+ 
+     pub fn credit_authored(&mut self, identity: &str, gateway: &str, work: u64) {
+@@ -330,223 +958,116 @@ impl Engine {
+         if self.is_house(&g) {
+             return;
+         }
+-        let ppm = self.independence_of(&g);
++        self.credit(identity, &g, work);
++    }
++
++    fn credit(&mut self, identity: &str, g: &str, work: u64) {
++        let ppm = self.independence_of(g);
+         match self.authored.iter_mut().find(|a| a.identity == identity && a.gateway == g) {
+-            // Like `note_share`: the latest verdict weighs all of the gateway's work, so work
+-            // credited before the detector had evidence doesn't stay at 0 (or at 1) forever.
++            // The latest verdict weighs all of the gateway's work, so work credited before the
++            // detector had evidence doesn't stay at 0 (or at 1) forever.
+             Some(a) => {
+                 a.work = a.work.saturating_add(work);
+                 a.independence_ppm = ppm;
+             }
+             None => self.authored.push(Authored {
+                 identity: identity.to_string(),
+-                gateway: g,
++                gateway: g.to_string(),
+                 work,
+                 independence_ppm: ppm,
+             }),
+         }
++        self.dirty = true;
+     }
+ 
+-    fn pool_snaps(&self) -> &[Snapshot] {
+-        self.snapshots.get("POOL").map(Vec::as_slice).unwrap_or(&[])
++    /// Copy what a detector pass reads, and drop keys gone quiet.
++    fn inputs(&mut self, at: u64) -> Inputs {
++        self.evict(at);
++        let mut tracks: Vec<(String, Vec<Arc<Prepared>>)> =
++            self.tracks.iter().map(|(n, t)| (n.clone(), t.snaps.iter().cloned().collect())).collect();
++        tracks.sort_by(|a, b| a.0.cmp(&b.0));
++        Inputs {
++            at,
++            mode: self.mode,
++            recompute_secs: self.recompute_secs,
++            tracks,
++            canaries: self.canaries.iter().map(|(n, c)| (n.clone(), c.list.clone())).collect(),
++            keys: self.keys.clone(),
++            blocks: self.blocks.iter().cloned().collect(),
++            authored: self.authored.clone(),
++            params: self.params,
++            bonus_on: self.bonus_on,
++            demo: self.demo,
++            min_key_age_secs: self.min_key_age_secs,
++        }
+     }
+ 
+-    pub fn independence_of(&self, gateway: &str) -> u32 {
+-        let g = if gateway.eq_ignore_ascii_case("pool") { "POOL".to_string() } else { gateway.to_ascii_lowercase() };
+-        let Some(snaps) = self.snapshots.get(&g) else { return 0 };
+-        entropy::independence_ppm(&self.features_of(&g, snaps))
++    fn set_report(&mut self, r: Arc<Report>) {
++        self.report = r;
++        self.dirty = false;
+     }
+ 
+-    pub fn detector_rows(&self) -> BTreeMap<String, entropy::Features> {
+-        self.snapshots
+-            .iter()
+-            .filter(|(n, _)| n.as_str() != "POOL")
+-            .map(|(n, s)| (n.clone(), self.features_of(n, s)))
+-            .collect()
++    /// Run a pass here, under the engine lock. Demo mode and tests only.
++    fn refresh(&mut self) -> Arc<Report> {
++        let r = Arc::new(compute(&self.inputs(now())));
++        self.set_report(r.clone());
++        r
+     }
+ 
+-    pub fn clusters(&self) -> Vec<Vec<String>> {
+-        entropy::clusters(&self.snapshots)
++    /// The last pass; in demo mode (and tests) rerun first if anything changed.
++    fn current(&mut self) -> Arc<Report> {
++        if self.demo && self.dirty {
++            self.refresh();
++        }
++        self.report.clone()
+     }
+ 
+-    pub fn flagged(&self) -> Vec<String> {
+-        self.detector_rows()
+-            .into_iter()
+-            .filter(|(_, f)| f.flagged)
+-            .map(|(n, _)| n)
+-            .collect()
++    /// Independence from the last pass, parts per million (0 when unknown).
++    pub fn independence_of(&mut self, gateway: &str) -> u32 {
++        let name = Self::name_of(gateway);
++        self.current().independence_ppm.get(&name).copied().unwrap_or(0)
+     }
+ 
+-    /// Builders in the detector cluster that also contains `POOL`.
+-    pub fn pool_cluster(&self) -> HashSet<String> {
+-        self.clusters()
+-            .into_iter()
+-            .find(|c| c.iter().any(|n| n == "POOL"))
+-            .into_iter()
+-            .flatten()
+-            .filter(|n| n != "POOL")
+-            .collect()
++    #[cfg(test)]
++    pub fn detector_rows(&mut self) -> BTreeMap<String, Features> {
++        self.current().rows.clone()
+     }
+ 
+-    /// *w(builder)* for the public score: independence, else 0 if flagged / pool-clustered / unknown.
+-    #[allow(dead_code)]
+-    pub fn weight_of(&self, builder: &str) -> f64 {
+-        let g = if builder.eq_ignore_ascii_case("pool") {
+-            "POOL".to_string()
+-        } else {
+-            builder.to_ascii_lowercase()
+-        };
+-        if g == "POOL" {
+-            return 0.0;
+-        }
+-        let Some(snaps) = self.snapshots.get(&g) else {
+-            return 0.0;
+-        };
+-        let f = self.features_of(&g, snaps);
+-        score::builder_weight(f.independence, f.flagged, self.pool_cluster().contains(&g), f.insufficient)
++    #[cfg(test)]
++    pub fn clusters(&mut self) -> Vec<Vec<String>> {
++        self.current().clusters.clone()
+     }
+ 
+-    pub fn work_totals(&self, w: &Window) -> WorkTotals {
+-        let mut stratum = 0u64;
+-        let mut datum = 0u64;
+-        for m in w.miners() {
+-            stratum = stratum.saturating_add(m.stratum_work);
+-            datum = datum.saturating_add(m.work.saturating_sub(m.stratum_work));
+-        }
+-        let authored: u64 = self.authored.iter().map(|a| a.work).sum();
+-        let authored = authored.min(datum);
+-        WorkTotals {
+-            total: w.total_work(),
+-            stratum,
+-            unauthored_datum: datum.saturating_sub(authored),
+-            authored,
+-        }
++    #[cfg(test)]
++    pub fn flagged(&mut self) -> Vec<String> {
++        self.current().rows.iter().filter(|(_, f)| f.flagged).map(|(n, _)| n.clone()).collect()
+     }
+ 
+-    pub fn sample_bonus(&self, value: u64, w: &Window) -> Bonus {
+-        bonus::compute(value, self.work_totals(w), self.params, &self.authored)
++    /// Builders in the detector cluster that also contains `POOL`.
++    #[cfg(test)]
++    pub fn pool_cluster(&mut self) -> HashSet<String> {
++        self.current().pool_cluster.clone()
+     }
+ 
+-    /// Credits the found-block bonus (identity → sats). Empty when the flag is off.
+-    pub fn bonus_for_block(&self, value: u64, w: &Window) -> Vec<(String, u64)> {
+-        if !self.bonus_on {
+-            return Vec::new();
+-        }
+-        self.sample_bonus(value, w).credits
++    /// *w(builder)* for the public score: independence, else 0 if flagged, pool-clustered with
++    /// no canary hit, or unknown.
++    #[cfg(test)]
++    pub fn weight_of(&mut self, builder: &str) -> f64 {
++        let name = Self::name_of(builder);
++        self.current().weights.get(&name).copied().unwrap_or(0.0)
+     }
+ 
+-    pub fn score(&self) -> PoolScore {
+-        let clustered = self.pool_cluster();
+-        let rows = self.detector_rows();
+-        score::summarize(&self.observed, |builder| {
+-            let Some(f) = rows.get(builder) else {
+-                return 0.0;
+-            };
+-            score::builder_weight(f.independence, f.flagged, clustered.contains(builder), f.insufficient)
+-        })
++    #[cfg(test)]
++    pub fn score(&mut self) -> PoolScore {
++        self.current().score.clone()
+     }
+ 
+-    pub fn stats_json(&self, w: Option<&Window>) -> Value {
+-        let rows = self.detector_rows();
+-        let clusters = self.clusters();
+-        let flagged = self.flagged();
+-        let clustered = self.pool_cluster();
+-        let score = self.score();
+-        let mut gw_blocks: HashMap<String, u64> = HashMap::new();
+-        for b in &self.observed {
+-            *gw_blocks.entry(b.builder.clone()).or_insert(0) += 1;
++    /// Credits the found-block bonus (identity → sats). Empty when the flag is off.
++    pub fn bonus_for_block(&self, value: u64, work: WindowWork) -> Vec<(String, u64)> {
++        if !self.bonus_on {
++            return Vec::new();
+         }
+-        let sample = w.map(|win| {
+-            let b = self.sample_bonus(312_500_000, win);
+-            json!({
+-                "from_stratum": b.from_stratum,
+-                "from_diff": b.from_diff,
+-                "credits": b.credits,
+-                "to_pool": b.to_pool,
+-                "diff_waived": b.diff_waived,
+-            })
+-        });
+-        let gateways: BTreeMap<String, Value> = rows
+-            .into_iter()
+-            .map(|(n, f)| {
+-                (n.clone(), json!({
+-                    "snapshots": f.snapshots,
+-                    "compared": f.compared,
+-                    "identical": f.identical,
+-                    "branch_sim": f.branch_sim,
+-                    "jaccard": f.jaccard,
+-                    "lead": f.lead,
+-                    "tip_lead": f.tip_lead,
+-                    "lockstep": f.lockstep,
+-                    "switch_lag": f.switch_lag,
+-                    "incl_lag": f.incl_lag,
+-                    "canaries": f.canaries,
+-                    "canaries_due": f.canaries_due,
+-                    "canary_hits": f.canary_hits,
+-                    "canary_rate": f.canary_rate,
+-                    "shared_due": f.shared_due,
+-                    "shared_hits": f.shared_hits,
+-                    "shared_rate": f.shared_rate,
+-                    "decoys_due": f.decoys_due,
+-                    "decoys_carried": f.decoys_carried,
+-                    "decoy_rate": f.decoy_rate,
+-                    "canary_pool_leaks": f.canary_pool_leaks,
+-                    "evidence": f.evidence,
+-                    "flagged": f.flagged,
+-                    "flag_reasons": f.flag_reasons,
+-                    "subset": f.subset,
+-                    "follower": f.follower,
+-                    "independence": f.independence,
+-                    "insufficient": f.insufficient,
+-                    "independence_ppm": entropy::independence_ppm(&f),
+-                    "weight": score::builder_weight(
+-                        f.independence,
+-                        f.flagged,
+-                        clustered.contains(&n),
+-                        f.insufficient,
+-                    ),
+-                    "pool_clustered": clustered.contains(&n),
+-                    "blocks": gw_blocks.get(&n).copied().unwrap_or(0),
+-                    "house": self.is_house(&n),
+-                    "registered": self.lookup(&n).is_some(),
+-                }))
+-            })
+-            .collect();
+-        json!({
+-            "bonus": {
+-                "on": self.bonus_on,
+-                "bps": self.params.bonus_bps,
+-                "effective_bps": self.params.effective_bonus_bps(),
+-                "diff_bps": self.params.diff_bps,
+-                "cap_per_gateway_bps": self.params.cap_per_gateway_bps,
+-                "min_key_age_secs": self.min_key_age_secs,
+-                "sample": sample,
+-            },
+-            "score": {
+-                "blocks": score.blocks,
+-                "claimed": score.claimed,
+-                "verified": score.verified,
+-                "verified_share": score.verified_share,
+-                "score": score.score,
+-                "builders": score.builders,
+-                "effective_builders": score.effective_builders,
+-                "top_builder_share": score.top_builder_share,
+-                "template_nakamoto": score.template_nakamoto,
+-            },
+-            "authored": self.authored.iter().map(|a| json!({
+-                "identity": a.identity,
+-                "gateway": a.gateway,
+-                "work": a.work,
+-                "independence_ppm": a.independence_ppm,
+-            })).collect::<Vec<_>>(),
+-            "directory": self.keys.values().map(|k| json!({
+-                "g": k.g, "payout": k.payout, "first_seen": k.first_seen, "house": k.house,
+-            })).collect::<Vec<_>>(),
+-            "gateways": gateways,
+-            "clusters": clusters,
+-            "flagged": flagged,
+-            "demo": self.demo,
+-        })
++        bonus::compute(value, work.with(&self.authored), self.params, &self.authored).credits
+     }
+ 
+     /// Sign a registration message with `G` (helper for tests and the demo).
+@@ -597,9 +1118,42 @@ pub fn now_f64() -> f64 {
+     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs_f64()).unwrap_or(0.0)
+ }
+ 
+-#[allow(dead_code)]
+-pub fn data_dir_ok(p: &Path) -> bool {
+-    p.exists()
++/// Fill `e` like a hub: `gws` gateways (one in five serving the pool's template) and the pool,
++/// `per` jobs each 3 s apart ending now, own canaries for half the gateways and shared ones.
++#[cfg(test)]
++pub fn fill_hub(e: &mut Engine, gws: u64, per: u64) {
++    let t0 = now() as f64 - per as f64 * 3.0;
++    for i in 0..per {
++        let t = t0 + i as f64 * 3.0;
++        let prev = hash_of(1_000_000_000 + i / 150);
++        let pool_br: Vec<Hash> = (0..12).map(|k| hash_of(i * 16 + k)).collect();
++        e.note_job("", true, None, t, &prev, &pool_br);
++        for g in 0..gws {
++            let script = [0x00, 0x14, (g >> 8) as u8, g as u8];
++            // a fifth copy the pool's template (proxies, or converged honest nodes)
++            let br: Vec<Hash> = if g % 5 == 0 {
++                pool_br.clone()
++            } else {
++                (0..12).map(|k| hash_of(((g + 1) << 40) | (i * 16 + k))).collect()
++            };
++            e.note_job(&format!("{g:064x}"), false, Some(&script), t + 0.01 * (g % 50) as f64, &prev, &br);
++        }
++    }
++    for g in (0..gws).step_by(2) {
++        for k in 0..40u64 {
++            e.note_canary(&format!("s:0014{:04x}", g), Canary::new(t0 + k as f64 * 100.0, format!("{:064x}", k)));
++        }
++    }
++    for k in 0..100u64 {
++        e.note_canary("", Canary::shared(t0 + k as f64 * 50.0, format!("{:064x}", 1_000 + k)));
++    }
++}
++
++#[cfg(test)]
++fn hash_of(i: u64) -> Hash {
++    let mut h = [0u8; 32];
++    h[..8].copy_from_slice(&i.to_le_bytes());
++    h
+ }
+ 
+ #[cfg(test)]
+@@ -607,6 +1161,7 @@ mod tests {
+     use super::*;
+     use datum_wire::authorship::{attest, NodeView};
+     use datum_wire::coinbase::{self, TxOut};
++    use std::time::Duration;
+ 
+     fn engine() -> Engine {
+         Engine { demo: true, min_key_age_secs: 0, started_ts: 1, ..Engine::default() }
+@@ -619,10 +1174,7 @@ mod tests {
+     }
+ 
+     fn sample_outs(value: u64) -> Vec<TxOut> {
+-        vec![
+-            TxOut { value: value / 2, script: p2wpkh(0x11) },
+-            TxOut { value: value - value / 2, script: p2wpkh(0x22) },
+-        ]
++        vec![TxOut { value: value / 2, script: p2wpkh(0x11) }, TxOut { value: value - value / 2, script: p2wpkh(0x22) }]
+     }
+ 
+     #[test]
+@@ -875,4 +1427,336 @@ mod tests {
+         let cl = e.clusters();
+         assert!(cl.iter().any(|c| c.contains(&"POOL".to_string()) && c.contains(&"proxy".to_string())), "{cl:?}");
+     }
++
++    // ---- SOV-006 (SOV-P-002 S0) -------------------------------------------------------------
++
++    fn attested_job(e: &mut Engine, seed: u8) -> (String, Hash, Vec<Hash>, Coinbase) {
++        let g = Identity::from_secret_bytes(&[seed; 64]);
++        let g_hex = hex::encode(g.sign_pk());
++        e.register(&g_hex, "bc1q", false, None).unwrap();
++        let prev = [seed; 32];
++        let height = 966_267u32;
++        let txs: Vec<Hash> = (1..=4u8).map(|i| [i ^ seed; 32]).collect();
++        let branches = datum_wire::pow::merkle_branches_for_coinbase(&txs);
++        let mut outs = sample_outs(312_538_966);
++        let (a, sig, c) = attest(&g, height, &prev, &branches, &outs, NodeView::default());
++        outs.push(c);
++        let (bytes, _, _) = coinbase::build(height, b"Lazarus\x0fTofu", &outs, 0);
++        e.ingest_attest(
++            &hex::encode(a.encode()),
++            &hex::encode(sig),
++            &hex::encode(&bytes),
++            &hex::encode(prev),
++            &branches.iter().map(hex::encode).collect::<Vec<_>>(),
++            Some(&g_hex),
++        )
++        .unwrap();
++        (g_hex, prev, branches, coinbase::parse(&bytes).unwrap())
++    }
++
++    /// W3: shares never touch the score; a block does, once per job.
++    #[test]
++    fn observed_counts_blocks_not_shares() {
++        let mut e = engine();
++        let (g_hex, prev, branches, cb) = attested_job(&mut e, 0x51);
++        // from here on production, where an attestation is not a block (the demo's stood in
++        // for one): start from a clean ring
++        e.demo = false;
++        e.blocks.clear();
++        e.block_jobs.clear();
++        for i in 0..1_000u32 {
++            e.note_share(&g_hex, false, "bc1qminer", 1 + u64::from(i % 3), &prev, &branches, 1_000 + i);
++        }
++        assert_eq!(e.blocks.len(), 0, "1,000 shares on one attested job are not blocks");
++        assert_eq!(e.authored.iter().map(|a| a.work).sum::<u64>(), 1_999, "but they are attested work");
++        assert!(e.note_block(&g_hex, false, None, &cb, &prev, &branches, 966_267, "aa"));
++        assert!(!e.note_block(&g_hex, false, None, &cb, &prev, &branches, 966_267, "aa"), "deduped per job");
++        assert_eq!(e.blocks.len(), 1);
++        let b = &e.blocks[0];
++        assert!(b.claimed && b.verified && b.builder == g_hex, "{b:?}");
++        e.demo = true;
++        let s = e.score();
++        assert_eq!((s.blocks, s.verified), (1, 1));
++    }
++
++    #[test]
++    fn unattested_blocks_count_in_the_denominator() {
++        let mut e = engine();
++        e.demo = false;
++        let prev = [9u8; 32];
++        let cb = coinbase::parse(&coinbase::build(10, b"x", &sample_outs(1_000), 0).0).unwrap();
++        let g = "ab".repeat(32);
++        assert!(e.note_block(&g, false, Some(&[0x00, 0x14, 1, 2]), &cb, &prev, &[], 10, "h1"));
++        assert!(e.note_block("", true, None, &cb, &[8u8; 32], &[], 11, "h2"));
++        let builders: Vec<&str> = e.blocks.iter().map(|b| b.builder.as_str()).collect();
++        assert_eq!(builders, vec!["s:00140102", "POOL"]);
++        assert!(e.blocks.iter().all(|b| !b.claimed && !b.verified));
++    }
++
++    #[test]
++    fn the_block_ring_is_bounded_and_survives_a_restart() {
++        let dir = std::env::temp_dir().join(format!("sov006-blocks-{}", std::process::id()));
++        let _ = std::fs::remove_dir_all(&dir);
++        std::fs::create_dir_all(&dir).unwrap();
++        let mut e = Engine { dir: dir.clone(), ..engine() };
++        for i in 0..(BLOCK_RING as u64 * 3 + 5) {
++            e.record_block(ObservedBlock {
++                ts: i,
++                height: i as u32,
++                hash: format!("{i:064x}"),
++                builder: "b".into(),
++                claimed: false,
++                verified: false,
++                job: format!("job{i}"),
++            });
++        }
++        assert_eq!(e.blocks.len(), BLOCK_RING);
++        assert_eq!(e.block_jobs.len(), BLOCK_RING);
++        let lines = std::fs::read_to_string(dir.join(BLOCKS_FILE)).unwrap().lines().count();
++        assert!(lines <= 2 * BLOCK_RING + 1, "{lines}");
++        let mut again = Engine { dir: dir.clone(), ..engine() };
++        again.load_blocks();
++        assert_eq!(again.blocks, e.blocks, "the last {BLOCK_RING} blocks come back after a restart");
++        let job = e.blocks.back().unwrap().job.clone();
++        assert!(!again.record_block(ObservedBlock { job, ..again.blocks[0].clone() }), "and still dedupe");
++        let _ = std::fs::remove_dir_all(&dir);
++    }
++
++    /// W4: 240 stock gateways, each restarting every hour (a new `G` each time) for 48 h, keep 240
++    /// keys: snapshots follow the payout script, not the throwaway key.
++    #[test]
++    fn restarting_gateways_keep_one_key_each() {
++        let mut e = engine();
++        e.demo = false;
++        let t0 = 1_800_000_000u64;
++        let mut peak_keys = 0;
++        let mut peak_snaps = 0;
++        for hour in 0..48u64 {
++            for gw in 0..240u64 {
++                let g = format!("{:064x}", (hour << 32) | gw); // new identity every restart
++                let script = [0x00, 0x14, (gw >> 8) as u8, gw as u8];
++                // unknown payout until the first share: nothing recorded
++                e.note_job(&g, false, None, (t0 + hour * 3600) as f64, &[1; 32], &[[2; 32]]);
++                for j in 0..12u64 {
++                    let t = (t0 + hour * 3600 + j * 300 + gw) as f64;
++                    e.note_job(
++                        &g,
++                        false,
++                        Some(&script),
++                        t,
++                        &[(hour % 250) as u8; 32],
++                        &[[j as u8; 32], [gw as u8; 32]],
++                    );
++                }
++            }
++            e.note_job("", true, None, (t0 + hour * 3600) as f64, &[0; 32], &[]);
++            peak_keys = peak_keys.max(e.tracks.len());
++            peak_snaps = peak_snaps.max(e.tracks.values().map(|t| t.snaps.len()).sum::<usize>());
++        }
++        assert_eq!(peak_keys, 241, "240 payout scripts + POOL");
++        assert!(peak_snaps <= 241 * MAX_SNAPSHOTS, "{peak_snaps}");
++        let bytes: usize = e.tracks.values().flat_map(|t| t.snaps.iter()).map(|p| p.heap_bytes()).sum();
++        assert!(bytes < 241 * MAX_SNAPSHOTS * 512, "{bytes} bytes");
++        // a day later every gateway key has aged out; the pool's own track stays
++        let later = t0 + 48 * 3600 + KEY_TTL_SECS + 1;
++        e.note_job("", true, None, later as f64, &[0; 32], &[]);
++        let _ = e.inputs(later);
++        assert_eq!(e.tracks.keys().collect::<Vec<_>>(), vec![POOL]);
++    }
++
++    #[test]
++    fn registered_gateways_are_keyed_by_g_and_keys_are_capped() {
++        let mut e = engine();
++        let g = Identity::from_secret_bytes(&[0x61; 64]);
++        let g_hex = hex::encode(g.sign_pk());
++        e.register(&g_hex, "bc1q", false, None).unwrap();
++        assert_eq!(e.track_name(&g_hex, false, Some(&[1, 2])), Some(g_hex.clone()));
++        assert_eq!(e.track_name(&"cd".repeat(32), false, Some(&[1, 2])), Some("s:0102".into()));
++        assert_eq!(e.track_name(&"cd".repeat(32), false, None), None);
++        let t = now() as f64;
++        for i in 0..(MAX_KEYS as u64 + 300) {
++            e.note_job(&"ee".repeat(32), false, Some(&i.to_be_bytes()), t + i as f64, &[1; 32], &[]);
++        }
++        e.note_job("", true, None, t, &[0; 32], &[]);
++        assert_eq!(e.tracks.len(), MAX_KEYS + 1);
++        assert!(e.tracks.contains_key(POOL));
++        // the least recently seen went first
++        assert!(!e.tracks.contains_key(&format!("s:{}", hex::encode(0u64.to_be_bytes()))));
++        assert!(e.tracks.contains_key(&format!("s:{}", hex::encode((MAX_KEYS as u64 + 299).to_be_bytes()))));
++    }
++
++    /// W5 (XBT-073): the pool-cluster rule zeroes only a builder with no canary hit.
++    #[test]
++    fn a_pool_twin_with_canary_hits_keeps_its_weight() {
++        let mut e = engine();
++        for i in 0..100u64 {
++            let t = i as f64;
++            let prev = format!("{:064x}", i / 20);
++            let txs = vec![format!("{:064x}", i + 100), format!("{:064x}", i + 200)];
++            e.note_snapshot("POOL", Snapshot::new(t, prev.clone(), txs.clone()));
++            e.note_snapshot("twin", Snapshot::new(t + 0.04, prev, txs));
++        }
++        let c = |k: u64| format!("{:064x}", 0xc000 + k);
++        for k in 0..10u64 {
++            e.note_canary("twin", Canary::new(100.0 + k as f64, c(k)));
++        }
++        // 9 of the 10 make it into the twin's own templates in time; the 10th never does
++        for (t, ks) in [(103.0, 0..3u64), (106.0, 3..6), (109.0, 6..9)] {
++            e.note_snapshot("twin", Snapshot::new(t, format!("{:064x}", 999), ks.map(c).collect()));
++        }
++        e.note_snapshot("twin", Snapshot::new(130.0, format!("{:064x}", 999), vec![]));
++        let rows = e.detector_rows();
++        let f = &rows["twin"];
++        assert!(f.identical > 0.95, "{}", f.identical);
++        assert_eq!((f.canary_hits, f.canaries_due), (9, 10));
++        assert!(e.pool_cluster().contains("twin"), "{:?}", e.clusters());
++        assert!(!pool_clustered(true, f));
++        assert!((e.weight_of("twin") - 0.9).abs() < 1e-9, "{}", e.weight_of("twin"));
++        let body = e.current().render(None);
++        assert_eq!(body["gateways"]["twin"]["in_pool_cluster"], true);
++        assert_eq!(body["gateways"]["twin"]["pool_clustered"], false);
++        assert_eq!(body["gateways"]["twin"]["weight"], 0.9);
++    }
++
++    /// W11: no `authored`/`directory` unless the bonus is on, and never a node address.
++    #[test]
++    fn stats_hide_who_earns_unless_the_bonus_is_on() {
++        let mut e = engine();
++        let g = Identity::from_secret_bytes(&[0x71; 64]);
++        let g_hex = hex::encode(g.sign_pk());
++        let mut rec = e.register(&g_hex, "bc1qpayout", false, None).unwrap();
++        rec.node_tag = "203.0.113.7:8333".into();
++        e.keys.insert(g_hex.clone(), rec);
++        e.credit_authored("bc1qminer", &g_hex, 10);
++        let body = e.current().render(Some(WindowWork::default()));
++        for k in ["authored", "directory"] {
++            assert!(body.get(k).is_none(), "{k} with the bonus off");
++        }
++        assert_eq!(body["bonus"]["sample"], Value::Null);
++        assert!(!body.to_string().contains("bc1qpayout"));
++        e.bonus_on = true;
++        e.dirty = true;
++        let body = e.current().render(Some(WindowWork { total: 100, stratum: 50, datum: 50 }));
++        assert_eq!(body["directory"][0]["payout"], "bc1qpayout");
++        assert_eq!(body["authored"][0]["identity"], "bc1qminer");
++        assert!(body["bonus"]["sample"].is_object());
++        let text = body.to_string();
++        assert!(!text.contains("203.0.113.7") && !text.contains("node"), "{text}");
++    }
++
++    /// M5: a key is found by its whole hex, never by a prefix either way.
++    #[test]
++    fn lookup_is_exact() {
++        let mut e = engine();
++        let g = "ab".repeat(32);
++        e.register(&g, "", false, None).unwrap();
++        assert!(e.lookup(&g).is_some());
++        assert!(e.lookup(&g.to_ascii_uppercase()).is_some());
++        assert!(e.lookup(&g[..16]).is_none());
++        assert!(e.lookup(&format!("{g}00")).is_none());
++    }
++
++    fn sovereignty(e: Engine) -> Arc<Sovereignty> {
++        Arc::new(Sovereignty {
++            mode: SovereigntyMode::Observe,
++            recompute: Duration::from_secs(300),
++            demo: e.demo,
++            token: "t".repeat(64),
++            engine: Mutex::new(e),
++            report: RwLock::new(Arc::new(Report::default())),
++        })
++    }
++
++    /// W2: the report is served without the engine lock, so a stats build never waits on (or
++    /// holds) it; a pass copies the store and computes outside every lock.
++    #[test]
++    fn the_report_is_read_without_the_engine_lock() {
++        let mut e = engine();
++        e.demo = false;
++        twin_of_pool(&mut e, "twin", 30);
++        let s = sovereignty(e);
++        let r = s.recompute_now();
++        assert!(r.pool_cluster.contains("twin"));
++        assert_eq!(r.body["store"]["snapshots"], 60);
++        assert!(r.body["compute_ms"].is_u64());
++        let held = s.engine();
++        let (tx, rx) = std::sync::mpsc::channel();
++        let s2 = s.clone();
++        std::thread::spawn(move || tx.send(s2.report().compute_ms).unwrap());
++        assert!(rx.recv_timeout(Duration::from_secs(2)).is_ok(), "report() blocked on the engine lock");
++        drop(held);
++    }
++
++    #[test]
++    fn the_token_is_checked_whole() {
++        let s = sovereignty(engine());
++        assert!(s.token_ok(Some(&"t".repeat(64))));
++        assert!(!s.token_ok(Some(&"t".repeat(63))));
++        assert!(!s.token_ok(Some("")));
++        assert!(!s.token_ok(None));
++        let off = Sovereignty { token: String::new(), ..Arc::try_unwrap(sovereignty(engine())).ok().unwrap() };
++        assert!(!off.token_ok(Some("")), "no token, no ingest");
++    }
++
++    /// W2 bench (`bench.sh`): 250 gateways × 2,000 snapshots. Run with
++    /// `cargo test --release -p primed bench_ -- --ignored --nocapture`.
++    #[test]
++    #[ignore]
++    fn bench_detector_pass_at_hub_scale() {
++        let (gws, per) = (250u64, MAX_SNAPSHOTS as u64);
++        let mut e = engine();
++        e.demo = false;
++        let fill = Instant::now();
++        fill_hub(&mut e, gws, per);
++        let fill = fill.elapsed();
++        let s = sovereignty(e);
++        let mut best = u64::MAX;
++        let mut copy_ms = 0;
++        for _ in 0..3 {
++            let at = Instant::now();
++            let inputs = s.engine().inputs(now());
++            copy_ms = at.elapsed().as_millis() as u64;
++            let r = compute(&inputs);
++            best = best.min(r.compute_ms);
++            assert_eq!(r.rows.len(), gws as usize);
++            assert_eq!(r.pool_cluster.len(), (gws / 5) as usize, "the copies, and only them, cluster with the pool");
++        }
++        let r = s.recompute_now();
++        let snaps = r.body["store"]["snapshots"].as_u64().unwrap();
++        let bytes = r.body["store"]["bytes"].as_u64().unwrap();
++        // the share path: an unattested share, and a job (both under the engine lock)
++        let mut e = s.engine();
++        let at = Instant::now();
++        for i in 0..100_000u32 {
++            e.note_share(&"ab".repeat(32), false, "bc1q", 1, &[1; 32], &[[2; 32]], i);
++        }
++        let share_ns = at.elapsed().as_nanos() / 100_000;
++        // with attestations on file: a share on another job, and one on the attested job
++        e.demo = true;
++        let (g_hex, prev, branches, _) = attested_job(&mut e, 0x5a);
++        e.demo = false;
++        let at = Instant::now();
++        for i in 0..100_000u32 {
++            e.note_share(&g_hex, false, "bc1q", 1, &[1; 32], &[[2; 32]], i);
++        }
++        let other_ns = at.elapsed().as_nanos() / 100_000;
++        let at = Instant::now();
++        for i in 0..100_000u32 {
++            e.note_share(&g_hex, false, "bc1q", 1, &prev, &branches, i);
++        }
++        let attested_ns = at.elapsed().as_nanos() / 100_000;
++        let at = Instant::now();
++        for i in 0..10_000u64 {
++            let br: Vec<Hash> = (0..12).map(|k| hash_of(i * 16 + k)).collect();
++            e.note_job(&"cd".repeat(32), false, Some(&[0x00, 0x14, 9, 9]), now_f64(), &[3; 32], &br);
++        }
++        let job_us = at.elapsed().as_micros() / 10_000;
++        drop(e);
++        println!(
++            "BENCH gateways={gws} snapshots_per_key={} store_snapshots={snaps} store_mb={:.0} fill_s={:.1} copy_ms={copy_ms} compute_ms={best} note_share_ns={share_ns} note_share_other_job_ns={other_ns} note_share_attested_ns={attested_ns} note_job_us={job_us}",
++            MAX_SNAPSHOTS,
++            bytes as f64 / 1e6,
++            fill.as_secs_f64()
++        );
++    }
+ }
+diff --git a/prime/primed/src/state.rs b/prime/primed/src/state.rs
+index 0524a39..d6e8aae 100644
+--- a/prime/primed/src/state.rs
++++ b/prime/primed/src/state.rs
+@@ -425,8 +425,9 @@ pub struct Shared {
+     /// Last known payout script per gateway signing key (64 hex chars). Survives reconnect
+     /// so the first empty job of a returning gateway already pays them.
+     pub gateway_payouts: Mutex<HashMap<String, GatewayPayout>>,
+-    /// Sovereign TIDES: key directory, job snapshots, attestations, detector, bonus.
+-    pub sovereignty: Mutex<crate::sovereignty::Engine>,
++    /// Sovereign TIDES: key directory, job snapshots, attestations, detector, bonus. Inert
++    /// unless `sovereignty-mode` is on.
++    pub sovereignty: crate::sovereignty::Sovereignty,
+ }
+ 
+ /// What Prime last learned as a gateway's own payout, persisted in `gateway-scripts.json`.
+diff --git a/prime/primed/src/stats.rs b/prime/primed/src/stats.rs
+index 5642048..095fed7 100644
+--- a/prime/primed/src/stats.rs
++++ b/prime/primed/src/stats.rs
+@@ -56,10 +56,20 @@ fn stale_doc(shared: &Shared, w: &tides::Window, ts: u64) -> Value {
+ }
+ 
+ pub fn build(shared: &Shared) -> Value {
++    build_timed(shared).0
++}
++
++/// [`build`], and how long it held the ledger lock (the SOV-006 bench holds this under 5 ms).
++/// The sovereignty report is read before the lock is taken and rendered after it is let go:
++/// the build never holds the ledger lock and the sovereignty engine's at once.
++pub fn build_timed(shared: &Shared) -> (Value, Duration) {
+     let ts = now();
+     let tip = shared.tip_snapshot();
++    let sovereignty = shared.sovereignty.on().then(|| shared.sovereignty.report());
+     let ledger = shared.ledger.lock().unwrap();
++    let locked = Instant::now();
+     let w = &ledger.window;
++    let sov_work = sovereignty.as_ref().filter(|r| r.needs_window()).map(|_| crate::sovereignty::WindowWork::of(w));
+ 
+     // recent work per identity for hashrate; walk the window from the newest row
+     let cutoff = ts.saturating_sub(HASHRATE_WINDOW_S) as u32;
+@@ -192,7 +202,7 @@ pub fn build(shared: &Shared) -> Value {
+         .map(|(h, p)| (h.to_string(), p.parse::<u16>().unwrap_or(shared.cfg.listen.port())))
+         .unwrap_or_else(|| (shared.cfg.advertise_address.clone(), shared.cfg.listen.port()));
+ 
+-    json!({
++    let mut doc = json!({
+         "ts": ts,
+         "build": { "name": "primed", "version": env!("CARGO_PKG_VERSION") },
+         "uptime_s": shared.started.elapsed().as_secs(),
+@@ -289,8 +299,13 @@ pub fn build(shared: &Shared) -> Value {
+         "connections_open": shared.connections.lock().unwrap().total(),
+         "owed": owed,
+         "blocks": blocks,
+-        "sovereignty": shared.sovereignty.lock().unwrap().stats_json(Some(w)),
+-    })
++    });
++    drop(ledger);
++    let held = locked.elapsed();
++    if let Some(r) = sovereignty {
++        doc["sovereignty"] = r.render(sov_work);
++    }
++    (doc, held)
+ }
+ 
+ /// The legacy `ledger.json` shape (`{"credits":[{ts,identity,work}], ...}`) for the last hour.
+@@ -334,7 +349,10 @@ pub async fn serve(shared: Arc<Shared>) {
+         let cache = cache.clone();
+         tokio::spawn(async move {
+             let _slot = slot;
+-            let mut buf = vec![0u8; 64 * 1024];
++            // With `sovereignty-mode = "off"` the listener is the one from before A2: one 2 KB
++            // read, routed on the path alone. The sovereignty ingest needs POST bodies.
++            let sovereignty = shared.sovereignty.on();
++            let mut buf = vec![0u8; if sovereignty { 64 * 1024 } else { 2048 }];
+             let n = match tokio::time::timeout(Duration::from_secs(5), sock.read(&mut buf)).await {
+                 Ok(Ok(n)) => n,
+                 _ => return,
+@@ -342,7 +360,7 @@ pub async fn serve(shared: Arc<Shared>) {
+             buf.truncate(n);
+             // A POST with Content-Length longer than the first read: pull the rest.
+             let head_end = buf.windows(4).position(|w| w == b"\r\n\r\n").map(|i| i + 4);
+-            if let Some(end) = head_end {
++            if let (true, Some(end)) = (sovereignty, head_end) {
+                 let headers = String::from_utf8_lossy(&buf[..end]);
+                 let want = headers
+                     .lines()
+@@ -351,7 +369,6 @@ pub async fn serve(shared: Arc<Shared>) {
+                     .and_then(|v| v.trim().parse::<usize>().ok())
+                     .unwrap_or(0)
+                     .min(1_000_000);
+-                let have = buf.len().saturating_sub(end);
+                 while buf.len() - end < want {
+                     let mut more = vec![0u8; (want - (buf.len() - end)).min(64 * 1024)];
+                     match tokio::time::timeout(Duration::from_secs(5), sock.read(&mut more)).await {
+@@ -360,13 +377,11 @@ pub async fn serve(shared: Arc<Shared>) {
+                         _ => break,
+                     }
+                 }
+-                let _ = have;
+             }
+             let req = String::from_utf8_lossy(&buf);
+-            let mut lines = req.split("\r\n");
+-            let start = lines.next().unwrap_or("");
+-            let mut start_w = start.split_whitespace();
++            let mut start_w = req.split_whitespace();
+             let method = start_w.next().unwrap_or("GET");
++            let method = if sovereignty { method } else { "GET" };
+             let path = start_w.next().unwrap_or("/");
+             let body = req.split("\r\n\r\n").nth(1).unwrap_or("");
+             let document = |which: usize| {
+@@ -388,15 +403,24 @@ pub async fn serve(shared: Arc<Shared>) {
+                 ("GET", "/" | "/stats.json" | "/stats") => ("200 OK", "application/json", document(0).await),
+                 ("GET", "/ledger.json") => ("200 OK", "application/json", document(1).await),
+                 ("GET", "/healthz") => ("200 OK", "text/plain", plain("ok\n")),
+-                ("GET", "/sovereignty.json" | "/sovereignty") => {
+-                    let ledger = shared.ledger.lock().unwrap();
+-                    let body = shared.sovereignty.lock().unwrap().stats_json(Some(&ledger.window)).to_string();
+-                    ("200 OK", "application/json", Arc::new(body))
++                // `sovereignty-mode = "off"`: these routes do not exist (the 404 below).
++                ("GET", "/sovereignty.json" | "/sovereignty") if shared.sovereignty.on() => {
++                    let r = shared.sovereignty.report();
++                    // one lock at a time: the window's work (only with the bonus on), then render
++                    let work = r
++                        .needs_window()
++                        .then(|| crate::sovereignty::WindowWork::of(&shared.ledger.lock().unwrap().window));
++                    ("200 OK", "application/json", Arc::new(r.render(work).to_string()))
+                 }
+-                ("POST", p) if p.starts_with("/sovereignty/") => {
+-                    match ingest(&shared, p, body) {
+-                        Ok(v) => ("200 OK", "application/json", Arc::new(v.to_string())),
+-                        Err(e) => ("400 Bad Request", "application/json", Arc::new(json!({"error": e}).to_string())),
++                ("POST", p) if p.starts_with("/sovereignty/") && shared.sovereignty.on() => {
++                    let token = header(&req, crate::sovereignty::TOKEN_HEADER);
++                    if !shared.sovereignty.token_ok(token) {
++                        ("403 Forbidden", "application/json", Arc::new(json!({"error": "sovereignty token"}).to_string()))
++                    } else {
++                        match ingest(&shared, p, body) {
++                            Ok(v) => ("200 OK", "application/json", Arc::new(v.to_string())),
++                            Err(e) => ("400 Bad Request", "application/json", Arc::new(json!({"error": e}).to_string())),
++                        }
+                     }
+                 }
+                 _ => ("404 Not Found", "text/plain", plain("not found\n")),
+@@ -457,8 +481,19 @@ pub async fn housekeeping(shared: Arc<Shared>) {
+     }
+ }
+ 
++/// A request header's value (name compared without case).
++fn header<'a>(req: &'a str, name: &str) -> Option<&'a str> {
++    let head = req.split("\r\n\r\n").next().unwrap_or("");
++    head.split("\r\n").skip(1).find_map(|l| {
++        let (k, v) = l.split_once(':')?;
++        k.trim().eq_ignore_ascii_case(name).then(|| v.trim())
++    })
++}
++
++/// `POST /sovereignty/*`, token already checked. `register` and `attest` are live in any mode
++/// but `off`; the rest are for local demos (`sovereignty-demo`).
+ fn ingest(shared: &Shared, path: &str, body: &str) -> Result<Value, String> {
+-    let demo = shared.sovereignty.lock().unwrap().demo();
++    let demo = shared.sovereignty.engine().demo();
+     let v: Value = if body.trim().is_empty() { json!({}) } else { serde_json::from_str(body).map_err(|e| e.to_string())? };
+     match path {
+         "/sovereignty/register" => {
+@@ -466,7 +501,7 @@ fn ingest(shared: &Shared, path: &str, body: &str) -> Result<Value, String> {
+             let payout = v["payout"].as_str().unwrap_or("");
+             let house = v["house"].as_bool().unwrap_or(false);
+             let sig = v["sig"].as_str();
+-            let rec = shared.sovereignty.lock().unwrap().register(g, payout, house, sig)?;
++            let rec = shared.sovereignty.engine().register(g, payout, house, sig)?;
+             Ok(serde_json::to_value(rec).unwrap())
+         }
+         "/sovereignty/snapshot" => {
+@@ -480,7 +515,7 @@ fn ingest(shared: &Shared, path: &str, body: &str) -> Result<Value, String> {
+                 .iter()
+                 .filter_map(|x| x.as_str().map(str::to_string))
+                 .collect();
+-            shared.sovereignty.lock().unwrap().note_snapshot(gw, tides::Snapshot::new(t, prev, txids));
++            shared.sovereignty.engine().note_snapshot(gw, tides::Snapshot::new(t, prev, txids));
+             Ok(json!({"ok": true}))
+         }
+         "/sovereignty/canary" => {
+@@ -495,7 +530,7 @@ fn ingest(shared: &Shared, path: &str, body: &str) -> Result<Value, String> {
+                 Some(k) => tides::CanaryKind::parse(k).ok_or("kind: own, shared or decoy")?,
+             };
+             let canary = tides::Canary { kind, ..tides::Canary::new(t, txid) };
+-            shared.sovereignty.lock().unwrap().note_canary(gw, canary);
++            shared.sovereignty.engine().note_canary(gw, canary);
+             Ok(json!({"ok": true}))
+         }
+         "/sovereignty/attest" => {
+@@ -510,7 +545,7 @@ fn ingest(shared: &Shared, path: &str, body: &str) -> Result<Value, String> {
+                 .filter_map(|x| x.as_str().map(str::to_string))
+                 .collect();
+             let expect = v["g"].as_str();
+-            let g = shared.sovereignty.lock().unwrap().ingest_attest(a, sig, cb, prev, &branches, expect)?;
++            let g = shared.sovereignty.engine().ingest_attest(a, sig, cb, prev, &branches, expect)?;
+             Ok(json!({"ok": true, "g": g}))
+         }
+         "/sovereignty/credit" => {
+@@ -527,7 +562,7 @@ fn ingest(shared: &Shared, path: &str, body: &str) -> Result<Value, String> {
+                     .map_err(|e| e.to_string())?;
+             }
+             if source != tides::SOURCE_STRATUM {
+-                shared.sovereignty.lock().unwrap().credit_authored(identity, gateway, work);
++                shared.sovereignty.engine().credit_authored(identity, gateway, work);
+             }
+             Ok(json!({"ok": true}))
+         }
+@@ -535,7 +570,7 @@ fn ingest(shared: &Shared, path: &str, body: &str) -> Result<Value, String> {
+             if !demo {
+                 return Err("sovereignty-demo is off".into());
+             }
+-            shared.sovereignty.lock().unwrap().observe(
++            shared.sovereignty.engine().observe(
+                 v["builder"].as_str().unwrap_or("unknown"),
+                 v["claimed"].as_bool().unwrap_or(false),
+                 v["verified"].as_bool().unwrap_or(false),
+@@ -547,10 +582,8 @@ fn ingest(shared: &Shared, path: &str, body: &str) -> Result<Value, String> {
+                 return Err("bonus off or not in demo".into());
+             }
+             let value = v["value"].as_u64().unwrap_or(312_500_000);
+-            let credits = {
+-                let ledger = shared.ledger.lock().unwrap();
+-                shared.sovereignty.lock().unwrap().bonus_for_block(value, &ledger.window)
+-            };
++            let work = crate::sovereignty::WindowWork::of(&shared.ledger.lock().unwrap().window);
++            let credits = shared.sovereignty.engine().bonus_for_block(value, work);
+             {
+                 let mut ledger = shared.ledger.lock().unwrap();
+                 let delta: Vec<(String, i64)> = credits.iter().map(|(i, s)| (i.clone(), *s as i64)).collect();
+@@ -568,3 +601,57 @@ fn write_atomic(path: &std::path::Path, data: &[u8]) {
+         log::debug!("could not write {}", path.display());
+     }
+ }
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    /// SOV-006 W2 bench (`bench.sh`): how long a stats build holds the ledger lock with a hub's
++    /// window, sovereignty off and on (250 gateways × 2,000 snapshots). Run with
++    /// `cargo test --release -p primed bench_ -- --ignored --nocapture`.
++    #[test]
++    #[ignore]
++    fn bench_stats_build_ledger_lock() {
++        for (mode, bonus) in [("off", false), ("publish", false), ("publish", true)] {
++            let dir = std::env::temp_dir().join(format!("sov006-stats-{mode}-{bonus}-{}", std::process::id()));
++            let _ = std::fs::remove_dir_all(&dir);
++            let shared = crate::test_shared(
++                &dir,
++                &format!("sovereignty-mode = \"{mode}\"\nsovereignty-bonus = {bonus}\nstratum-fee-bps = 2500\n"),
++            );
++            let ts = now() as u32;
++            {
++                let mut ledger = shared.ledger.lock().unwrap();
++                // 250 gateways' miners, an hour of coalesced credits
++                for i in 0..100_000u32 {
++                    let who = format!("bc1qminer{:03}", i % 250);
++                    let source = if i % 4 == 0 { tides::SOURCE_STRATUM } else { tides::SOURCE_DATUM };
++                    ledger.credit(&who, 1 + u64::from(i % 7), 900_000, ts - 3_600 + i / 28, source).unwrap();
++                }
++            }
++            if shared.sovereignty.on() {
++                crate::sovereignty::fill_hub(&mut shared.sovereignty.engine(), 250, crate::sovereignty::MAX_SNAPSHOTS as u64);
++                shared.sovereignty.recompute_now();
++            }
++            let mut held: Vec<f64> = Vec::new();
++            let mut total: Vec<f64> = Vec::new();
++            for _ in 0..30 {
++                let at = Instant::now();
++                let (doc, h) = build_timed(&shared);
++                total.push(at.elapsed().as_secs_f64() * 1e3);
++                held.push(h.as_secs_f64() * 1e3);
++                assert_eq!(doc.get("sovereignty").is_some(), mode != "off");
++            }
++            held.sort_by(|a, b| a.partial_cmp(b).unwrap());
++            total.sort_by(|a, b| a.partial_cmp(b).unwrap());
++            println!(
++                "BENCH_STATS mode={mode} bonus={bonus} ledger_lock_ms_p50={:.3} ledger_lock_ms_max={:.3} build_ms_p50={:.3} build_ms_max={:.3}",
++                held[held.len() / 2],
++                held[held.len() - 1],
++                total[total.len() / 2],
++                total[total.len() - 1]
++            );
++            let _ = std::fs::remove_dir_all(&dir);
++        }
++    }
++}
+diff --git a/prime/primed/tests/sovereignty_e2e.rs b/prime/primed/tests/sovereignty_e2e.rs
+index 9ac561c..89ff05c 100644
+--- a/prime/primed/tests/sovereignty_e2e.rs
++++ b/prime/primed/tests/sovereignty_e2e.rs
+@@ -34,9 +34,29 @@ fn make_attest(id: &Identity) -> (String, String, String, String, Vec<String>) {
+ }
+ 
+ fn post(port: u16, path: &str, body: &Value) -> Value {
+-    let payload = body.to_string();
++    post_with(port, path, body, TOKEN.with(|t| t.borrow().clone()).as_deref())
++}
++
++thread_local! {
++    /// The token of the primed this test thread talks to (`data-dir/sovereignty.token`).
++    static TOKEN: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
++}
++
++fn use_token_of(p: &common::Primed) {
++    let t = std::fs::read_to_string(p.dir.join("sovereignty.token")).expect("mode on writes a token");
++    TOKEN.with(|c| *c.borrow_mut() = Some(t.trim().to_string()));
++}
++
++fn post_with(port: u16, path: &str, body: &Value, token: Option<&str>) -> Value {
++    let (status, body) = request(port, "POST", path, &body.to_string(), token);
++    serde_json::from_str(&body).unwrap_or_else(|_| json!({"raw": body, "status": status}))
++}
++
++/// `(status line, body)` of one HTTP/1.0 request to the stats listener.
++fn request(port: u16, method: &str, path: &str, payload: &str, token: Option<&str>) -> (String, String) {
++    let auth = token.map(|t| format!("X-Sovereignty-Token: {t}\r\n")).unwrap_or_default();
+     let req = format!(
+-        "POST {path} HTTP/1.0\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{payload}",
++        "{method} {path} HTTP/1.0\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\n{auth}Content-Length: {}\r\n\r\n{payload}",
+         payload.len()
+     );
+     let mut s = TcpStream::connect(("127.0.0.1", port)).unwrap();
+@@ -44,8 +64,8 @@ fn post(port: u16, path: &str, body: &Value) -> Value {
+     let mut buf = Vec::new();
+     s.read_to_end(&mut buf).unwrap();
+     let text = String::from_utf8_lossy(&buf);
+-    let body = text.split("\r\n\r\n").nth(1).unwrap_or("");
+-    serde_json::from_str(body).unwrap_or_else(|_| json!({"raw": body}))
++    let status = text.lines().next().unwrap_or("").to_string();
++    (status, text.split("\r\n\r\n").nth(1).unwrap_or("").to_string())
+ }
+ 
+ fn hex32(i: u64) -> String {
+@@ -85,6 +105,7 @@ fn primed_flags_the_fake_gateway_and_moves_bonus_credit() {
+     let extra = r#"
+ rpc = "http://127.0.0.1:9"
+ poll = 60
++sovereignty-mode = "publish"
+ sovereignty-bonus = true
+ sovereignty-demo = true
+ sovereignty-bonus-bps = 500
+@@ -95,6 +116,13 @@ house-loopback = false
+ "#;
+     let (p, _listen) = common::start_primed(&pool, extra);
+     let stats = p.stats; // u16, passed by value to post()
++    use_token_of(&p);
++    // no token, or a wrong one: refused before anything is parsed
++    let g0 = hex::encode(Identity::from_secret_bytes(&[0x10; 64]).sign_pk());
++    for token in [None, Some("00")] {
++        let r = post_with(stats, "/sovereignty/register", &json!({"g": g0}), token);
++        assert_eq!(r["error"], "sovereignty token", "{r}");
++    }
+ 
+     let h1 = Identity::from_secret_bytes(&[0x11; 64]);
+     let h2 = Identity::from_secret_bytes(&[0x12; 64]);
+@@ -169,3 +197,56 @@ house-loopback = false
+     let flagged = sov["flagged"].as_array().unwrap();
+     assert_eq!(flagged, &vec![json!("proxy")]);
+ }
++
++/// W1: `sovereignty-mode = "off"` (the default) is the pre-A2 Prime: no `sovereignty` object,
++/// no routes, no files. Keys added by A2 other than the mode still parse (they are inert).
++#[test]
++fn mode_off_is_the_old_prime() {
++    let pool = Identity::from_secret_bytes(&[0x65; 64]);
++    for extra in ["", "sovereignty-mode = \"off\"\nsovereignty-bonus = true\nsovereignty-demo = true\n"] {
++        let (p, _listen) = common::start_primed(&pool, &format!("rpc = \"http://127.0.0.1:9\"\npoll = 60\n{extra}"));
++        let doc = common::settled_stats(&p);
++        assert!(doc.get("sovereignty").is_none(), "{extra:?}: {doc}");
++        for path in ["/sovereignty.json", "/sovereignty"] {
++            let (status, _) = request(p.stats, "GET", path, "", None);
++            assert!(status.contains("404"), "{path}: {status}");
++        }
++        for path in ["/sovereignty/register", "/sovereignty/attest", "/sovereignty/snapshot"] {
++            let (status, _) = request(p.stats, "POST", path, "{}", Some("anything"));
++            assert!(status.contains("404"), "{path}: {status}");
++        }
++        for f in ["sovereignty.token", "sovereignty-keys.json", "sovereignty-blocks.jsonl"] {
++            assert!(!p.dir.join(f).exists(), "{f} written with the mode off");
++        }
++    }
++}
++
++/// W1: `observe` serves the report but marks it unpublished; `register` needs the token and,
++/// outside the demo, a signature by G.
++#[test]
++fn mode_observe_serves_an_unpublished_report() {
++    let pool = Identity::from_secret_bytes(&[0x66; 64]);
++    let (p, _listen) =
++        common::start_primed(&pool, "rpc = \"http://127.0.0.1:9\"\npoll = 60\nsovereignty-mode = \"observe\"\nsovereignty-recompute-secs = 1\n");
++    use_token_of(&p);
++    let sov = common::settled_stats(&p)["sovereignty"].clone();
++    assert_eq!(sov["mode"], "observe");
++    assert_eq!(sov["published"], false);
++    assert!(sov["compute_ms"].is_u64());
++    assert!(sov.get("directory").is_none() && sov.get("authored").is_none(), "{sov}");
++    let g = Identity::from_secret_bytes(&[0x21; 64]);
++    let g_hex = hex::encode(g.sign_pk());
++    let r = post(p.stats, "/sovereignty/register", &json!({"g": g_hex, "payout": "bc1q"}));
++    assert_eq!(r["error"], "signature required", "{r}");
++    let msg = format!("LZT1 register G={g_hex} pool=lazarus");
++    let sig = hex::encode(g.sign(msg.as_bytes()));
++    let r = post(p.stats, "/sovereignty/register", &json!({"g": g_hex, "payout": "bc1q", "sig": sig}));
++    assert_eq!(r["g"], g_hex, "{r}");
++    let r = post(p.stats, "/sovereignty/snapshot", &json!({"gateway": "x", "t": 1.0, "prev": "00", "txids": []}));
++    assert_eq!(r["error"], "sovereignty-demo is off", "{r}");
++    let (status, body) = request(p.stats, "GET", "/sovereignty.json", "", None);
++    assert!(status.contains("200"), "{status}");
++    let doc: Value = serde_json::from_str(&body).unwrap();
++    assert_eq!(doc["mode"], "observe");
++    assert!(!body.contains("bc1q"), "no payout addresses with the bonus off: {body}");
++}
+diff --git a/prime/tides/src/entropy.rs b/prime/tides/src/entropy.rs
+index 6c380af..bf7929b 100644
+--- a/prime/tides/src/entropy.rs
++++ b/prime/tides/src/entropy.rs
+@@ -374,10 +374,29 @@ fn median(mut v: Vec<f64>) -> Option<f64> {
+     Some(if n % 2 == 1 { v[n / 2] } else { (v[n / 2 - 1] + v[n / 2]) / 2.0 })
+ }
+ 
+-type FpMap<V> = std::collections::HashMap<u64, V>;
++/// Fingerprints are already SipHash output: hash them as themselves.
++#[derive(Default)]
++struct FpHasher(u64);
++
++impl std::hash::Hasher for FpHasher {
++    fn finish(&self) -> u64 {
++        self.0
++    }
++    fn write(&mut self, bytes: &[u8]) {
++        for &b in bytes {
++            self.0 = self.0.rotate_left(8) ^ u64::from(b);
++        }
++    }
++    fn write_u64(&mut self, n: u64) {
++        self.0 = n;
++    }
++}
++
++type FpMap<V> = std::collections::HashMap<u64, V, std::hash::BuildHasherDefault<FpHasher>>;
++type FpSet = std::collections::HashSet<u64, std::hash::BuildHasherDefault<FpHasher>>;
+ 
+ fn first_on_parent(snaps: &[&Prepared]) -> FpMap<f64> {
+-    let mut first = FpMap::new();
++    let mut first = FpMap::default();
+     for s in snaps {
+         first.entry(s.prev).or_insert(s.t);
+     }
+@@ -385,7 +404,7 @@ fn first_on_parent(snaps: &[&Prepared]) -> FpMap<f64> {
+ }
+ 
+ fn first_seen(snaps: &[&Prepared]) -> FpMap<f64> {
+-    let mut seen = FpMap::new();
++    let mut seen = FpMap::default();
+     for s in snaps {
+         for &t in &s.txids {
+             seen.entry(t).or_insert(s.t);
+@@ -395,8 +414,8 @@ fn first_seen(snaps: &[&Prepared]) -> FpMap<f64> {
+ }
+ 
+ /// Times (in snapshot order) at which each of `wanted` appears in `snaps`.
+-fn occurrences(snaps: &[&Prepared], wanted: Option<&std::collections::HashSet<u64>>) -> FpMap<Vec<f64>> {
+-    let mut at: FpMap<Vec<f64>> = FpMap::new();
++fn occurrences(snaps: &[&Prepared], wanted: Option<&FpSet>) -> FpMap<Vec<f64>> {
++    let mut at: FpMap<Vec<f64>> = FpMap::default();
+     for s in snaps {
+         for &t in &s.txids {
+             if wanted.is_none_or(|w| w.contains(&t)) {
+@@ -426,7 +445,7 @@ pub struct PoolView<'a> {
+ impl<'a> PoolView<'a> {
+     pub fn new(pool: impl IntoIterator<Item = &'a Prepared>) -> Self {
+         let snaps = sort_by_t(pool);
+-        let mut by_prev: FpMap<Vec<usize>> = FpMap::new();
++        let mut by_prev: FpMap<Vec<usize>> = FpMap::default();
+         for (i, p) in snaps.iter().enumerate() {
+             by_prev.entry(p.prev).or_default().push(i);
+         }
+@@ -463,12 +482,13 @@ pub fn features(gw: &[Snapshot], pool: &[Snapshot]) -> Features {
+ pub fn features_with(gw: &[Snapshot], pool: &[Snapshot], canaries: &[Canary]) -> Features {
+     let gw: Vec<Prepared> = gw.iter().map(Prepared::new).collect();
+     let pool: Vec<Prepared> = pool.iter().map(Prepared::new).collect();
+-    features_prepared(&gw.iter().collect::<Vec<_>>(), &PoolView::new(&pool), canaries)
++    let canaries: Vec<&Canary> = canaries.iter().collect();
++    features_prepared(&gw.iter().collect::<Vec<_>>(), &PoolView::new(&pool), &canaries)
+ }
+ 
+ /// [`features_with`] on prepared snapshots and a shared [`PoolView`]: what a detector pass runs
+ /// once per gateway. Same results as the pairwise version (`reference::features_with`).
+-pub fn features_prepared(gw: &[&Prepared], pool: &PoolView, canaries: &[Canary]) -> Features {
++pub fn features_prepared(gw: &[&Prepared], pool: &PoolView, canaries: &[&Canary]) -> Features {
+     let gw = sort_by_t(gw.iter().copied());
+     let mut ident = 0usize;
+     let mut sims = 0.0;
+@@ -547,7 +567,7 @@ pub fn features_prepared(gw: &[&Prepared], pool: &PoolView, canaries: &[Canary])
+     let follower = subset * (1.0 - (lead / LEAD_REF).min(1.0));
+ 
+     let last_gw = gw.last().map(|s| s.t).unwrap_or(f64::NEG_INFINITY);
+-    let wanted: std::collections::HashSet<u64> = canaries.iter().map(|c| fp(&c.txid)).collect();
++    let wanted: FpSet = canaries.iter().map(|c| fp(&c.txid)).collect();
+     let gw_occ = occurrences(&gw, Some(&wanted));
+     // [own, shared, decoy]: (due, hits)
+     let mut tally = [(0usize, 0usize); 3];
+@@ -653,7 +673,8 @@ pub fn clusters(gws: &std::collections::BTreeMap<String, Vec<Snapshot>>) -> Vec<
+ /// Same result as `reference::clusters` (the pairwise version, O(gateways² × snapshots)).
+ pub fn clusters_prepared(gws: &[(String, Vec<&Prepared>)]) -> Vec<Vec<String>> {
+     let n = gws.len();
+-    let mut index: std::collections::HashMap<(u64, u64), Vec<(f64, u32, &Prepared)>> = std::collections::HashMap::new();
++    type Bucket<'a> = Vec<(f64, u32, &'a Prepared)>;
++    let mut index: std::collections::HashMap<(u64, u64), Bucket> = std::collections::HashMap::new();
+     for (g, (_, snaps)) in gws.iter().enumerate() {
+         for s in snaps {
+             index.entry((s.prev, s.brk)).or_default().push((s.t, g as u32, s));
+@@ -712,8 +733,8 @@ pub fn clusters_prepared(gws: &[(String, Vec<&Prepared>)]) -> Vec<Vec<String>> {
+         }
+     }
+     let mut out: std::collections::HashMap<usize, Vec<String>> = std::collections::HashMap::new();
+-    for g in 0..n {
+-        out.entry(root(&mut parent, g)).or_default().push(gws[g].0.clone());
++    for (g, (name, _)) in gws.iter().enumerate() {
++        out.entry(root(&mut parent, g)).or_default().push(name.clone());
+     }
+     for v in out.values_mut() {
+         v.sort();
+-- 
+2.43.0
+

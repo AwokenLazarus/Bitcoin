@@ -1,0 +1,68 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: michael moore <mrmoore27@pm.me>
+Date: Fri, 25 Sep 2026 07:16:08 +0000
+Subject: [PATCH 12/27] rnd/sov-002: stratum-grind --threads; keep 32 tips of
+ NTA latency
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ prime/primed/src/bin/stratum-grind.rs | 8 ++++++--
+ prime/primed/src/nta.rs               | 5 +++--
+ 2 files changed, 9 insertions(+), 4 deletions(-)
+
+diff --git a/prime/primed/src/bin/stratum-grind.rs b/prime/primed/src/bin/stratum-grind.rs
+index 5601c18..d26d960 100644
+--- a/prime/primed/src/bin/stratum-grind.rs
++++ b/prime/primed/src/bin/stratum-grind.rs
+@@ -18,6 +18,7 @@ fn main() {
+     let mut user = String::new();
+     let mut skip_empty = false;
+     let mut skip_n = false;
++    let mut threads = 0usize;
+     while let Some(a) = args.next() {
+         match a.as_str() {
+             "--host" => host = args.next().expect("--host value"),
+@@ -25,11 +26,13 @@ fn main() {
+             "--user" => user = args.next().expect("--user value"),
+             "--skip-empty" => skip_empty = true,
+             "--skip-n" => skip_n = true,
++            // Cap the worker threads (default: every core). Shared hosts want 2.
++            "--threads" | "--procs" => threads = args.next().expect("--threads value").parse().unwrap(),
+             _ => {}
+         }
+     }
+     if user.is_empty() {
+-        eprintln!("usage: stratum-grind --host HOST --port PORT --user ADDRESS [--skip-empty|--skip-n]");
++        eprintln!("usage: stratum-grind --host HOST --port PORT --user ADDRESS [--threads N] [--skip-empty|--skip-n]");
+         std::process::exit(2);
+     }
+ 
+@@ -44,7 +47,8 @@ fn main() {
+     let (hit_tx, hit_rx) = mpsc::channel::<Hit>();
+     let stop = Arc::new(AtomicBool::new(false));
+     let hashes = Arc::new(AtomicU64::new(0));
+-    let nproc = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
++    let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
++    let nproc = if threads > 0 { threads.min(cores) } else { cores };
+     for i in 0..nproc {
+         let jobs = current_job.clone();
+         let hit_tx = hit_tx.clone();
+diff --git a/prime/primed/src/nta.rs b/prime/primed/src/nta.rs
+index f7f931f..3dc26f7 100644
+--- a/prime/primed/src/nta.rs
++++ b/prime/primed/src/nta.rs
+@@ -18,8 +18,9 @@ use std::time::Instant;
+ use datum_wire::nta::{self, NtaAttest, Signer};
+ use serde_json::{json, Value};
+ 
+-/// Tips kept: the current one, and a few for a gateway still finishing work on its parent.
+-const TIPS_KEPT: usize = 8;
++/// Tips kept: the current one, a few for a gateway still finishing work on its parent, and
++/// enough history for the latency report.
++const TIPS_KEPT: usize = 32;
+ /// Latency samples kept for the percentiles.
+ const SAMPLES_KEPT: usize = 4096;
+ 
+-- 
+2.43.0
+

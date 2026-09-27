@@ -1,0 +1,40 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: michael moore <mrmoore27@pm.me>
+Date: Fri, 25 Sep 2026 11:00:17 +0000
+Subject: [PATCH 20/27] Merge resolution: Merge commit '17a8ab5' into
+ rnd/sov-s0
+
+Linearised for publication: the side-branch commits above were replayed onto the
+first parent; this commit brings the tree to exactly 400aab8 (the merge).
+---
+ prime/primed/src/config.rs | 14 ++++++++++++++
+ 1 file changed, 14 insertions(+)
+
+diff --git a/prime/primed/src/config.rs b/prime/primed/src/config.rs
+index 0ac9677..5357574 100644
+--- a/prime/primed/src/config.rs
++++ b/prime/primed/src/config.rs
+@@ -185,6 +185,20 @@ pub struct Config {
+     /// Accept HTTP ingest for snapshots / attestations / demo credits. Local rnd only.
+     #[serde(default)]
+     pub sovereignty_demo: bool,
++    /// rnd/sov-002: first height at which XBT-NTA is enforced (`-testactivationheight=nta@<h>`
++    /// on the node). From there every coinbaser pays only payees whose attestation for the tip
++    /// arrived, plus the pool, and carries the rest. Unset: coinbasers are unchanged.
++    #[serde(default)]
++    pub nta_height: Option<u32>,
++    /// File holding the pool payout key's secret (64 hex characters): the key of the
++    /// `payout-address`, which must be `OP_1 <K>` for that key. Required with `nta-height`.
++    /// Read once at start; never logged.
++    #[serde(default)]
++    pub nta_pool_key_file: Option<PathBuf>,
++    /// Test hook: behave as a Prime without NTA support even past `nta-height` (the demo's
++    /// "patched-out" Prime, whose un-attested blocks nodes refuse).
++    #[serde(default)]
++    pub nta_disabled: bool,
+     /// W8: seconds after a canary is registered (`POST /sovereignty/canary`) that the gateway's
+     /// newest job is fetched with `request_full_block` to see whether it holds the canary. Checked
+     /// on the session's 5 s tick.
+-- 
+2.43.0
+

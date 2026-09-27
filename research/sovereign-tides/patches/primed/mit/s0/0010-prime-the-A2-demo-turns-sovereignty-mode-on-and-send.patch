@@ -1,0 +1,65 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: michael moore <mrmoore27@pm.me>
+Date: Fri, 25 Sep 2026 08:20:34 +0000
+Subject: [PATCH 10/27] prime: the A2 demo turns sovereignty-mode on and sends
+ the ingest token
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ prime/scripts/rnd-a2-demo.sh  | 3 +++
+ prime/scripts/rnd-a2-feed.py  | 3 ++-
+ prime/scripts/rnd-a2-knots.py | 3 ++-
+ 3 files changed, 7 insertions(+), 2 deletions(-)
+
+diff --git a/prime/scripts/rnd-a2-demo.sh b/prime/scripts/rnd-a2-demo.sh
+index 0c30ef8..b2bc147 100755
+--- a/prime/scripts/rnd-a2-demo.sh
++++ b/prime/scripts/rnd-a2-demo.sh
+@@ -41,6 +41,7 @@ fee-bps = 0
+ stratum-fee-bps = 2500
+ datum-rebate-bps = 1000
+ house-loopback = false
++sovereignty-mode = "publish"
+ sovereignty-bonus = true
+ sovereignty-demo = true
+ sovereignty-bonus-bps = 500
+@@ -67,6 +68,8 @@ for i in $(seq 1 50); do
+   fi
+ done
+ curl -sf "$PRIME_STATS/healthz" >/dev/null
++# POST /sovereignty/* carries primed's local ingest token
++export SOV_TOKEN=$(cat "$RUN/prime/sovereignty.token")
+ 
+ echo "== feed (honest vs fake, attestation, bonus) =="
+ python3 "$HERE/rnd-a2-feed.py"
+diff --git a/prime/scripts/rnd-a2-feed.py b/prime/scripts/rnd-a2-feed.py
+index 0390158..48d0345 100755
+--- a/prime/scripts/rnd-a2-feed.py
++++ b/prime/scripts/rnd-a2-feed.py
+@@ -10,7 +10,8 @@ PRIME = os.path.abspath(os.path.join(HERE, ".."))
+ 
+ 
+ def post(path, body):
+-    req = urllib.request.Request(STATS + path, json.dumps(body).encode(), {"Content-Type": "application/json"})
++    req = urllib.request.Request(STATS + path, json.dumps(body).encode(),
++                                 {"Content-Type": "application/json", "X-Sovereignty-Token": os.environ.get("SOV_TOKEN", "")})
+     with urllib.request.urlopen(req, timeout=30) as r:
+         return json.load(r)
+ 
+diff --git a/prime/scripts/rnd-a2-knots.py b/prime/scripts/rnd-a2-knots.py
+index 1a2d9aa..f56d89f 100755
+--- a/prime/scripts/rnd-a2-knots.py
++++ b/prime/scripts/rnd-a2-knots.py
+@@ -111,7 +111,8 @@ def tx(inputs, outputs):
+ 
+ 
+ def post(path, body):
+-    req = urllib.request.Request(STATS + path, json.dumps(body).encode(), {"Content-Type": "application/json"})
++    req = urllib.request.Request(STATS + path, json.dumps(body).encode(),
++                                 {"Content-Type": "application/json", "X-Sovereignty-Token": os.environ.get("SOV_TOKEN", "")})
+     with urllib.request.urlopen(req, timeout=15) as r:
+         return json.load(r)
+ 
+-- 
+2.43.0
+

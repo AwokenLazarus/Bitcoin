@@ -1,0 +1,123 @@
+{
+ "rows": {
+  "H1": {
+   "snapshots": 360,
+   "compared": 360,
+   "identical": 0.06388888888888888,
+   "branch_sim": 0.1086183649086874,
+   "jaccard": 0.4683632776742232,
+   "jaccard_hi": 0.09166666666666666,
+   "switches": 10,
+   "switch_lag": -0.00022554397583007812,
+   "lockstep": 1.0,
+   "incl_lag": -0.0007572174072265625,
+   "lead": 0.2953929539295393,
+   "subset": 0.7010415596721419,
+   "follower": 0.0,
+   "independence": 0.936
+  },
+  "H2": {
+   "snapshots": 360,
+   "compared": 360,
+   "identical": 0.030555555555555555,
+   "branch_sim": 0.060145929339477926,
+   "jaccard": 0.35293008911733753,
+   "jaccard_hi": 0.030555555555555555,
+   "switches": 10,
+   "switch_lag": -0.000754237174987793,
+   "lockstep": 0.9,
+   "incl_lag": -0.0018148422241210938,
+   "lead": 0.3619402985074627,
+   "subset": 0.6725483888857258,
+   "follower": 0.0,
+   "independence": 0.969
+  },
+  "H3": {
+   "snapshots": 360,
+   "compared": 360,
+   "identical": 0.06388888888888888,
+   "branch_sim": 0.10350230414746521,
+   "jaccard": 0.40028541070415063,
+   "jaccard_hi": 0.06388888888888888,
+   "switches": 10,
+   "switch_lag": -0.0003134012222290039,
+   "lockstep": 1.0,
+   "incl_lag": -0.0005106925964355469,
+   "lead": 0.33559322033898303,
+   "subset": 0.7231211552084256,
+   "follower": 0.0,
+   "independence": 0.936
+  },
+  "PROXY": {
+   "snapshots": 360,
+   "compared": 360,
+   "identical": 1.0,
+   "branch_sim": 1.0,
+   "jaccard": 1.0,
+   "jaccard_hi": 1.0,
+   "switches": 10,
+   "switch_lag": 0.04732322692871094,
+   "lockstep": 1.0,
+   "incl_lag": 0.046941518783569336,
+   "lead": 0.0,
+   "subset": 1.0,
+   "follower": 1.0,
+   "independence": 0.0
+  },
+  "MIMIC": {
+   "snapshots": 360,
+   "compared": 360,
+   "identical": 0.2861111111111111,
+   "branch_sim": 0.26626671218069065,
+   "jaccard": 0.9483645615885564,
+   "jaccard_hi": 0.9222222222222223,
+   "switches": 10,
+   "switch_lag": 0.8111653327941895,
+   "lockstep": 0.0,
+   "incl_lag": 1.039795160293579,
+   "lead": 0.0,
+   "subset": 1.0,
+   "follower": 1.0,
+   "independence": 0.0
+  },
+  "HYBRID": {
+   "snapshots": 360,
+   "compared": 360,
+   "identical": 0.11666666666666667,
+   "branch_sim": 0.4210997326051092,
+   "jaccard": 0.6899964386485719,
+   "jaccard_hi": 0.1111111111111111,
+   "switches": 10,
+   "switch_lag": 0.45067906379699707,
+   "lockstep": 0.1,
+   "incl_lag": 0.41988086700439453,
+   "lead": 0.14215686274509803,
+   "subset": 0.8584938876776431,
+   "follower": 0.37033069664525786,
+   "independence": 0.63
+  }
+ },
+ "clusters": [
+  [
+   "POOL",
+   "PROXY"
+  ],
+  [
+   "H1"
+  ],
+  [
+   "H2"
+  ],
+  [
+   "H3"
+  ],
+  [
+   "HYBRID"
+  ],
+  [
+   "MIMIC"
+  ]
+ ],
+ "secs": 180.0,
+ "pool_templates": 360
+}

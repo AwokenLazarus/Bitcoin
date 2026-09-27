@@ -1,0 +1,677 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: michael moore <mrmoore27@pm.me>
+Date: Sat, 26 Sep 2026 01:33:01 +0000
+Subject: [PATCH 1/4] prime: POST /nta/attest, the direct NTA path for payees
+ that are not gateways
+
+SOV-017. A TIDES payee with no gateway (a pay-with-work provider) files its
+per-tip attestation straight to Prime's stats listener with the 0x4e fields as
+JSON. It is checked against Prime's own node exactly as 0x4e is and filed in
+the same book. Admission is for spam only: optional token (nta-attest-token-file,
+0600), a global rate (nta-attest-rate), the script must be a live payee in the
+window, and nta-attest-per-tip tries per script per tip. /nta.json gains a
+direct section.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ prime/primed/src/config.rs  |  24 +++
+ prime/primed/src/main.rs    |   9 ++
+ prime/primed/src/nta.rs     | 296 ++++++++++++++++++++++++++++++++++++
+ prime/primed/src/session.rs |  25 +--
+ prime/primed/src/state.rs   |   2 +
+ prime/primed/src/stats.rs   | 164 +++++++++++++++++++-
+ 6 files changed, 492 insertions(+), 28 deletions(-)
+
+diff --git a/prime/primed/src/config.rs b/prime/primed/src/config.rs
+index 5357574..a1afc84 100644
+--- a/prime/primed/src/config.rs
++++ b/prime/primed/src/config.rs
+@@ -199,6 +199,19 @@ pub struct Config {
+     /// "patched-out" Prime, whose un-attested blocks nodes refuse).
+     #[serde(default)]
+     pub nta_disabled: bool,
++    /// SOV-017: `POST /nta/attest` on the stats listener, the direct path for TIDES payees
++    /// that are not gateways (pay-with-work providers). At most this many submissions per
++    /// payee script per tip, refused ones included (a retry fits in the default).
++    #[serde(default = "d_nta_attest_per_tip")]
++    pub nta_attest_per_tip: u32,
++    /// SOV-017: direct attestations accepted per second across all payees, also the burst.
++    #[serde(default = "d_nta_attest_rate")]
++    pub nta_attest_rate: u32,
++    /// SOV-017: optional file holding a token (at least 32 characters) that every
++    /// `POST /nta/attest` must carry in `x-nta-token`. Unset: the signature is the only gate.
++    /// Refused if group- or world-readable; never logged.
++    #[serde(default)]
++    pub nta_attest_token_file: Option<PathBuf>,
+     /// W8: seconds after a canary is registered (`POST /sovereignty/canary`) that the gateway's
+     /// newest job is fetched with `request_full_block` to see whether it holds the canary. Checked
+     /// on the session's 5 s tick.
+@@ -301,6 +314,14 @@ fn d_sov_canary_check_gap_secs() -> u64 {
+     300
+ }
+ 
++fn d_nta_attest_per_tip() -> u32 {
++    2
++}
++
++fn d_nta_attest_rate() -> u32 {
++    50
++}
++
+ fn d_sov_recompute_secs() -> u64 {
+     300
+ }
+@@ -385,6 +406,9 @@ impl Config {
+         if c.empty_solo_fee_bps > 10_000 {
+             return Err("empty-solo-fee-bps cannot exceed 10000".into());
+         }
++        if c.nta_attest_per_tip == 0 || c.nta_attest_rate == 0 {
++            return Err("nta-attest-per-tip and nta-attest-rate must be at least 1".into());
++        }
+         if c.sovereignty_recompute_secs == 0 {
+             return Err("sovereignty-recompute-secs must be at least 1".into());
+         }
+diff --git a/prime/primed/src/main.rs b/prime/primed/src/main.rs
+index 0895616..5ca6c15 100644
+--- a/prime/primed/src/main.rs
++++ b/prime/primed/src/main.rs
+@@ -230,6 +230,13 @@ fn run(cfg: Config) -> i32 {
+             return 2;
+         }
+     };
++    let nta_direct_token = match cfg.nta_attest_token_file.as_deref().map(crate::nta::Direct::load_token).transpose() {
++        Ok(t) => t,
++        Err(e) => {
++            eprintln!("nta-attest-token-file {e}");
++            return 2;
++        }
++    };
+     let pool = match load_or_create_key(&cfg) {
+         Ok(k) => k,
+         Err(e) => {
+@@ -316,6 +323,7 @@ fn run(cfg: Config) -> i32 {
+         sovereignty: crate::sovereignty::Sovereignty::from_config(&cfg),
+         nta_pool,
+         nta: Mutex::new(Default::default()),
++        nta_direct: crate::nta::Direct::new(nta_direct_token, cfg.nta_attest_per_tip, cfg.nta_attest_rate),
+         cfg,
+     });
+     log::info!("pool pubkey {}", shared.pool.public_hex());
+@@ -572,6 +580,7 @@ pub fn test_shared(dir: &std::path::Path, extra: &str) -> Shared {
+         sovereignty: crate::sovereignty::Sovereignty::from_config(&cfg),
+         nta_pool: None,
+         nta: Mutex::new(Default::default()),
++        nta_direct: crate::nta::Direct::new(None, cfg.nta_attest_per_tip, cfg.nta_attest_rate),
+         cfg,
+     }
+ }
+diff --git a/prime/primed/src/nta.rs b/prime/primed/src/nta.rs
+index 67989c2..bf3753c 100644
+--- a/prime/primed/src/nta.rs
++++ b/prime/primed/src/nta.rs
+@@ -11,8 +11,15 @@
+ //! The (height, nBits) a coinbaser commits to are always Prime's own, from its node's tip,
+ //! never a gateway's claim: one validly signed attestation for the wrong nBits would make
+ //! every block that lists it invalid.
++//!
++//! SOV-017: a TIDES payee that is not a gateway (a pay-with-work provider, paid in coinbases
++//! other people's gateways ask for) sends the same attestation to `POST /nta/attest` instead
++//! ([`Direct`]). It is checked exactly as `0x4e` is and filed in the same book. The signature is
++//! what makes it count; [`Direct`] only keeps the endpoint from being used to burn CPU: the
++//! script must be a live payee in the window, a few tries per script per tip, a global rate.
+ 
+ use std::collections::{HashMap, HashSet, VecDeque};
++use std::sync::Mutex;
+ use std::time::Instant;
+ 
+ use datum_wire::nta::{self, NtaAttest, Signer};
+@@ -231,6 +238,224 @@ impl Book {
+     }
+ }
+ 
++/// Prime's own view of the block after `prev`: its node's tip, refreshed once if the caller is
++/// ahead of the poller. `None` if the node does not have `prev` as its tip. Noted in the book
++/// (when this Prime attests at all), so latency counts from when Prime first knew the tip.
++pub async fn target(shared: &crate::state::Shared, prev: &[u8; 32]) -> Option<Target> {
++    let from_tip = |shared: &crate::state::Shared| {
++        let tip = shared.tip_snapshot()?;
++        (tip.hash_le.as_ref() == Some(prev)).then_some(())?;
++        Some((Target { prev: *prev, height: tip.height + 1, nbits: tip.next_bits? }, tip.seen_at, tip.seen_ts))
++    };
++    let found = match from_tip(shared) {
++        Some(t) => Some(t),
++        None => {
++            crate::node::refresh_ahead(shared).await;
++            from_tip(shared)
++        }
++    };
++    let (t, seen_at, seen_ts) = found?;
++    if let Some(pool) = shared.nta_pool.as_ref().filter(|_| !shared.cfg.nta_disabled) {
++        shared.nta.lock().unwrap().note_tip(t, seen_at, seen_ts, pool);
++    }
++    Some(t)
++}
++
++/// Header a `POST /nta/attest` carries the optional token in.
++pub const TOKEN_HEADER: &str = "x-nta-token";
++/// Parents whose per-script try counts are kept; older ones are forgotten.
++const DIRECT_PREVS_KEPT: usize = 8;
++
++/// Why the direct endpoint turned a submission away before looking at its signature.
++#[derive(Clone, Copy, Debug, PartialEq, Eq)]
++pub enum Gate {
++    Token,
++    Rate,
++    NotPayee,
++    PerTip,
++}
++
++impl Gate {
++    pub fn status(self) -> &'static str {
++        match self {
++            Gate::Token | Gate::NotPayee => "403 Forbidden",
++            Gate::Rate | Gate::PerTip => "429 Too Many Requests",
++        }
++    }
++
++    pub fn reason(self) -> &'static str {
++        match self {
++            Gate::Token => "nta token",
++            Gate::Rate => "rate limited: too many attestations to this Prime",
++            Gate::NotPayee => "not a live TIDES payee in the current window",
++            Gate::PerTip => "rate limited: too many attestations for this script on this tip",
++        }
++    }
++}
++
++#[derive(Debug)]
++struct DirectState {
++    /// Token bucket for the global cap: tokens left, and when it was last refilled.
++    bucket: f64,
++    refilled: Instant,
++    /// Parent (internal order) -> x-only key -> submissions, newest parent last.
++    tries: VecDeque<([u8; 32], HashMap<[u8; 32], u32>)>,
++    accepted: u64,
++    duplicate: u64,
++    refused: u64,
++    unknown_tip: u64,
++    gated: HashMap<&'static str, u64>,
++}
++
++/// Admission for `POST /nta/attest` (SOV-017).
++#[derive(Debug)]
++pub struct Direct {
++    token: Option<String>,
++    per_tip: u32,
++    rate: f64,
++    state: Mutex<DirectState>,
++}
++
++impl Direct {
++    pub fn new(token: Option<String>, per_tip: u32, rate: u32) -> Self {
++        let rate = f64::from(rate.max(1));
++        Self {
++            token,
++            per_tip: per_tip.max(1),
++            rate,
++            state: Mutex::new(DirectState {
++                bucket: rate,
++                refilled: Instant::now(),
++                tries: VecDeque::new(),
++                accepted: 0,
++                duplicate: 0,
++                refused: 0,
++                unknown_tip: 0,
++                gated: HashMap::new(),
++            }),
++        }
++    }
++
++    /// Read `nta-attest-token-file`: refused if group- or world-readable, or shorter than 32.
++    pub fn load_token(path: &std::path::Path) -> Result<String, String> {
++        #[cfg(unix)]
++        {
++            use std::os::unix::fs::PermissionsExt;
++            let mode = std::fs::metadata(path).map_err(|e| format!("{}: {e}", path.display()))?.permissions().mode();
++            if mode & 0o077 != 0 {
++                return Err(format!("{}: mode {:o}; the token must not be group- or world-readable (chmod 600)", path.display(), mode & 0o777));
++            }
++        }
++        let t = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?.trim().to_string();
++        if t.len() < 32 {
++            return Err(format!("{}: the token must be at least 32 characters", path.display()));
++        }
++        Ok(t)
++    }
++
++    fn gate(&self, st: &mut DirectState, g: Gate) -> Result<(), Gate> {
++        *st.gated.entry(g.reason()).or_insert(0) += 1;
++        Err(g)
++    }
++
++    /// The token, when one is configured (constant time), then one unit of the global rate.
++    /// Checked before the body is parsed.
++    pub fn admit(&self, presented: Option<&str>) -> Result<(), Gate> {
++        let mut st = self.state.lock().unwrap();
++        if let Some(want) = &self.token {
++            let p = presented.unwrap_or("").trim().as_bytes();
++            let w = want.as_bytes();
++            if w.len() != p.len() || w.iter().zip(p).fold(0u8, |acc, (x, y)| acc | (x ^ y)) != 0 {
++                return self.gate(&mut st, Gate::Token);
++            }
++        }
++        let now = Instant::now();
++        st.bucket = (st.bucket + now.duration_since(st.refilled).as_secs_f64() * self.rate).min(self.rate);
++        st.refilled = now;
++        if st.bucket < 1.0 {
++            return self.gate(&mut st, Gate::Rate);
++        }
++        st.bucket -= 1.0;
++        Ok(())
++    }
++
++    /// One try for `key` on `prev`, if it is a live payee and under `nta-attest-per-tip`.
++    pub fn admit_script(&self, key: &[u8; 32], prev: &[u8; 32], live_payee: bool) -> Result<(), Gate> {
++        let mut st = self.state.lock().unwrap();
++        if !live_payee {
++            return self.gate(&mut st, Gate::NotPayee);
++        }
++        let i = match st.tries.iter().position(|(p, _)| p == prev) {
++            Some(i) => i,
++            None => {
++                st.tries.push_back((*prev, HashMap::new()));
++                while st.tries.len() > DIRECT_PREVS_KEPT {
++                    st.tries.pop_front();
++                }
++                st.tries.len() - 1
++            }
++        };
++        let n = st.tries[i].1.entry(*key).or_insert(0);
++        if *n >= self.per_tip {
++            return self.gate(&mut st, Gate::PerTip);
++        }
++        *n += 1;
++        Ok(())
++    }
++
++    /// Count what the book made of an admitted submission.
++    pub fn note(&self, outcome: &Outcome) {
++        let mut st = self.state.lock().unwrap();
++        match outcome {
++            Outcome::Accepted(_) => st.accepted += 1,
++            Outcome::Duplicate => st.duplicate += 1,
++            Outcome::UnknownTip => st.unknown_tip += 1,
++            Outcome::Refused(_) => st.refused += 1,
++        }
++    }
++
++    pub fn stats_json(&self) -> Value {
++        let st = self.state.lock().unwrap();
++        json!({
++            "token": self.token.is_some(),
++            "per_tip": self.per_tip,
++            "rate": self.rate,
++            "accepted": st.accepted,
++            "duplicate": st.duplicate,
++            "refused": st.refused,
++            "unknown_tip": st.unknown_tip,
++            "gated": st.gated,
++        })
++    }
++}
++
++/// A `POST /nta/attest` body: the `0x4e` fields as JSON.
++/// `{"version": 1, "key": hex32, "height": n, "nbits": "207fffff", "prev": hex32, "sig": hex64}`,
++/// `prev` in RPC (display) order as `getbestblockhash` prints it; `nbits` as GBT's `bits`
++/// (8 hex) or a number.
++pub fn parse_direct(body: &str) -> Result<NtaAttest, String> {
++    let v: Value = serde_json::from_str(body).map_err(|e| format!("json: {e}"))?;
++    if v["version"].as_u64() != Some(u64::from(nta::ATTEST_VERSION)) {
++        return Err(format!("version: {} only", nta::ATTEST_VERSION));
++    }
++    fn hexn<const N: usize>(v: &Value, k: &str) -> Result<[u8; N], String> {
++        let s = v[k].as_str().ok_or_else(|| format!("{k}: missing"))?;
++        let raw = hex::decode(s).map_err(|_| format!("{k}: not hex"))?;
++        raw.try_into().map_err(|_| format!("{k}: {N} bytes"))
++    }
++    let key = hexn::<32>(&v, "key")?;
++    let height = v["height"].as_u64().and_then(|h| u32::try_from(h).ok()).ok_or("height: u32")?;
++    let nbits = match &v["nbits"] {
++        Value::String(s) if s.len() == 8 => u32::from_str_radix(s, 16).map_err(|_| "nbits: 8 hex")?,
++        Value::Number(n) => n.as_u64().and_then(|n| u32::try_from(n).ok()).ok_or("nbits: u32")?,
++        _ => return Err("nbits: 8 hex or a number".into()),
++    };
++    let mut prev_hash = hexn::<32>(&v, "prev")?;
++    prev_hash.reverse();
++    let sig = hexn::<64>(&v, "sig")?;
++    Ok(NtaAttest { key, height, nbits, prev_hash, sig })
++}
++
+ #[cfg(test)]
+ mod tests {
+     use super::*;
+@@ -286,4 +511,75 @@ mod tests {
+         // a paid script nobody signed: no attestation list, so no coinbaser
+         assert!(b.attestations(T, &[(1, c.script())], &pool).is_none());
+     }
++
++    #[test]
++    fn the_direct_gate_keeps_order_token_rate_payee_per_tip() {
++        let d = Direct::new(Some("k".repeat(32)), 2, 3);
++        assert_eq!(d.admit(None), Err(Gate::Token));
++        assert_eq!(d.admit(Some(&"k".repeat(31))), Err(Gate::Token));
++        let tok = "k".repeat(32);
++        for _ in 0..3 {
++            assert_eq!(d.admit(Some(&tok)), Ok(()));
++        }
++        // the bucket holds `rate`: the fourth at once is over it
++        assert_eq!(d.admit(Some(&tok)), Err(Gate::Rate));
++
++        let open = Direct::new(None, 2, 1000);
++        assert_eq!(open.admit(None), Ok(()), "no token configured: none needed");
++        let (k1, k2) = ([1u8; 32], [2u8; 32]);
++        assert_eq!(open.admit_script(&k1, &T.prev, false), Err(Gate::NotPayee));
++        assert_eq!(open.admit_script(&k1, &T.prev, true), Ok(()));
++        assert_eq!(open.admit_script(&k1, &T.prev, true), Ok(()));
++        assert_eq!(open.admit_script(&k1, &T.prev, true), Err(Gate::PerTip));
++        assert_eq!(open.admit_script(&k2, &T.prev, true), Ok(()), "per script");
++        assert_eq!(open.admit_script(&k1, &[9u8; 32], true), Ok(()), "per tip");
++        // an old parent's counts are forgotten once enough newer ones arrive
++        for i in 0..DIRECT_PREVS_KEPT as u8 {
++            open.admit_script(&k1, &[100 + i; 32], true).unwrap();
++        }
++        assert_eq!(open.admit_script(&k1, &T.prev, true), Ok(()));
++        let st = open.stats_json();
++        assert_eq!(st["gated"][Gate::PerTip.reason()], 1);
++        assert_eq!(st["gated"][Gate::NotPayee.reason()], 1);
++    }
++
++    #[test]
++    fn a_direct_body_is_the_0x4e_fields_with_prev_in_rpc_order() {
++        let gw = signer(2);
++        let a = gw.attest(T.height, T.nbits, &T.prev);
++        let mut prev_rpc = T.prev;
++        prev_rpc[0] = 0xaa; // not symmetric, so byte order matters
++        let a = NtaAttest { prev_hash: prev_rpc, sig: gw.sign(T.height, T.nbits, &prev_rpc), ..a };
++        let mut display = prev_rpc;
++        display.reverse();
++        let body = |nbits: Value, version: u64| {
++            json!({"version": version, "key": hex::encode(a.key), "height": a.height, "nbits": nbits,
++                   "prev": hex::encode(display), "sig": hex::encode(a.sig)})
++            .to_string()
++        };
++        let parsed = parse_direct(&body(json!("207fffff"), 1)).unwrap();
++        assert_eq!(parsed, a);
++        assert!(parsed.verify());
++        assert_eq!(parse_direct(&body(json!(0x207f_ffffu32), 1)).unwrap(), a);
++        assert!(parse_direct(&body(json!("207fff"), 1)).is_err());
++        assert!(parse_direct(&body(json!("207fffff"), 2)).is_err());
++        assert!(parse_direct("{}").is_err());
++        assert!(parse_direct("not json").is_err());
++    }
++
++    #[test]
++    fn a_token_file_anyone_else_can_read_is_refused() {
++        use std::os::unix::fs::PermissionsExt;
++        let dir = std::env::temp_dir().join(format!("sov017-token-{}", std::process::id()));
++        std::fs::create_dir_all(&dir).unwrap();
++        let p = dir.join("token");
++        std::fs::write(&p, format!("{}\n", "t".repeat(40))).unwrap();
++        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o644)).unwrap();
++        assert!(Direct::load_token(&p).unwrap_err().contains("chmod 600"));
++        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o600)).unwrap();
++        assert_eq!(Direct::load_token(&p).unwrap(), "t".repeat(40));
++        std::fs::write(&p, "short").unwrap();
++        assert!(Direct::load_token(&p).is_err());
++        let _ = std::fs::remove_dir_all(&dir);
++    }
+ }
+diff --git a/prime/primed/src/session.rs b/prime/primed/src/session.rs
+index a2b4376..a2a18d2 100644
+--- a/prime/primed/src/session.rs
++++ b/prime/primed/src/session.rs
+@@ -845,30 +845,9 @@ impl Session {
+         self.shared.nta_pool.as_ref().filter(|_| !self.shared.cfg.nta_disabled)
+     }
+ 
+-    /// Prime's own view of the block after `prev`: its node's tip, refreshed once if the
+-    /// gateway is ahead of the poller. `None` if the node does not have `prev` as its tip.
++    /// Prime's own view of the block after `prev`; see [`crate::nta::target`].
+     async fn nta_target(&self, prev: &[u8; 32]) -> Option<crate::nta::Target> {
+-        let from_tip = |shared: &Shared| {
+-            let tip = shared.tip_snapshot()?;
+-            (tip.hash_le.as_ref() == Some(prev)).then_some(())?;
+-            Some((
+-                crate::nta::Target { prev: *prev, height: tip.height + 1, nbits: tip.next_bits? },
+-                tip.seen_at,
+-                tip.seen_ts,
+-            ))
+-        };
+-        let found = match from_tip(&self.shared) {
+-            Some(t) => Some(t),
+-            None => {
+-                node::refresh_ahead(&self.shared).await;
+-                from_tip(&self.shared)
+-            }
+-        };
+-        let (t, seen_at, seen_ts) = found?;
+-        if let Some(pool) = self.nta_pool() {
+-            self.shared.nta.lock().unwrap().note_tip(t, seen_at, seen_ts, pool);
+-        }
+-        Some(t)
++        crate::nta::target(&self.shared, prev).await
+     }
+ 
+     async fn on_nta_attest(&mut self, a: datum_wire::nta::NtaAttest) -> Result<(), SessionError> {
+diff --git a/prime/primed/src/state.rs b/prime/primed/src/state.rs
+index 129feb0..e0e2a7d 100644
+--- a/prime/primed/src/state.rs
++++ b/prime/primed/src/state.rs
+@@ -431,6 +431,8 @@ pub struct Shared {
+     /// rnd/sov-002: the pool payout key when `nta-height` is set, and the attestation book.
+     pub nta_pool: Option<datum_wire::nta::Signer>,
+     pub nta: Mutex<crate::nta::Book>,
++    /// SOV-017: admission for `POST /nta/attest` (payees that are not gateways).
++    pub nta_direct: crate::nta::Direct,
+ }
+ 
+ /// What Prime last learned as a gateway's own payout, persisted in `gateway-scripts.json`.
+diff --git a/prime/primed/src/stats.rs b/prime/primed/src/stats.rs
+index 8c44d5e..bd2af7f 100644
+--- a/prime/primed/src/stats.rs
++++ b/prime/primed/src/stats.rs
+@@ -350,8 +350,9 @@ pub async fn serve(shared: Arc<Shared>) {
+         tokio::spawn(async move {
+             let _slot = slot;
+             // With `sovereignty-mode = "off"` the listener is the one from before A2: one 2 KB
+-            // read, routed on the path alone. The sovereignty ingest needs POST bodies.
+-            let sovereignty = shared.sovereignty.on();
++            // read, routed on the path alone. The sovereignty ingest needs POST bodies, and so
++            // does `POST /nta/attest` (SOV-017) once `nta-height` is set.
++            let sovereignty = shared.sovereignty.on() || shared.cfg.nta_height.is_some();
+             let mut buf = vec![0u8; if sovereignty { 64 * 1024 } else { 2048 }];
+             let n = match tokio::time::timeout(Duration::from_secs(5), sock.read(&mut buf)).await {
+                 Ok(Ok(n)) => n,
+@@ -409,9 +410,15 @@ pub async fn serve(shared: Arc<Shared>) {
+                         .nta
+                         .lock()
+                         .unwrap()
+-                        .stats_json(shared.cfg.nta_height, shared.nta_pool.as_ref())
+-                        .to_string();
+-                    ("200 OK", "application/json", Arc::new(body))
++                        .stats_json(shared.cfg.nta_height, shared.nta_pool.as_ref());
++                    let mut body = body;
++                    body["direct"] = shared.nta_direct.stats_json();
++                    ("200 OK", "application/json", Arc::new(body.to_string()))
++                }
++                // SOV-017: a TIDES payee that is not a gateway files its attestation for a tip.
++                ("POST", "/nta/attest") if shared.cfg.nta_height.is_some() => {
++                    let (status, v) = direct_attest(&shared, &req, body, peer).await;
++                    (status, "application/json", Arc::new(v.to_string()))
+                 }
+                 // `sovereignty-mode = "off"`: these routes do not exist (the 404 below).
+                 ("GET", "/sovereignty.json" | "/sovereignty") if shared.sovereignty.on() => {
+@@ -512,6 +519,53 @@ pub async fn housekeeping(shared: Arc<Shared>) {
+     }
+ }
+ 
++/// `POST /nta/attest` (SOV-017): the direct path for payees that are not gateways, such as
++/// pay-with-work providers. Same fields as the `0x4e` body, checked against this Prime's own
++/// node exactly as `0x4e` is, filed in the same book. In order, cheapest first: token (if
++/// configured), global rate, body, live payee in the window, tries per script per tip, then
++/// tip and signature.
++async fn direct_attest(shared: &Arc<Shared>, req: &str, body: &str, peer: std::net::SocketAddr) -> (&'static str, Value) {
++    let Some(pool) = shared.nta_pool.as_ref().filter(|_| !shared.cfg.nta_disabled) else {
++        return ("503 Service Unavailable", json!({"error": "this Prime does not build attested coinbasers"}));
++    };
++    let gated = |g: crate::nta::Gate| (g.status(), json!({"error": g.reason()}));
++    if let Err(g) = shared.nta_direct.admit(header(req, crate::nta::TOKEN_HEADER)) {
++        return gated(g);
++    }
++    let a = match crate::nta::parse_direct(body) {
++        Ok(a) => a,
++        Err(e) => return ("400 Bad Request", json!({"error": e})),
++    };
++    let script = a.script();
++    let live = shared.coinbaser_base().scripts.values().any(|s| *s == script);
++    if let Err(g) = shared.nta_direct.admit_script(&a.key, &a.prev_hash, live) {
++        log::debug!("NTA direct from {peer}: key {} {}", &hex::encode(a.key)[..16], g.reason());
++        return gated(g);
++    }
++    let target = crate::nta::target(shared, &a.prev_hash).await;
++    let outcome = shared.nta.lock().unwrap().add(&a, target, "direct", pool);
++    shared.nta_direct.note(&outcome);
++    let key = &hex::encode(a.key)[..16];
++    match outcome {
++        crate::nta::Outcome::Accepted(ms) => {
++            log::info!("NTA direct attestation height={} key={key} +{ms:.1} ms after the tip", a.height);
++            ("200 OK", json!({"ok": true, "outcome": "accepted", "height": a.height, "ms": (ms * 10.0).round() / 10.0}))
++        }
++        crate::nta::Outcome::Duplicate => ("200 OK", json!({"ok": true, "outcome": "duplicate", "height": a.height})),
++        crate::nta::Outcome::UnknownTip => {
++            let tip = shared.tip_snapshot().and_then(|t| t.hash_le).map(|mut h| {
++                h.reverse();
++                hex::encode(h)
++            });
++            ("409 Conflict", json!({"error": "not this Prime's node's tip", "tip": tip}))
++        }
++        crate::nta::Outcome::Refused(why) => {
++            log::info!("NTA direct attestation from {peer} refused: key={key} {why}");
++            ("422 Unprocessable Entity", json!({"error": why}))
++        }
++    }
++}
++
+ /// A request header's value (name compared without case).
+ fn header<'a>(req: &'a str, name: &str) -> Option<&'a str> {
+     let head = req.split("\r\n\r\n").next().unwrap_or("");
+@@ -690,6 +744,106 @@ fn write_atomic(path: &std::path::Path, data: &[u8]) {
+ mod tests {
+     use super::*;
+ 
++    /// SOV-017: the endpoint end to end on a test Prime whose node tip is set by hand.
++    #[tokio::test]
++    async fn direct_attest_files_live_payees_on_the_nodes_tip_and_turns_the_rest_away() {
++        use datum_wire::nta::Signer;
++        let dir = std::env::temp_dir().join(format!("sov017-direct-{}", std::process::id()));
++        let _ = std::fs::remove_dir_all(&dir);
++        let mut shared = crate::test_shared(&dir, "nta-height = 100\nnta-attest-per-tip = 2\nnta-attest-rate = 1000\n");
++        let sk = |n: u8| {
++            let mut k = [0u8; 32];
++            k[31] = n;
++            Signer::from_secret(&k).unwrap()
++        };
++        let (pool, provider, stranger) = (sk(1), sk(2), sk(3));
++        shared.nta_pool = Some(sk(1));
++        let shared = Arc::new(shared);
++        let addr = bech32::segwit::encode_v1(bech32::hrp::BC, &provider.key()).unwrap();
++        shared.ledger.lock().unwrap().credit(&addr, 1000, 100, now() as u32, tides::SOURCE_DATUM).unwrap();
++        let (prev, nbits) = ([7u8; 32], 0x207f_ffffu32);
++        let mut prev_be = prev;
++        prev_be.reverse();
++        shared.tip_tx.send_replace(Some(crate::state::Tip {
++            height: 120,
++            hash: hex::encode(prev_be),
++            difficulty: 1.0,
++            hash_le: Some(prev),
++            parent_le: None,
++            bits: Some(nbits),
++            next_bits: Some(nbits),
++            seen_at: Instant::now(),
++            seen_ts: now(),
++        }));
++        let peer: std::net::SocketAddr = "127.0.0.1:5".parse().unwrap();
++        let body = |s: &Signer, height: u32, prev_le: [u8; 32]| {
++            let a = s.attest(height, nbits, &prev_le);
++            let mut d = prev_le;
++            d.reverse();
++            json!({"version": 1, "key": hex::encode(a.key), "height": height, "nbits": format!("{nbits:08x}"),
++                   "prev": hex::encode(d), "sig": hex::encode(a.sig)})
++            .to_string()
++        };
++        let req = "POST /nta/attest HTTP/1.1\r\n\r\n";
++
++        let (st, v) = direct_attest(&shared, req, &body(&stranger, 121, prev), peer).await;
++        assert_eq!((st, v["error"].as_str()), ("403 Forbidden", Some(crate::nta::Gate::NotPayee.reason())));
++        // a signature for another tip: the node does not have it
++        let (st, _) = direct_attest(&shared, req, &body(&provider, 121, [8u8; 32]), peer).await;
++        assert_eq!(st, "409 Conflict");
++        // the right tip but a height the node would not build: signed, still refused
++        let (st, _) = direct_attest(&shared, req, &body(&provider, 122, prev), peer).await;
++        assert_eq!(st, "422 Unprocessable Entity");
++        // the refused try counted: one left on this tip, then the cap holds even for a good one
++        let (st, _) = direct_attest(&shared, req, &body(&provider, 122, prev), peer).await;
++        assert_eq!(st, "422 Unprocessable Entity");
++        let (st, _) = direct_attest(&shared, req, &body(&provider, 121, prev), peer).await;
++        assert_eq!(st, "429 Too Many Requests");
++        assert!(!shared.nta.lock().unwrap().payable(crate::nta::Target { prev, height: 121, nbits }, &pool).contains(&provider.script()));
++
++        // next tip: accepted first time, then a duplicate, then capped
++        let prev2 = [9u8; 32];
++        let mut prev2_be = prev2;
++        prev2_be.reverse();
++        shared.tip_tx.send_modify(|t| {
++            let t = t.as_mut().unwrap();
++            t.height = 121;
++            t.hash = hex::encode(prev2_be);
++            t.hash_le = Some(prev2);
++            t.seen_at = Instant::now();
++        });
++        let (st, v) = direct_attest(&shared, req, &body(&provider, 122, prev2), peer).await;
++        assert_eq!((st, v["outcome"].as_str()), ("200 OK", Some("accepted")), "{v}");
++        let (st, v) = direct_attest(&shared, req, &body(&provider, 122, prev2), peer).await;
++        assert_eq!((st, v["outcome"].as_str()), ("200 OK", Some("duplicate")));
++        let (st, _) = direct_attest(&shared, req, &body(&provider, 122, prev2), peer).await;
++        assert_eq!(st, "429 Too Many Requests");
++        let t2 = crate::nta::Target { prev: prev2, height: 122, nbits };
++        assert!(shared.nta.lock().unwrap().payable(t2, &pool).contains(&provider.script()));
++        let direct = shared.nta_direct.stats_json();
++        assert_eq!((direct["accepted"].as_u64(), direct["refused"].as_u64(), direct["unknown_tip"].as_u64()), (Some(1), Some(2), Some(1)));
++        let _ = std::fs::remove_dir_all(&dir);
++    }
++
++    #[tokio::test]
++    async fn direct_attest_needs_the_token_when_one_is_set_and_nta_on() {
++        let dir = std::env::temp_dir().join(format!("sov017-direct-tok-{}", std::process::id()));
++        let _ = std::fs::remove_dir_all(&dir);
++        let mut shared = crate::test_shared(&dir, "nta-height = 100\n");
++        let peer: std::net::SocketAddr = "127.0.0.1:5".parse().unwrap();
++        let (st, _) = direct_attest(&Arc::new(crate::test_shared(&dir, "nta-height = 100\n")), "", "{}", peer).await;
++        assert_eq!(st, "503 Service Unavailable", "no pool key: NTA is not built here");
++        shared.nta_pool = datum_wire::nta::Signer::from_secret(&[1u8; 32]);
++        shared.nta_direct = crate::nta::Direct::new(Some("s".repeat(32)), 2, 50);
++        let shared = Arc::new(shared);
++        let (st, _) = direct_attest(&shared, "POST /nta/attest HTTP/1.1\r\n\r\n", "{}", peer).await;
++        assert_eq!(st, "403 Forbidden");
++        let with = format!("POST /nta/attest HTTP/1.1\r\nX-NTA-Token: {}\r\n\r\n", "s".repeat(32));
++        let (st, _) = direct_attest(&shared, &with, "{}", peer).await;
++        assert_eq!(st, "400 Bad Request", "past the token, the body is looked at");
++        let _ = std::fs::remove_dir_all(&dir);
++    }
++
+     /// SOV-006 W2 bench (`bench.sh`): how long a stats build holds the ledger lock with a hub's
+     /// window, sovereignty off and on (250 gateways × 2,000 snapshots). Run with
+     /// `cargo test --release -p primed bench_ -- --ignored --nocapture`.
+-- 
+2.43.0
+

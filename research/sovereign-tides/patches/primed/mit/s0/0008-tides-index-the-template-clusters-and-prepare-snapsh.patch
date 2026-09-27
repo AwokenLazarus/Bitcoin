@@ -1,0 +1,944 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: michael moore <mrmoore27@pm.me>
+Date: Fri, 25 Sep 2026 07:56:53 +0000
+Subject: [PATCH 08/27] tides: index the template clusters and prepare
+ snapshots once
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+The detector rehashed every snapshot on every call and compared every
+pair of gateways: O(gateways² × snapshots), 233 s per stats build at
+240 gateways (SOV-003). Snapshots are now prepared once when recorded
+(txids fingerprinted, merkle branches cached), the pool's snapshots are
+indexed once per pass, and clusters come from one (parent, branches)
+index. The pairwise code stays as entropy::reference, and property
+tests hold the new code to it on random worlds.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ prime/tides/src/entropy.rs | 767 ++++++++++++++++++++++++++++++++-----
+ 1 file changed, 661 insertions(+), 106 deletions(-)
+
+diff --git a/prime/tides/src/entropy.rs b/prime/tides/src/entropy.rs
+index 22e3516..6c380af 100644
+--- a/prime/tides/src/entropy.rs
++++ b/prime/tides/src/entropy.rs
+@@ -193,14 +193,6 @@ pub struct Features {
+     pub flagged: bool,
+ }
+ 
+-#[derive(Clone)]
+-struct Prepared {
+-    t: f64,
+-    prev: String,
+-    txids: Vec<String>,
+-    br: Vec<Vec<u8>>,
+-}
+-
+ fn dsha(b: &[u8]) -> [u8; 32] {
+     use sha2::{Digest, Sha256};
+     let first = Sha256::digest(b);
+@@ -220,6 +212,10 @@ fn decode_txid(hex: &str) -> Option<[u8; 32]> {
+ 
+ /// Stratum merkle branches for the coinbase path, from the template's txids (hex).
+ pub fn branches(txids: &[String]) -> Vec<Vec<u8>> {
++    branches32(txids).into_iter().map(|b| b.to_vec()).collect()
++}
++
++fn branches32(txids: &[String]) -> Vec<[u8; 32]> {
+     let mut out = Vec::new();
+     let mut level: Vec<Option<[u8; 32]>> = std::iter::once(None).chain(txids.iter().filter_map(|t| decode_txid(t).map(Some))).collect();
+     // if a txid failed to decode, still keep a placeholder so the caller sees a mismatch
+@@ -235,11 +231,7 @@ pub fn branches(txids: &[String]) -> Vec<Vec<u8>> {
+             .collect();
+     }
+     while level.len() > 1 {
+-        if let Some(b) = level.get(1).and_then(|x| *x) {
+-            out.push(b.to_vec());
+-        } else {
+-            out.push(vec![0; 32]);
+-        }
++        out.push(level.get(1).and_then(|x| *x).unwrap_or([0; 32]));
+         if level.len() % 2 == 1 {
+             level.push(*level.last().unwrap());
+         }
+@@ -260,7 +252,7 @@ pub fn branches(txids: &[String]) -> Vec<Vec<u8>> {
+ }
+ 
+ /// b10c-style weighted similarity of two branch lists (1.0 = same template).
+-pub fn branch_sim(a: &[Vec<u8>], b: &[Vec<u8>]) -> f64 {
++pub fn branch_sim<T: PartialEq>(a: &[T], b: &[T]) -> f64 {
+     let n = a.len().max(b.len());
+     if n == 0 {
+         return 1.0;
+@@ -289,40 +281,176 @@ pub fn jaccard(a: &[String], b: &[String]) -> f64 {
+     inter as f64 / union as f64
+ }
+ 
+-fn prep(snaps: &[Snapshot]) -> Vec<Prepared> {
+-    let mut v: Vec<Prepared> = snaps
+-        .iter()
+-        .map(|s| Prepared { t: s.t, prev: s.prev.clone(), txids: s.txids.clone(), br: branches(&s.txids) })
+-        .collect();
++/// Jaccard of two sorted, deduplicated fingerprint sets.
++fn jaccard_sorted(a: &[u64], b: &[u64]) -> f64 {
++    if a.is_empty() && b.is_empty() {
++        return 1.0;
++    }
++    let inter = inter_sorted(a, b);
++    inter as f64 / (a.len() + b.len() - inter) as f64
++}
++
++fn inter_sorted(a: &[u64], b: &[u64]) -> usize {
++    let (mut i, mut j, mut n) = (0, 0, 0);
++    while i < a.len() && j < b.len() {
++        match a[i].cmp(&b[j]) {
++            std::cmp::Ordering::Less => i += 1,
++            std::cmp::Ordering::Greater => j += 1,
++            std::cmp::Ordering::Equal => {
++                n += 1;
++                i += 1;
++                j += 1;
++            }
++        }
++    }
++    n
++}
++
++/// A txid, parent or branch list as the detector compares it: a 64-bit SipHash of the string
++/// (fixed keys, so equal inputs agree within a process; never persisted). Two distinct txids
++/// collide with probability ~2⁻⁶⁴ per pair.
++pub fn fp(s: &str) -> u64 {
++    use std::hash::{Hash, Hasher};
++    #[allow(deprecated)]
++    let mut h = std::hash::SipHasher::new_with_keys(0x5452_4944_4553_0006, 0x0006_5345_4449_5254);
++    s.hash(&mut h);
++    h.finish()
++}
++
++fn fp_branches(br: &[[u8; 32]]) -> u64 {
++    use std::hash::{Hash, Hasher};
++    #[allow(deprecated)]
++    let mut h = std::hash::SipHasher::new_with_keys(0x6272_616e_6368_0006, 0x0006_6863_6e61_7262);
++    br.hash(&mut h);
++    h.finish()
++}
++
++/// A snapshot prepared once, when it is recorded: txids and parent fingerprinted, merkle
++/// branches computed. The detector never rehashes a snapshot, and the store holds no hex.
++#[derive(Clone, Debug, PartialEq)]
++pub struct Prepared {
++    pub t: f64,
++    prev: u64,
++    /// Template order, duplicates kept.
++    txids: Vec<u64>,
++    /// Sorted and deduplicated.
++    set: Vec<u64>,
++    br: Vec<[u8; 32]>,
++    brk: u64,
++}
++
++impl Prepared {
++    pub fn new(s: &Snapshot) -> Self {
++        Self::from_parts(s.t, &s.prev, &s.txids)
++    }
++
++    pub fn from_parts(t: f64, prev: &str, txids: &[String]) -> Self {
++        let ids: Vec<u64> = txids.iter().map(|x| fp(x)).collect();
++        let mut set = ids.clone();
++        set.sort_unstable();
++        set.dedup();
++        let br = branches32(txids);
++        Prepared { t, prev: fp(prev), txids: ids, set, brk: fp_branches(&br), br }
++    }
++
++    /// Bytes the snapshot store holds for this one (for the memory bound).
++    pub fn heap_bytes(&self) -> usize {
++        std::mem::size_of::<Self>() + self.txids.capacity() * 8 + self.set.capacity() * 8 + self.br.capacity() * 32
++    }
++}
++
++fn sort_by_t<'a>(snaps: impl IntoIterator<Item = &'a Prepared>) -> Vec<&'a Prepared> {
++    let mut v: Vec<&Prepared> = snaps.into_iter().collect();
+     v.sort_by(|a, b| a.t.partial_cmp(&b.t).unwrap_or(std::cmp::Ordering::Equal));
+     v
+ }
+ 
+-fn first_on_parent(snaps: &[Prepared]) -> std::collections::HashMap<String, f64> {
+-    let mut first = std::collections::HashMap::new();
++fn median(mut v: Vec<f64>) -> Option<f64> {
++    if v.is_empty() {
++        return None;
++    }
++    v.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
++    let n = v.len();
++    Some(if n % 2 == 1 { v[n / 2] } else { (v[n / 2 - 1] + v[n / 2]) / 2.0 })
++}
++
++type FpMap<V> = std::collections::HashMap<u64, V>;
++
++fn first_on_parent(snaps: &[&Prepared]) -> FpMap<f64> {
++    let mut first = FpMap::new();
+     for s in snaps {
+-        first.entry(s.prev.clone()).or_insert(s.t);
++        first.entry(s.prev).or_insert(s.t);
+     }
+     first
+ }
+ 
+-fn first_seen(snaps: &[Prepared]) -> std::collections::HashMap<String, f64> {
+-    let mut seen = std::collections::HashMap::new();
++fn first_seen(snaps: &[&Prepared]) -> FpMap<f64> {
++    let mut seen = FpMap::new();
+     for s in snaps {
+-        for t in &s.txids {
+-            seen.entry(t.clone()).or_insert(s.t);
++        for &t in &s.txids {
++            seen.entry(t).or_insert(s.t);
+         }
+     }
+     seen
+ }
+ 
+-fn median(mut v: Vec<f64>) -> Option<f64> {
+-    if v.is_empty() {
+-        return None;
++/// Times (in snapshot order) at which each of `wanted` appears in `snaps`.
++fn occurrences(snaps: &[&Prepared], wanted: Option<&std::collections::HashSet<u64>>) -> FpMap<Vec<f64>> {
++    let mut at: FpMap<Vec<f64>> = FpMap::new();
++    for s in snaps {
++        for &t in &s.txids {
++            if wanted.is_none_or(|w| w.contains(&t)) {
++                at.entry(t).or_default().push(s.t);
++            }
++        }
++    }
++    at
++}
++
++/// The first `t` in `[from, to]` of an occurrence list in snapshot order.
++fn first_between(times: Option<&Vec<f64>>, from: f64, to: f64) -> Option<f64> {
++    let times = times?;
++    let i = times.partition_point(|&t| t < from);
++    times.get(i).copied().filter(|&t| t >= from && t <= to)
++}
++
++/// The pool node's snapshots, indexed once per detector pass and shared by every gateway.
++pub struct PoolView<'a> {
++    snaps: Vec<&'a Prepared>,
++    by_prev: FpMap<Vec<usize>>,
++    first_parent: FpMap<f64>,
++    first_seen: FpMap<f64>,
++    occ: FpMap<Vec<f64>>,
++}
++
++impl<'a> PoolView<'a> {
++    pub fn new(pool: impl IntoIterator<Item = &'a Prepared>) -> Self {
++        let snaps = sort_by_t(pool);
++        let mut by_prev: FpMap<Vec<usize>> = FpMap::new();
++        for (i, p) in snaps.iter().enumerate() {
++            by_prev.entry(p.prev).or_default().push(i);
++        }
++        PoolView {
++            first_parent: first_on_parent(&snaps),
++            first_seen: first_seen(&snaps),
++            occ: occurrences(&snaps, None),
++            by_prev,
++            snaps,
++        }
++    }
++
++    /// Pool snapshots on `s`'s parent inside the comparison window, in time order.
++    fn candidates(&self, s: &Prepared) -> impl Iterator<Item = &'a Prepared> + '_ {
++        let bucket: &[usize] = self.by_prev.get(&s.prev).map(Vec::as_slice).unwrap_or(&[]);
++        // a coarse bound with slack, then the exact test the pairwise version used
++        let lo = bucket.partition_point(|&i| self.snaps[i].t < s.t - WINDOW - 1.0);
++        let t = s.t;
++        bucket[lo..]
++            .iter()
++            .map(|&i| self.snaps[i])
++            .take_while(move |p| p.t <= t + 0.05 + 1.0)
++            .filter(move |p| t - WINDOW <= p.t && p.t <= t + 0.05)
+     }
+-    v.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+-    let n = v.len();
+-    Some(if n % 2 == 1 { v[n / 2] } else { (v[n / 2 - 1] + v[n / 2]) / 2.0 })
+ }
+ 
+ /// Detector features for `gw` against the pool node's snapshots, without canaries.
+@@ -330,33 +458,33 @@ pub fn features(gw: &[Snapshot], pool: &[Snapshot]) -> Features {
+     features_with(gw, pool, &[])
+ }
+ 
+-fn first_with(snaps: &[Prepared], txid: &str, from: f64, to: f64) -> Option<f64> {
+-    snaps.iter().find(|s| s.t >= from && s.t <= to && s.txids.iter().any(|t| t == txid)).map(|s| s.t)
+-}
+-
+ /// Detector features for `gw` against the pool node's snapshots and the canaries handed
+ /// to `gw`'s node.
+ pub fn features_with(gw: &[Snapshot], pool: &[Snapshot], canaries: &[Canary]) -> Features {
+-    let gw = prep(gw);
+-    let pool = prep(pool);
+-    let mut by_prev: std::collections::HashMap<&str, Vec<&Prepared>> = std::collections::HashMap::new();
+-    for p in &pool {
+-        by_prev.entry(p.prev.as_str()).or_default().push(p);
+-    }
++    let gw: Vec<Prepared> = gw.iter().map(Prepared::new).collect();
++    let pool: Vec<Prepared> = pool.iter().map(Prepared::new).collect();
++    features_prepared(&gw.iter().collect::<Vec<_>>(), &PoolView::new(&pool), canaries)
++}
++
++/// [`features_with`] on prepared snapshots and a shared [`PoolView`]: what a detector pass runs
++/// once per gateway. Same results as the pairwise version (`reference::features_with`).
++pub fn features_prepared(gw: &[&Prepared], pool: &PoolView, canaries: &[Canary]) -> Features {
++    let gw = sort_by_t(gw.iter().copied());
+     let mut ident = 0usize;
+     let mut sims = 0.0;
+     let mut jacs = 0.0;
+     let mut jhi = 0usize;
+     let mut n = 0usize;
++    let mut sub = 0.0;
++    let mut subn = 0usize;
++    let mut recent: Vec<u64> = Vec::new();
+     for s in &gw {
+-        let Some(cands) = by_prev.get(s.prev.as_str()) else { continue };
+-        let cands: Vec<&&Prepared> =
+-            cands.iter().filter(|p| s.t - WINDOW <= p.t && p.t <= s.t + 0.05).collect();
++        let cands: Vec<&Prepared> = pool.candidates(s).collect();
+         if cands.is_empty() {
+             continue;
+         }
+         n += 1;
+-        if cands.iter().any(|p| p.br == s.br) {
++        if cands.iter().any(|p| p.brk == s.brk && p.br == s.br) {
+             ident += 1;
+         }
+         let near = cands
+@@ -368,20 +496,33 @@ pub fn features_with(gw: &[Snapshot], pool: &[Snapshot], canaries: &[Canary]) ->
+             })
+             .unwrap();
+         sims += branch_sim(&s.br, &near.br);
+-        let j = jaccard(&s.txids, &near.txids);
++        let j = jaccard_sorted(&s.set, &near.set);
+         jacs += j;
+         if j >= 0.98 {
+             jhi += 1;
+         }
++        if !s.txids.is_empty() {
++            recent.clear();
++            for p in &cands {
++                recent.extend_from_slice(&p.set);
++            }
++            if !recent.is_empty() {
++                recent.sort_unstable();
++                recent.dedup();
++                subn += 1;
++                let hit = s.txids.iter().filter(|t| recent.binary_search(t).is_ok()).count();
++                sub += hit as f64 / s.txids.len() as f64;
++            }
++        }
+     }
+-    let pf = first_on_parent(&pool);
++    let pf = &pool.first_parent;
+     let gf = first_on_parent(&gw);
+     // Tips both saw, minus the one each started on (its first-seen time is just the start).
+-    let start_p = pool.first().map(|p| p.prev.as_str());
+-    let start_g = gw.first().map(|p| p.prev.as_str());
++    let start_p = pool.snaps.first().map(|p| p.prev);
++    let start_g = gw.first().map(|p| p.prev);
+     let lags: Vec<f64> = gf
+         .iter()
+-        .filter(|(p, _)| Some(p.as_str()) != start_p && Some(p.as_str()) != start_g)
++        .filter(|(p, _)| Some(**p) != start_p && Some(**p) != start_g)
+         .filter_map(|(p, &gt)| pf.get(p).map(|&pt| gt - pt))
+         .collect();
+     let tip_lead = if lags.is_empty() {
+@@ -389,7 +530,7 @@ pub fn features_with(gw: &[Snapshot], pool: &[Snapshot], canaries: &[Canary]) ->
+     } else {
+         lags.iter().filter(|&&l| l < -LEAD_MARGIN).count() as f64 / lags.len() as f64
+     };
+-    let pseen = first_seen(&pool);
++    let pseen = &pool.first_seen;
+     let gseen = first_seen(&gw);
+     let incl: Vec<f64> = gseen.iter().filter_map(|(t, &gt)| pseen.get(t).map(|&pt| gt - pt)).collect();
+     let lead = if gseen.is_empty() {
+@@ -401,36 +542,19 @@ pub fn features_with(gw: &[Snapshot], pool: &[Snapshot], canaries: &[Canary]) ->
+             .count() as f64
+             / gseen.len() as f64
+     };
+-    let mut sub = 0.0;
+-    let mut subn = 0usize;
+-    for s in &gw {
+-        if s.txids.is_empty() {
+-            continue;
+-        }
+-        let mut recent = std::collections::HashSet::new();
+-        if let Some(cands) = by_prev.get(s.prev.as_str()) {
+-            for p in cands {
+-                if s.t - WINDOW <= p.t && p.t <= s.t + 0.05 {
+-                    recent.extend(p.txids.iter().cloned());
+-                }
+-            }
+-        }
+-        if !recent.is_empty() {
+-            subn += 1;
+-            let hit = s.txids.iter().filter(|t| recent.contains(*t)).count();
+-            sub += hit as f64 / s.txids.len() as f64;
+-        }
+-    }
+     let identical = if n > 0 { ident as f64 / n as f64 } else { 0.0 };
+     let subset = if subn > 0 { sub / subn as f64 } else { 0.0 };
+     let follower = subset * (1.0 - (lead / LEAD_REF).min(1.0));
+ 
+     let last_gw = gw.last().map(|s| s.t).unwrap_or(f64::NEG_INFINITY);
++    let wanted: std::collections::HashSet<u64> = canaries.iter().map(|c| fp(&c.txid)).collect();
++    let gw_occ = occurrences(&gw, Some(&wanted));
+     // [own, shared, decoy]: (due, hits)
+     let mut tally = [(0usize, 0usize); 3];
+     let mut leaks = 0usize;
+     for c in canaries {
+-        let pool_at = first_with(&pool, &c.txid, c.t - WINDOW, f64::INFINITY);
++        let id = fp(&c.txid);
++        let pool_at = first_between(pool.occ.get(&id), c.t - WINDOW, f64::INFINITY);
+         if pool_at.is_some() && c.kind != CanaryKind::Decoy {
+             leaks += 1;
+         }
+@@ -439,7 +563,7 @@ pub fn features_with(gw: &[Snapshot], pool: &[Snapshot], canaries: &[Canary]) ->
+         }
+         let (due, hits) = &mut tally[c.kind as usize];
+         *due += 1;
+-        if let Some(at) = first_with(&gw, &c.txid, c.t, c.t + CANARY_WINDOW) {
++        if let Some(at) = first_between(gw_occ.get(&id), c.t, c.t + CANARY_WINDOW) {
+             // a decoy counts however it got there; a must-carry canary only if the pool's
+             // template cannot have been the source
+             if c.kind == CanaryKind::Decoy || pool_at.is_none_or(|pt| at < pt - LEAD_MARGIN) {
+@@ -513,48 +637,83 @@ pub fn features_with(gw: &[Snapshot], pool: &[Snapshot], canaries: &[Canary]) ->
+ 
+ /// Share of `a`'s snapshots whose branches equal one of `b`'s (same parent, within window).
+ pub fn pair_identical(a: &[Snapshot], b: &[Snapshot]) -> f64 {
+-    let a = prep(a);
+-    let b = prep(b);
+-    let mut idx: std::collections::HashMap<(String, Vec<Vec<u8>>), Vec<f64>> = std::collections::HashMap::new();
+-    for s in &b {
+-        idx.entry((s.prev.clone(), s.br.clone())).or_default().push(s.t);
+-    }
+-    if a.is_empty() {
+-        return 0.0;
+-    }
+-    let hits = a
+-        .iter()
+-        .filter(|s| {
+-            idx.get(&(s.prev.clone(), s.br.clone())).is_some_and(|ts| ts.iter().any(|t| (t - s.t).abs() <= WINDOW))
+-        })
+-        .count();
+-    hits as f64 / a.len() as f64
++    reference::pair_identical(a, b)
+ }
+ 
+ /// Single-linkage clusters of gateways whose templates are identical ≥ 80% of the time.
+ pub fn clusters(gws: &std::collections::BTreeMap<String, Vec<Snapshot>>) -> Vec<Vec<String>> {
+-    let names: Vec<String> = gws.keys().cloned().collect();
+-    let mut parent: std::collections::HashMap<String, String> = names.iter().map(|n| (n.clone(), n.clone())).collect();
+-    fn root(parent: &mut std::collections::HashMap<String, String>, mut x: String) -> String {
+-        while parent[&x] != x {
+-            x = parent[&x].clone();
++    let prepared: Vec<(String, Vec<Prepared>)> =
++        gws.iter().map(|(n, s)| (n.clone(), s.iter().map(Prepared::new).collect())).collect();
++    let refs: Vec<(String, Vec<&Prepared>)> = prepared.iter().map(|(n, v)| (n.clone(), v.iter().collect())).collect();
++    clusters_prepared(&refs)
++}
++
++/// [`clusters`] through one index `(parent, branches) → [(t, gateway)]` instead of every pair
++/// of gateways: O(total snapshots + matches within the window). `gws` names must be unique.
++/// Same result as `reference::clusters` (the pairwise version, O(gateways² × snapshots)).
++pub fn clusters_prepared(gws: &[(String, Vec<&Prepared>)]) -> Vec<Vec<String>> {
++    let n = gws.len();
++    let mut index: std::collections::HashMap<(u64, u64), Vec<(f64, u32, &Prepared)>> = std::collections::HashMap::new();
++    for (g, (_, snaps)) in gws.iter().enumerate() {
++        for s in snaps {
++            index.entry((s.prev, s.brk)).or_default().push((s.t, g as u32, s));
++        }
++    }
++    // matched[a·n + b]: snapshots of `a` that `b` had too (same key, |Δt| ≤ WINDOW)
++    let mut matched = vec![0u32; n * n];
++    let mut stamp = vec![usize::MAX; n];
++    let mut id = 0usize;
++    for bucket in index.values_mut() {
++        bucket.sort_by(|x, y| x.0.partial_cmp(&y.0).unwrap_or(std::cmp::Ordering::Equal));
++        let mut lo = 0usize;
++        for i in 0..bucket.len() {
++            let (t, a, s) = bucket[i];
++            id += 1;
++            while lo < bucket.len() && bucket[lo].0 < t - WINDOW - 1.0 {
++                lo += 1;
++            }
++            for &(u, b, o) in &bucket[lo..] {
++                if u > t + WINDOW + 1.0 {
++                    break;
++                }
++                if b == a || stamp[b as usize] == id || (u - t).abs() > WINDOW || o.br != s.br || o.prev != s.prev {
++                    continue;
++                }
++                stamp[b as usize] = id;
++                matched[a as usize * n + b as usize] += 1;
++            }
++        }
++    }
++    let mut parent: Vec<usize> = (0..n).collect();
++    fn root(parent: &mut [usize], mut x: usize) -> usize {
++        while parent[x] != x {
++            parent[x] = parent[parent[x]];
++            x = parent[x];
+         }
+         x
+     }
+-    for (i, a) in names.iter().enumerate() {
+-        for b in names.iter().skip(i + 1) {
+-            let ab = pair_identical(&gws[a], &gws[b]);
+-            let ba = pair_identical(&gws[b], &gws[a]);
+-            if ab.min(ba) >= CLUSTER_THRESHOLD {
+-                let ra = root(&mut parent, a.clone());
+-                let rb = root(&mut parent, b.clone());
+-                parent.insert(ra, rb);
++    let share = |a: usize, b: usize| {
++        let len = gws[a].1.len();
++        if len == 0 {
++            0.0
++        } else {
++            matched[a * n + b] as f64 / len as f64
++        }
++    };
++    for a in 0..n {
++        for b in a + 1..n {
++            if matched[a * n + b] == 0 {
++                continue;
++            }
++            if share(a, b).min(share(b, a)) >= CLUSTER_THRESHOLD {
++                let (ra, rb) = (root(&mut parent, a), root(&mut parent, b));
++                parent[ra] = rb;
+             }
+         }
+     }
+-    let mut out: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
+-    for n in &names {
+-        out.entry(root(&mut parent, n.clone())).or_default().push(n.clone());
++    let mut out: std::collections::HashMap<usize, Vec<String>> = std::collections::HashMap::new();
++    for g in 0..n {
++        out.entry(root(&mut parent, g)).or_default().push(gws[g].0.clone());
+     }
+     for v in out.values_mut() {
+         v.sort();
+@@ -575,6 +734,280 @@ pub fn report(
+     (rows, cl)
+ }
+ 
++/// The detector before SOV-006: pairwise and string-keyed, rehashing every snapshot on every
++/// call. Kept as the oracle the property tests and the bench hold the indexed version to.
++pub mod reference {
++    use super::*;
++
++    #[derive(Clone)]
++    struct Prepared {
++        t: f64,
++        prev: String,
++        txids: Vec<String>,
++        br: Vec<Vec<u8>>,
++    }
++
++    fn prep(snaps: &[Snapshot]) -> Vec<Prepared> {
++        let mut v: Vec<Prepared> = snaps
++            .iter()
++            .map(|s| Prepared { t: s.t, prev: s.prev.clone(), txids: s.txids.clone(), br: branches(&s.txids) })
++            .collect();
++        v.sort_by(|a, b| a.t.partial_cmp(&b.t).unwrap_or(std::cmp::Ordering::Equal));
++        v
++    }
++
++    fn first_on_parent(snaps: &[Prepared]) -> std::collections::HashMap<String, f64> {
++        let mut first = std::collections::HashMap::new();
++        for s in snaps {
++            first.entry(s.prev.clone()).or_insert(s.t);
++        }
++        first
++    }
++
++    fn first_seen(snaps: &[Prepared]) -> std::collections::HashMap<String, f64> {
++        let mut seen = std::collections::HashMap::new();
++        for s in snaps {
++            for t in &s.txids {
++                seen.entry(t.clone()).or_insert(s.t);
++            }
++        }
++        seen
++    }
++
++    fn first_with(snaps: &[Prepared], txid: &str, from: f64, to: f64) -> Option<f64> {
++        snaps.iter().find(|s| s.t >= from && s.t <= to && s.txids.iter().any(|t| t == txid)).map(|s| s.t)
++    }
++
++    /// Pre-SOV-006 `features_with`.
++    pub fn features_with(gw: &[Snapshot], pool: &[Snapshot], canaries: &[Canary]) -> Features {
++        let gw = prep(gw);
++        let pool = prep(pool);
++        let mut by_prev: std::collections::HashMap<&str, Vec<&Prepared>> = std::collections::HashMap::new();
++        for p in &pool {
++            by_prev.entry(p.prev.as_str()).or_default().push(p);
++        }
++        let mut ident = 0usize;
++        let mut sims = 0.0;
++        let mut jacs = 0.0;
++        let mut jhi = 0usize;
++        let mut n = 0usize;
++        for s in &gw {
++            let Some(cands) = by_prev.get(s.prev.as_str()) else { continue };
++            let cands: Vec<&&Prepared> =
++                cands.iter().filter(|p| s.t - WINDOW <= p.t && p.t <= s.t + 0.05).collect();
++            if cands.is_empty() {
++                continue;
++            }
++            n += 1;
++            if cands.iter().any(|p| p.br == s.br) {
++                ident += 1;
++            }
++            let near = cands
++                .iter()
++                .min_by(|a, b| {
++                    let da = if a.t <= s.t { s.t - a.t } else { 1e9 };
++                    let db = if b.t <= s.t { s.t - b.t } else { 1e9 };
++                    da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
++                })
++                .unwrap();
++            sims += branch_sim(&s.br, &near.br);
++            let j = jaccard(&s.txids, &near.txids);
++            jacs += j;
++            if j >= 0.98 {
++                jhi += 1;
++            }
++        }
++        let pf = first_on_parent(&pool);
++        let gf = first_on_parent(&gw);
++        // Tips both saw, minus the one each started on (its first-seen time is just the start).
++        let start_p = pool.first().map(|p| p.prev.as_str());
++        let start_g = gw.first().map(|p| p.prev.as_str());
++        let lags: Vec<f64> = gf
++            .iter()
++            .filter(|(p, _)| Some(p.as_str()) != start_p && Some(p.as_str()) != start_g)
++            .filter_map(|(p, &gt)| pf.get(p).map(|&pt| gt - pt))
++            .collect();
++        let tip_lead = if lags.is_empty() {
++            0.0
++        } else {
++            lags.iter().filter(|&&l| l < -LEAD_MARGIN).count() as f64 / lags.len() as f64
++        };
++        let pseen = first_seen(&pool);
++        let gseen = first_seen(&gw);
++        let incl: Vec<f64> = gseen.iter().filter_map(|(t, &gt)| pseen.get(t).map(|&pt| gt - pt)).collect();
++        let lead = if gseen.is_empty() {
++            0.0
++        } else {
++            gseen
++                .iter()
++                .filter(|(t, &gt)| pseen.get(*t).is_none_or(|&pt| gt < pt - LEAD_MARGIN))
++                .count() as f64
++                / gseen.len() as f64
++        };
++        let mut sub = 0.0;
++        let mut subn = 0usize;
++        for s in &gw {
++            if s.txids.is_empty() {
++                continue;
++            }
++            let mut recent = std::collections::HashSet::new();
++            if let Some(cands) = by_prev.get(s.prev.as_str()) {
++                for p in cands {
++                    if s.t - WINDOW <= p.t && p.t <= s.t + 0.05 {
++                        recent.extend(p.txids.iter().cloned());
++                    }
++                }
++            }
++            if !recent.is_empty() {
++                subn += 1;
++                let hit = s.txids.iter().filter(|t| recent.contains(*t)).count();
++                sub += hit as f64 / s.txids.len() as f64;
++            }
++        }
++        let identical = if n > 0 { ident as f64 / n as f64 } else { 0.0 };
++        let subset = if subn > 0 { sub / subn as f64 } else { 0.0 };
++        let follower = subset * (1.0 - (lead / LEAD_REF).min(1.0));
++
++        let last_gw = gw.last().map(|s| s.t).unwrap_or(f64::NEG_INFINITY);
++        // [own, shared, decoy]: (due, hits)
++        let mut tally = [(0usize, 0usize); 3];
++        let mut leaks = 0usize;
++        for c in canaries {
++            let pool_at = first_with(&pool, &c.txid, c.t - WINDOW, f64::INFINITY);
++            if pool_at.is_some() && c.kind != CanaryKind::Decoy {
++                leaks += 1;
++            }
++            if c.t + CANARY_DUE > last_gw {
++                continue;
++            }
++            let (due, hits) = &mut tally[c.kind as usize];
++            *due += 1;
++            if let Some(at) = first_with(&gw, &c.txid, c.t, c.t + CANARY_WINDOW) {
++                // a decoy counts however it got there; a must-carry canary only if the pool's
++                // template cannot have been the source
++                if c.kind == CanaryKind::Decoy || pool_at.is_none_or(|pt| at < pt - LEAD_MARGIN) {
++                    *hits += 1;
++                }
++            }
++        }
++        let rate = |(due, hits): (usize, usize)| (due > 0).then(|| hits as f64 / due as f64);
++        let judged = |(due, hits): (usize, usize)| (due >= CANARY_MIN).then(|| hits as f64 / due as f64);
++        let [own, shared, decoy] = tally;
++        let carry: Vec<f64> = [judged(own), judged(shared)].into_iter().flatten().collect();
++        let mut reasons = Vec::new();
++        if judged(own).is_some_and(|r| r < CANARY_FLAG) {
++            reasons.push("own-canaries-missed");
++        }
++        if judged(shared).is_some_and(|r| r < CANARY_FLAG) {
++            reasons.push("shared-canaries-missed");
++        }
++        if judged(decoy).is_some_and(|r| r >= DECOY_FLAG) {
++            reasons.push("decoys-carried");
++        }
++        let flagged = !reasons.is_empty();
++        // Carrying no decoys proves nothing (any source but the pool's carries none), so decoys
++        // alone can convict but never clear.
++        let (evidence, independence) = if flagged {
++            ("canary", 0.0)
++        } else if !carry.is_empty() {
++            ("canary", carry.iter().copied().fold(1.0, f64::min))
++        } else if n >= MIN_COMPARED {
++            ("timing", (lead / LEAD_REF).max(tip_lead / TIP_LEAD_REF).min(1.0))
++        } else {
++            ("none", 0.0)
++        };
++        Features {
++            snapshots: gw.len(),
++            compared: n,
++            identical,
++            branch_sim: if n > 0 { sims / n as f64 } else { 0.0 },
++            jaccard: if n > 0 { jacs / n as f64 } else { 0.0 },
++            jaccard_hi: if n > 0 { jhi as f64 / n as f64 } else { 0.0 },
++            switches: lags.len(),
++            switch_lag: median(lags.clone()),
++            lockstep: if lags.is_empty() {
++                0.0
++            } else {
++                lags.iter().filter(|x| x.abs() <= LOCKSTEP).count() as f64 / lags.len() as f64
++            },
++            incl_lag: median(incl),
++            lead,
++            tip_lead,
++            subset,
++            follower,
++            canaries: canaries.len(),
++            canaries_due: own.0,
++            canary_hits: own.1,
++            canary_rate: rate(own),
++            shared_due: shared.0,
++            shared_hits: shared.1,
++            shared_rate: rate(shared),
++            decoys_due: decoy.0,
++            decoys_carried: decoy.1,
++            decoy_rate: rate(decoy),
++            canary_pool_leaks: leaks,
++            flag_reasons: reasons,
++            evidence,
++            independence: (independence.clamp(0.0, 1.0) * 1000.0).round() / 1000.0,
++            insufficient: evidence == "none",
++            flagged,
++        }
++    }
++
++    /// Pre-SOV-006 `pair_identical`.
++    pub fn pair_identical(a: &[Snapshot], b: &[Snapshot]) -> f64 {
++        let a = prep(a);
++        let b = prep(b);
++        let mut idx: std::collections::HashMap<(String, Vec<Vec<u8>>), Vec<f64>> = std::collections::HashMap::new();
++        for s in &b {
++            idx.entry((s.prev.clone(), s.br.clone())).or_default().push(s.t);
++        }
++        if a.is_empty() {
++            return 0.0;
++        }
++        let hits = a
++            .iter()
++            .filter(|s| {
++                idx.get(&(s.prev.clone(), s.br.clone())).is_some_and(|ts| ts.iter().any(|t| (t - s.t).abs() <= WINDOW))
++            })
++            .count();
++        hits as f64 / a.len() as f64
++    }
++
++    /// Pre-SOV-006 `clusters`: single-linkage clusters of gateways whose templates are identical ≥ 80% of the time.
++    pub fn clusters(gws: &std::collections::BTreeMap<String, Vec<Snapshot>>) -> Vec<Vec<String>> {
++        let names: Vec<String> = gws.keys().cloned().collect();
++        let mut parent: std::collections::HashMap<String, String> = names.iter().map(|n| (n.clone(), n.clone())).collect();
++        fn root(parent: &mut std::collections::HashMap<String, String>, mut x: String) -> String {
++            while parent[&x] != x {
++                x = parent[&x].clone();
++            }
++            x
++        }
++        for (i, a) in names.iter().enumerate() {
++            for b in names.iter().skip(i + 1) {
++                let ab = pair_identical(&gws[a], &gws[b]);
++                let ba = pair_identical(&gws[b], &gws[a]);
++                if ab.min(ba) >= CLUSTER_THRESHOLD {
++                    let ra = root(&mut parent, a.clone());
++                    let rb = root(&mut parent, b.clone());
++                    parent.insert(ra, rb);
++                }
++            }
++        }
++        let mut out: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
++        for n in &names {
++            out.entry(root(&mut parent, n.clone())).or_default().push(n.clone());
++        }
++        for v in out.values_mut() {
++            v.sort();
++        }
++        let mut groups: Vec<Vec<String>> = out.into_values().collect();
++        groups.sort_by(|a, b| b.len().cmp(&a.len()).then_with(|| a.cmp(b)));
++        groups
++    }
++}
++
+ /// Independence as parts-per-million for the TIDES bonus weight.
+ pub fn independence_ppm(f: &Features) -> u32 {
+     (f.independence.clamp(0.0, 1.0) * 1_000_000.0).round() as u32
+@@ -956,6 +1389,128 @@ mod tests {
+         assert_eq!(CanaryKind::parse("x"), None);
+     }
+ 
++    /// A small random world for the property tests: a pool and `k` gateways that copy it
++    /// (exactly, late, partly or not at all), on a coarse time grid so window edges are hit
++    /// exactly, with repeated and non-hex txids, empty templates and every canary kind.
++    fn random_world(seed: u64) -> (std::collections::BTreeMap<String, Vec<Snapshot>>, Vec<Canary>) {
++        let mut s = seed.wrapping_mul(0x9e37_79b9_7f4a_7c15) | 1;
++        let mut next = |m: u64| {
++            s ^= s << 13;
++            s ^= s >> 7;
++            s ^= s << 17;
++            s % m.max(1)
++        };
++        let tx = |i: u64| if i % 11 == 0 { format!("x{i}") } else { hex32(i) };
++        let k = 2 + next(6) as usize;
++        let n = 5 + next(40) as usize;
++        let mut pool = Vec::new();
++        for i in 0..n {
++            let t = (i as u64 * (1 + next(4))) as f64 * 0.5;
++            let prev = hex32(next(3));
++            let txids: Vec<String> = (0..next(6)).map(|_| tx(next(12))).collect();
++            pool.push(Snapshot::new(t, prev, txids));
++        }
++        let mut gws = std::collections::BTreeMap::new();
++        for g in 0..k {
++            let style = next(4);
++            let mut v = Vec::new();
++            for p in &pool {
++                if next(10) < 2 {
++                    continue;
++                }
++                let dt = [0.0, 0.5, 3.0, 3.5, -3.0, 0.05, 1.0][next(7) as usize];
++                let mut txids = p.txids.clone();
++                match style {
++                    0 => {}
++                    1 if next(3) == 0 => txids.push(tx(next(12))),
++                    2 => txids = (0..next(6)).map(|_| tx(next(12))).collect(),
++                    _ if next(2) == 0 => txids.reverse(),
++                    _ => {}
++                }
++                v.push(Snapshot::new(p.t + dt, p.prev.clone(), txids));
++            }
++            if next(3) == 0 {
++                v.push(v.last().cloned().unwrap_or_else(|| Snapshot::new(0.0, "p", vec![])));
++            }
++            gws.insert(format!("g{g}"), v);
++        }
++        gws.insert("POOL".into(), pool);
++        let mut canaries = Vec::new();
++        for _ in 0..next(30) {
++            let t = next(60) as f64 * 0.5;
++            let id = tx(next(12));
++            canaries.push(match next(3) {
++                0 => Canary::new(t, id),
++                1 => Canary::shared(t, id),
++                _ => Canary::decoy(t, id),
++            });
++        }
++        (gws, canaries)
++    }
++
++    #[test]
++    fn indexed_clusters_match_the_pairwise_version() {
++        let mut nontrivial = 0;
++        for seed in 0..600u64 {
++            let (gws, _) = random_world(seed);
++            let fast = clusters(&gws);
++            assert_eq!(fast, reference::clusters(&gws), "seed {seed}");
++            nontrivial += usize::from(fast.len() < gws.len());
++        }
++        assert!(nontrivial > 50, "the worlds must actually cluster: {nontrivial}");
++        for n in [30usize, 200] {
++            let (pool, honest, proxy, mimic) = synth(n, n as u64);
++            let gws: std::collections::BTreeMap<String, Vec<Snapshot>> =
++                [("POOL", pool), ("H", honest), ("X", proxy), ("M", mimic)].into_iter().map(|(k, v)| (k.to_string(), v)).collect();
++            assert_eq!(clusters(&gws), reference::clusters(&gws));
++        }
++    }
++
++    #[test]
++    fn prepared_features_match_the_pairwise_version() {
++        let json = |f: &Features| serde_json::to_value(f).unwrap();
++        for seed in 0..400u64 {
++            let (gws, canaries) = random_world(seed);
++            let pool = &gws["POOL"];
++            for (name, snaps) in &gws {
++                let fast = features_with(snaps, pool, &canaries);
++                let slow = reference::features_with(snaps, pool, &canaries);
++                assert_eq!(json(&fast), json(&slow), "seed {seed} gateway {name}");
++            }
++        }
++        let w = world(240);
++        let all: Vec<Canary> = w.own.iter().chain(&w.global).cloned().collect();
++        for s in [&w.honest, &w.proxy, &w.naive, &w.filtered, &w.forced] {
++            assert_eq!(json(&features_with(s, &w.pool, &all)), json(&reference::features_with(s, &w.pool, &all)));
++        }
++    }
++
++    /// The shape the hub produces: a proxy with the pool's template 40 ms later is clustered
++    /// with it, an honest gateway with its own template is not.
++    #[test]
++    fn indexed_clusters_at_scale_group_only_the_copies() {
++        let mut gws = std::collections::BTreeMap::new();
++        let mut pool = Vec::new();
++        for i in 0..300u64 {
++            pool.push(Snapshot::new(i as f64, hex32(i / 20), vec![hex32(i), hex32(i + 1)]));
++        }
++        for g in 0..20u64 {
++            let v: Vec<Snapshot> = pool
++                .iter()
++                .map(|p| {
++                    let txids = if g < 5 { p.txids.clone() } else { vec![hex32(1_000_000 * (g + 1) + p.t as u64)] };
++                    Snapshot::new(p.t + 0.04, p.prev.clone(), txids)
++                })
++                .collect();
++            gws.insert(format!("g{g:02}"), v);
++        }
++        gws.insert("POOL".into(), pool);
++        let cl = clusters(&gws);
++        assert_eq!(cl[0], vec!["POOL", "g00", "g01", "g02", "g03", "g04"]);
++        assert_eq!(cl.len(), 16);
++        assert_eq!(cl, reference::clusters(&gws));
++    }
++
+     #[test]
+     fn a_straight_copy_is_identical_and_scores_zero() {
+         let pool = vec![
+-- 
+2.43.0
+

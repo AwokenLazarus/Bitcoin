@@ -1,0 +1,110 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: michael moore <mrmoore27@pm.me>
+Date: Fri, 25 Sep 2026 11:07:04 +0000
+Subject: [PATCH 25/27] prime, lazarus-canary: the sidecar reads
+ sovereignty-nodes.json
+
+Primed now writes exactly what Engine::node_of answers to
+sovereignty-nodes.json. A refused key's node leaves the file as a
+superseded or revoked one's does, so the canary sidecar, which reads the
+file as its nodes_file every round, canaries only active gateways. The
+sidecar logs an unreadable or torn file and runs the round on
+[[gateways]]. The example config, README and unit point at the file.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ prime/primed/src/sovereignty.rs | 52 +++++++++++++++++++++++++++++++--
+ 1 file changed, 49 insertions(+), 3 deletions(-)
+
+diff --git a/prime/primed/src/sovereignty.rs b/prime/primed/src/sovereignty.rs
+index 3d7d7fe..1a5f0d3 100644
+--- a/prime/primed/src/sovereignty.rs
++++ b/prime/primed/src/sovereignty.rs
+@@ -864,13 +864,16 @@ impl Engine {
+         }
+     }
+ 
+-    /// Rewrite `NODES_FILE`, mode 0600 from creation (a temp file renamed over it).
++    /// Rewrite `NODES_FILE`, mode 0600 from creation (a temp file renamed over it). It holds
++    /// exactly what `node_of` answers, so the canary sidecar (W9), which reads it as its
++    /// `nodes_file` every round, canaries only active keys' nodes.
+     fn persist_nodes(&self) {
+         if !self.persists() {
+             return;
+         }
+         let _ = std::fs::create_dir_all(&self.dir);
+-        let sorted: BTreeMap<&String, &NodeEntry> = self.nodes.iter().collect();
++        let sorted: BTreeMap<&String, &NodeEntry> =
++            self.nodes.iter().filter(|(g, _)| self.node_of(g).is_some()).collect();
+         let Ok(bytes) = serde_json::to_vec_pretty(&sorted) else { return };
+         let tmp = self.dir.join(format!("{NODES_FILE}.tmp"));
+         let _ = std::fs::remove_file(&tmp);
+@@ -891,7 +894,6 @@ impl Engine {
+     }
+ 
+     /// The node address a registered, active key named (for canary delivery).
+-    #[allow(dead_code)]
+     pub fn node_of(&self, g_hex: &str) -> Option<&str> {
+         let g = g_hex.to_ascii_lowercase();
+         self.active(&g)?;
+@@ -1167,6 +1169,9 @@ impl Engine {
+             rec.bound_height = 0;
+             rec.bound_ts = 0;
+             log::warn!("sovereignty: G {} refused: its coinbase pays another payout than it registered", &g[..16]);
++            // a refused key is no longer canaried (SOV-010): its node leaves the file too
++            self.nodes.remove(&g);
++            self.persist_nodes();
+         }
+         self.persist_keys();
+         self.dirty = true;
+@@ -2711,6 +2716,47 @@ mod tests {
+         assert!(e.enrol(checked(Kind::V1, &g, 1, "none", None), None).unwrap_err().contains("house"));
+     }
+ 
++    /// SOV-010: `sovereignty-nodes.json` is the canary sidecar's `nodes_file`. It holds exactly
++    /// what `node_of` answers, as `{G: {"node": ..}}`: superseded, revoked and refused keys and
++    /// `node: none` drop out.
++    #[test]
++    fn the_nodes_file_is_what_node_of_answers() {
++        let dir = reg_dir("nodes-file");
++        let mut e = reg_engine(&dir);
++        let ids: Vec<Identity> = (0..5u8).map(|i| Identity::from_secret_bytes(&[0x50 + i; 64])).collect();
++        let hs: Vec<String> = ids.iter().map(|g| hex::encode(g.sign_pk())).collect();
++        let file = |e: &Engine| -> BTreeMap<String, String> {
++            let v: serde_json::Value = serde_json::from_slice(&std::fs::read(e.dir.join(NODES_FILE)).unwrap()).unwrap();
++            v.as_object().unwrap().iter().map(|(g, n)| (g.clone(), n["node"].as_str().unwrap().to_string())).collect()
++        };
++        let expect = |e: &Engine| -> BTreeMap<String, String> {
++            hs.iter().filter_map(|h| e.node_of(h).map(|n| (h.clone(), n.to_string()))).collect()
++        };
++        e.enrol(checked(Kind::V1, &ids[0], 700, "198.51.100.1:8333", None), None).unwrap();
++        e.enrol(checked(Kind::V2, &ids[1], 701, "198.51.100.2:8333", Some(21)), None).unwrap();
++        e.enrol(checked(Kind::V2, &ids[2], 702, "198.51.100.3:8333", Some(22)), None).unwrap();
++        e.enrol(checked(Kind::V2, &ids[3], 703, "198.51.100.4:8333", Some(23)), None).unwrap();
++        e.enrol(checked(Kind::V1, &ids[4], 704, "none", None), None).unwrap();
++        assert_eq!(file(&e).len(), 4);
++        assert_eq!(file(&e), expect(&e));
++        // rotation: ids[1]'s payout names a new key; revocation; a coinbase paying elsewhere
++        let g5 = Identity::from_secret_bytes(&[0x5f; 64]);
++        e.enrol(checked(Kind::V2, &g5, 710, "198.51.100.5:8333", Some(21)), None).unwrap();
++        e.enrol(checked(Kind::Revoke, &ids[2], 711, "", Some(22)), None).unwrap();
++        e.note_gateway_payout(&hs[3], &signer::p2tr_script(&[99; 32]));
++        let f = file(&e);
++        assert_eq!(
++            f.values().map(String::as_str).collect::<HashSet<_>>(),
++            HashSet::from(["198.51.100.1:8333", "198.51.100.5:8333"]),
++            "{f:?}"
++        );
++        for h in &hs[1..] {
++            assert!(!f.contains_key(h) && e.node_of(h).is_none(), "{h}");
++        }
++        assert_eq!(f.get(&hex::encode(g5.sign_pk())).map(String::as_str), e.node_of(&hex::encode(g5.sign_pk())));
++        let _ = std::fs::remove_dir_all(&dir);
++    }
++
+     /// Node addresses live in `sovereignty-nodes.json` (0600) alone: never in the keys file,
+     /// stats.json's `sovereignty`, `/sovereignty.json`, or the bonus directory.
+     #[test]
+-- 
+2.43.0
+

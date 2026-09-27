@@ -1,0 +1,39 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: michael moore <mrmoore27@pm.me>
+Date: Fri, 25 Sep 2026 10:13:09 +0000
+Subject: [PATCH 17/27] prime: rustfmt the W7 additions
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ prime/primed/src/session.rs     | 5 +++--
+ prime/primed/src/sovereignty.rs | 1 -
+ 2 files changed, 3 insertions(+), 3 deletions(-)
+
+diff --git a/prime/primed/src/session.rs b/prime/primed/src/session.rs
+index fd5dcd8..0a1be66 100644
+--- a/prime/primed/src/session.rs
++++ b/prime/primed/src/session.rs
+@@ -930,8 +930,9 @@ impl Session {
+         }
+         p.decided = true;
+         let g = self.hello.identity_sign_pk;
+-        let result = datum_wire::authorship::verify(cb, &p.msg.a, &p.msg.sig, &job.prev_hash, &job.merkle_branches, Some(&g))
+-            .map(|_| ());
++        let result =
++            datum_wire::authorship::verify(cb, &p.msg.a, &p.msg.sig, &job.prev_hash, &job.merkle_branches, Some(&g))
++                .map(|_| ());
+         let (msg, house) = (p.msg.clone(), self.is_house_stratum());
+         match &result {
+             Ok(()) => log::info!(
+diff --git a/prime/primed/src/sovereignty.rs b/prime/primed/src/sovereignty.rs
+index 3d00c63..a28c813 100644
+--- a/prime/primed/src/sovereignty.rs
++++ b/prime/primed/src/sovereignty.rs
+@@ -2034,4 +2034,3 @@ mod tests {
+         let _ = std::fs::remove_dir_all(&dir);
+     }
+ }
+-
+-- 
+2.43.0
+

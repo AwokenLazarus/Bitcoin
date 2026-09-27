@@ -1,0 +1,1168 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: michael moore <mrmoore27@pm.me>
+Date: Fri, 25 Sep 2026 09:20:32 +0000
+Subject: [PATCH 5/8] lazarus-canary: the canary sidecar (SOV-P-002 W9)
+
+A Python service outside primed, with a systemd unit that is shipped but
+not installed. Per round it places, for each due gateway with a registered
+node, an own canary C/C' (C deprioritised on the pool node before it
+exists, then pushed over one P2P connection to that node only; C' to the
+pool node), plus one shared canary (market fee, pre-prioritised under the
+pool's -blockmintxfee) and one decoy (zero fee, prioritised on the pool
+node only), and reports each to primed (POST /sovereignty/canary with the
+token and kind). Cadence per SOV-P-002 section 5 from primed's own report.
+
+The canary key signs only on a signer node through signrawtransactionwithkey;
+the RPC clients are allowlisted per role, so the signer can never be asked
+to broadcast and the pool node never gets a key or wallet-signing call.
+Startup and every scan refuse to run if a pool-node wallet knows the canary
+address. Settled pairs return to the UTXO list with their fee booked.
+Shared canaries are released after 600 s so the pool can mine them.
+SOCKS5 (Tor) delivery is written, framing-tested only.
+
+The in-repo A2 feeders post template checks (demo route) now that canary
+evidence comes from checks; rnd-a2-demo.sh takes KNOTS_BASE and RPC_PORT.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ lazarus/canary/README.md                   |  91 ++++
+ lazarus/canary/lazarus-canary.service      |  29 ++
+ lazarus/canary/lazarus-canary.toml.example |  58 +++
+ lazarus/canary/lazarus_canary.py           | 545 +++++++++++++++++++++
+ lazarus/canary/test_lazarus_canary.py      | 216 ++++++++
+ lazarus/canary/xbt_p2p.py                  | 149 ++++++
+ 6 files changed, 1088 insertions(+)
+ create mode 100644 lazarus/canary/README.md
+ create mode 100644 lazarus/canary/lazarus-canary.service
+ create mode 100644 lazarus/canary/lazarus-canary.toml.example
+ create mode 100644 lazarus/canary/lazarus_canary.py
+ create mode 100644 lazarus/canary/test_lazarus_canary.py
+ create mode 100644 lazarus/canary/xbt_p2p.py
+
+diff --git a/lazarus/canary/README.md b/lazarus/canary/README.md
+new file mode 100644
+index 0000000..25b923c
+--- /dev/null
++++ b/lazarus/canary/README.md
+@@ -0,0 +1,91 @@
++# lazarus-canary
++
++Places the Sovereign TIDES canaries that primed judges gateways by (SOV-P-002 W9; the detector is
++W8 in `prime/`). A Python service with no dependencies beyond the standard library (3.11+). It is
++shipped with a systemd unit that is **not installed**: it starts at stage S3 (the canary shadow).
++
++```
++python3 lazarus_canary.py -c lazarus-canary.toml check-isolation   # the pool node's wallets must not know the canary address
++python3 lazarus_canary.py -c lazarus-canary.toml scan              # rebuild the UTXO list (scantxoutset; slow on mainnet)
++python3 lazarus_canary.py -c lazarus-canary.toml once              # one round now
++python3 lazarus_canary.py -c lazarus-canary.toml run               # the service
++python3 lazarus_canary.py -c lazarus-canary.toml status
++python3 -m unittest test_lazarus_canary                            # unit tests, no node needed
++```
++
++## What one round does
++| Kind | Tx | Where it goes | What an honest gateway does |
++|---|---|---|---|
++| **own** (per due gateway G) | C and C′ spend the same canary UTXO; C′ pays `twin_extra_sats` more | `prioritisetransaction C 0 -1e8` on the pool node **first**; C over one P2P connection to G's registered node only; C′ to the pool node | templates C (the pool node never can) |
++| **shared** (one per round) | D at the market fee | `prioritisetransaction D` on the pool node to a modified feerate under its `-blockmintxfee`, **then** `sendrawtransaction D` to the pool node | templates D (relayed everywhere on its base fee; the pool node keeps it and never templates it) |
++| **decoy** (one per round) | Q with zero fee | `prioritisetransaction Q +decoy_delta_sats`, then `sendrawtransaction Q 0` to the pool node | never has Q (under every relay floor); the pool node templates it |
++
++Each canary is reported to primed with `POST /sovereignty/canary`
++`{"gateway": G | "*", "t": <delivered>, "txid", "kind"}` and the `X-Sovereignty-Token` header (the
++token file primed writes in its data dir). An own canary makes primed fetch G's newest job about 45 s
++later (`request_full_block`); shared canaries and decoys are read from the same job lists.
++
++Everything pays back to the canary address. After each round the sidecar settles earlier canaries:
++`gettxout` on the pool node tells which of C / C′ (or D, Q) confirmed; that output goes back on the
++UTXO list and the fee is booked in `state_dir/canaries.jsonl` (`"event": "placed"` and
++`"event": "resolved"`, with `which` = `C` or `C'` and `fee`). A canary whose input is still unspent
++after `inflight_max_secs` and that no mempool holds is released. A delivery that fails is never
++reported to primed, its C is re-prioritised back and its UTXO kept.
++
++A shared canary is evidence only while primed can judge it (jobs up to 180 s after it). After
++`fees.shared_release_secs` (600 s) the sidecar lifts its priority on the pool node, so the pool can
++mine it as well; otherwise only other pools' blocks would, and on a chain where Lazarus finds most
++blocks its UTXO would stay locked.
++
++The sidecar also reads each C / D back out of the pool node's `getblocktemplate` after a round and
++logs `LEAK` if one is there (`status.leaks`).
++
++## Cadence (SOV-P-002 §5)
++Per gateway, from primed's `/sovereignty.json` row: new or suspect (fewer than `new_until_due`
++canaries judged) every `new_secs` (1,200 s); flagged every `flagged_secs` (1,200 s); clean (≥
++`clean_min_due` judged, own hit rate ≥ `clean_min_rate`) every `clean_secs` (14,400 s); otherwise
++`enrolled_secs` (3,600 s). Each interval is drawn from base × (1 ± `jitter`) (0.5). A round runs at
++most every `round_min_gap_secs` (1,200 s) and takes every gateway due by then, plus one shared canary
++and one decoy. Gateways come from `[[gateways]]` (G, node) and `nodes_file` (read every round;
++W10's `sovereignty-nodes.json` once it lands). A gateway with `node = "none"` is never canaried.
++
++## Keys and isolation
++- The canary key is a WIF in `wallet.key_file`. The sidecar refuses a key file readable by group or
++  others. Keep the key in Proton Pass and write the file at install (`pass-cli`, see the
++  `proton-pass` skill); it never goes in git or a vault note.
++- It is used in exactly one place: `signrawtransactionwithkey` on the **signer** node, with the
++  prevout given explicitly. The signer should run with `-connect=0 -listen=0 -disablewallet`. The
++  sidecar's RPC client for it allows only `signrawtransactionwithkey`, `getdescriptorinfo`,
++  `deriveaddresses` and `validateaddress`, so it can never ask the signer to broadcast.
++- The pool node's RPC client allows no key or wallet-signing method at all. At start (and on every
++  `scan`) the sidecar asks each of the pool node's wallets about the canary address and refuses to
++  run if any has it as mine, watch-only or solvable (`check-isolation`).
++- The pool node never sees C before it is deprioritised, and never holds a canary key: C′, D and Q
++  reach it as raw transactions.
++
++## Pool-node requirements
++- `-blockprioritysize=0`. Knots' coin-age area otherwise adds the first below-minimum-priority tx
++  whatever its fee delta, and a deprioritised C or D reaches the template (SOV-004).
++- `-blockmintxfee` above its relay floor, set in `pool_node.blockmintxfee_satvb`. A shared canary
++  sits halfway between the two unless `fees.shared_modified_satvb` says otherwise.
++- The getblocktemplate/submitblock RPC stays private: `getrawmempool true` (`fees.modified`) and
++  `getprioritisedtransactions` show which txs are canaries.
++
++## Delivery
++`delivery.mode = "direct"` pushes C over plain TCP from this host (v1 P2P: version/verack, `tx`,
++then `ping` and wait for the `pong`, which the node sends only after it processed the `tx`). A canary
++from the pool's own IP is recognisable, so production should use `mode = "socks5"` with
++`proxy = "127.0.0.1:9050"` (Tor), which also reaches `.onion` nodes. **The SOCKS5 path is written
++and unit-tested for its framing only; it has not been run against Tor** (SOV-008 used direct P2P on
++regtest). Nodes that only speak BIP324 v2 are not supported.
++
++## Files
++| Path | What |
++|---|---|
++| `lazarus_canary.py` | the service and CLI |
++| `xbt_p2p.py` | one-shot P2P delivery (and SOCKS5) |
++| `lazarus-canary.toml.example` | every config key with its default |
++| `lazarus-canary.service` | systemd unit (not installed) |
++| `test_lazarus_canary.py` | unit tests |
++
++Demo: `~/xbt-rnd/sov-008/canary-sidecar-demo.sh` (SOV-008).
+diff --git a/lazarus/canary/lazarus-canary.service b/lazarus/canary/lazarus-canary.service
+new file mode 100644
+index 0000000..0ba0bf2
+--- /dev/null
++++ b/lazarus/canary/lazarus-canary.service
+@@ -0,0 +1,29 @@
++# SOV-P-002 S3: the canary sidecar. Shipped, not installed: install by hand when S3 starts.
++[Unit]
++Description=Lazarus canary sidecar (Sovereign TIDES canaries for primed)
++After=network-online.target lazarus-prime.service
++Wants=network-online.target
++
++[Service]
++Type=simple
++User=lazarus-canary
++Group=lazarus-canary
++ExecStart=/usr/bin/python3 /opt/lazarus-canary/lazarus_canary.py -c /etc/lazarus-canary/lazarus-canary.toml run
++Restart=on-failure
++RestartSec=30
++StateDirectory=lazarus-canary
++StateDirectoryMode=0700
++# primed's token file has to be readable by this user (a group ACL, not a world bit)
++ReadOnlyPaths=/etc/lazarus-canary /var/lib/primed/sovereignty.token
++NoNewPrivileges=true
++ProtectSystem=strict
++ProtectHome=true
++PrivateTmp=true
++PrivateDevices=true
++ProtectKernelTunables=true
++ProtectControlGroups=true
++RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
++UMask=0077
++
++[Install]
++WantedBy=multi-user.target
+diff --git a/lazarus/canary/lazarus-canary.toml.example b/lazarus/canary/lazarus-canary.toml.example
+new file mode 100644
+index 0000000..fcedbf0
+--- /dev/null
++++ b/lazarus/canary/lazarus-canary.toml.example
+@@ -0,0 +1,58 @@
++# lazarus-canary (SOV-P-002 W9). Copy to /etc/lazarus-canary/lazarus-canary.toml.
++# Every key shown is optional except the node URLs, credentials and the gateways (or nodes_file).
++network = "main"                     # P2P magic: main | test | signet | regtest
++
++[prime]
++url = "http://127.0.0.1:28916"       # primed's stats listener (loopback)
++token_file = "/var/lib/primed/sovereignty.token"
++
++[pool_node]                          # the node primed builds on (Prime's). Needs -blockprioritysize=0
++url = "http://127.0.0.1:9332"        # and -blockmintxfee above its relay floor (see README)
++cookie = "/var/lib/bitcoind/.cookie"   # or user / password
++blockmintxfee_satvb = 1.5            # what the pool node runs with; shared canaries sit just under it
++wallets_rpc = true                   # ask its wallets whether they know the canary address (they must not)
++
++[signer]                             # a node with no peers (-connect=0 -listen=0 -disablewallet); it only
++url = "http://127.0.0.1:19332"       # signs (signrawtransactionwithkey) and is never asked to broadcast
++cookie = "/var/lib/lazarus-canary/signer/.cookie"
++
++[wallet]
++key_file = "/etc/lazarus-canary/canary.wif"   # WIF, 0600, owned by the service user; from Proton Pass
++state_dir = "/var/lib/lazarus-canary"          # state.json (UTXOs, in-flight pairs), canaries.jsonl (fees)
++min_utxo_sats = 2000
++inflight_max_secs = 86400
++
++[fees]
++fee_rate_satvb = 0                   # 0 = estimatesmartfee 6 on the pool node, else this
++fallback_fee_rate_satvb = 5
++twin_extra_sats = 1                  # C' pays this much more than C (not enough to replace it)
++shared_modified_satvb = 0            # 0 = halfway between the pool's relay floor and blockmintxfee
++decoy_delta_sats = 1000000           # the decoy's priority on the pool node
++shared_release_secs = 600            # then the shared canary's delta is lifted so the pool mines it too
++                                     # (primed judges it only with jobs up to 180 s old)
++
++[cadence]                            # SOV-P-002 §5
++tick_secs = 30
++round_min_gap_secs = 1200            # a round places one shared canary and one decoy for everyone
++new_secs = 1200                      # new or suspect gateway, until new_until_due canaries were judged
++new_until_due = 10
++enrolled_secs = 3600
++clean_secs = 14400                   # >= clean_min_due judged and hit rate >= clean_min_rate
++clean_min_due = 100
++clean_min_rate = 0.8
++flagged_secs = 1200
++jitter = 0.5                         # every interval is drawn from base * (1 +- jitter)
++shared = true
++decoy = true
++
++[delivery]
++mode = "direct"                      # direct | socks5 (Tor: proxy = "127.0.0.1:9050"; also reaches .onion)
++proxy = ""
++timeout_secs = 20
++
++# Gateways with a registered node (registration v1, W10). nodes_file is read on every round and may
++# be primed's sovereignty-nodes.json once W10 lands: {"<G hex>": "host:port"} or [{"g":..,"node":..}].
++nodes_file = ""
++# [[gateways]]
++# g = "<64 hex ed25519 DATUM identity key>"
++# node = "203.0.113.7:8333"
+diff --git a/lazarus/canary/lazarus_canary.py b/lazarus/canary/lazarus_canary.py
+new file mode 100644
+index 0000000..6c7bfdf
+--- /dev/null
++++ b/lazarus/canary/lazarus_canary.py
+@@ -0,0 +1,545 @@
++#!/usr/bin/env python3
++"""lazarus-canary: places Sovereign TIDES canaries for primed (SOV-P-002 W9, §5).
++
++Per round:
++  own     for each registered gateway G that is due: a pair C / C' spending one canary UTXO.
++          The pool node is told never to template C (`prioritisetransaction C 0 -1e8`) before
++          C exists anywhere; C goes over one P2P connection to G's registered node and nowhere
++          else; C' (1 sat more fee) goes to the pool node. One of the pair confirms; both pay
++          back to the canary wallet.
++  shared  one tx D at a market fee, pre-prioritised on the pool node to a modified feerate
++          under its -blockmintxfee, then sent to the pool node: every node relays and templates
++          it on its base fee; the pool node keeps it and never templates it.
++  decoy   one zero-fee tx Q, pre-prioritised +delta on the pool node only: the pool templates
++          it, no peer accepts it.
++Every canary is reported to primed (`POST /sovereignty/canary`, `X-Sovereignty-Token`) with its
++kind; primed checks gateways' jobs for them (W8).
++
++Keys: the canary key is a WIF in `wallet.key_file` (0600). It is used only in
++`signrawtransactionwithkey` on the *signer* node, which is never asked to broadcast (its RPC is
++restricted to an allowlist here) and should have no peers. The pool node never holds the key in a
++wallet: at start and on every scan the sidecar asks each of the pool node's wallets about the
++canary address and refuses to run if one knows it.
++
++usage: lazarus_canary.py -c lazarus-canary.toml run|once|scan|status|check-isolation
++"""
++import argparse
++import base64
++import json
++import os
++import random
++import stat
++import sys
++import time
++import tomllib
++import urllib.error
++import urllib.request
++
++sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
++import xbt_p2p  # noqa: E402
++
++SAT = 100_000_000
++# P2WPKH 1-in 1-out: 10.5 + 68 + 31 vbytes, rounded up
++CANARY_VSIZE = 110
++
++DEFAULTS = {
++    "network": "regtest",
++    "prime": {"url": "http://127.0.0.1:28916", "token_file": "/var/lib/primed/sovereignty.token"},
++    "pool_node": {"url": "http://127.0.0.1:8332", "cookie": "", "user": "", "password": "",
++                  "blockmintxfee_satvb": 1.5, "wallets_rpc": True},
++    "signer": {"url": "", "cookie": "", "user": "", "password": ""},
++    "wallet": {"key_file": "/etc/lazarus-canary/canary.wif", "state_dir": "/var/lib/lazarus-canary",
++               "min_utxo_sats": 2_000, "inflight_max_secs": 86_400},
++    "fees": {"fee_rate_satvb": 0.0, "fallback_fee_rate_satvb": 5.0, "twin_extra_sats": 1,
++             "shared_modified_satvb": 0.0, "decoy_delta_sats": 1_000_000, "shared_release_secs": 600},
++    "cadence": {"tick_secs": 30, "round_min_gap_secs": 1_200, "new_secs": 1_200, "new_until_due": 10,
++                "enrolled_secs": 3_600, "clean_secs": 14_400, "clean_min_due": 100, "clean_min_rate": 0.8,
++                "flagged_secs": 1_200, "jitter": 0.5, "shared": True, "decoy": True},
++    "delivery": {"mode": "direct", "proxy": "", "timeout_secs": 20},
++    "gateways": [],
++    "nodes_file": "",
++}
++
++
++def merged(cfg: dict) -> dict:
++    out = json.loads(json.dumps(DEFAULTS))
++    for k, v in cfg.items():
++        if isinstance(v, dict) and isinstance(out.get(k), dict):
++            out[k].update(v)
++        else:
++            out[k] = v
++    return out
++
++
++def read_text(path: str) -> str:
++    with open(path) as f:
++        return f.read()
++
++
++def log(*a):
++    print(time.strftime("%Y-%m-%dT%H:%M:%S"), *a, flush=True)
++
++
++# --- RPC ---------------------------------------------------------------------------------------
++
++class Rpc:
++    """JSON-RPC to one node, limited to the methods its role needs."""
++
++    def __init__(self, conf: dict, allowed: set[str], role: str):
++        self.url = conf["url"].rstrip("/")
++        self.role = role
++        self.allowed = allowed
++        user, pw = conf.get("user") or "", conf.get("password") or ""
++        if conf.get("cookie"):
++            user, _, pw = read_text(conf["cookie"]).strip().partition(":")
++        self.auth = "Basic " + base64.b64encode(f"{user}:{pw}".encode()).decode()
++
++    def call(self, method: str, *params, wallet: str | None = None):
++        if method not in self.allowed:
++            raise PermissionError(f"{self.role} node: {method} is not allowed")
++        body = json.dumps({"jsonrpc": "1.0", "id": 0, "method": method, "params": list(params)}).encode()
++        url = self.url + (f"/wallet/{urllib.request.quote(wallet)}" if wallet is not None else "")
++        req = urllib.request.Request(url, body, {"Authorization": self.auth, "Content-Type": "application/json"})
++        try:
++            with urllib.request.urlopen(req, timeout=60) as r:
++                return json.load(r)["result"]
++        except urllib.error.HTTPError as e:
++            try:
++                err = json.load(e).get("error")
++            except Exception:  # noqa: BLE001
++                err = str(e)
++            raise RuntimeError(f"{self.role} {method}: {err}") from None
++
++
++POOL_METHODS = {"prioritisetransaction", "sendrawtransaction", "getmempoolinfo", "getmempoolentry",
++                "gettxout", "scantxoutset", "estimatesmartfee", "listwallets", "getaddressinfo",
++                "getblockcount", "getblocktemplate"}
++# the signer never sees sendrawtransaction: it signs and nothing else
++SIGNER_METHODS = {"signrawtransactionwithkey", "getdescriptorinfo", "deriveaddresses", "validateaddress"}
++
++
++# --- transactions ------------------------------------------------------------------------------
++
++def txid_of(raw: bytes) -> str:
++    """Display-hex txid of a raw tx in either serialization (the legacy bytes' SHA256d)."""
++    if raw[4:6] == b"\x00\x01":
++        # version | marker flag | ins outs | witnesses | locktime: rebuild the legacy bytes
++        pos = 6
++        n_in, pos = read_varint(raw, pos)
++        for _ in range(n_in):
++            pos += 36
++            sl, pos = read_varint(raw, pos)
++            pos += sl + 4
++        n_out, pos = read_varint(raw, pos)
++        for _ in range(n_out):
++            pos += 8
++            sl, pos = read_varint(raw, pos)
++            pos += sl
++        body_end = pos
++        legacy = raw[:4] + raw[6:body_end] + raw[-4:]
++    else:
++        legacy = raw
++    return xbt_p2p.sha256d(legacy)[::-1].hex()
++
++
++def read_varint(b: bytes, pos: int) -> tuple[int, int]:
++    first = b[pos]
++    if first < 0xFD:
++        return first, pos + 1
++    size = {0xFD: 2, 0xFE: 4, 0xFF: 8}[first]
++    return int.from_bytes(b[pos + 1:pos + 1 + size], "little"), pos + 1 + size
++
++
++def unsigned_tx(txid: str, vout: int, value_out: int, script_out: bytes) -> bytes:
++    """One input, one output, version 2, locktime 0, final sequence (no replacement signal)."""
++    return (b"\x02\x00\x00\x00" + b"\x01" + bytes.fromhex(txid)[::-1] + vout.to_bytes(4, "little") + b"\x00"
++            + b"\xff\xff\xff\xff" + b"\x01" + value_out.to_bytes(8, "little") + xbt_p2p.varint(len(script_out))
++            + script_out + b"\x00\x00\x00\x00")
++
++
++# --- the service -------------------------------------------------------------------------------
++
++class Canary:
++    def __init__(self, cfg: dict):
++        self.cfg = cfg
++        self.net = cfg["network"]
++        self.pool = Rpc(cfg["pool_node"], POOL_METHODS, "pool")
++        self.signer = Rpc(cfg["signer"], SIGNER_METHODS, "signer")
++        self.state_dir = cfg["wallet"]["state_dir"]
++        os.makedirs(self.state_dir, exist_ok=True)
++        self.state_path = os.path.join(self.state_dir, "state.json")
++        self.ledger_path = os.path.join(self.state_dir, "canaries.jsonl")
++        self.wif = self._read_key()
++        self.address, self.script = self._address()
++        self.state = self._load()
++        self.rng = random.Random()
++
++    # key and address
++    def _read_key(self) -> str:
++        path = self.cfg["wallet"]["key_file"]
++        st = os.stat(path)
++        if st.st_mode & (stat.S_IRWXG | stat.S_IRWXO):
++            raise SystemExit(f"{path} is readable by group or others; chmod 600 it")
++        return read_text(path).strip()
++
++    def _address(self) -> tuple[str, bytes]:
++        info = self.signer.call("getdescriptorinfo", f"wpkh({self.wif})")
++        # the public descriptor (no key material) is what the signer hands back
++        addr = self.signer.call("deriveaddresses", info["descriptor"])[0]
++        spk = bytes.fromhex(self.signer.call("validateaddress", addr)["scriptPubKey"])
++        if len(spk) != 22 or spk[:2] != b"\x00\x14":
++            raise SystemExit("canary key must give a P2WPKH script")
++        return addr, spk
++
++    def check_isolation(self) -> list[str]:
++        """Wallets on the pool node that know the canary address (must be none)."""
++        if not self.cfg["pool_node"].get("wallets_rpc", True):
++            return []
++        bad = []
++        for w in self.pool.call("listwallets"):
++            info = self.pool.call("getaddressinfo", self.address, wallet=w)
++            if info.get("ismine") or info.get("iswatchonly") or info.get("solvable"):
++                bad.append(w)
++        return bad
++
++    # state
++    def _load(self) -> dict:
++        try:
++            return json.loads(read_text(self.state_path))
++        except (OSError, ValueError):
++            return {"utxos": [], "inflight": [], "rounds": 0, "last_round": 0, "next_due": {}, "fees_planned": 0,
++                    "fees_paid": 0, "resolved": 0, "delivered": {"own": 0, "shared": 0, "decoy": 0},
++                    "delivery_failed": 0, "leaks": 0}
++
++    def save(self):
++        tmp = self.state_path + ".tmp"
++        with open(tmp, "w") as f:
++            json.dump(self.state, f, indent=1)
++        os.replace(tmp, self.state_path)
++
++    def ledger(self, rec: dict):
++        with open(self.ledger_path, "a") as f:
++            f.write(json.dumps(rec) + "\n")
++
++    def scan(self) -> int:
++        """Rebuild the UTXO list from the chain (slow on mainnet: run it for refills)."""
++        bad = self.check_isolation()
++        if bad:
++            raise SystemExit(f"the canary address is known to pool-node wallet(s) {bad}: refusing")
++        res = self.pool.call("scantxoutset", "start", [f"addr({self.address})"])
++        busy = {(i["input"]["txid"], i["input"]["vout"]) for i in self.state["inflight"]}
++        self.state["utxos"] = [
++            {"txid": u["txid"], "vout": u["vout"], "value": round(u["amount"] * SAT)}
++            for u in res.get("unspents", []) if (u["txid"], u["vout"]) not in busy
++        ]
++        self.save()
++        return len(self.state["utxos"])
++
++    # gateways and cadence
++    def gateways(self) -> dict[str, dict]:
++        out = {}
++        for g in self.cfg.get("gateways", []):
++            out[g["g"].lower()] = dict(g)
++        nf = self.cfg.get("nodes_file")
++        if nf and os.path.exists(nf):
++            data = json.loads(read_text(nf))
++            items = data.items() if isinstance(data, dict) else ((d.get("g"), d) for d in data)
++            for g, v in items:
++                node = v if isinstance(v, str) else (v or {}).get("node")
++                if g and node and node != "none":
++                    out.setdefault(g.lower(), {"g": g.lower(), "node": node})
++        return {g: v for g, v in out.items() if v.get("node") and v["node"] != "none"}
++
++    def prime_report(self) -> dict:
++        try:
++            with urllib.request.urlopen(self.cfg["prime"]["url"].rstrip("/") + "/sovereignty.json", timeout=30) as r:
++                return json.load(r).get("gateways") or {}
++        except Exception as e:  # noqa: BLE001
++            log("primed report unavailable:", e)
++            return {}
++
++    def interval(self, row: dict | None) -> float:
++        c = self.cfg["cadence"]
++        row = row or {}
++        due = row.get("canaries_due") or 0
++        rate = row.get("canary_rate")
++        if row.get("flagged"):
++            base = c["flagged_secs"]
++        elif due < c["new_until_due"]:
++            base = c["new_secs"]
++        elif due >= c["clean_min_due"] and (rate or 0) >= c["clean_min_rate"]:
++            base = c["clean_secs"]
++        else:
++            base = c["enrolled_secs"]
++        j = c["jitter"]
++        return base * self.rng.uniform(1 - j, 1 + j)
++
++    # fees
++    def fee_rate(self) -> float:
++        f = self.cfg["fees"]
++        if f["fee_rate_satvb"]:
++            return float(f["fee_rate_satvb"])
++        try:
++            est = self.pool.call("estimatesmartfee", 6)
++            if est.get("feerate"):
++                return est["feerate"] * SAT / 1000
++        except RuntimeError:
++            pass
++        return float(f["fallback_fee_rate_satvb"])
++
++    def shared_modified_sats(self) -> int:
++        f = self.cfg["fees"]
++        rate = f["shared_modified_satvb"]
++        if not rate:
++            relay = self.pool.call("getmempoolinfo")["minrelaytxfee"] * SAT / 1000
++            rate = (relay + float(self.cfg["pool_node"]["blockmintxfee_satvb"])) / 2
++        return int(rate * CANARY_VSIZE)
++
++    # utxos
++    def take_utxo(self, min_value: int) -> dict | None:
++        ok = [u for u in self.state["utxos"] if u["value"] >= min_value]
++        if not ok:
++            return None
++        u = self.rng.choice(ok)
++        self.state["utxos"].remove(u)
++        return u
++
++    def sign(self, u: dict, value_out: int) -> tuple[bytes, str]:
++        raw = unsigned_tx(u["txid"], u["vout"], value_out, self.script)
++        prev = [{"txid": u["txid"], "vout": u["vout"], "scriptPubKey": self.script.hex(),
++                 "amount": round(u["value"] / SAT, 8)}]
++        res = self.signer.call("signrawtransactionwithkey", raw.hex(), [self.wif], prev)
++        if not res.get("complete"):
++            raise RuntimeError(f"signing failed: {res.get('errors')}")
++        signed = bytes.fromhex(res["hex"])
++        return signed, txid_of(signed)
++
++    def report(self, gateway: str, t: float, txid: str, kind: str):
++        token = read_text(self.cfg["prime"]["token_file"]).strip()
++        body = json.dumps({"gateway": gateway, "t": t, "txid": txid, "kind": kind}).encode()
++        req = urllib.request.Request(self.cfg["prime"]["url"].rstrip("/") + "/sovereignty/canary", body,
++                                     {"Content-Type": "application/json", "X-Sovereignty-Token": token})
++        with urllib.request.urlopen(req, timeout=15) as r:
++            res = json.load(r)
++        if not res.get("ok"):
++            raise RuntimeError(f"primed refused the canary: {res}")
++
++    # one round
++    def own(self, g: str, node: str, rate: float) -> bool:
++        fee = int(rate * CANARY_VSIZE)
++        u = self.take_utxo(fee + self.cfg["wallet"]["min_utxo_sats"])
++        if u is None:
++            log("no canary UTXO left for", g[:16])
++            return False
++        extra = int(self.cfg["fees"]["twin_extra_sats"])
++        c_raw, c = self.sign(u, u["value"] - fee)
++        twin_raw, twin = self.sign(u, u["value"] - fee - extra)
++        # the pool node must never template C: set the delta before C exists anywhere
++        self.pool.call("prioritisetransaction", c, 0, -SAT)
++        d = self.cfg["delivery"]
++        try:
++            t = xbt_p2p.deliver(node, c_raw, network=self.net, proxy=(d["proxy"] or None) if d["mode"] == "socks5" else None,
++                                timeout=float(d["timeout_secs"]))
++        except xbt_p2p.DeliveryError as e:
++            log(f"own canary for {g[:16]} not delivered ({e}); its UTXO is kept")
++            self.pool.call("prioritisetransaction", c, 0, SAT)
++            self.state["utxos"].append(u)
++            self.state["delivery_failed"] += 1
++            return False
++        try:
++            self.pool.call("sendrawtransaction", twin_raw.hex())
++        except RuntimeError as e:
++            # C reached the pool first (relayed from G's node, deprioritised there) and C' lost:
++            # the canary still stands, the pool just has no twin to mine
++            log(f"twin for {g[:16]} refused by the pool node: {e}")
++        self.report(g, t, c, "own")
++        self.ledger({"event": "placed", "kind": "own", "gateway": g, "t": t, "txid": c, "twin": twin, "fee": fee})
++        self.state["inflight"].append({"kind": "own", "gateway": g, "t": t, "input": u, "txids": [c, twin],
++                                       "fees": [fee, fee + extra]})
++        self.state["fees_planned"] += fee + extra
++        self.state["delivered"]["own"] += 1
++        return True
++
++    def shared_or_decoy(self, kind: str, rate: float) -> bool:
++        fee = int(rate * CANARY_VSIZE) if kind == "shared" else 0
++        u = self.take_utxo(fee + self.cfg["wallet"]["min_utxo_sats"])
++        if u is None:
++            log(f"no canary UTXO left for a {kind} canary")
++            return False
++        raw, txid = self.sign(u, u["value"] - fee)
++        delta = self.shared_modified_sats() - fee if kind == "shared" else int(self.cfg["fees"]["decoy_delta_sats"])
++        # prioritised before acceptance: prioritising after races the template rebuild (SOV-004)
++        self.pool.call("prioritisetransaction", txid, 0, delta)
++        try:
++            self.pool.call("sendrawtransaction", raw.hex(), 0)
++        except RuntimeError as e:
++            log(f"{kind} canary refused by the pool node: {e}")
++            self.pool.call("prioritisetransaction", txid, 0, -delta)
++            self.state["utxos"].append(u)
++            return False
++        t = time.time()
++        self.report("*", t, txid, kind)
++        self.ledger({"event": "placed", "kind": kind, "gateway": "*", "t": t, "txid": txid, "fee": fee})
++        self.state["inflight"].append({"kind": kind, "gateway": "*", "t": t, "input": u, "txids": [txid], "fees": [fee],
++                                       "delta": delta})
++        self.state["fees_planned"] += fee
++        self.state["delivered"][kind] += 1
++        return True
++
++    def release_shared(self):
++        """A shared canary is evidence only while primed can judge it (checks of jobs up to 180 s
++        after it). After `shared_release_secs` its priority is lifted so the pool node mines it too;
++        otherwise only other pools' blocks would, and its UTXO would stay locked for as long."""
++        after = float(self.cfg["fees"]["shared_release_secs"])
++        now = time.time()
++        for f in self.state["inflight"]:
++            if f["kind"] == "shared" and not f.get("released") and after > 0 and now - f["t"] > after:
++                try:
++                    self.pool.call("prioritisetransaction", f["txids"][0], 0, -int(f.get("delta", 0)))
++                    f["released"] = now
++                except RuntimeError as e:
++                    log("could not release a shared canary:", e)
++
++    def resolve(self) -> bool:
++        """Return settled canaries' outputs to the UTXO list and book what they cost. Saves the
++        state when anything moved, so the ledger and state.json never disagree after a restart."""
++        before = json.dumps(self.state, sort_keys=True)
++        self.release_shared()
++        keep = []
++        now = time.time()
++        for f in self.state["inflight"]:
++            u = f["input"]
++            if self.pool.call("gettxout", u["txid"], u["vout"], False) is not None:
++                if now - f["t"] > self.cfg["wallet"]["inflight_max_secs"]:
++                    alive = False
++                    for x in f["txids"]:
++                        try:
++                            self.pool.call("getmempoolentry", x)
++                            alive = True
++                        except RuntimeError:
++                            pass
++                    if not alive:
++                        log(f"{f['kind']} canary {f['txids'][0][:16]} expired unconfirmed; input released")
++                        self.state["utxos"].append(u)
++                        continue
++                keep.append(f)
++                continue
++            got = None
++            for i, x in enumerate(f["txids"]):
++                o = self.pool.call("gettxout", x, 0, False)
++                if o is not None:
++                    got = (i, x, round(o["value"] * SAT))
++                    break
++            if got is None:
++                # the input is spent in the chain but neither output is there (spent already,
++                # or a reorg in flight): look again next time, give up after the max age
++                if now - f["t"] <= self.cfg["wallet"]["inflight_max_secs"]:
++                    keep.append(f)
++                else:
++                    log(f"{f['kind']} canary {f['txids'][0][:16]}: outcome unknown, dropped")
++                continue
++            i, x, value = got
++            fee = u["value"] - value
++            self.state["utxos"].append({"txid": x, "vout": 0, "value": value})
++            self.state["fees_paid"] += fee
++            self.state["resolved"] += 1
++            self.ledger({"event": "resolved", "kind": f["kind"], "gateway": f["gateway"], "t": f["t"], "confirmed": x,
++                         "which": ("C", "C'")[i] if f["kind"] == "own" else f["kind"], "fee": fee, "resolved_at": now})
++        self.state["inflight"] = keep
++        changed = json.dumps(self.state, sort_keys=True) != before
++        if changed:
++            self.save()
++        return changed
++
++    def leak_check(self) -> int:
++        """Own and shared canaries in the pool node's template right now (must be 0)."""
++        must_not = {f["txids"][0] for f in self.state["inflight"] if f["kind"] in ("own", "shared")}
++        if not must_not:
++            return 0
++        tpl = self.pool.call("getblocktemplate", {"rules": ["segwit", "blake2b"]})
++        leaks = sum(1 for t in tpl.get("transactions", []) if t["txid"] in must_not)
++        if leaks:
++            log(f"LEAK: {leaks} canaries in the pool node's template")
++        self.state["leaks"] += leaks
++        return leaks
++
++    def round(self, force: bool = False) -> dict:
++        self.resolve()
++        c = self.cfg["cadence"]
++        now = time.time()
++        gws = self.gateways()
++        rows = self.prime_report()
++        due = [g for g in gws if force or self.state["next_due"].get(g, 0) <= now]
++        if not due or (not force and now - self.state["last_round"] < c["round_min_gap_secs"]):
++            return {}
++        rate = self.fee_rate()
++        placed = {"own": 0, "shared": 0, "decoy": 0}
++        planned_before = self.state["fees_planned"]
++        for g in due:
++            if self.own(g, gws[g]["node"], rate):
++                placed["own"] += 1
++            self.state["next_due"][g] = now + self.interval(rows.get(g))
++        for kind in ("shared", "decoy"):
++            if c.get(kind, True) and self.shared_or_decoy(kind, rate):
++                placed[kind] += 1
++        self.state["rounds"] += 1
++        self.state["last_round"] = now
++        info = {"round": self.state["rounds"], "t": now, "placed": placed, "fee_rate": rate,
++                "fees_planned": self.state["fees_planned"] - planned_before, "utxos": len(self.state["utxos"]),
++                "inflight": len(self.state["inflight"])}
++        try:
++            info["leaks"] = self.leak_check()
++        except RuntimeError as e:
++            log("leak check failed:", e)
++        self.save()
++        log("round", json.dumps(info))
++        return info
++
++    def run(self):
++        bad = self.check_isolation()
++        if bad:
++            raise SystemExit(f"the canary address is known to pool-node wallet(s) {bad}: refusing")
++        if not self.state["utxos"] and not self.state["inflight"]:
++            log("no UTXOs on file; scanning")
++            log("utxos:", self.scan())
++        log(f"lazarus-canary up: {len(self.gateways())} gateways with a node, {len(self.state['utxos'])} UTXOs")
++        tick = float(self.cfg["cadence"]["tick_secs"])
++        while True:
++            try:
++                self.round()
++            except Exception as e:  # noqa: BLE001
++                log("round failed:", repr(e))
++            time.sleep(tick)
++
++    def status(self) -> dict:
++        s = self.state
++        return {"address": self.address, "utxos": len(s["utxos"]), "utxo_sats": sum(u["value"] for u in s["utxos"]),
++                "inflight": len(s["inflight"]), "rounds": s["rounds"], "delivered": s["delivered"],
++                "delivery_failed": s["delivery_failed"], "fees_planned": s["fees_planned"], "fees_paid": s["fees_paid"],
++                "resolved": s["resolved"], "leaks": s["leaks"]}
++
++
++def main():
++    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
++    ap.add_argument("-c", "--config", required=True)
++    ap.add_argument("command", choices=["run", "once", "scan", "status", "check-isolation"])
++    a = ap.parse_args()
++    with open(a.config, "rb") as f:
++        cfg = merged(tomllib.load(f))
++    svc = Canary(cfg)
++    if a.command == "run":
++        svc.run()
++    elif a.command == "once":
++        print(json.dumps(svc.round(force=True)))
++    elif a.command == "scan":
++        print(json.dumps({"utxos": svc.scan()}))
++    elif a.command == "status":
++        print(json.dumps(svc.status(), indent=1))
++    elif a.command == "check-isolation":
++        bad = svc.check_isolation()
++        print(json.dumps({"address": svc.address, "pool_wallets_knowing_it": bad}))
++        sys.exit(1 if bad else 0)
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/lazarus/canary/test_lazarus_canary.py b/lazarus/canary/test_lazarus_canary.py
+new file mode 100644
+index 0000000..1122a57
+--- /dev/null
++++ b/lazarus/canary/test_lazarus_canary.py
+@@ -0,0 +1,216 @@
++"""Unit tests for lazarus-canary (no node needed): python3 -m unittest test_lazarus_canary"""
++import json
++import os
++import socket
++import struct
++import tempfile
++import threading
++import unittest
++
++import lazarus_canary as lc
++import xbt_p2p
++
++
++class Tx(unittest.TestCase):
++    def test_unsigned_tx_layout_and_txid(self):
++        raw = lc.unsigned_tx("11" * 32, 3, 19_000, b"\x00\x14" + b"\x22" * 20)
++        self.assertEqual(raw[:4], b"\x02\x00\x00\x00")
++        self.assertEqual(raw[5:37], bytes.fromhex("11" * 32)[::-1])
++        self.assertEqual(raw[37:41], (3).to_bytes(4, "little"))
++        self.assertEqual(len(raw), 4 + 1 + 36 + 1 + 4 + 1 + 8 + 1 + 22 + 4)
++        self.assertEqual(lc.txid_of(raw), xbt_p2p.sha256d(raw)[::-1].hex())
++
++    def test_segwit_txid_is_the_legacy_hash(self):
++        legacy = lc.unsigned_tx("ab" * 32, 0, 5_000, b"\x00\x14" + b"\x01" * 20)
++        wit = b"\x02" + b"\x47" + b"\x30" * 71 + b"\x21" + b"\x02" * 33
++        segwit = legacy[:4] + b"\x00\x01" + legacy[4:-4] + wit + legacy[-4:]
++        self.assertEqual(lc.txid_of(segwit), lc.txid_of(legacy))
++
++
++class P2P(unittest.TestCase):
++    def test_message_framing(self):
++        m = xbt_p2p.message(xbt_p2p.MAGIC["regtest"], "ping", b"\x01" * 8)
++        self.assertEqual(m[:4], bytes.fromhex("fabfb5da"))
++        self.assertEqual(m[4:16], b"ping" + b"\x00" * 8)
++        self.assertEqual(struct.unpack("<I", m[16:20])[0], 8)
++        self.assertEqual(m[20:24], xbt_p2p.sha256d(b"\x01" * 8)[:4])
++
++    def test_version_payload(self):
++        v = xbt_p2p.version_payload(7, now=1_700_000_000)
++        self.assertEqual(struct.unpack("<i", v[:4])[0], 70016)
++        self.assertEqual(v[-1], 1, "relay flag on, or the node would not take the tx")
++        self.assertIn(b"/Satoshi:", v)
++
++    def test_one_shot_delivery_against_a_fake_node(self):
++        """version/verack, then the tx, then ping/pong; nothing else is sent."""
++        magic = xbt_p2p.MAGIC["regtest"]
++        srv = socket.socket()
++        srv.bind(("127.0.0.1", 0))
++        srv.listen(1)
++        port = srv.getsockname()[1]
++        seen = []
++
++        def node():
++            c, _ = srv.accept()
++            c.settimeout(5)
++            try:
++                while True:
++                    cmd, payload = xbt_p2p.read_message(c, magic)
++                    seen.append((cmd, payload))
++                    if cmd == "version":
++                        c.sendall(xbt_p2p.message(magic, "version", xbt_p2p.version_payload(1)))
++                        c.sendall(xbt_p2p.message(magic, "ping", b"\x09" * 8))
++                        c.sendall(xbt_p2p.message(magic, "verack", b""))
++                    elif cmd == "ping":
++                        c.sendall(xbt_p2p.message(magic, "pong", payload))
++            except (xbt_p2p.DeliveryError, OSError):
++                pass
++            finally:
++                c.close()
++
++        th = threading.Thread(target=node, daemon=True)
++        th.start()
++        t = xbt_p2p.deliver(f"127.0.0.1:{port}", b"\xab" * 60, network="regtest", timeout=5)
++        th.join(5)
++        srv.close()
++        self.assertGreater(t, 0)
++        cmds = [c for c, _ in seen]
++        self.assertEqual(cmds, ["version", "verack", "tx", "ping"])
++        self.assertEqual(seen[2][1], b"\xab" * 60)
++
++    def test_onion_needs_a_proxy(self):
++        with self.assertRaises(xbt_p2p.DeliveryError):
++            xbt_p2p.deliver("abcdef.onion:8333", b"", network="main")
++
++    def test_unreachable_node_is_a_delivery_error(self):
++        s = socket.socket()
++        s.bind(("127.0.0.1", 0))
++        port = s.getsockname()[1]
++        s.close()
++        with self.assertRaises(xbt_p2p.DeliveryError):
++            xbt_p2p.deliver(f"127.0.0.1:{port}", b"", timeout=2)
++
++
++class Policy(unittest.TestCase):
++    def svc(self):
++        s = lc.Canary.__new__(lc.Canary)
++        s.cfg = lc.merged({})
++        s.cfg["cadence"]["jitter"] = 0.0
++        s.rng = __import__("random").Random(1)
++        return s
++
++    def test_cadence_follows_the_gateways_record(self):
++        s = self.svc()
++        c = s.cfg["cadence"]
++        self.assertEqual(s.interval(None), c["new_secs"])
++        self.assertEqual(s.interval({"canaries_due": 9}), c["new_secs"])
++        self.assertEqual(s.interval({"canaries_due": 40, "canary_rate": 0.9}), c["enrolled_secs"])
++        self.assertEqual(s.interval({"canaries_due": 120, "canary_rate": 0.85}), c["clean_secs"])
++        self.assertEqual(s.interval({"canaries_due": 120, "canary_rate": 0.5}), c["enrolled_secs"])
++        self.assertEqual(s.interval({"canaries_due": 500, "canary_rate": 1.0, "flagged": True}), c["flagged_secs"])
++
++    def test_jitter_stays_in_bounds(self):
++        s = self.svc()
++        s.cfg["cadence"]["jitter"] = 0.5
++        xs = [s.interval({"canaries_due": 40}) for _ in range(500)]
++        self.assertTrue(all(1800 <= x <= 5400 for x in xs))
++
++    def test_gateways_from_config_and_nodes_file(self):
++        s = self.svc()
++        with tempfile.TemporaryDirectory() as d:
++            nf = os.path.join(d, "nodes.json")
++            with open(nf, "w") as f:
++                json.dump({"AA" * 32: "10.0.0.2:8333", "bb" * 32: "none", "cc" * 32: "x.onion:8333"}, f)
++            s.cfg["nodes_file"] = nf
++            s.cfg["gateways"] = [{"g": "DD" * 32, "node": "127.0.0.1:18444"}, {"g": "ee" * 32, "node": "none"}]
++            gws = s.gateways()
++        self.assertEqual(sorted(gws), sorted(["aa" * 32, "cc" * 32, "dd" * 32]))
++
++
++class StubPool:
++    def __init__(self):
++        self.calls = []
++
++    def call(self, method, *params, **kw):
++        self.calls.append((method, params))
++        return None
++
++
++class Release(unittest.TestCase):
++    def test_a_shared_canary_is_released_after_its_window_and_only_once(self):
++        s = lc.Canary.__new__(lc.Canary)
++        s.cfg = lc.merged({})
++        s.pool = StubPool()
++        now = lc.time.time()
++        s.state = {"inflight": [
++            {"kind": "shared", "t": now - 700, "txids": ["aa" * 32], "delta": -2_890},
++            {"kind": "shared", "t": now - 60, "txids": ["bb" * 32], "delta": -2_890},
++            {"kind": "decoy", "t": now - 700, "txids": ["cc" * 32], "delta": 1_000_000},
++            {"kind": "own", "t": now - 700, "txids": ["dd" * 32, "ee" * 32]},
++        ]}
++        s.release_shared()
++        s.release_shared()
++        self.assertEqual(s.pool.calls, [("prioritisetransaction", ("aa" * 32, 0, 2_890))])
++        self.assertIn("released", s.state["inflight"][0])
++
++
++class Settle(unittest.TestCase):
++    def test_settling_saves_the_state_with_the_ledger(self):
++        """A canary settled between rounds is on disk at once (it used to wait for the next round)."""
++        class Pool(StubPool):
++            def call(self, method, *params, **kw):
++                self.calls.append((method, params))
++                if method == "gettxout":
++                    txid, vout = params[0], params[1]
++                    return {"value": 0.00018899} if txid == "cc" * 32 else None
++                return None
++
++        with tempfile.TemporaryDirectory() as d:
++            s = lc.Canary.__new__(lc.Canary)
++            s.cfg = lc.merged({})
++            s.pool = Pool()
++            s.state_path, s.ledger_path = os.path.join(d, "state.json"), os.path.join(d, "l.jsonl")
++            s.state = s._load()
++            s.state["inflight"] = [{"kind": "own", "gateway": "g", "t": lc.time.time(), "fees": [1100, 1101],
++                                    "input": {"txid": "aa" * 32, "vout": 0, "value": 20_000}, "txids": ["bb" * 32, "cc" * 32]}]
++            self.assertTrue(s.resolve())
++            with open(s.state_path) as f:
++                on_disk = json.load(f)
++            self.assertEqual(on_disk["fees_paid"], 1_101)
++            self.assertEqual(on_disk["utxos"], [{"txid": "cc" * 32, "vout": 0, "value": 18_899}])
++            self.assertEqual(on_disk["inflight"], [])
++            with open(s.ledger_path) as f:
++                rec = json.loads(f.read())
++            self.assertEqual((rec["which"], rec["fee"]), ("C'", 1_101))
++            self.assertFalse(s.resolve(), "nothing moved: nothing written")
++
++
++class Isolation(unittest.TestCase):
++    def test_the_signer_can_never_broadcast(self):
++        r = lc.Rpc({"url": "http://127.0.0.1:9", "user": "u", "password": "p"}, lc.SIGNER_METHODS, "signer")
++        for m in ("sendrawtransaction", "importprivkey", "importdescriptors", "walletprocesspsbt"):
++            with self.assertRaises(PermissionError):
++                r.call(m, "00")
++        self.assertNotIn("sendrawtransaction", lc.SIGNER_METHODS)
++
++    def test_the_pool_node_is_never_given_the_key(self):
++        for m in ("importprivkey", "importdescriptors", "signrawtransactionwithkey", "signrawtransactionwithwallet",
++                  "dumpprivkey", "getdescriptorinfo"):
++            self.assertNotIn(m, lc.POOL_METHODS)
++
++    def test_a_readable_key_file_is_refused(self):
++        with tempfile.TemporaryDirectory() as d:
++            p = os.path.join(d, "k.wif")
++            with open(p, "w") as f:
++                f.write("cVt4o7BGAig1UXywgGSmARhxMdzP5qvQsxKkSsc1XEkw3tDTQFpy\n")
++            os.chmod(p, 0o644)
++            s = lc.Canary.__new__(lc.Canary)
++            s.cfg = lc.merged({"wallet": {"key_file": p}})
++            with self.assertRaises(SystemExit):
++                s._read_key()
++            os.chmod(p, 0o600)
++            self.assertTrue(s._read_key().startswith("cVt4"))
++
++
++if __name__ == "__main__":
++    unittest.main()
+diff --git a/lazarus/canary/xbt_p2p.py b/lazarus/canary/xbt_p2p.py
+new file mode 100644
+index 0000000..764363c
+--- /dev/null
++++ b/lazarus/canary/xbt_p2p.py
+@@ -0,0 +1,149 @@
++"""One-shot P2P delivery of a raw transaction to one node (lazarus-canary, SOV-P-002 W9).
++
++The canary must reach the gateway's registered node and nowhere else, so it is not handed to any
++node's RPC (which would relay it) but pushed over a single P2P connection: version/verack, `tx`,
++then `ping` and wait for the matching `pong`, which a node answers only after it has processed
++every message before it. Then the connection is closed.
++
++Plain TCP, or through a SOCKS5 proxy (Tor: `127.0.0.1:9050`, which also reaches `.onion` nodes).
++v1 transport only; nodes that require BIP324 v2 are not supported here.
++"""
++import hashlib
++import os
++import socket
++import struct
++import time
++
++MAGIC = {
++    "main": bytes.fromhex("f9beb4d9"),
++    "test": bytes.fromhex("0b110907"),
++    "signet": bytes.fromhex("0a03cf40"),
++    "regtest": bytes.fromhex("fabfb5da"),
++}
++PROTOCOL_VERSION = 70016
++# What an ordinary recent node says, so a canary connection does not name itself.
++USER_AGENT = b"/Satoshi:29.0.0/"
++
++
++class DeliveryError(Exception):
++    pass
++
++
++def sha256d(b: bytes) -> bytes:
++    return hashlib.sha256(hashlib.sha256(b).digest()).digest()
++
++
++def varint(n: int) -> bytes:
++    if n < 0xFD:
++        return bytes([n])
++    if n <= 0xFFFF:
++        return b"\xfd" + struct.pack("<H", n)
++    if n <= 0xFFFFFFFF:
++        return b"\xfe" + struct.pack("<I", n)
++    return b"\xff" + struct.pack("<Q", n)
++
++
++def message(magic: bytes, command: str, payload: bytes) -> bytes:
++    cmd = command.encode().ljust(12, b"\x00")
++    return magic + cmd + struct.pack("<I", len(payload)) + sha256d(payload)[:4] + payload
++
++
++def version_payload(nonce: int, now: int | None = None) -> bytes:
++    now = int(time.time()) if now is None else now
++    no_addr = struct.pack("<Q", 0) + b"\x00" * 10 + b"\xff\xff" + b"\x00" * 4 + struct.pack(">H", 0)
++    return (struct.pack("<iQq", PROTOCOL_VERSION, 0, now) + no_addr + no_addr + struct.pack("<Q", nonce)
++            + varint(len(USER_AGENT)) + USER_AGENT + struct.pack("<i", 0) + b"\x01")
++
++
++def split_hostport(addr: str) -> tuple[str, int]:
++    host, _, port = addr.rpartition(":")
++    if not host or not port.isdigit():
++        raise DeliveryError(f"node address must be host:port, got {addr!r}")
++    return host.strip("[]"), int(port)
++
++
++def _recv_exact(sock: socket.socket, n: int) -> bytes:
++    buf = b""
++    while len(buf) < n:
++        chunk = sock.recv(n - len(buf))
++        if not chunk:
++            raise DeliveryError("peer closed the connection")
++        buf += chunk
++    return buf
++
++
++def read_message(sock: socket.socket, magic: bytes) -> tuple[str, bytes]:
++    head = _recv_exact(sock, 24)
++    if head[:4] != magic:
++        raise DeliveryError("wrong network magic from peer")
++    command = head[4:16].rstrip(b"\x00").decode(errors="replace")
++    (length,) = struct.unpack("<I", head[16:20])
++    if length > 4_000_000:
++        raise DeliveryError("oversized message from peer")
++    payload = _recv_exact(sock, length)
++    if sha256d(payload)[:4] != head[20:24]:
++        raise DeliveryError("bad checksum from peer")
++    return command, payload
++
++
++def socks5_connect(proxy: str, host: str, port: int, timeout: float) -> socket.socket:
++    phost, pport = split_hostport(proxy)
++    s = socket.create_connection((phost, pport), timeout=timeout)
++    s.sendall(b"\x05\x01\x00")
++    if _recv_exact(s, 2) != b"\x05\x00":
++        s.close()
++        raise DeliveryError("SOCKS5 proxy refused no-auth")
++    h = host.encode()
++    s.sendall(b"\x05\x01\x00\x03" + bytes([len(h)]) + h + struct.pack(">H", port))
++    rep = _recv_exact(s, 4)
++    if rep[1] != 0:
++        s.close()
++        raise DeliveryError(f"SOCKS5 connect failed (code {rep[1]})")
++    skip = {1: 4, 4: 16}.get(rep[3])
++    if skip is None:
++        skip = _recv_exact(s, 1)[0]
++    _recv_exact(s, skip + 2)
++    return s
++
++
++def deliver(node: str, raw_tx: bytes, *, network: str = "regtest", proxy: str | None = None,
++            timeout: float = 20.0) -> float:
++    """Push `raw_tx` to `node` (host:port) over one fresh P2P connection. Returns the unix time the
++    node acknowledged (its `pong`, sent after it processed the `tx`). Raises DeliveryError."""
++    magic = MAGIC[network]
++    host, port = split_hostport(node)
++    if host.endswith(".onion") and not proxy:
++        raise DeliveryError("an .onion node needs delivery.proxy (Tor SOCKS5)")
++    deadline = time.monotonic() + timeout
++    try:
++        sock = socks5_connect(proxy, host, port, timeout) if proxy else socket.create_connection((host, port), timeout=timeout)
++    except OSError as e:
++        raise DeliveryError(f"connect {node}: {e}") from None
++    try:
++        sock.settimeout(timeout)
++        sock.sendall(message(magic, "version", version_payload(int.from_bytes(os.urandom(8), "little"))))
++        got_version = got_verack = False
++        while not (got_version and got_verack):
++            if time.monotonic() > deadline:
++                raise DeliveryError("handshake timed out")
++            cmd, _ = read_message(sock, magic)
++            if cmd == "version":
++                got_version = True
++                sock.sendall(message(magic, "verack", b""))
++            elif cmd == "verack":
++                got_verack = True
++        sock.sendall(message(magic, "tx", raw_tx))
++        nonce = os.urandom(8)
++        sock.sendall(message(magic, "ping", nonce))
++        while True:
++            if time.monotonic() > deadline:
++                raise DeliveryError("no pong after the tx")
++            cmd, payload = read_message(sock, magic)
++            if cmd == "pong" and payload == nonce:
++                return time.time()
++            if cmd == "ping":
++                sock.sendall(message(magic, "pong", payload))
++    except (OSError, socket.timeout) as e:
++        raise DeliveryError(f"{node}: {e}") from None
++    finally:
++        sock.close()
+-- 
+2.43.0
+

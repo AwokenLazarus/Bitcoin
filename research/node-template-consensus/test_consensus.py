@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Mike Moore (AwokenLazarus)
 """Exhaustive ConnectBlock scenarios. Run: python3 test_consensus.py"""
 
 from __future__ import annotations

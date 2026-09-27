@@ -1,0 +1,34 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: michael moore <mrmoore27@pm.me>
+Date: Sat, 26 Sep 2026 01:49:31 +0000
+Subject: [PATCH 2/3] prime, nta-signer: a direct attestation waits up to 1 s
+ for Prime's tip
+
+The SOV-017 demo showed every signer's first POST landing ~2 ms after its
+node heard of the block, ahead of primed's 250 ms poller; refresh_ahead then
+skipped (the poller had just refreshed) and the answer was 409, so acceptance
+waited on the signer's retry (~750 ms). POST /nta/attest now waits on the tip
+watch for that parent before refusing. The coinbaser's best_payees count no
+longer subtracts a pool output that is not there. Signer retry 750 -> 250 ms.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ lazarus/nta-signer/src/main.rs | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/lazarus/nta-signer/src/main.rs b/lazarus/nta-signer/src/main.rs
+index ce07352..ec2379d 100644
+--- a/lazarus/nta-signer/src/main.rs
++++ b/lazarus/nta-signer/src/main.rs
+@@ -304,7 +304,7 @@ fn post_one(s: &Signer, t: &Target, url: &str, token: Option<&str>, seen: Instan
+                     seen.elapsed().as_secs_f64() * 1e3
+                 );
+                 if r.status_code == 409 && counted < COUNTED_TRIES {
+-                    std::thread::sleep(Duration::from_millis(750));
++                    std::thread::sleep(Duration::from_millis(250));
+                     continue;
+                 }
+                 return;
+-- 
+2.43.0
+

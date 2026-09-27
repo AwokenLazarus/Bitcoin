@@ -1,0 +1,168 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: michael moore <mrmoore27@pm.me>
+Date: Sat, 26 Sep 2026 01:10:59 +0000
+Subject: [PATCH 2/2] prime, split-only patch: probe advertisers too; the C
+ gateway keeps zero-value outputs after its payees
+
+The readiness demo ran the split-only datum_gateway live for the first time.
+It advertised nta-v1, parsed the 70-byte attestations, and then dropped them
+all: generate_coinbase_txns_for_stratum_job_subtypebysize stopped adding
+outputs once the payees had used the coinbase value, and every attestation is
+a zero-value output after them. Prime caught it on the first post-activation
+share (attestations dropped) and refused it. Both loops now go on past the
+spent value; the value check still admits only zero-value outputs there.
+
+So the flag is a claim, not evidence. Prime now probes every gateway before
+activation, advertiser or not, and a dropped probe outranks the flag. A build
+that dropped while advertising is not believed again until it says hello with
+another user agent (an upgrade); a reconnect of the same build stays refused.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../patches/datum-gateway-split-only.patch    | 53 ++++++++++++++-----
+ 1 file changed, 39 insertions(+), 14 deletions(-)
+
+diff --git a/lazarus/patches/datum-gateway-split-only.patch b/lazarus/patches/datum-gateway-split-only.patch
+index c7edf56..8b25b10 100644
+--- a/lazarus/patches/datum-gateway-split-only.patch
++++ b/lazarus/patches/datum-gateway-split-only.patch
+@@ -74,9 +74,17 @@
+ #   XBT-NTA capability (SOV-011). The hello carries "nta-v1\0" right after the
+ #   4-byte header key seed, where stock sends only random padding (stock
+ #   datum_protocol.c:1028-1033; every server skips it). Lazarus Prime reads it as
+-#   "keeps 70-byte attestation outputs" and does not probe the gateway before NTA
+-#   activation; a gateway without it is probed and, if it drops the probe,
+-#   refused work from the activation height.
++#   "keeps 70-byte attestation outputs": ready. It still probes the gateway
++#   before NTA activation, and one that drops the probe (flag or not) is refused
++#   work from the activation height.
++#
++#   Zero-value outputs after the payees (SOV-011). generate_coinbase_txns_for_
++#   stratum_job_subtypebysize no longer stops once the payees have used the
++#   coinbase value: the XBT-NTA attestations (and a Prime's pre-activation
++#   probe) come after the payees and are zero-value, and stopping there dropped
++#   them all, so every post-activation block was bad-nta-count. Found live by
++#   the SOV-011 readiness demo: the gateway advertised nta-v1 and Prime refused
++#   it after its first post-activation share.
+ #
+ diff --git a/CMakeLists.txt b/CMakeLists.txt
+ index ed47e49..a615652 100644
+@@ -146,7 +154,7 @@ index 601c462..2d36da8 100644
+  						if (was_notified) {
+  							// we got a notification of a new block, but there doesn't seem to actually be a new block.
+ diff --git a/src/datum_coinbaser.c b/src/datum_coinbaser.c
+-index 00fbb54..51a5954 100644
++index 00fbb54..8f2caea 100644
+ --- a/src/datum_coinbaser.c
+ +++ b/src/datum_coinbaser.c
+ @@ -53,6 +53,7 @@
+@@ -182,7 +190,16 @@ index 00fbb54..51a5954 100644
+  	m = 0;
+  	mval = 0;
+  	// technically an output script could be > 0x4B, meaning an extra byte would be eaten here... but that's not currently the standard
+-@@ -275,6 +287,7 @@ void generate_coinbase_txns_for_stratum_job_subtypebysize(T_DATUM_STRATUM_JOB *s
++@@ -270,11 +282,15 @@ void generate_coinbase_txns_for_stratum_job_subtypebysize(T_DATUM_STRATUM_JOB *s
++ 			m++;
++ 			mval += s->available_coinbase_outputs[k].value_sats;
++ 			if (i < 30) break;
++-			if (mval >= s->coinbase_value) break;
+++			// Lazarus (SOV-011): no break once the value is spent. What follows the payees is
+++			// zero-value (XBT-NTA attestations, a Prime's probe) and the value check above
+++			// still admits nothing else; stopping here dropped every attestation, so every
+++			// block after NTA activation was invalid. Must match the loop below.
++ 		}
+  	}
+  	
+  	// "m" outputs fit
+@@ -190,7 +207,15 @@ index 00fbb54..51a5954 100644
+  	if (space_for_en_in_coinbase) {
+  		// we'll start the empty coinb2 with the "sequence"
+  		m+=2; // pool addr + witness
+-@@ -357,6 +370,11 @@ void generate_coinbase_txns_for_stratum_job_subtypebysize(T_DATUM_STRATUM_JOB *s
++@@ -326,7 +342,6 @@ void generate_coinbase_txns_for_stratum_job_subtypebysize(T_DATUM_STRATUM_JOB *s
++ 			}
++ 			if (!m) break;
++ 			if (j < 30) break;
++-			if (mval >= s->coinbase_value) break;
++ 		}
++ 	}
++ 	
++@@ -357,6 +372,11 @@ void generate_coinbase_txns_for_stratum_job_subtypebysize(T_DATUM_STRATUM_JOB *s
+  		cb2idx[coinbase_index] += sprintf(&s->coinbase[coinbase_index].coinb2[cb2idx[coinbase_index]], "0000000000000000036a0100"); // TODO: Is a naked OP_RETURN without any bytes after safe?  Above TODO is probably better than investigating.
+  	}
+  	
+@@ -202,7 +227,7 @@ index 00fbb54..51a5954 100644
+  	// witness commit output costs 46 bytes
+  	// append the default_witness_commitment
+  	cb2idx[coinbase_index] += sprintf(&s->coinbase[coinbase_index].coinb2[cb2idx[coinbase_index]], "0000000000000000%2.2x%s", (unsigned int)strlen(s->block_template->default_witness_commitment)>>1, s->block_template->default_witness_commitment);
+-@@ -582,7 +600,8 @@ void generate_coinbase_txns_for_stratum_job(T_DATUM_STRATUM_JOB *s, bool empty_o
++@@ -582,7 +602,8 @@ void generate_coinbase_txns_for_stratum_job(T_DATUM_STRATUM_JOB *s, bool empty_o
+  		memcpy(&s->pool_addr_script[0], datum_config.override_mining_pool_scriptsig, datum_config.override_mining_pool_scriptsig_len);
+  		s->is_datum_job = true;
+  		if (s->available_coinbase_outputs_count == 0) {
+@@ -212,7 +237,7 @@ index 00fbb54..51a5954 100644
+  		}
+  	} else {
+  		// No pool
+-@@ -590,6 +609,11 @@ void generate_coinbase_txns_for_stratum_job(T_DATUM_STRATUM_JOB *s, bool empty_o
++@@ -590,6 +611,11 @@ void generate_coinbase_txns_for_stratum_job(T_DATUM_STRATUM_JOB *s, bool empty_o
+  		s->is_datum_job = false;
+  		empty_only = true;
+  	}
+@@ -224,7 +249,7 @@ index 00fbb54..51a5954 100644
+  	if (!s->pool_addr_script_len) {
+  		DLOG_FATAL("Could not generate output script for pool addr! Perhaps invalid? This is bad.");
+  		panic_from_thread(__LINE__);
+-@@ -761,6 +785,13 @@ void generate_coinbase_txns_for_stratum_job(T_DATUM_STRATUM_JOB *s, bool empty_o
++@@ -761,6 +787,13 @@ void generate_coinbase_txns_for_stratum_job(T_DATUM_STRATUM_JOB *s, bool empty_o
+  			cb_req_sz[2] += 10; // always OP_RETURN extranonce for type 2
+  		}
+  		
+@@ -238,7 +263,7 @@ index 00fbb54..51a5954 100644
+  		// TYPE 1 - "Nicehash" friendly, max 500 bytes
+  		i = datum_stratum_coinbase_fit_to_template(500, cb_req_sz[1], s);
+  		generate_coinbase_txns_for_stratum_job_subtypebysize(s, 1, i, space_for_en_in_coinbase, cb1idx, cb2idx, false);
+-@@ -780,6 +811,14 @@ void generate_coinbase_txns_for_stratum_job(T_DATUM_STRATUM_JOB *s, bool empty_o
++@@ -780,6 +813,14 @@ void generate_coinbase_txns_for_stratum_job(T_DATUM_STRATUM_JOB *s, bool empty_o
+  		// TYPE 2 - Older Antminer stock (S19)
+  		i = datum_stratum_coinbase_fit_to_template(755, cb_req_sz[2], s);
+  		generate_coinbase_txns_for_stratum_job_subtypebysize(s, 2, i, false, cb1idx, cb2idx, true);
+@@ -253,7 +278,7 @@ index 00fbb54..51a5954 100644
+  	}
+  	
+  	// prep binary versions of the coinbase for speeding up later
+-@@ -813,6 +852,12 @@ void generate_coinbase_txns_for_stratum_job(T_DATUM_STRATUM_JOB *s, bool empty_o
++@@ -813,6 +854,12 @@ void generate_coinbase_txns_for_stratum_job(T_DATUM_STRATUM_JOB *s, bool empty_o
+  		}
+  	}
+  
+@@ -266,7 +291,7 @@ index 00fbb54..51a5954 100644
+  	// A BLAKE2b job commits every client to one coinbase, so commit to the
+  	// one that carries the pool's payout outputs when there are any. Type 4
+  	// has the largest budget, and the Sia hasher never parses the Bitcoin
+-@@ -863,7 +908,10 @@ int datum_coinbaser_v2_parse(T_DATUM_STRATUM_JOB *s, unsigned char *coinbaser, i
++@@ -863,7 +910,10 @@ int datum_coinbaser_v2_parse(T_DATUM_STRATUM_JOB *s, unsigned char *coinbaser, i
+  			break;
+  		}
+  		slen = coinbaser[cidx]; cidx++;
+@@ -278,7 +303,7 @@ index 00fbb54..51a5954 100644
+  			DLOG_ERROR("Script length (%d) is invalid. Using default/empty", slen);
+  			s->available_coinbase_outputs_count = 0;
+  			return 0;
+-@@ -926,9 +974,15 @@ void *datum_coinbaser_thread(void *ptr) {
++@@ -926,9 +976,15 @@ void *datum_coinbaser_thread(void *ptr) {
+  				s->available_coinbase_outputs_count = 0;
+  				i = 0;
+  			}
+@@ -295,7 +320,7 @@ index 00fbb54..51a5954 100644
+  				if (need_coinbaser_rwlocks_init_done) {
+  					pthread_rwlock_wrlock(&need_coinbaser_rwlocks[sjob]);
+  					s->need_coinbaser = false;
+-@@ -936,6 +990,8 @@ void *datum_coinbaser_thread(void *ptr) {
++@@ -936,6 +992,8 @@ void *datum_coinbaser_thread(void *ptr) {
+  					need_coinbaser = false;
+  				}
+  				DLOG_DEBUG("Generated and notified.");
+-- 
+2.43.0
+

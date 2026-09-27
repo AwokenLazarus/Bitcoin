@@ -1,0 +1,1546 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: michael moore <mrmoore27@pm.me>
+Date: Fri, 25 Sep 2026 08:56:47 +0000
+Subject: [PATCH 18/27] prime: canary evidence from canary checks (SOV-P-002
+ W8)
+
+An own canary registered with POST /sovereignty/canary (now a token-only
+route for the lazarus-canary sidecar, not demo-gated) schedules one extra
+request_full_block of that gateway's newest job, sovereignty-canary-check-secs
+(45) later, at most one per sovereignty-canary-check-gap-secs (300) per
+gateway. The reply counts only if its transactions hash to the job's merkle
+branches (verify::job_txids), so a gateway cannot answer with a list its
+miners are not hashing.
+
+The detector reads own/shared/decoy hits from these checks
+(entropy::features_checked): a canary is judged by jobs first seen
+12-180 s after delivery. Job snapshots keep the timing and cluster
+features only. POST /sovereignty/check is the demo ingest for harnesses
+without a DATUM session.
+
+Ported to origin/main f14bb4c for publication: the check rides on the
+found-block transaction request only.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ prime/README.md                       |  18 +-
+ prime/primed/src/config.rs            |  36 ++--
+ prime/primed/src/session.rs           | 132 ++++++++++++-
+ prime/primed/src/sovereignty.rs       | 259 ++++++++++++++++++++++---
+ prime/primed/src/stats.rs             |  50 ++++-
+ prime/primed/tests/sovereignty_e2e.rs | 148 +++++++++++++++
+ prime/tides/src/entropy.rs            | 262 +++++++++++++++++++++++---
+ prime/tides/src/lib.rs                |   2 +-
+ prime/wire/src/verify.rs              | 114 +++++++++++
+ 9 files changed, 932 insertions(+), 89 deletions(-)
+
+diff --git a/prime/README.md b/prime/README.md
+index f6d2c69..ae1537f 100644
+--- a/prime/README.md
++++ b/prime/README.md
+@@ -401,9 +401,23 @@ detector and the score):
+ | `observe` | Job snapshots, attestations and blocks are recorded. The detector runs in the background every `sovereignty-recompute-secs` (default 300) on a copy of its store, never under the ledger lock; stats.json and `GET /sovereignty.json` serve the last pass (`compute_ms`, `computed_at`), with `published: false`. |
+ | `publish` | As `observe`, with `published: true` for the pool site. |
+ 
+-`POST /sovereignty/{register,attest}` need the mode on and the token from
++`POST /sovereignty/{register,attest,canary}` need the mode on and the token from
+ `data-dir/sovereignty.token` in an `X-Sovereignty-Token` header; the other POSTs (snapshot,
+-canary, credit, observe, apply-bonus) also need `sovereignty-demo = true` (local rnd only).
++check, credit, observe, apply-bonus) also need `sovereignty-demo = true` (local rnd only).
++
++**Canary evidence comes from canary checks (SOV-P-002 W8).** The canary sidecar
++(`lazarus/canary/`, W9) reports each canary it places with `POST /sovereignty/canary`
++`{"gateway": G, "t": <delivered, unix s>, "txid": <hex>, "kind": "own"|"shared"|"decoy"}`.
++An own canary schedules one extra check of that gateway `sovereignty-canary-check-secs`
++(default 45) later: on its next 5 s tick the session sends `request_full_block` for the newest
++job the gateway has sent (whatever its shares scored). The reply counts only if its transactions hash to that job's merkle branches, so a
++gateway cannot answer with a list its miners are not hashing (refusals are logged and counted
++in `/sovereignty.json` `store.checks_refused`). A canary is judged by the checks of jobs Prime
++first saw 12–180 s after its delivery, and hit if one of them holds it; shared canaries and
++decoys are read from the same job lists. Job snapshots still feed the timing and cluster
++features but are no canary evidence. One gateway gets at most one canary check per
++`sovereignty-canary-check-gap-secs` (default 300: a full block is megabytes of upload for it);
++checks due together are made once. 256 checks are kept per key.
+ `sovereignty-bonus` pays nothing unless the mode is on. `authored` and `directory` (payout
+ addresses) appear in the report only with the bonus on; node addresses never do.
+ 
+diff --git a/prime/primed/src/config.rs b/prime/primed/src/config.rs
+index e08c402..0ac9677 100644
+--- a/prime/primed/src/config.rs
++++ b/prime/primed/src/config.rs
+@@ -185,20 +185,16 @@ pub struct Config {
+     /// Accept HTTP ingest for snapshots / attestations / demo credits. Local rnd only.
+     #[serde(default)]
+     pub sovereignty_demo: bool,
+-    /// rnd/sov-002: first height at which XBT-NTA is enforced (`-testactivationheight=nta@<h>`
+-    /// on the node). From there every coinbaser pays only payees whose attestation for the tip
+-    /// arrived, plus the pool, and carries the rest. Unset: coinbasers are unchanged.
+-    #[serde(default)]
+-    pub nta_height: Option<u32>,
+-    /// File holding the pool payout key's secret (64 hex characters): the key of the
+-    /// `payout-address`, which must be `OP_1 <K>` for that key. Required with `nta-height`.
+-    /// Read once at start; never logged.
+-    #[serde(default)]
+-    pub nta_pool_key_file: Option<PathBuf>,
+-    /// Test hook: behave as a Prime without NTA support even past `nta-height` (the demo's
+-    /// "patched-out" Prime, whose un-attested blocks nodes refuse).
+-    #[serde(default)]
+-    pub nta_disabled: bool,
++    /// W8: seconds after a canary is registered (`POST /sovereignty/canary`) that the gateway's
++    /// newest job is fetched with `request_full_block` to see whether it holds the canary. Checked
++    /// on the session's 5 s tick.
++    #[serde(default = "d_sov_canary_check_secs")]
++    pub sovereignty_canary_check_secs: u64,
++    /// W8: the fewest seconds between two canary checks of one gateway. Canaries due closer
++    /// together share a check. A full block is up to a few MB of upload for the gateway, so
++    /// this is what bounds what the canary cadence can cost it.
++    #[serde(default = "d_sov_canary_check_gap_secs")]
++    pub sovereignty_canary_check_gap_secs: u64,
+ 
+     // Keys the previous Prime used. Accepted so an existing config starts unchanged;
+     // `load` reports each one it saw.
+@@ -283,6 +279,14 @@ fn d_solo_tag() -> String {
+ fn d_sov_bonus_bps() -> u32 {
+     500
+ }
++fn d_sov_canary_check_secs() -> u64 {
++    45
++}
++
++fn d_sov_canary_check_gap_secs() -> u64 {
++    300
++}
++
+ fn d_sov_recompute_secs() -> u64 {
+     300
+ }
+@@ -370,6 +374,9 @@ impl Config {
+         if c.sovereignty_recompute_secs == 0 {
+             return Err("sovereignty-recompute-secs must be at least 1".into());
+         }
++        if c.sovereignty_canary_check_secs == 0 || c.sovereignty_canary_check_gap_secs == 0 {
++            return Err("sovereignty-canary-check-secs and -gap-secs must be at least 1".into());
++        }
+         if c.sovereignty_bonus_bps > 10_000 {
+             return Err("sovereignty-bonus-bps cannot exceed 10000".into());
+         }
+@@ -473,6 +480,7 @@ require-split-gateway = true
+         assert_eq!(c.sovereignty_mode, SovereigntyMode::Off);
+         assert_eq!(c.sovereignty_recompute_secs, 300);
+         assert_eq!(c.sovereignty_bonus_bps, 500);
++        assert_eq!((c.sovereignty_canary_check_secs, c.sovereignty_canary_check_gap_secs), (45, 300));
+         // a data dir the old Prime left behind keeps its key, hence its pubkey
+         std::fs::write(dir.join("lazarus-prime.key"), "00").unwrap();
+         let c = Config::load(&p).unwrap();
+diff --git a/prime/primed/src/session.rs b/prime/primed/src/session.rs
+index 0a1be66..a2b4376 100644
+--- a/prime/primed/src/session.rs
++++ b/prime/primed/src/session.rs
+@@ -45,6 +45,8 @@ const IDLE_LIMIT: Duration = Duration::from_secs(300);
+ const HANDSHAKE_LIMIT: Duration = Duration::from_secs(15);
+ const COINBASERS_KEPT: usize = 16;
+ const PENDING_BLOCK_TTL: Duration = Duration::from_secs(120);
++/// A canary check whose transactions have not arrived by then is given up (W8).
++const CANARY_CHECK_TTL: Duration = Duration::from_secs(120);
+ const MAX_IDENTITIES: usize = 1 << 16;
+ /// The identity table's hard ceiling, addresses included (about 100 MB of names).
+ const MAX_IDENTITIES_HARD: usize = 1 << 20;
+@@ -275,6 +277,15 @@ struct PendingBlock {
+     at: Instant,
+ }
+ 
++/// A job whose transactions were asked for: what the reply must hash to, and when Prime first
++/// saw the job (the canary rule times a check by the job, not by the reply). SOV-P-002 W8.
++#[derive(Clone)]
++struct CheckedJob {
++    id: u8,
++    seen: f64,
++    branches: Vec<[u8; 32]>,
++}
++
+ /// A DATUM-delivered LZT1 attestation waiting for its coinbase (W7).
+ struct PendingLzt1 {
+     msg: datum_wire::authorship::Lzt1Attest,
+@@ -360,6 +371,12 @@ struct Session {
+     coinbaser_send_at: Option<tokio::time::Instant>,
+     /// This session's row for the clients table, until its first frame earns it a place there.
+     row: Option<ClientInfo>,
++    /// When each slot's current job was first seen (unix seconds), and the slot that last
++    /// moved to a new job: what a canary check asks about.
++    job_seen: Vec<f64>,
++    newest_slot: Option<u8>,
++    /// A canary check waiting on the gateway's transactions (W8), and when it was asked.
++    canary_check: Option<(CheckedJob, Instant)>,
+ }
+ 
+ /// Which of the two gateway-side faults produced a pool-only coinbase, read off the share rather
+@@ -508,6 +525,9 @@ pub async fn run(shared: Arc<Shared>, mut stream: TcpStream, remote: SocketAddr)
+         },
+         pending_coinbaser: None,
+         coinbaser_send_at: None,
++        job_seen: vec![0.0; mining::MAX_JOB_SLOTS],
++        newest_slot: None,
++        canary_check: None,
+         row: Some(row),
+     };
+     s.serve().await
+@@ -580,7 +600,8 @@ impl Session {
+                                 // full size while a found block's transactions are owed, and
+                                 // for a while after: a slow reply must not cost the connection
+                                 let block_about = !self.pending_blocks.is_empty()
+-                                    || self.candidate_at.is_some_and(|t| t.elapsed() < BLOCK_REPLY_WINDOW);
++                                    || self.candidate_at.is_some_and(|t| t.elapsed() < BLOCK_REPLY_WINDOW)
++                                    || self.canary_check.as_ref().is_some_and(|(_, t)| t.elapsed() < CANARY_CHECK_TTL);
+                                 let cap = if block_about { MAX_CMD_LEN } else { MAX_IDLE_FRAME };
+                                 if h.len as usize > cap {
+                                     return Err(SessionError::Bad("frame too large"));
+@@ -633,6 +654,7 @@ impl Session {
+                         v.retain(|p| p.at.elapsed() < PENDING_BLOCK_TTL);
+                         !v.is_empty()
+                     });
++                    self.maybe_check_canaries().await?;
+                 }
+                 _ = async {
+                     if let Some(at) = restore {
+@@ -1269,6 +1291,8 @@ impl Session {
+         };
+         if absorbed.job_changed {
+             self.touch_slot(job_id);
++            self.job_seen[job_id] = crate::sovereignty::now_f64();
++            self.newest_slot = Some(s.job_id);
+             self.coinbase_bytes = self.slots.iter().map(JobSlot::coinbase_bytes).sum();
+             if self.shared.sovereignty.on() {
+                 if let Some(j) = &self.slots[job_id].job {
+@@ -1593,6 +1617,79 @@ impl Session {
+         self.note_reject()
+     }
+ 
++    /// The job in slot `id` as a check would judge it; `None` for an empty slot, or a job with no
++    /// transactions (nothing to hold a canary).
++    fn checked_job(&self, id: u8) -> Option<CheckedJob> {
++        let j = self.slots.get(usize::from(id))?.job.as_ref()?;
++        (!j.merkle_branches.is_empty()).then(|| CheckedJob {
++            id,
++            seen: self.job_seen[usize::from(id)],
++            branches: j.merkle_branches.clone(),
++        })
++    }
++
++    /// W8: a canary was registered for this gateway a while ago (`sovereignty-canary-check-secs`);
++    /// ask for the transactions of its newest job, whatever its shares scored, and read the
++    /// canary verdict from them (`on_validation` → `note_check`). One check in flight at a time;
++    /// `Sovereignty::take_check` rate-limits them per gateway.
++    async fn maybe_check_canaries(&mut self) -> Result<(), SessionError> {
++        let sov = &self.shared.sovereignty;
++        if !sov.on() || self.is_house_stratum() {
++            return Ok(());
++        }
++        if self.canary_check.as_ref().is_some_and(|(_, t)| t.elapsed() < CANARY_CHECK_TTL) {
++            return Ok(());
++        }
++        self.canary_check = None;
++        let Some(job) = self.newest_slot.and_then(|id| self.checked_job(id)) else { return Ok(()) };
++        if !sov.take_check(&self.gateway_key_hex(), crate::sovereignty::now_f64()) {
++            return Ok(());
++        }
++        let now = Instant::now();
++        let id = job.id;
++        self.canary_check = Some((job, now));
++        // a found block on this very job has already asked for its transactions: that reply serves both
++        if self.pending_blocks.contains_key(&id) {
++            return Ok(());
++        }
++        log::debug!("[{}] {}: canary check on job {id}", self.id, self.gateway_hex);
++        self.send_mining(&mining::request_full_block(id), false).await
++    }
++
++    /// A job's transactions arrived for a canary check: if they are the job's, they are canary
++    /// evidence for this gateway.
++    fn note_check(&self, job: &CheckedJob, txns: &[Vec<u8>]) {
++        let sov = &self.shared.sovereignty;
++        if !sov.on() || self.is_house_stratum() {
++            return;
++        }
++        let Some(ids) = verify::job_txids(txns, &job.branches) else {
++            log::warn!(
++                "[{}] {}: the transactions sent for job {} do not hash to that job's merkle branches; not taken as canary evidence",
++                self.id,
++                self.gateway_hex,
++                job.id
++            );
++            sov.note_check_refused();
++            return;
++        };
++        let txids: Vec<String> = ids
++            .iter()
++            .map(|h| {
++                let mut b = *h;
++                b.reverse();
++                hex::encode(b)
++            })
++            .collect();
++        sov.engine().note_check(
++            &self.gateway_key_hex(),
++            self.is_house_stratum(),
++            self.gateway_script.as_deref(),
++            job.seen,
++            &txids,
++        );
++    }
++
+     /// Note an accepted share whose coinbase paid only the pool script.
+     ///
+     /// The share is good work and is credited; what it cannot do is pay the window if it turns
+@@ -1832,20 +1929,40 @@ impl Session {
+ 
+     async fn on_validation(&mut self, v: JobValidationReply) -> Result<(), SessionError> {
+         let job = v.job();
+-        let Some(pending) = self.pending_blocks.remove(&job) else {
++        let pending = self.pending_blocks.remove(&job);
++        let canary = match self.canary_check.take() {
++            Some((j, at)) if j.id == job => Some((j, at)),
++            other => {
++                self.canary_check = other;
++                None
++            }
++        };
++        if pending.is_none() && canary.is_none() {
+             log::debug!("[{}] unsolicited validation reply for job {job}", self.id);
+             return Ok(());
+-        };
++        }
+         let (status, txns) = match v {
+             JobValidationReply::FullBlock { status, txns, .. } => (status, txns),
+             JobValidationReply::Transactions { status, txns, .. } => (status, txns),
+             JobValidationReply::ShortIds { .. } => {
+-                self.pending_blocks.insert(job, pending);
++                if let Some(p) = pending {
++                    self.pending_blocks.insert(job, p);
++                }
++                if canary.is_some() {
++                    self.canary_check = canary;
++                }
+                 return Ok(());
+             }
+         };
+         if status != ValidationStatus::Ok {
+-            for p in &pending {
++            if canary.is_some() {
++                log::debug!(
++                    "[{}] {} could not send job {job}'s transactions for a canary check: {status:?}",
++                    self.id,
++                    self.gateway_hex
++                );
++            }
++            for p in pending.iter().flatten() {
+                 log::warn!(
+                     "[{}] gateway could not supply transactions for block {}: {:?}",
+                     self.id,
+@@ -1857,9 +1974,12 @@ impl Session {
+             return Ok(());
+         }
+         // one transaction set per job; every candidate solved on this job assembles from it
+-        for p in pending {
++        for p in pending.into_iter().flatten() {
+             self.submit_candidate(p, &txns);
+         }
++        if let Some((j, _)) = canary {
++            self.note_check(&j, &txns);
++        }
+         Ok(())
+     }
+ 
+diff --git a/prime/primed/src/sovereignty.rs b/prime/primed/src/sovereignty.rs
+index a28c813..bec2b40 100644
+--- a/prime/primed/src/sovereignty.rs
++++ b/prime/primed/src/sovereignty.rs
+@@ -19,6 +19,7 @@
+ use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+ use std::io::Write as _;
+ use std::path::PathBuf;
++use std::sync::atomic::{AtomicU64, Ordering};
+ use std::sync::{Arc, Mutex, MutexGuard, RwLock};
+ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+ 
+@@ -28,7 +29,7 @@ use datum_wire::crypto::{Identity, SIG, SIGN_PK};
+ use datum_wire::pow::Hash;
+ use serde::{Deserialize, Serialize};
+ use serde_json::{json, Value};
+-use tides::entropy::{self, Canary, CanaryKind, Features, PoolView, Prepared, Snapshot};
++use tides::entropy::{self, Canary, CanaryKind, Check, Features, PoolView, Prepared, Snapshot};
+ use tides::score::{self, BlockCredit, PoolScore};
+ use tides::sovereignty::{self as bonus, Authored, BonusParams, WorkTotals};
+ use tides::Window;
+@@ -51,6 +52,11 @@ pub const KEY_TTL_SECS: u64 = 24 * 3600;
+ pub const BLOCK_RING: usize = 2_016;
+ /// Attested jobs kept for share and block lookups.
+ const MAX_ATTESTED: usize = 4_096;
++/// Template checks kept per gateway key (W8): at the fastest canary cadence (one every 20 min)
++/// about three days of them.
++pub const MAX_CHECKS: usize = 256;
++/// Canary checks one gateway may have scheduled at once; more are coalesced into the last.
++const MAX_PENDING_CHECKS: usize = 16;
+ const TOKEN_FILE: &str = "sovereignty.token";
+ const BLOCKS_FILE: &str = "sovereignty-blocks.jsonl";
+ /// W7 verdicts on LZT1 attestations delivered over DATUM (`0x5A`), one JSON line each. Rotated
+@@ -158,6 +164,21 @@ struct CanaryList {
+     last_seen: u64,
+ }
+ 
++/// A key's template checks (W8), oldest first.
++#[derive(Default)]
++struct CheckList {
++    list: VecDeque<Arc<Check>>,
++    last_seen: u64,
++}
++
++/// W8: when each gateway's canary checks fall due, and when it last had one. Its own lock:
++/// every session reads it on its 5 s tick, and that must not queue behind a detector pass.
++#[derive(Default)]
++struct CheckSchedule {
++    due: HashMap<String, VecDeque<f64>>,
++    last: HashMap<String, f64>,
++}
++
+ /// A detector pass: what stats.json and `/sovereignty.json` serve, and what share crediting
+ /// reads a gateway's independence from.
+ #[derive(Default)]
+@@ -186,6 +207,7 @@ struct Inputs {
+     recompute_secs: u64,
+     tracks: Vec<(String, Vec<Arc<Prepared>>)>,
+     canaries: HashMap<String, Vec<Canary>>,
++    checks: HashMap<String, Vec<Arc<Check>>>,
+     keys: HashMap<String, KeyRecord>,
+     blocks: Vec<ObservedBlock>,
+     authored: Vec<Authored>,
+@@ -209,14 +231,24 @@ fn compute(inp: &Inputs) -> Report {
+     let view = PoolView::new(pool.iter().map(|a| &**a));
+     let shared: Vec<&Canary> = inp.canaries.get(ALL).map(|v| v.iter().collect()).unwrap_or_default();
+     let mut rows = BTreeMap::new();
+-    for (name, snaps) in &inp.tracks {
++    // every gateway with jobs or checks on file; canary hits come from the checks alone (W8)
++    let mut names: Vec<&String> = inp.tracks.iter().map(|(n, _)| n).chain(inp.checks.keys()).collect();
++    names.sort();
++    names.dedup();
++    for name in names {
+         if name == POOL {
+             continue;
+         }
+         let mut canaries: Vec<&Canary> = inp.canaries.get(name).map(|v| v.iter().collect()).unwrap_or_default();
+         canaries.extend(shared.iter().copied());
+-        let refs: Vec<&Prepared> = snaps.iter().map(|a| &**a).collect();
+-        rows.insert(name.clone(), entropy::features_prepared(&refs, &view, &canaries));
++        let refs: Vec<&Prepared> = inp
++            .tracks
++            .iter()
++            .find(|(n, _)| n == name)
++            .map(|(_, v)| v.iter().map(|a| &**a).collect())
++            .unwrap_or_default();
++        let checks: Vec<&Check> = inp.checks.get(name).map(|v| v.iter().map(|a| &**a).collect()).unwrap_or_default();
++        rows.insert(name.clone(), entropy::features_checked(&refs, &view, &canaries, &checks));
+     }
+     let named: Vec<(String, Vec<&Prepared>)> =
+         inp.tracks.iter().map(|(n, v)| (n.clone(), v.iter().map(|a| &**a).collect())).collect();
+@@ -297,6 +329,8 @@ fn render(inp: &Inputs, r: &Report) -> Value {
+                     "decoys_carried": f.decoys_carried,
+                     "decoy_rate": f.decoy_rate,
+                     "canary_pool_leaks": f.canary_pool_leaks,
++                    "canary_source": f.canary_source,
++                    "checks": f.checks,
+                     "evidence": f.evidence,
+                     "flagged": f.flagged,
+                     "flag_reasons": f.flag_reasons,
+@@ -322,7 +356,13 @@ fn render(inp: &Inputs, r: &Report) -> Value {
+         "computed_at": r.computed_at,
+         "compute_ms": r.compute_ms,
+         "recompute_secs": inp.recompute_secs,
+-        "store": {"keys": inp.tracks.len(), "snapshots": snapshots, "bytes": bytes},
++        "store": {
++            "keys": inp.tracks.len(),
++            "snapshots": snapshots,
++            "bytes": bytes,
++            "check_keys": inp.checks.len(),
++            "checks": inp.checks.values().map(Vec::len).sum::<usize>(),
++        },
+         "observed": inp.blocks.len(),
+         // W7: attestations delivered over DATUM (0x5A) and Prime's verdicts on them.
+         "attest": {
+@@ -445,6 +485,12 @@ pub struct Sovereignty {
+     token: String,
+     engine: Mutex<Engine>,
+     report: RwLock<Arc<Report>>,
++    /// W8: `sovereignty-canary-check-secs` and `-gap-secs`.
++    check_after: f64,
++    check_gap: f64,
++    schedule: Mutex<CheckSchedule>,
++    /// Canary checks answered with transactions that are not the job's (see `note_check`).
++    pub checks_refused: AtomicU64,
+ }
+ 
+ impl Sovereignty {
+@@ -462,6 +508,10 @@ impl Sovereignty {
+             token,
+             engine: Mutex::new(engine),
+             report: RwLock::new(Arc::new(Report::default())),
++            check_after: cfg.sovereignty_canary_check_secs as f64,
++            check_gap: cfg.sovereignty_canary_check_gap_secs as f64,
++            schedule: Mutex::new(CheckSchedule::default()),
++            checks_refused: AtomicU64::new(0),
+         };
+         if s.on() {
+             s.recompute_now();
+@@ -503,6 +553,62 @@ impl Sovereignty {
+         r
+     }
+ 
++    /// W8: a canary delivered to `gateway`'s node at `t` wants a look at that gateway's newest job
++    /// `sovereignty-canary-check-secs` later. Only own canaries schedule a check; shared canaries
++    /// and decoys are read from the same job lists.
++    pub fn schedule_check(&self, gateway: &str, t: f64) {
++        let at = (t + self.check_after).max(now_f64());
++        let mut s = self.schedule.lock().unwrap();
++        if !s.due.contains_key(gateway) && s.due.len() >= MAX_KEYS {
++            // bounded like the key store: the gateway with the latest first due check waits
++            let drop = s
++                .due
++                .iter()
++                .max_by(|a, b| a.1.front().partial_cmp(&b.1.front()).unwrap_or(std::cmp::Ordering::Equal))
++                .map(|(k, _)| k.clone());
++            if let Some(k) = drop {
++                s.due.remove(&k);
++            }
++        }
++        let q = s.due.entry(gateway.to_ascii_lowercase()).or_default();
++        let i = q.partition_point(|&d| d <= at);
++        q.insert(i, at);
++        while q.len() > MAX_PENDING_CHECKS {
++            // keep the latest: it judges the most recent canaries, and the earlier ones' window
++            // (`entropy::CHECK_WINDOW`) still covers it
++            q.pop_front();
++        }
++    }
++
++    /// Is a canary check of `gateway` due at `now`? Taking it clears every check due by then
++    /// (one look at the newest job answers them all). At most one per `-gap-secs` per gateway.
++    pub fn take_check(&self, gateway: &str, now: f64) -> bool {
++        let g = gateway.to_ascii_lowercase();
++        let mut s = self.schedule.lock().unwrap();
++        let Some(q) = s.due.get_mut(&g) else { return false };
++        if q.front().is_none_or(|&d| d > now) {
++            return false;
++        }
++        if s.last.get(&g).is_some_and(|&l| now - l < self.check_gap) {
++            return false;
++        }
++        let q = s.due.get_mut(&g).unwrap();
++        while q.front().is_some_and(|&d| d <= now) {
++            q.pop_front();
++        }
++        if q.is_empty() {
++            s.due.remove(&g);
++        }
++        s.last.insert(g, now);
++        let stale = now - 2.0 * KEY_TTL_SECS as f64;
++        s.last.retain(|_, l| *l > stale);
++        true
++    }
++
++    pub fn note_check_refused(&self) {
++        self.checks_refused.fetch_add(1, Ordering::Relaxed);
++    }
++
+     /// Does the request carry the local token? Compared in constant time.
+     pub fn token_ok(&self, presented: Option<&str>) -> bool {
+         let Some(p) = presented else { return false };
+@@ -559,6 +665,8 @@ pub struct Engine {
+     tracks: HashMap<String, Track>,
+     /// Own canaries per gateway; shared canaries and decoys under `ALL`.
+     canaries: HashMap<String, CanaryList>,
++    /// Template checks per gateway key (W8): the canary evidence.
++    checks: HashMap<String, CheckList>,
+     attested: HashMap<String, AttestedJob>,
+     attested_order: VecDeque<String>,
+     authored: Vec<Authored>,
+@@ -819,6 +927,7 @@ impl Engine {
+         let live = |seen: u64| seen.saturating_add(KEY_TTL_SECS) >= now_s;
+         self.tracks.retain(|n, t| n == POOL || live(t.last_seen));
+         self.canaries.retain(|n, c| n == ALL || live(c.last_seen));
++        self.checks.retain(|_, c| live(c.last_seen));
+     }
+ 
+     /// Record a canary. An own canary went to `gateway`'s node, and the caller must already have
+@@ -863,6 +972,47 @@ impl Engine {
+         self.note_prepared(&name, Prepared::from_parts(t, &hex::encode(prev), &txids), t as u64);
+     }
+ 
++    /// W8: a template check of a live session's job (its transactions, already matched to the
++    /// job's merkle branches), under [`Engine::track_name`]. `job_seen` is when Prime first saw
++    /// the job. The house stratum builds on the pool node and is never canary-checked.
++    pub fn note_check(
++        &mut self,
++        gateway: &str,
++        house: bool,
++        payout_script: Option<&[u8]>,
++        job_seen: f64,
++        txids: &[String],
++    ) {
++        if house {
++            return;
++        }
++        let Some(name) = self.track_name(gateway, house, payout_script) else { return };
++        self.note_check_named(&name, Check::new(job_seen, txids));
++    }
++
++    fn note_check_named(&mut self, name: &str, check: Check) {
++        let seen = now();
++        if !self.checks.contains_key(name) && self.checks.len() >= MAX_KEYS {
++            self.evict(seen);
++            let lru = self.checks.iter().min_by_key(|(_, c)| c.last_seen).map(|(n, _)| n.clone());
++            if let (true, Some(n)) = (self.checks.len() >= MAX_KEYS, lru) {
++                self.checks.remove(&n);
++            }
++        }
++        let c = self.checks.entry(name.to_string()).or_default();
++        c.last_seen = seen;
++        c.list.push_back(Arc::new(check));
++        while c.list.len() > MAX_CHECKS {
++            c.list.pop_front();
++        }
++        self.dirty = true;
++    }
++
++    /// Demo ingest: a check posted over HTTP, for harnesses with no DATUM session.
++    pub fn note_check_demo(&mut self, gateway: &str, job_seen: f64, txids: &[String]) {
++        self.note_check_named(&Self::name_of(gateway), Check::new(job_seen, txids));
++    }
++
+     pub fn ingest_attest(
+         &mut self,
+         a_hex: &str,
+@@ -1144,6 +1294,7 @@ impl Engine {
+             recompute_secs: self.recompute_secs,
+             tracks,
+             canaries: self.canaries.iter().map(|(n, c)| (n.clone(), c.list.clone())).collect(),
++            checks: self.checks.iter().map(|(n, c)| (n.clone(), c.list.iter().cloned().collect())).collect(),
+             keys: self.keys.clone(),
+             blocks: self.blocks.iter().cloned().collect(),
+             authored: self.authored.clone(),
+@@ -1386,9 +1537,8 @@ mod tests {
+         for k in 0..12u64 {
+             let c = format!("{:064x}", 0xc000 + k);
+             e.note_canary("h1", Canary::new(k as f64, c.clone()));
+-            e.note_snapshot("h1", Snapshot::new(k as f64 + 1.0, format!("{:064x}", 1), vec![c]));
++            e.note_check_demo("h1", k as f64 + 13.0, &[c]);
+         }
+-        e.note_snapshot("h1", Snapshot::new(40.0, format!("{:064x}", 1), vec![]));
+         e.credit_authored("miner", "h1", 100);
+         assert_eq!(e.authored[0].work, 200);
+         assert!(e.authored[0].independence_ppm > 800_000, "{}", e.authored[0].independence_ppm);
+@@ -1425,13 +1575,13 @@ mod tests {
+         assert_eq!(s.score, 0.0, "unknown independence counts 0, matching the bonus");
+     }
+ 
++    /// `n` own canaries, each found by a template check of `gw` 13 s on (W8).
+     fn give_canary_hits(e: &mut Engine, gw: &str, n: usize) {
+         for k in 0..n as u64 {
+             let c = format!("{:064x}", 0xc000 + k + (gw.len() as u64) * 1_000);
+             e.note_canary(gw, Canary::new(k as f64, c.clone()));
+-            e.note_snapshot(gw, Snapshot::new(k as f64 + 1.0, format!("{:064x}", 1), vec![c]));
++            e.note_check_demo(gw, k as f64 + 13.0, &[c]);
+         }
+-        e.note_snapshot(gw, Snapshot::new(40.0, format!("{:064x}", 1), vec![]));
+     }
+ 
+     #[test]
+@@ -1446,11 +1596,10 @@ mod tests {
+             e.note_canary("whoever", Canary::decoy(t, q.clone()));
+             e.note_canary("", Canary::shared(t, d.clone()));
+             e.note_snapshot("POOL", Snapshot::new(t + 0.1, prev.clone(), vec![q.clone()]));
+-            e.note_snapshot("honest", Snapshot::new(t + 1.0, prev.clone(), vec![d.clone()]));
+-            e.note_snapshot("naive", Snapshot::new(t + 1.0, prev.clone(), vec![q, d]));
++            // both are read from each gateway's template checks (W8)
++            e.note_check_demo("honest", t + 13.0, &[d.clone()]);
++            e.note_check_demo("naive", t + 13.0, &[q, d]);
+         }
+-        e.note_snapshot("honest", Snapshot::new(60.0, prev.clone(), vec![]));
+-        e.note_snapshot("naive", Snapshot::new(60.0, prev, vec![]));
+         let rows = e.detector_rows();
+         assert!(!rows["honest"].flagged && rows["honest"].shared_hits == 12, "{:?}", rows["honest"]);
+         assert_eq!(rows["naive"].flag_reasons, vec!["decoys-carried"]);
+@@ -1490,8 +1639,9 @@ mod tests {
+             let t = 30.0 + k as f64;
+             let c = format!("{:064x}", 0xc000 + k);
+             e.note_canary("proxy", Canary::new(t, c));
++            // its checked jobs are the pool's
++            e.note_check_demo("proxy", t + 13.0, &[format!("{:064x}", k + 100)]);
+         }
+-        e.note_snapshot("proxy", Snapshot::new(60.0, format!("{:064x}", 999), vec![]));
+         for _ in 0..8 {
+             e.observe("proxy", true, true);
+         }
+@@ -1574,18 +1724,14 @@ mod tests {
+         // Canaries handed to each gateway's node; honest ones template them, the proxy can't.
+         for k in 0..12u64 {
+             let t = 30.0 + k as f64;
+-            let prev = format!("{:064x}", 999);
+             for gw in ["h1", "h2", "proxy"] {
+                 let c = format!("{:064x}", 0xc000 + k * 10 + gw.len() as u64);
+                 e.note_canary(gw, Canary::new(t, c.clone()));
+-                if gw != "proxy" {
+-                    e.note_snapshot(gw, Snapshot::new(t + 1.0, prev.clone(), vec![c]));
+-                }
++                // the check 13 s on: honest jobs hold their canary, the proxy's job is the pool's
++                let job = if gw == "proxy" { vec![format!("{:064x}", k + 100)] } else { vec![c] };
++                e.note_check_demo(gw, t + 13.0, &job);
+             }
+         }
+-        for gw in ["h1", "h2", "proxy"] {
+-            e.note_snapshot(gw, Snapshot::new(60.0, format!("{:064x}", 999), vec![]));
+-        }
+         let rows = e.detector_rows();
+         assert!(rows["proxy"].independence < 0.05, "{}", rows["proxy"].independence);
+         assert!(rows["h1"].independence > 0.8, "{}", rows["h1"].independence);
+@@ -1768,11 +1914,11 @@ mod tests {
+         for k in 0..10u64 {
+             e.note_canary("twin", Canary::new(100.0 + k as f64, c(k)));
+         }
+-        // 9 of the 10 make it into the twin's own templates in time; the 10th never does
+-        for (t, ks) in [(103.0, 0..3u64), (106.0, 3..6), (109.0, 6..9)] {
+-            e.note_snapshot("twin", Snapshot::new(t, format!("{:064x}", 999), ks.map(c).collect()));
++        // 9 of the 10 are in the twin's job when it is checked; the 10th never is
++        for k in 0..10u64 {
++            let job = if k < 9 { vec![c(k)] } else { vec![] };
++            e.note_check_demo("twin", 113.0 + k as f64, &job);
+         }
+-        e.note_snapshot("twin", Snapshot::new(130.0, format!("{:064x}", 999), vec![]));
+         let rows = e.detector_rows();
+         let f = &rows["twin"];
+         assert!(f.identical > 0.95, "{}", f.identical);
+@@ -1832,9 +1978,72 @@ mod tests {
+             token: "t".repeat(64),
+             engine: Mutex::new(e),
+             report: RwLock::new(Arc::new(Report::default())),
++            check_after: 45.0,
++            check_gap: 300.0,
++            schedule: Mutex::new(CheckSchedule::default()),
++            checks_refused: AtomicU64::new(0),
+         })
+     }
+ 
++    /// W8: an own canary schedules one check of its gateway `check_after` s on; checks due by
++    /// then are taken together; a gateway gets at most one per `check_gap` s; nothing else does.
++    #[test]
++    fn canary_checks_are_delayed_coalesced_and_rate_limited() {
++        let s = sovereignty(engine());
++        let g = "ab".repeat(32);
++        let t0 = now_f64();
++        assert!(!s.take_check(&g, t0 + 1_000.0), "nothing scheduled");
++        s.schedule_check(&g.to_ascii_uppercase(), t0);
++        s.schedule_check(&g, t0 + 10.0);
++        assert!(!s.take_check(&g, t0 + 44.0), "not due before check_after");
++        assert!(!s.take_check(&"cd".repeat(32), t0 + 46.0), "another gateway has none");
++        assert!(s.take_check(&g, t0 + 46.0));
++        // the second canary's check is due at +55, but one was just made: the gap holds it
++        assert!(!s.take_check(&g, t0 + 56.0));
++        assert!(s.take_check(&g, t0 + 46.0 + 300.0));
++        assert!(!s.take_check(&g, t0 + 1_000.0), "both served");
++        // a burst is bounded, and one check answers everything due
++        for k in 0..100 {
++            s.schedule_check(&g, t0 + 2_000.0 + k as f64);
++        }
++        assert!(s.schedule.lock().unwrap().due[&g].len() <= MAX_PENDING_CHECKS);
++        assert!(s.take_check(&g, t0 + 3_000.0));
++        assert!(!s.schedule.lock().unwrap().due.contains_key(&g));
++        // a canary reported late is checked straight away, not in the past
++        let late = "ef".repeat(32);
++        s.schedule_check(&late, t0 - 3_600.0);
++        assert!(!s.take_check(&late, t0 - 10.0));
++        assert!(s.take_check(&late, now_f64() + 0.1));
++    }
++
++    /// W8: checks are the canary evidence, bounded per key, and kept under the gateway's track
++    /// name (registered G); the house stratum is never checked.
++    #[test]
++    fn checks_are_the_canary_evidence_and_are_bounded() {
++        let mut e = engine();
++        let g = "ab".repeat(32);
++        e.register(&g, "", false, None).unwrap();
++        let c = format!("{:064x}", 0xc0);
++        e.note_canary(&g, Canary::new(100.0, c.clone()));
++        // a job snapshot carrying the canary is not evidence
++        e.note_snapshot(&g, Snapshot::new(113.0, format!("{:064x}", 1), vec![c.clone()]));
++        assert_eq!(e.detector_rows()[&g].canaries_due, 0);
++        e.note_check(&g.to_ascii_uppercase(), false, None, 113.0, std::slice::from_ref(&c));
++        let f = e.detector_rows()[&g].clone();
++        assert_eq!((f.canaries_due, f.canary_hits, f.checks), (1, 1, 1), "{f:?}");
++        e.note_check(&g, true, None, 114.0, std::slice::from_ref(&c));
++        assert_eq!(e.detector_rows()[&g].checks, 1, "house sessions are never checked");
++        for k in 0..(MAX_CHECKS + 50) {
++            e.note_check(&g, false, None, 200.0 + k as f64, &[]);
++        }
++        assert_eq!(e.checks[&g].list.len(), MAX_CHECKS);
++        // an unregistered gateway's checks go under its payout script, like its snapshots
++        e.note_check(&"cd".repeat(32), false, Some(&[0x00, 0x14]), 10.0, &[]);
++        assert!(e.checks.contains_key("s:0014"));
++        e.note_check(&"cd".repeat(32), false, None, 10.0, &[]);
++        assert_eq!(e.checks.len(), 2, "no payout yet: nowhere to keep it");
++    }
++
+     /// W2: the report is served without the engine lock, so a stats build never waits on (or
+     /// holds) it; a pass copies the store and computes outside every lock.
+     #[test]
+diff --git a/prime/primed/src/stats.rs b/prime/primed/src/stats.rs
+index a62a1d2..8e3bdcb 100644
+--- a/prime/primed/src/stats.rs
++++ b/prime/primed/src/stats.rs
+@@ -420,7 +420,10 @@ pub async fn serve(shared: Arc<Shared>) {
+                     let work = r
+                         .needs_window()
+                         .then(|| crate::sovereignty::WindowWork::of(&shared.ledger.lock().unwrap().window));
+-                    ("200 OK", "application/json", Arc::new(r.render(work).to_string()))
++                    let mut doc = r.render(work);
++                    doc["store"]["checks_refused"] =
++                        json!(shared.sovereignty.checks_refused.load(std::sync::atomic::Ordering::Relaxed));
++                    ("200 OK", "application/json", Arc::new(doc.to_string()))
+                 }
+                 ("POST", p) if p.starts_with("/sovereignty/") && shared.sovereignty.on() => {
+                     let token = header(&req, crate::sovereignty::TOKEN_HEADER);
+@@ -500,8 +503,8 @@ fn header<'a>(req: &'a str, name: &str) -> Option<&'a str> {
+     })
+ }
+ 
+-/// `POST /sovereignty/*`, token already checked. `register` and `attest` are live in any mode
+-/// but `off`; the rest are for local demos (`sovereignty-demo`).
++/// `POST /sovereignty/*`, token already checked. `register`, `attest` and `canary` are live in
++/// any mode but `off`; the rest are for local demos (`sovereignty-demo`).
+ fn ingest(shared: &Shared, path: &str, body: &str) -> Result<Value, String> {
+     let demo = shared.sovereignty.engine().demo();
+     let v: Value = if body.trim().is_empty() { json!({}) } else { serde_json::from_str(body).map_err(|e| e.to_string())? };
+@@ -528,19 +531,46 @@ fn ingest(shared: &Shared, path: &str, body: &str) -> Result<Value, String> {
+             shared.sovereignty.engine().note_snapshot(gw, tides::Snapshot::new(t, prev, txids));
+             Ok(json!({"ok": true}))
+         }
++        // The canary sidecar (W9) reports each canary it placed. An own canary schedules a
++        // canary check of that gateway's newest job (W8).
+         "/sovereignty/canary" => {
++            let kind = match v["kind"].as_str() {
++                None => tides::CanaryKind::Own,
++                Some(k) => tides::CanaryKind::parse(k).ok_or("kind: own, shared or decoy")?,
++            };
++            let gw = match (kind, v["gateway"].as_str()) {
++                (tides::CanaryKind::Own, Some(g)) => g.to_ascii_lowercase(),
++                (tides::CanaryKind::Own, None) => return Err("gateway".into()),
++                (_, g) => g.unwrap_or("*").to_ascii_lowercase(),
++            };
++            let txid = v["txid"].as_str().ok_or("txid")?;
++            if txid.len() != 64 || !txid.bytes().all(|b| b.is_ascii_hexdigit()) {
++                return Err("txid: 64 hex".into());
++            }
++            // when it was delivered, on this host's clock; never later than now
++            let now_f = crate::sovereignty::now_f64();
++            let t = v["t"].as_f64().unwrap_or(now_f).min(now_f);
++            let canary = tides::Canary { kind, ..tides::Canary::new(t, txid.to_ascii_lowercase()) };
++            shared.sovereignty.engine().note_canary(&gw, canary);
++            if kind == tides::CanaryKind::Own {
++                shared.sovereignty.schedule_check(&gw, t);
++            }
++            Ok(json!({"ok": true}))
++        }
++        // A template check's transactions, for harnesses with no DATUM session.
++        "/sovereignty/check" => {
+             if !demo {
+                 return Err("sovereignty-demo is off".into());
+             }
+             let gw = v["gateway"].as_str().ok_or("gateway")?;
+             let t = v["t"].as_f64().ok_or("t")?;
+-            let txid = v["txid"].as_str().ok_or("txid")?;
+-            let kind = match v["kind"].as_str() {
+-                None => tides::CanaryKind::Own,
+-                Some(k) => tides::CanaryKind::parse(k).ok_or("kind: own, shared or decoy")?,
+-            };
+-            let canary = tides::Canary { kind, ..tides::Canary::new(t, txid) };
+-            shared.sovereignty.engine().note_canary(gw, canary);
++            let txids: Vec<String> = v["txids"]
++                .as_array()
++                .ok_or("txids")?
++                .iter()
++                .filter_map(|x| x.as_str().map(str::to_string))
++                .collect();
++            shared.sovereignty.engine().note_check_demo(gw, t, &txids);
+             Ok(json!({"ok": true}))
+         }
+         "/sovereignty/attest" => {
+diff --git a/prime/primed/tests/sovereignty_e2e.rs b/prime/primed/tests/sovereignty_e2e.rs
+index 89ff05c..d67aa99 100644
+--- a/prime/primed/tests/sovereignty_e2e.rs
++++ b/prime/primed/tests/sovereignty_e2e.rs
+@@ -149,6 +149,11 @@ house-loopback = false
+         for k in 0..17u64 {
+             let r = post(stats, "/sovereignty/canary", &json!({"gateway": gw, "t": k as f64, "txid": canary(gw, k)}));
+             assert_eq!(r["ok"], true, "{r}");
++            // W8: the verdict comes from template checks, not snapshots; here the check of each
++            // gateway's job 13 s on (honest jobs hold the canary, the proxy's is the pool's)
++            let job = if gw == "proxy" { vec![hex32(k + 100)] } else { vec![canary(gw, k), hex32(k + 300)] };
++            let r = post(stats, "/sovereignty/check", &json!({"gateway": gw, "t": k as f64 + 13.0, "txids": job}));
++            assert_eq!(r["ok"], true, "{r}");
+         }
+     }
+ 
+@@ -244,9 +249,152 @@ fn mode_observe_serves_an_unpublished_report() {
+     assert_eq!(r["g"], g_hex, "{r}");
+     let r = post(p.stats, "/sovereignty/snapshot", &json!({"gateway": "x", "t": 1.0, "prev": "00", "txids": []}));
+     assert_eq!(r["error"], "sovereignty-demo is off", "{r}");
++    let r = post(p.stats, "/sovereignty/check", &json!({"gateway": "x", "t": 1.0, "txids": []}));
++    assert_eq!(r["error"], "sovereignty-demo is off", "{r}");
++    // W9: the canary sidecar's route is live without the demo flag (token only)
++    let r = post(p.stats, "/sovereignty/canary", &json!({"gateway": g_hex, "txid": hex32(7), "kind": "own"}));
++    assert_eq!(r["ok"], true, "{r}");
++    let r = post(p.stats, "/sovereignty/canary", &json!({"txid": hex32(8), "kind": "decoy"}));
++    assert_eq!(r["ok"], true, "{r}");
++    for bad in [json!({"txid": hex32(9)}), json!({"gateway": g_hex, "txid": "zz"}), json!({"txid": hex32(9), "kind": "x"})] {
++        let r = post(p.stats, "/sovereignty/canary", &bad);
++        assert!(r.get("error").is_some(), "{bad} → {r}");
++    }
+     let (status, body) = request(p.stats, "GET", "/sovereignty.json", "", None);
+     assert!(status.contains("200"), "{status}");
+     let doc: Value = serde_json::from_str(&body).unwrap();
+     assert_eq!(doc["mode"], "observe");
+     assert!(!body.contains("bc1q"), "no payout addresses with the bonus off: {body}");
+ }
++
++/// A minimal raw transaction, distinct per `i`.
++fn raw_tx(i: u8) -> Vec<u8> {
++    let mut t = 2u32.to_le_bytes().to_vec();
++    t.push(1);
++    t.extend_from_slice(&[i; 32]);
++    t.extend_from_slice(&0u32.to_le_bytes());
++    t.push(0);
++    t.extend_from_slice(&0xffff_fffdu32.to_le_bytes());
++    t.push(1);
++    t.extend_from_slice(&(1_000 + u64::from(i)).to_le_bytes());
++    t.extend_from_slice(&[1, 0x51]);
++    t.extend_from_slice(&[0; 4]);
++    t
++}
++
++fn display_txid(raw: &[u8]) -> String {
++    let mut h = datum_wire::verify::txid(raw).unwrap();
++    h.reverse();
++    hex::encode(h)
++}
++
++/// A share on a job whose transactions are `txns` (its merkle branches are theirs). Its hash
++/// is not ground, so Prime refuses the work; the job section is taken all the same.
++fn share_on(txns: &[Vec<u8>], slot: u8) -> datum_wire::mining::PowSubmit {
++    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as u32;
++    let mut s = common::pool_only_share(slot, common::HEIGHT, [7u8; 32], 0x1d00_ffff, 4_000, now);
++    let ids: Vec<pow::Hash> = txns.iter().map(|t| datum_wire::verify::txid(t).unwrap()).collect();
++    let job = s.job.as_mut().unwrap();
++    job.merkle_branches = pow::merkle_branches_for_coinbase(&ids);
++    job.txn_count = ids.len() as u32;
++    s
++}
++
++/// The gateway's side of `request_full_block`: wait for Prime to ask about `slot`.
++fn await_full_block_request(gw: &mut common::Gateway, slot: u8) {
++    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
++    loop {
++        assert!(std::time::Instant::now() < deadline, "Prime never asked for job {slot}'s transactions");
++        let m = gw.next_mining();
++        if m.len() >= 3 && m[..3] == [datum_wire::mining::SUB_JOB_VALIDATION, 0x12, slot] {
++            return;
++        }
++    }
++}
++
++fn full_block_reply(slot: u8, txns: &[Vec<u8>]) -> Vec<u8> {
++    let mut m = vec![datum_wire::mining::SUB_JOB_VALIDATION, 0x92, slot, 0x01];
++    m.extend_from_slice(&(txns.len() as u16).to_le_bytes());
++    for t in txns {
++        m.extend_from_slice(&(t.len() as u16).to_le_bytes());
++        m.push((t.len() >> 16) as u8);
++        m.extend_from_slice(t);
++    }
++    m.push(datum_wire::mining::END);
++    m
++}
++
++/// W8 end to end over DATUM: a canary registered for G makes Prime fetch G's newest job with
++/// `request_full_block` on its own; the job's transactions (matched to its merkle branches) are
++/// the canary evidence. A gateway that answers with a list its job does not hash to, one with
++/// the canary added, is not believed.
++#[test]
++fn a_canary_check_reads_the_gateways_own_job() {
++    let pool = Identity::from_secret_bytes(&[0x65; 64]);
++    let extra = r#"
++rpc = "http://127.0.0.1:9"
++poll = 60
++house-loopback = false
++sovereignty-mode = "observe"
++sovereignty-demo = true
++sovereignty-canary-check-secs = 1
++sovereignty-canary-check-gap-secs = 300
++"#;
++    let (p, listen) = common::start_primed(&pool, extra);
++    use_token_of(&p);
++    let honest = Identity::from_secret_bytes(&[0x31; 64]);
++    let forger = Identity::from_secret_bytes(&[0x32; 64]);
++    let (hg, fg) = (hex::encode(honest.sign_pk()), hex::encode(forger.sign_pk()));
++    for g in [&hg, &fg] {
++        let r = post(p.stats, "/sovereignty/register", &json!({"g": g, "payout": "bc1q"}));
++        assert_eq!(&r["g"], g, "{r}");
++    }
++
++    // the honest gateway's job holds its canary (tx 2); the forger's job does not hold its own
++    // (tx 9), and it answers the check with tx 9 appended
++    let honest_job = vec![raw_tx(1), raw_tx(2), raw_tx(3)];
++    let forger_job = vec![raw_tx(4), raw_tx(5)];
++    let mut forged = forger_job.clone();
++    forged.push(raw_tx(9));
++    let mut h = common::Gateway::connect(listen, &pool, &honest);
++    let mut f = common::Gateway::connect(listen, &pool, &forger);
++    let (hs, fs) = (3u8, 4u8);
++    let (status, _) = h.submit(&share_on(&honest_job, hs));
++    assert_ne!(status, datum_wire::mining::ACCEPTED, "an unground share is refused");
++    f.submit(&share_on(&forger_job, fs));
++
++    // delivered 13 s before the jobs were first seen, so those jobs can judge them
++    let t = crate_now() - 13.0;
++    for (g, txid) in [(&hg, display_txid(&raw_tx(2))), (&fg, display_txid(&raw_tx(9)))] {
++        let r = post(p.stats, "/sovereignty/canary", &json!({"gateway": g, "t": t, "txid": txid, "kind": "own"}));
++        assert_eq!(r["ok"], true, "{r}");
++    }
++    await_full_block_request(&mut h, hs);
++    h.send_mining(&full_block_reply(hs, &honest_job));
++    await_full_block_request(&mut f, fs);
++    f.send_mining(&full_block_reply(fs, &forged));
++
++    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
++    let doc = loop {
++        let (_, body) = request(p.stats, "GET", "/sovereignty.json", "", None);
++        let doc: Value = serde_json::from_str(&body).unwrap();
++        if doc["gateways"][&hg]["checks"] == 1 && doc["store"]["checks_refused"] == 1 {
++            break doc;
++        }
++        assert!(std::time::Instant::now() < deadline, "no check evidence: {doc}");
++        std::thread::sleep(std::time::Duration::from_millis(300));
++    };
++    let hrow = &doc["gateways"][&hg];
++    assert_eq!((hrow["canaries_due"].as_u64(), hrow["canary_hits"].as_u64()), (Some(1), Some(1)), "{hrow}");
++    assert_eq!(hrow["canary_source"], "checks");
++    let frow = &doc["gateways"][&fg];
++    assert_eq!(frow["checks"], 0, "a forged list is no evidence: {frow}");
++    assert_eq!(frow["canary_hits"], 0, "{frow}");
++    let log = std::fs::read_to_string(p.dir.join("primed.log")).unwrap_or_default()
++        + &std::fs::read_to_string(p.dir.join("primed.err")).unwrap_or_default();
++    assert!(log.contains("do not hash to that job's merkle branches"), "{log}");
++}
++
++fn crate_now() -> f64 {
++    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs_f64()
++}
+diff --git a/prime/tides/src/entropy.rs b/prime/tides/src/entropy.rs
+index bf7929b..6562e4f 100644
+--- a/prime/tides/src/entropy.rs
++++ b/prime/tides/src/entropy.rs
+@@ -80,6 +80,10 @@ pub const CANARY_WINDOW: f64 = 30.0;
+ pub const CANARY_DUE: f64 = 12.0;
+ /// Canaries judged before the canary verdict replaces the timing fallback.
+ pub const CANARY_MIN: usize = 10;
++/// W8: a template check judges a canary when Prime first saw the checked job between
++/// `CANARY_DUE` and this many seconds after the canary's delivery. Later than that the canary
++/// (or its twin) has usually confirmed, and a job without it says nothing about the gateway.
++pub const CHECK_WINDOW: f64 = 180.0;
+ /// Hit rate below which a gateway with canary evidence is flagged as fake DATUM. A proxy of
+ /// the pool's template hits exactly 0, so the bar can sit low and absorb honest misses.
+ pub const CANARY_FLAG: f64 = 0.25;
+@@ -150,6 +154,45 @@ impl Snapshot {
+     }
+ }
+ 
++/// One template check (W8): the whole transaction list of one of a gateway's jobs, as the
++/// gateway sent it for `request_full_block` and Prime matched it to the job's merkle branches,
++/// stamped with when Prime first saw that job. This, not a job snapshot, is canary evidence:
++/// a job's merkle branches say nothing about which txs it holds, and a list that does not hash
++/// to the job the gateway is mining never gets this far.
++#[derive(Clone, Debug, PartialEq)]
++pub struct Check {
++    /// Unix seconds (fractional) Prime first saw the checked job.
++    pub t: f64,
++    /// Txid fingerprints ([`fp`] of display hex), sorted and deduplicated.
++    set: Vec<u64>,
++}
++
++impl Check {
++    /// `txids` in display (big-endian) hex, as canaries are posted.
++    pub fn new(t: f64, txids: &[String]) -> Self {
++        let mut set: Vec<u64> = txids.iter().map(|x| fp(x)).collect();
++        set.sort_unstable();
++        set.dedup();
++        Check { t, set }
++    }
++
++    pub fn len(&self) -> usize {
++        self.set.len()
++    }
++
++    pub fn is_empty(&self) -> bool {
++        self.set.is_empty()
++    }
++
++    fn has(&self, id: u64) -> bool {
++        self.set.binary_search(&id).is_ok()
++    }
++
++    pub fn heap_bytes(&self) -> usize {
++        std::mem::size_of::<Self>() + self.set.capacity() * 8
++    }
++}
++
+ #[derive(Clone, Debug, Serialize)]
+ pub struct Features {
+     pub snapshots: usize,
+@@ -183,6 +226,11 @@ pub struct Features {
+     /// Own and shared canaries a pool template carried (should stay 0: the pool node never
+     /// templates them).
+     pub canary_pool_leaks: usize,
++    /// Where canary hits were read from: `checks` (template checks, W8) or `snapshots` (job
++    /// snapshots posted over HTTP: the pre-W8 demos and the reference tests).
++    pub canary_source: &'static str,
++    /// Template checks on file for this gateway (0 on the snapshot path).
++    pub checks: usize,
+     /// Why the gateway is flagged: `own-canaries-missed`, `shared-canaries-missed`,
+     /// `decoys-carried`.
+     pub flag_reasons: Vec<&'static str>,
+@@ -489,6 +537,17 @@ pub fn features_with(gw: &[Snapshot], pool: &[Snapshot], canaries: &[Canary]) ->
+ /// [`features_with`] on prepared snapshots and a shared [`PoolView`]: what a detector pass runs
+ /// once per gateway. Same results as the pairwise version (`reference::features_with`).
+ pub fn features_prepared(gw: &[&Prepared], pool: &PoolView, canaries: &[&Canary]) -> Features {
++    features_inner(gw, pool, canaries, None)
++}
++
++/// [`features_prepared`] with canary hits read from template checks (W8) instead of job
++/// snapshots. Snapshots still give the timing and similarity features; a gateway with no
++/// checks has no canary due.
++pub fn features_checked(gw: &[&Prepared], pool: &PoolView, canaries: &[&Canary], checks: &[&Check]) -> Features {
++    features_inner(gw, pool, canaries, Some(checks))
++}
++
++fn features_inner(gw: &[&Prepared], pool: &PoolView, canaries: &[&Canary], checks: Option<&[&Check]>) -> Features {
+     let gw = sort_by_t(gw.iter().copied());
+     let mut ident = 0usize;
+     let mut sims = 0.0;
+@@ -566,31 +625,10 @@ pub fn features_prepared(gw: &[&Prepared], pool: &PoolView, canaries: &[&Canary]
+     let subset = if subn > 0 { sub / subn as f64 } else { 0.0 };
+     let follower = subset * (1.0 - (lead / LEAD_REF).min(1.0));
+ 
+-    let last_gw = gw.last().map(|s| s.t).unwrap_or(f64::NEG_INFINITY);
+-    let wanted: FpSet = canaries.iter().map(|c| fp(&c.txid)).collect();
+-    let gw_occ = occurrences(&gw, Some(&wanted));
+-    // [own, shared, decoy]: (due, hits)
+-    let mut tally = [(0usize, 0usize); 3];
+-    let mut leaks = 0usize;
+-    for c in canaries {
+-        let id = fp(&c.txid);
+-        let pool_at = first_between(pool.occ.get(&id), c.t - WINDOW, f64::INFINITY);
+-        if pool_at.is_some() && c.kind != CanaryKind::Decoy {
+-            leaks += 1;
+-        }
+-        if c.t + CANARY_DUE > last_gw {
+-            continue;
+-        }
+-        let (due, hits) = &mut tally[c.kind as usize];
+-        *due += 1;
+-        if let Some(at) = first_between(gw_occ.get(&id), c.t, c.t + CANARY_WINDOW) {
+-            // a decoy counts however it got there; a must-carry canary only if the pool's
+-            // template cannot have been the source
+-            if c.kind == CanaryKind::Decoy || pool_at.is_none_or(|pt| at < pt - LEAD_MARGIN) {
+-                *hits += 1;
+-            }
+-        }
+-    }
++    let (tally, leaks) = match checks {
++        None => tally_snapshots(&gw, pool, canaries),
++        Some(checks) => tally_checks(checks, pool, canaries),
++    };
+     let rate = |(due, hits): (usize, usize)| (due > 0).then(|| hits as f64 / due as f64);
+     let judged = |(due, hits): (usize, usize)| (due >= CANARY_MIN).then(|| hits as f64 / due as f64);
+     let [own, shared, decoy] = tally;
+@@ -647,6 +685,8 @@ pub fn features_prepared(gw: &[&Prepared], pool: &PoolView, canaries: &[&Canary]
+         decoys_carried: decoy.1,
+         decoy_rate: rate(decoy),
+         canary_pool_leaks: leaks,
++        canary_source: if checks.is_some() { "checks" } else { "snapshots" },
++        checks: checks.map_or(0, <[&Check]>::len),
+         flag_reasons: reasons,
+         evidence,
+         independence: (independence.clamp(0.0, 1.0) * 1000.0).round() / 1000.0,
+@@ -655,6 +695,78 @@ pub fn features_prepared(gw: &[&Prepared], pool: &PoolView, canaries: &[&Canary]
+     }
+ }
+ 
++/// `[own, shared, decoy]` as `(due, hits)`, and own/shared leaks into pool snapshots.
++type Tally = ([(usize, usize); 3], usize);
++
++/// Canary hits read from job snapshots: a canary is due once the gateway has sent a template
++/// `CANARY_DUE` s after its delivery, and a hit if a template of the gateway's carried it within
++/// `CANARY_WINDOW` s.
++fn tally_snapshots(gw: &[&Prepared], pool: &PoolView, canaries: &[&Canary]) -> Tally {
++    let last_gw = gw.last().map(|s| s.t).unwrap_or(f64::NEG_INFINITY);
++    let wanted: FpSet = canaries.iter().map(|c| fp(&c.txid)).collect();
++    let gw_occ = occurrences(gw, Some(&wanted));
++    let mut tally = [(0usize, 0usize); 3];
++    let mut leaks = 0usize;
++    for c in canaries {
++        let id = fp(&c.txid);
++        let pool_at = first_between(pool.occ.get(&id), c.t - WINDOW, f64::INFINITY);
++        if pool_at.is_some() && c.kind != CanaryKind::Decoy {
++            leaks += 1;
++        }
++        if c.t + CANARY_DUE > last_gw {
++            continue;
++        }
++        let (due, hits) = &mut tally[c.kind as usize];
++        *due += 1;
++        if let Some(at) = first_between(gw_occ.get(&id), c.t, c.t + CANARY_WINDOW) {
++            // a decoy counts however it got there; a must-carry canary only if the pool's
++            // template cannot have been the source
++            if c.kind == CanaryKind::Decoy || pool_at.is_none_or(|pt| at < pt - LEAD_MARGIN) {
++                *hits += 1;
++            }
++        }
++    }
++    (tally, leaks)
++}
++
++/// Canary hits read from template checks (W8): a canary is due when a check's job was first
++/// seen between `CANARY_DUE` and `CHECK_WINDOW` s after its delivery, and a hit if one of those
++/// jobs holds it. A canary with no check in that span is not judged at all (neither hit nor
++/// miss), so a gateway is never marked down for a check Prime did not make.
++fn tally_checks(checks: &[&Check], pool: &PoolView, canaries: &[&Canary]) -> Tally {
++    let mut checks: Vec<&Check> = checks.to_vec();
++    checks.sort_by(|a, b| a.t.partial_cmp(&b.t).unwrap_or(std::cmp::Ordering::Equal));
++    let mut tally = [(0usize, 0usize); 3];
++    let mut leaks = 0usize;
++    for c in canaries {
++        let id = fp(&c.txid);
++        let pool_at = first_between(pool.occ.get(&id), c.t - WINDOW, f64::INFINITY);
++        if pool_at.is_some() && c.kind != CanaryKind::Decoy {
++            leaks += 1;
++        }
++        let (from, to) = (c.t + CANARY_DUE, c.t + CHECK_WINDOW);
++        let lo = checks.partition_point(|k| k.t < from);
++        let judging = checks[lo..].iter().take_while(|k| k.t <= to);
++        let mut due = false;
++        let mut hit = false;
++        for k in judging {
++            due = true;
++            // as on the snapshot path: a must-carry canary the pool's template had first is no
++            // evidence of the gateway's own view
++            if k.has(id) && (c.kind == CanaryKind::Decoy || pool_at.is_none_or(|pt| k.t < pt - LEAD_MARGIN)) {
++                hit = true;
++                break;
++            }
++        }
++        if due {
++            let (d, h) = &mut tally[c.kind as usize];
++            *d += 1;
++            *h += usize::from(hit);
++        }
++    }
++    (tally, leaks)
++}
++
+ /// Share of `a`'s snapshots whose branches equal one of `b`'s (same parent, within window).
+ pub fn pair_identical(a: &[Snapshot], b: &[Snapshot]) -> f64 {
+     reference::pair_identical(a, b)
+@@ -967,6 +1079,8 @@ pub mod reference {
+             decoys_carried: decoy.1,
+             decoy_rate: rate(decoy),
+             canary_pool_leaks: leaks,
++            canary_source: "snapshots",
++            checks: 0,
+             flag_reasons: reasons,
+             evidence,
+             independence: (independence.clamp(0.0, 1.0) * 1000.0).round() / 1000.0,
+@@ -1240,6 +1354,12 @@ mod tests {
+     }
+ 
+     fn world(n: usize) -> World {
++        world_with(n, 0.5, 30, 8)
++    }
++
++    /// `n` steps of `dt` s; a block every `block_every` steps, a canary round (own, then shared
++    /// 3 steps later, then a decoy at 5) every `canary_every` steps.
++    fn world_with(n: usize, dt: f64, block_every: usize, canary_every: usize) -> World {
+         let mut w = World {
+             pool: vec![],
+             honest: vec![],
+@@ -1256,26 +1376,26 @@ mod tests {
+         let mut decoy_live: Vec<String> = vec![];
+         let delivered = |cs: &[Canary], id: &str, t: f64, lag: f64| cs.iter().any(|c| c.txid == id && c.t + lag <= t);
+         for i in 0..n {
+-            let t = i as f64 * 0.5;
+-            if i % 30 == 0 {
++            let t = i as f64 * dt;
++            if i % block_every == 0 {
+                 // a block: canaries and decoys so far are mined (by whoever)
+                 own_live.clear();
+                 shared_live.clear();
+                 decoy_live.clear();
+             }
+-            let prev = hex32(1 + (i / 30) as u64);
++            let prev = hex32(1 + (i / block_every) as u64);
+             let common: Vec<String> = (0..5).map(|k| hex32(1_000 + (i / 4 + k) as u64)).collect();
+-            if i % 8 == 0 {
++            if i % canary_every == 0 {
+                 let c = hex32(9_000_000 + i as u64);
+                 w.own.push(Canary::new(t, c.clone()));
+                 own_live.push((c, hex32(8_000_000 + i as u64)));
+             }
+-            if i % 8 == 3 {
++            if i % canary_every == 3 {
+                 let d = hex32(7_000_000 + i as u64);
+                 w.global.push(Canary::shared(t, d.clone()));
+                 shared_live.push(d);
+             }
+-            if i % 8 == 5 {
++            if i % canary_every == 5 {
+                 let q = hex32(6_000_000 + i as u64);
+                 w.global.push(Canary::decoy(t, q.clone()));
+                 decoy_live.push(q);
+@@ -1316,6 +1436,86 @@ mod tests {
+         features_with(s, &w.pool, &all)
+     }
+ 
++    /// W8: one template check per own canary, `delay` s after it: the gateway's newest job then.
++    fn checks_for(w: &World, s: &[Snapshot], delay: f64) -> Vec<Check> {
++        w.own
++            .iter()
++            .filter_map(|c| s.iter().rev().find(|x| x.t <= c.t + delay))
++            .map(|x| Check::new(x.t, &x.txids))
++            .collect()
++    }
++
++    fn judge_checked(w: &World, s: &[Snapshot], checks: &[Check]) -> Features {
++        let all: Vec<Canary> = w.own.iter().chain(&w.global).cloned().collect();
++        let gw: Vec<Prepared> = s.iter().map(Prepared::new).collect();
++        let pool: Vec<Prepared> = w.pool.iter().map(Prepared::new).collect();
++        features_checked(
++            &gw.iter().collect::<Vec<_>>(),
++            &PoolView::new(&pool),
++            &all.iter().collect::<Vec<_>>(),
++            &checks.iter().collect::<Vec<_>>(),
++        )
++    }
++
++    /// 2.5 min blocks, a canary round every 20 s, the check 45 s after each own canary.
++    fn check_world() -> World {
++        world_with(1_500, 1.0, 150, 20)
++    }
++
++    #[test]
++    fn template_checks_clear_the_honest_gateway_and_convict_every_copy() {
++        let w = check_world();
++        let honest = judge_checked(&w, &w.honest, &checks_for(&w, &w.honest, 45.0));
++        assert_eq!(honest.canary_source, "checks");
++        assert!(honest.canaries_due >= CANARY_MIN && honest.shared_due >= CANARY_MIN, "{honest:?}");
++        assert!(honest.decoys_due >= CANARY_MIN, "{honest:?}");
++        assert!(!honest.flagged && honest.evidence == "canary", "{honest:?}");
++        // a check 45 s on misses what a block cleared first, and nothing else
++        assert!(honest.canary_rate.unwrap() > 0.5 && honest.shared_rate.unwrap() > 0.5, "{honest:?}");
++        assert_eq!(honest.decoys_carried, 0);
++
++        let proxy = judge_checked(&w, &w.proxy, &checks_for(&w, &w.proxy, 45.0));
++        assert!(proxy.flagged, "{proxy:?}");
++        assert_eq!(proxy.flag_reasons, vec!["own-canaries-missed", "shared-canaries-missed", "decoys-carried"]);
++        let naive = judge_checked(&w, &w.naive, &checks_for(&w, &w.naive, 45.0));
++        assert_eq!(naive.flag_reasons, vec!["decoys-carried"], "{naive:?}");
++        let filtered = judge_checked(&w, &w.filtered, &checks_for(&w, &w.filtered, 45.0));
++        assert_eq!(filtered.flag_reasons, vec!["shared-canaries-missed"], "{filtered:?}");
++        let forced = judge_checked(&w, &w.forced, &checks_for(&w, &w.forced, 45.0));
++        assert!(!forced.flagged, "{forced:?}");
++    }
++
++    #[test]
++    fn job_snapshots_are_no_canary_evidence_on_the_check_path() {
++        let w = check_world();
++        // the honest gateway's snapshots carry every canary, but no check was made
++        let f = judge_checked(&w, &w.honest, &[]);
++        assert_eq!((f.canaries_due, f.shared_due, f.decoys_due, f.checks), (0, 0, 0, 0), "{f:?}");
++        assert_ne!(f.evidence, "canary");
++        // and a proxy is not convicted on no evidence either
++        let p = judge_checked(&w, &w.proxy, &[]);
++        assert!(!p.flagged, "{p:?}");
++    }
++
++    #[test]
++    fn a_check_outside_the_window_judges_nothing() {
++        let c = Canary::new(1_000.0, hex32(9_000_001));
++        let judge = |at: f64| {
++            let k = Check::new(at, &[c.txid.clone(), hex32(5)]);
++            features_checked(&[], &PoolView::new(std::iter::empty()), &[&c], &[&k])
++        };
++        // too soon: the job may predate the canary reaching the gateway's node
++        assert_eq!(judge(c.t + CANARY_DUE - 3.0).canaries_due, 0);
++        // too late: by then the canary or its twin has usually confirmed
++        assert_eq!(judge(c.t + CHECK_WINDOW + 1.0).canaries_due, 0);
++        let f = judge(c.t + 45.0);
++        assert_eq!((f.canaries_due, f.canary_hits, f.checks), (1, 1, 1), "{f:?}");
++        // a job without it inside the window is a miss
++        let k = Check::new(c.t + 45.0, &[hex32(5)]);
++        let f = features_checked(&[], &PoolView::new(std::iter::empty()), &[&c], &[&k]);
++        assert_eq!((f.canaries_due, f.canary_hits), (1, 0), "{f:?}");
++    }
++
+     #[test]
+     fn every_canary_kind_clears_the_honest_gateway() {
+         let w = world(240);
+diff --git a/prime/tides/src/lib.rs b/prime/tides/src/lib.rs
+index 87d4de9..7714c4f 100644
+--- a/prime/tides/src/lib.rs
++++ b/prime/tides/src/lib.rs
+@@ -37,7 +37,7 @@ pub use score::{
+     builder_weight, claim_credit, hhi_effective, nakamoto, sovereignty_score, verified_share, BlockCredit,
+     PoolScore,
+ };
+-pub use entropy::{features, features_with, independence_ppm, report, Canary, CanaryKind, Snapshot};
++pub use entropy::{features, features_with, independence_ppm, report, Canary, CanaryKind, Check, Snapshot};
+ 
+ /// Work that arrived before dual-fee tagging. Split as DATUM (the lower fee).
+ pub const SOURCE_UNKNOWN: u8 = 0;
+diff --git a/prime/wire/src/verify.rs b/prime/wire/src/verify.rs
+index c2cdba1..9b90bbf 100644
+--- a/prime/wire/src/verify.rs
++++ b/prime/wire/src/verify.rs
+@@ -613,6 +613,68 @@ pub fn assemble_block(v: &VerifiedShare, s: &PowSubmit, txns: &[Vec<u8>]) -> Vec
+     out
+ }
+ 
++/// The txid of one raw transaction as a gateway sends it (legacy or segwit serialization):
++/// SHA256d of the legacy bytes, internal byte order. `None` unless `raw` is exactly one
++/// well-formed transaction.
++pub fn txid(raw: &[u8]) -> Option<Hash> {
++    use crate::coinbase::read_varint;
++    let mut c = crate::Cursor::new(raw);
++    let version = c.take(4).ok()?;
++    let segwit = raw.get(4..6) == Some(&[0x00, 0x01][..]);
++    if segwit {
++        c.take(2).ok()?;
++    }
++    let body_at = c.pos;
++    let nin = read_varint(&mut c).ok()?;
++    if nin == 0 || nin > 100_000 {
++        return None;
++    }
++    for _ in 0..nin {
++        c.take(36).ok()?;
++        let n = read_varint(&mut c).ok()?;
++        c.take(usize::try_from(n).ok()?).ok()?;
++        c.take(4).ok()?;
++    }
++    let nout = read_varint(&mut c).ok()?;
++    if nout > 100_000 {
++        return None;
++    }
++    for _ in 0..nout {
++        c.take(8).ok()?;
++        let n = read_varint(&mut c).ok()?;
++        c.take(usize::try_from(n).ok()?).ok()?;
++    }
++    let body_end = c.pos;
++    if segwit {
++        for _ in 0..nin {
++            let items = read_varint(&mut c).ok()?;
++            for _ in 0..items {
++                let n = read_varint(&mut c).ok()?;
++                c.take(usize::try_from(n).ok()?).ok()?;
++            }
++        }
++    }
++    let lock = c.take(4).ok()?;
++    if c.remaining() != 0 {
++        return None;
++    }
++    let mut legacy = Vec::with_capacity(8 + body_end - body_at);
++    legacy.extend_from_slice(version);
++    legacy.extend_from_slice(&raw[body_at..body_end]);
++    legacy.extend_from_slice(lock);
++    Some(pow::sha256d(&legacy))
++}
++
++/// The txids of a job's transactions (coinbase excluded), in order, if and only if they are the
++/// job's: the coinbase merkle branches they make equal the ones the gateway's job section
++/// carried. A gateway cannot answer a template check with a list other than the one its miners
++/// are hashing.
++pub fn job_txids(txns: &[Vec<u8>], merkle_branches: &[Hash]) -> Option<Vec<Hash>> {
++    let ids: Option<Vec<Hash>> = txns.iter().map(|t| txid(t)).collect();
++    let ids = ids?;
++    (pow::merkle_branches_for_coinbase(&ids) == merkle_branches).then_some(ids)
++}
++
+ /// Precompute the per-job hashing state for a share so a grinder (tests, the bundled
+ /// client) can search nonces the way hardware does.
+ pub fn job_work_for(slot: &JobSlot, s: &PowSubmit, txcount_includes_coinbase: bool) -> Option<JobWork> {
+@@ -767,6 +829,58 @@ pub mod fixtures {
+ mod tests {
+     use super::fixtures::*;
+     use super::*;
++
++    fn raw_pair() -> (Vec<u8>, Vec<u8>) {
++        // one input, one output; legacy and the same tx with a one-item witness
++        let mut body = vec![1u8];
++        body.extend_from_slice(&[0x11; 32]);
++        body.extend_from_slice(&3u32.to_le_bytes());
++        body.push(0);
++        body.extend_from_slice(&0xffff_fffdu32.to_le_bytes());
++        body.push(1);
++        body.extend_from_slice(&19_000u64.to_le_bytes());
++        body.extend_from_slice(&[0x16, 0x00, 0x14]);
++        body.extend_from_slice(&[0x22; 20]);
++        let mut legacy = 2u32.to_le_bytes().to_vec();
++        legacy.extend_from_slice(&body);
++        legacy.extend_from_slice(&[0; 4]);
++        let mut segwit = 2u32.to_le_bytes().to_vec();
++        segwit.extend_from_slice(&[0x00, 0x01]);
++        segwit.extend_from_slice(&body);
++        segwit.extend_from_slice(&[0x01, 0x03, 0xaa, 0xbb, 0xcc]);
++        segwit.extend_from_slice(&[0; 4]);
++        (legacy, segwit)
++    }
++
++    #[test]
++    fn txid_hashes_the_legacy_bytes_of_either_serialization() {
++        let (legacy, segwit) = raw_pair();
++        assert_eq!(txid(&legacy), Some(pow::sha256d(&legacy)));
++        assert_eq!(txid(&segwit), Some(pow::sha256d(&legacy)));
++        assert_eq!(txid(&segwit[..segwit.len() - 1]), None);
++        let mut long = legacy.clone();
++        long.push(0);
++        assert_eq!(txid(&long), None);
++        assert_eq!(txid(&[]), None);
++    }
++
++    #[test]
++    fn a_check_reply_counts_only_if_it_is_the_jobs_list() {
++        let (legacy, segwit) = raw_pair();
++        let mut other = legacy.clone();
++        other[10] ^= 1;
++        let txns = vec![segwit.clone(), other.clone()];
++        let ids: Vec<Hash> = txns.iter().map(|t| txid(t).unwrap()).collect();
++        let branches = pow::merkle_branches_for_coinbase(&ids);
++        assert_eq!(job_txids(&txns, &branches), Some(ids));
++        // a list with a tx added (a canary the job does not hold), dropped, or reordered is refused
++        let mut forged = txns.clone();
++        forged.push(legacy.iter().rev().copied().collect());
++        assert_eq!(job_txids(&forged, &branches), None);
++        assert_eq!(job_txids(&[segwit.clone()], &branches), None);
++        assert_eq!(job_txids(&[other, segwit], &branches), None);
++        assert_eq!(job_txids(&[], &[]), Some(vec![]));
++    }
+     use crate::coinbase::TxOut;
+ 
+     fn policy<'a>(issued: &'a [Output], pool: &'a [u8]) -> Policy<'a> {
+-- 
+2.43.0
+

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Mike Moore (AwokenLazarus)
 """Node-template consensus — constants and types.
 
 Abstract ConnectBlock model of the Node Template Attestation *soft fork*.
@@ -93,6 +95,10 @@ class Attestation:
     # Must equal extra.txid in this model (one extra tx). Same extra => one script.
     wtxid_tree: bytes
     il: Tuple[Tx, ...]
+    # XBT-NTA profile (xbt_nta.py): x-only payee key and its BIP340 signature over
+    # the attestation. Empty in the base draft.
+    payee_key: bytes = b""
+    sig: bytes = b""
 
 
 @dataclass
@@ -104,6 +110,10 @@ class Block:
     txs: List[Tx]  # not including coinbase
     attestations: List[Attestation]
     weight: int = 4000  # coinbase overhead; plus txs in validate
+    # XBT-NTA profile: the 32-byte reserved header slot (m_mm_rhs, bytes 132-163)
+    # and the (tag, value) leaves it commits to, carried beside vtxa.
+    slot: bytes = bytes(32)
+    slot_leaves: Tuple[Tuple[bytes, bytes], ...] = ()
 
 
 @dataclass

@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Node Template Attestation — soft-fork draft</title>
 <meta name="description" content="Draft Bitcoin soft fork: a block may pay a coinbase address only if that same block carries a grind proving a node-template for that script, and it must include the short list of transactions that template named whenever they still fit and still spend.">
-<link rel="canonical" href="https://github.com/AwokenLazarus/Bitcoin/blob/nta-soft-fork/research/node-template-consensus/bip-node-template-attestation.md">
+<link rel="canonical" href="https://github.com/AwokenLazarus/Bitcoin/blob/main/research/node-template-consensus/bip-node-template-attestation.md">
 <style>
   :root {
     --bg: #f6f1e8;
@@ -147,456 +147,671 @@
   <h1>Node Template Attestation</h1>
   <p class="lede">A block may pay a coinbase address only if that same block carries a grind proving a node-template for that script, and it must include the short list of transactions that template named whenever they still fit and still spend.</p>
 </header>
-<dl class='meta'><dt>BIP</dt><dd>unassigned</dd><dt>Title</dt><dd>Node Template Attestation</dd><dt>Author</dt><dd>Mike Moore <mrmoore27@pm.me></dd><dt>Status</dt><dd>Draft</dd><dt>Type</dt><dd>Standards Track</dd><dt>Layer</dt><dd>Consensus (soft fork)</dd><dt>Created</dt><dd>2026-09-07</dd><dt>License</dt><dd>BSD-2-Clause</dd></dl><nav class="toc"><div class="toctitle">Contents</div><div class="toc">
+<dl class='meta'><dt>BIP</dt><dd>unassigned</dd><dt>Title</dt><dd>Node Template Attestation (payee-signed coinbase outputs)</dd><dt>Author</dt><dd>Mike Moore <mrmoore27@pm.me></dd><dt>Status</dt><dd>Draft</dd><dt>Type</dt><dd>Standards Track</dd><dt>Layer</dt><dd>Consensus (soft fork)</dd><dt>Created</dt><dd>2026-09-07</dd><dt>License</dt><dd>CC-BY-4.0</dd></dl><nav class="toc"><div class="toctitle">Contents</div><div class="toc">
 <ul>
 <li><a href="#abstract">Abstract</a></li>
 <li><a href="#copyright">Copyright</a></li>
 <li><a href="#motivation">Motivation</a><ul>
-<li><a href="#what-this-is-not">What this is not</a></li>
+<li><a href="#step-3-per-payee">Step 3, per payee</a></li>
+<li><a href="#datum-tides-shares-are-never-forfeited">DATUM TIDES shares are never forfeited</a></li>
+<li><a href="#what-changed-from-the-original-draft">What changed from the original draft</a></li>
 </ul>
 </li>
 <li><a href="#specification">Specification</a><ul>
-<li><a href="#1-soft-fork-packaging">1. Soft-fork packaging</a></li>
-<li><a href="#2-coinbase-commitment">2. Coinbase commitment</a></li>
-<li><a href="#3-value-bearing-payees">3. Value-bearing payees</a></li>
-<li><a href="#4-attestation-object">4. Attestation object</a></li>
-<li><a href="#5-attestation-proof-of-work-tag">5. Attestation proof-of-work tag</a></li>
-<li><a href="#6-multiplex">6. Multiplex</a></li>
-<li><a href="#7-caps">7. Caps</a></li>
-<li><a href="#8-feasible-inclusion-list">8. Feasible inclusion list</a></li>
-<li><a href="#9-connect-and-undo">9. Connect and undo</a></li>
-<li><a href="#10-p2p">10. P2P</a></li>
-<li><a href="#11-activation">11. Activation</a></li>
+<li><a href="#definitions">Definitions</a></li>
+<li><a href="#rules">Rules</a></li>
+<li><a href="#attestation-digest">Attestation digest</a></li>
+<li><a href="#deployment-parameters">Deployment parameters</a></li>
+<li><a href="#mining-and-templates-non-normative">Mining and templates (non-normative)</a></li>
 </ul>
 </li>
-<li><a href="#rationale">Rationale</a><ul>
-<li><a href="#why-a-soft-fork-not-a-new-header-field">Why a soft fork, not a new header field</a></li>
-<li><a href="#why-full-bodies-not-txids">Why full bodies, not txids</a></li>
-<li><a href="#why-previous-utxo-feasibility-not-leftover-weight">Why previous-UTXO feasibility, not leftover weight</a></li>
-<li><a href="#why-fail-closed">Why fail closed</a></li>
-<li><a href="#why-one-attestation-per-script-not-one-datum-share-for-a-tides-list">Why one attestation per script, not one DATUM share for a TIDES list</a></li>
-<li><a href="#why-the-extra-transaction">Why the extra transaction</a></li>
-<li><a href="#why-carry-forward">Why carry-forward</a></li>
-</ul>
-</li>
-<li><a href="#limitations">Limitations</a></li>
-<li><a href="#comparison">Comparison</a></li>
+<li><a href="#rationale">Rationale</a></li>
 <li><a href="#backwards-compatibility">Backwards compatibility</a></li>
-<li><a href="#datum-and-prime">DATUM and Prime</a></li>
-<li><a href="#reference-implementation">Reference implementation</a><ul>
-<li><a href="#tests-that-state-the-claim">Tests that state the claim</a></li>
+<li><a href="#deployment">Deployment</a><ul>
+<li><a href="#gateway-readiness">Gateway readiness</a></li>
 </ul>
 </li>
-<li><a href="#deployment">Deployment</a></li>
-<li><a href="#reference">Reference</a></li>
+<li><a href="#test-vectors">Test vectors</a><ul>
+<li><a href="#vector-1-one-signed-payee-valid">Vector 1: one signed payee (valid)</a></li>
+<li><a href="#vector-2-split-repeated-script-shares-one-attestation-valid">Vector 2: split, repeated script shares one attestation (valid)</a></li>
+<li><a href="#vector-3-gifted-attestation-invalid">Vector 3: gifted attestation (invalid)</a></li>
+<li><a href="#vector-4-over-the-cap-invalid">Vector 4: over the cap (invalid)</a></li>
+<li><a href="#other-rejections-from-the-functional-test">Other rejections (from the functional test)</a></li>
+</ul>
+</li>
+<li><a href="#reference-implementation">Reference implementation</a></li>
+<li><a href="#limitations">Limitations</a></li>
+<li><a href="#follow-up-inclusion-list-extension-not-part-of-v1">Follow-up: inclusion-list extension (not part of v1)</a></li>
+<li><a href="#xbt-notes-what-this-is-not">XBT notes: what this is not</a></li>
+<li><a href="#comparison">Comparison</a></li>
+<li><a href="#references">References</a></li>
 </ul>
 </div>
 </nav>
-<p>A <strong>draft</strong> soft fork. It has no BIP number, no version bit, and no activation
-parameters. It is not a Bitcoin Core or Bitcoin Knots patch. A Python
-<code>ConnectBlock</code> model and tests live beside this file.</p>
+<p>A <strong>draft</strong> soft fork for XBT (Bitcoin on BLAKE2b, Bitcoin Knots 29.4.x). It has no
+BIP number and no activation parameters. It is published for discussion and has not
+been submitted to the Knots maintainers. A working Knots patch is included as patch files
+(see <a href="#reference-implementation">Reference implementation</a>).</p>
+<p>This revision (v1) specifies what that patch enforces. The original draft&rsquo;s inclusion
+list, <code>extra</code> transaction and <code>vtxa</code> sidecar are kept as a separate, later extension in
+<a href="#follow-up-inclusion-list-extension-not-part-of-v1">Follow-up: inclusion-list extension</a>.</p>
 <h2 id="abstract">Abstract<a class="headerlink" href="#abstract" title="Permanent link">&para;</a></h2>
-<p>After activation, a block is valid only if every value-bearing coinbase
-output is backed by a <strong>node-template attestation</strong> committed in that same
-block, and only if the block actually contains the <strong>feasible inclusion-list
-(IL)</strong> transactions those attestations named.</p>
-<p>The attestation vector is not part of the 80-byte header. It is bound the
-same way SegWit bound witness data: a magic <code>OP_RETURN</code> in the coinbase
-whose 32-byte payload is a hash of the new data. Old nodes ignore the
-<code>OP_RETURN</code> and still see a normal block. New nodes reject a block that
-pays a script with no proof, or that pays a node-miner and then omits the
-transactions that miner&rsquo;s node required.</p>
-<p>The rule is about <strong>coinbase payees</strong>, not about who found the block.
-Pooling, TIDES-style splits, and DATUM stay legal. A hasher who never ran
-a node, and never produced an attestation, cannot appear in the coinbase.</p>
+<p>After activation, every coinbase output that carries value must pay a key-path Taproot
+script <code>OP_1 &lt;K&gt;</code>. For each distinct such script, the coinbase must also carry a
+zero-value attestation output</p>
+<pre><code>OP_RETURN PUSH68( &quot;NTA&quot; 0x02 || sig64 )
+</code></pre>
+<p>in the same order as the payees. <code>sig64</code> is a BIP340 signature by <code>K</code> over a tagged
+hash of the payee script, the block height, the block&rsquo;s <code>nBits</code> and its
+<code>hashPrevBlock</code>.</p>
+<p>A block may therefore pay a script only if the holder of that script&rsquo;s key signed
+for this height, this difficulty and this tip. The rule is about <strong>payees</strong>, not about
+who found the block or which protocol delivered the work. Old nodes see ordinary
+<code>OP_RETURN</code> outputs and accept the blocks: this is a soft fork.</p>
 <h2 id="copyright">Copyright<a class="headerlink" href="#copyright" title="Permanent link">&para;</a></h2>
-<p>This document is licensed under the 2-clause BSD license.</p>
+<p>This document is licensed under the Creative Commons Attribution 4.0 International License
+(<a href="https://creativecommons.org/licenses/by/4.0/">CC-BY-4.0</a>). Copyright (c) 2026 Mike Moore
+(AwokenLazarus).</p>
 <h2 id="motivation">Motivation<a class="headerlink" href="#motivation" title="Permanent link">&para;</a></h2>
-<p>Stratum V1 lets a pool be the only author of the block template. Hashers
-authenticate as usernames. The pool can omit transactions (policy filters,
-OFAC lists, fee discrimination) and the chain cannot tell a 50% pool from
-a 50% solo farm.</p>
-<p>DATUM and Stratum V2 Job Declaration already move template construction
-to the miner <strong>when the miner runs a node</strong>. They are pool protocols. They
-are not consensus. A pool can still pay those miners and drop their
-transactions, or pay people who never ran a node at all.</p>
-<p>This draft asks consensus for one thing:</p>
+<h3 id="step-3-per-payee">Step 3, per payee<a class="headerlink" href="#step-3-per-payee" title="Permanent link">&para;</a></h3>
+<p>The Knots maintainers have circulated a &ldquo;step 3&rdquo; that would withhold block rewards
+from blocks produced via stratum-to-pool. At the time of writing it has no
+specification, patch or activation height. Any consensus version of it has one
+problem: <strong>the chain cannot see a mining protocol.</strong> Once a block is found, a
+share delivered over Stratum V1 and one delivered by a DATUM gateway look the same.</p>
+<p>What the chain can see is who the coinbase pays. This draft restates step 3 as a rule
+about payees:</p>
 <blockquote>
-<p>If a block pays you, it must include the transactions your node wanted,
-whenever those transactions are still feasible.</p>
+<p>After activation, a block may pay a script only if the holder of that script&rsquo;s key
+signed for this height, this tip and this difficulty.</p>
 </blockquote>
-<p>&ldquo;Wanted&rdquo; is a short, capped inclusion list inside an attestation, not a
-full mempool dump. &ldquo;Feasible&rdquo; is a pure function of the previous UTXO set
-and the block, not of any node&rsquo;s local mempool.</p>
-<h3 id="what-this-is-not">What this is not<a class="headerlink" href="#what-this-is-not" title="Permanent link">&para;</a></h3>
-<p>Bitcoin cannot see a process named <code>bitcoind</code>. Anyone who <em>can</em> run a node
-can grind an attestation that pays someone else&rsquo;s script (a <strong>gifted</strong>
-name). A pool that only pays itself, and settles hashers off-chain, is
-indistinguishable from a large solo miner. Those limits are physics, not
-unfinished work. They are stated again under <a href="#limitations">Limitations</a>.</p>
-<h2 id="specification">Specification<a class="headerlink" href="#specification" title="Permanent link">&para;</a></h2>
-<p>The specification is consensus rules for <strong>full nodes</strong> after the
-(unspecified) activation point. Policy, wallets, and pool software are
-non-normative and live in later sections.</p>
-<h3 id="1-soft-fork-packaging">1. Soft-fork packaging<a class="headerlink" href="#1-soft-fork-packaging" title="Permanent link">&para;</a></h3>
-<p>The 80-byte header is unchanged. The transaction merkle root is unchanged
-in meaning: it still commits to the ordinary <code>vtx</code> list, coinbase first.</p>
-<p>New data is an <strong>attestation vector</strong> <code>vtxa</code>, analogous to the witness
-vector in BIP141:</p>
-<ul>
-<li>It is not hashed into <code>hashMerkleRoot</code>.</li>
-<li>It is hashed into a commitment in a coinbase <code>scriptPubKey</code>.</li>
-<li>Peers that do not implement this draft strip it, as pre-SegWit peers
-  stripped witnesses.</li>
-<li>A block whose <code>vtx</code> is valid under today&rsquo;s rules remains valid to old
-  nodes even when <code>vtxa</code> is present.</li>
-</ul>
-<p>New nodes, after activation, <strong>tighten</strong> the rules: some blocks that old
-nodes would accept become invalid. That is a soft fork. If a majority of
-hashrate produces only new-valid blocks, old nodes follow that chain
-because it is the heaviest chain they still consider valid.</p>
-<div class="mermaid">flowchart TD
-  header[&quot;Block header&lt;br/&gt;prev, merkle root of vtx, nBits, nonce&quot;]
-  vtx[&quot;vtx: coinbase + ordinary transactions&lt;br/&gt;IL transactions live here&quot;]
-  vtxa[&quot;vtxa: attestation vector&lt;br/&gt;stripped by old peers&quot;]
-  cb[&quot;Coinbase output: OP_RETURN NTA commitment&quot;]
-  header --&gt; vtx
-  vtx --&gt; cb
-  cb --&gt;|&quot;SHA256D merkle of vtxa&quot;| vtxa</div>
-<h3 id="2-coinbase-commitment">2. Coinbase commitment<a class="headerlink" href="#2-coinbase-commitment" title="Permanent link">&para;</a></h3>
-<p>A coinbase output is an <strong>NTA commitment</strong> if and only if its
-<code>scriptPubKey</code> is at least 38 bytes and begins with exactly these 6 bytes:</p>
-<pre><code>0x6a 0x24 0x4e 0x54 0x41 0x01
-</code></pre>
-<p>That is <code>OP_RETURN</code>, <code>OP_PUSHBYTES_36</code>, then the 4-byte magic <code>NTA</code> ||
-<code>0x01</code>. The following 32 bytes are <code>nta_commit</code>.</p>
-<p>Define:</p>
-<pre><code>nta_root     = MerkleRoot(SHA256D(serialize(vtxa[i])) for i in 0..n-1)
-nta_reserved = 32 zero bytes   // v1; non-zero is invalid
-nta_commit   = SHA256D(nta_root || nta_reserved)
-</code></pre>
-<p>MerkleRoot is the Bitcoin transaction merkle tree, including the
-duplicated-tail quirk, over those 32-byte leaves. If <code>n = 0</code>, <code>nta_root</code>
-is <code>SHA256D(empty)</code>.</p>
-<p>After activation a block is invalid unless:</p>
-<ol>
-<li>The coinbase has <strong>exactly one</strong> NTA commitment output.</li>
-<li>That output&rsquo;s <code>nValue</code> is <code>0</code>.</li>
-<li><code>nta_commit</code> equals the 32 bytes in the script.</li>
-<li><code>nta_reserved</code> is 32 zero bytes.</li>
-</ol>
-<p>The SegWit witness commitment (<code>0xaa21a9ed</code>, BIP141) is a different magic.
-A block may have both. Scanning outputs for the NTA prefix must not
-confuse the two.</p>
-<p>0-value <code>OP_RETURN</code> outputs, including this one and the witness
-commitment, are <strong>not</strong> value-bearing payees. They do not need
-attestations.</p>
-<h3 id="3-value-bearing-payees">3. Value-bearing payees<a class="headerlink" href="#3-value-bearing-payees" title="Permanent link">&para;</a></h3>
-<p>Let <code>V</code> be the list of coinbase outputs with <code>nValue &gt; 0</code> whose
-<code>scriptPubKey</code> is not provably unspendable (<code>OP_RETURN</code> and equivalent).</p>
-<ul>
-<li><code>nValue &lt; 0</code> is already invalid.</li>
-<li>An anyone-can-spend coinbase output with <code>nValue &gt; 0</code> is invalid under
-  this draft (same spirit as wasting subsidy; the Python model rejects
-  it explicitly).</li>
-<li>Two outputs may share the same <code>scriptPubKey</code>. They share one
-  attestation.</li>
-</ul>
-<p>After activation, for every distinct <code>scriptPubKey</code> in <code>V</code> there must be
-<strong>exactly one</strong> attestation in <code>vtxa</code> whose <code>scriptPubKey</code> field equals
-it. A value-bearing output with no attestation is invalid
-(<code>unattested_payee</code>). A Stratum username, by itself, is not an
-attestation.</p>
-<p>Attestations whose scripts are <strong>not</strong> in <code>V</code> are allowed. They still
-contribute IL transactions to the catalog. That lets a finder include an
-unpaid miner&rsquo;s list. It does not let a finder pay a script that has no
-attestation.</p>
-<h3 id="4-attestation-object">4. Attestation object<a class="headerlink" href="#4-attestation-object" title="Permanent link">&para;</a></h3>
-<p>Each <code>vtxa[i]</code> deserializes to:</p>
+<p>How that plays out for each way of mining:</p>
 <table>
 <thead>
 <tr>
-<th>Field</th>
-<th>Type</th>
-<th>Notes</th>
+<th>Who mines how</th>
+<th>Under this rule</th>
 </tr>
 </thead>
 <tbody>
 <tr>
-<td><code>scriptPubKey</code></td>
-<td><code>CScript</code></td>
-<td>Payee this attestation is for</td>
+<td>DATUM miner: own node and gateway, own payout key</td>
+<td>Valid, provided the payout address is P2TR and the gateway signs each tip</td>
 </tr>
 <tr>
-<td><code>nHeight</code></td>
-<td><code>uint32</code></td>
-<td>Must equal the enclosing block height</td>
+<td>Stratum hasher paid in the coinbase (FPPS/PPLNS in coinbase)</td>
+<td><strong>Cannot be paid in the coinbase</strong> unless it runs a signer. It has no key the pool can use, and the pool cannot sign for it</td>
 </tr>
 <tr>
-<td><code>nBits</code></td>
-<td><code>uint32</code></td>
-<td>Must equal the enclosing block <code>nBits</code></td>
+<td>Stratum pool that pays only itself</td>
+<td>Valid. The pool signs for its own key; to the chain it is one large miner</td>
 </tr>
 <tr>
-<td><code>extra</code></td>
-<td><code>CTransaction</code></td>
-<td>Non-coinbase; see below</td>
-</tr>
-<tr>
-<td><code>il</code></td>
-<td><code>vector&lt;CTransaction&gt;</code></td>
-<td>Inclusion-list <strong>bodies</strong>, not txids</td>
-</tr>
-<tr>
-<td><code>nVersion</code></td>
-<td><code>int32</code></td>
-<td>Must be <code>0x4e544101</code> (<code>NTA</code> || <code>1</code>)</td>
-</tr>
-<tr>
-<td><code>nTime</code></td>
-<td><code>uint32</code></td>
-<td><code>MTP &lt; nTime ≤ block.nTime</code></td>
-</tr>
-<tr>
-<td><code>nNonce</code></td>
-<td><code>uint32</code></td>
-<td>Grind</td>
+<td>Pool holding its farms&rsquo; payout keys</td>
+<td>Valid, but the pool holds keys that spend the farms&rsquo; coinbase outputs</td>
 </tr>
 </tbody>
 </table>
-<p><code>extra</code> must have at least one input, must be valid against the
-<strong>previous</strong> UTXO set (the UTXO before this block&rsquo;s <code>vtx</code> is applied),
-and must not exceed <code>MAX_EXTRA_WEIGHT</code> as computed by
-<code>GetTransactionWeight</code>. It is <strong>not</strong> applied to the UTXO set. It is not
-required to appear in <code>vtx</code>. Its job is to make a headers-only share
-illegal: the attester had at least one real transaction in a template.</p>
-<p><code>il</code> is a list of full transactions, not a list of txids looked up in
-the mempool. Two nodes with different mempools therefore cannot disagree.
-Each IL transaction&rsquo;s weight is <code>GetTransactionWeight</code>; the sum must be
-<code>≤ MAX_IL_WEIGHT</code>. The count must be <code>≤ MAX_IL_TXIDS</code>.</p>
-<p>Identity of an IL transaction is its <strong>wtxid</strong> (BIP141). If two IL
-bodies in the catalog (this block plus the last <code>W</code> blocks) share a
-wtxid but are not byte-identical, the block is invalid
-(<code>il_txid_conflict</code>). Claimed txids are not a field an author can set;
-they are <code>SHA256D</code> of the serialization, as in Bitcoin today.</p>
-<h3 id="5-attestation-proof-of-work-tag">5. Attestation proof-of-work tag<a class="headerlink" href="#5-attestation-proof-of-work-tag" title="Permanent link">&para;</a></h3>
-<p>The attestation is bound to a grind so a copied tag cannot ride a
-different script, extra, or IL.</p>
-<pre><code>hashMerkleRoot_A = SHA256D(
-    serialize(scriptPubKey) || extra.GetWitnessHash() || il_root
-)
-il_root          = MerkleRoot(il[j].GetWitnessHash() for j in 0..m-1)
-
-header_A is 80 bytes:
-    nVersion | hashPrevBlock | hashMerkleRoot_A | nTime | nBits | nNonce
+<h3 id="datum-tides-shares-are-never-forfeited">DATUM TIDES shares are never forfeited<a class="headerlink" href="#datum-tides-shares-are-never-forfeited" title="Permanent link">&para;</a></h3>
+<p>A rule keyed on the <strong>finder</strong> (&ldquo;this block came from stratum, so its reward is
+withheld&rdquo;) would punish every DATUM miner whose TIDES share sits in a block that a
+stratum hasher happened to find. This rule is keyed on the <strong>payees</strong>. A block is
+valid whoever found it, provided every script it pays has attested. The pool&rsquo;s
+coinbase builder controls that list, not the hasher:
+- it lists only payees whose signature for the current tip has arrived;
+- it carries everyone else&rsquo;s share forward (TIDES carry).</p>
+<p>The block stays valid, and no honest miner&rsquo;s share is lost to a stratum find. This was
+shown end to end on regtest (XBT-071: a four-node chain with TIDES coinbases and
+<code>nta@139</code>).</p>
+<h3 id="what-changed-from-the-original-draft">What changed from the original draft<a class="headerlink" href="#what-changed-from-the-original-draft" title="Permanent link">&para;</a></h3>
+<p>The original draft accepted <strong>gifted</strong> attestations: a pool with a node could grind an
+attestation for a customer&rsquo;s script. v1 closes that by making the payee&rsquo;s own key sign.
+v1 also drops the inclusion list, the <code>extra</code> transaction and the attestation grind
+(<code>SHARE_K</code>). These need a sidecar and new P2P messages, and are specified separately as
+a follow-up. What v1 does not stop is listed under <a href="#limitations">Limitations</a>.</p>
+<h2 id="specification">Specification<a class="headerlink" href="#specification" title="Permanent link">&para;</a></h2>
+<p>The rules below apply to full nodes validating a block at height <code>h ≥ NtaHeight</code>
+(the <code>nta</code> deployment is active for the block being validated). Before that height,
+nothing changes.</p>
+<h3 id="definitions">Definitions<a class="headerlink" href="#definitions" title="Permanent link">&para;</a></h3>
+<ul>
+<li><strong>Attestation output.</strong> A coinbase output whose <code>scriptPubKey</code> is exactly 70 bytes
+  and begins with the 6 bytes <code>6a 44 4e 54 41 02</code>: <code>OP_RETURN</code>, <code>OP_PUSHBYTES_68</code>, then
+  <code>"NTA"</code> and version byte <code>0x02</code>. The remaining 64 bytes are <code>sig64</code>. Matching is on
+  exact bytes, as for the BIP141 witness commitment. Any other encoding of the same data
+  (a different push opcode, a truncated signature, extra bytes) is <strong>not</strong> an
+  attestation output. It is an ordinary <code>OP_RETURN</code>.</li>
+<li><strong>Payee output.</strong> A coinbase output that is not an attestation output, has
+  <code>nValue &gt; 0</code>, and whose <code>scriptPubKey</code> is not provably unspendable. Provably
+  unspendable means it begins with <code>OP_RETURN</code> or is larger than <code>MAX_SCRIPT_SIZE</code>
+  (<code>CScript::IsUnspendable</code>). Zero-value outputs of any script are not payees, and
+  neither are value-carrying <code>OP_RETURN</code>s (burns).</li>
+<li><strong>Payee list.</strong> The distinct payee <code>scriptPubKey</code>s, ordered by first occurrence.
+  Two outputs with the same script are one payee.</li>
+<li><strong><code>MAX_NTA_PAYEES</code> = 512.</strong> The most entries a payee list may have.</li>
+</ul>
+<h3 id="rules">Rules<a class="headerlink" href="#rules" title="Permanent link">&para;</a></h3>
+<p>The coinbase outputs are scanned once, in order. The first failure ends validation
+with the given reject reason. All failures are <code>BLOCK_CONSENSUS</code>: the block is
+invalid.</p>
+<ol>
+<li>If an output is an attestation output and its <code>nValue ≠ 0</code>: <strong><code>bad-nta-att-value</code></strong>.</li>
+<li>If an output is a payee output and its <code>scriptPubKey</code> is not exactly
+   <code>0x51 0x20 &lt;32 bytes&gt;</code> (<code>OP_1 OP_PUSHBYTES_32 K</code>): <strong><code>bad-nta-payee</code></strong>.</li>
+<li>If <code>K</code> is not a valid BIP340 x-only public key (no curve point with that x):
+   <strong><code>bad-nta-payee-key</code></strong>.</li>
+<li>If the output adds a new entry to the payee list and the list already has
+   <code>MAX_NTA_PAYEES</code> entries: <strong><code>bad-nta-too-many</code></strong>. Repeating a script already in the
+   list never triggers this.</li>
+</ol>
+<p>After the scan:</p>
+<ol start="5">
+<li>If the number of attestation outputs differs from the number of entries in the payee
+   list: <strong><code>bad-nta-count</code></strong>. A block with no payees must have no attestation outputs.</li>
+<li>For each <code>i</code>, the <code>i</code>-th attestation output (in output order) must hold a valid BIP340
+   signature by the <code>i</code>-th payee&rsquo;s key <code>K_i</code> over <code>NtaAttestationHash(payee_i, h, nBits,
+   hashPrevBlock)</code>; otherwise <strong><code>bad-nta-sig</code></strong>.</li>
+</ol>
+<p>Attestation outputs may appear anywhere among the coinbase outputs. Only their order
+relative to each other matters. The recommended layout is: payees, then attestations in
+payee order, then the witness commitment, then any other zero-value commitments.</p>
+<h3 id="attestation-digest">Attestation digest<a class="headerlink" href="#attestation-digest" title="Permanent link">&para;</a></h3>
+<pre><code>NtaAttestationHash(script, h, nBits, prev) =
+    TaggedHash(&quot;XBT-NTA/attestation&quot;, ser(script) || h || nBits || prev)
 </code></pre>
-<p><code>hashPrevBlock</code> must equal the previous block hash (the tip this block
-extends). <code>SHA256D(header_A)</code> interpreted as a uint256 must be strictly
-less than <code>share_target</code>, where</p>
-<pre><code>share_target = min(uint256_max, block_target * SHARE_K)
+<ul>
+<li><code>TaggedHash(tag, m) = SHA256(SHA256(tag) || SHA256(tag) || m)</code>, as in BIP340, with
+  <code>tag</code> the 19 ASCII bytes <code>XBT-NTA/attestation</code>.</li>
+<li><code>ser(script)</code>: CompactSize length, then the script bytes. For a P2TR payee that is
+  <code>0x22 0x51 0x20 || K</code>, 35 bytes.</li>
+<li><code>h</code>: the height of the block being validated, <code>int32</code> little-endian.</li>
+<li><code>nBits</code>: the block header&rsquo;s <code>nBits</code>, <code>uint32</code> little-endian.</li>
+<li><code>prev</code>: the block header&rsquo;s <code>hashPrevBlock</code>, 32 bytes in serialized (internal) byte order,
+  i.e. the reverse of the usual hex display.</li>
+</ul>
+<p>The preimage is 75 bytes. <code>sig64</code> is a BIP340 signature by the secret key of <code>K</code> over
+this 32-byte message. The attestation is not a transaction signature: no sighash, no
+annex, no script execution.</p>
+<h3 id="deployment-parameters">Deployment parameters<a class="headerlink" href="#deployment-parameters" title="Permanent link">&para;</a></h3>
+<p>A buried deployment named <code>nta</code> (<code>Consensus::DEPLOYMENT_NTA</code>, height <code>NtaHeight</code>).
+In the reference implementation it is <strong>unscheduled on every network</strong>
+(<code>NtaHeight = INT_MAX</code>). Regtest sets it with <code>-testactivationheight=nta@&lt;height&gt;</code>, and
+<code>getdeploymentinfo</code> reports it as a buried deployment. This document proposes no mainnet
+height. See <a href="#deployment">Deployment</a>.</p>
+<h3 id="mining-and-templates-non-normative">Mining and templates (non-normative)<a class="headerlink" href="#mining-and-templates-non-normative" title="Permanent link">&para;</a></h3>
+<ul>
+<li>A node holds no payee keys, so it cannot build a valid coinbase after activation
+  unless the coinbase pays nothing. <code>generate*</code> blocks that pay the node&rsquo;s script are
+  refused on submission.</li>
+<li><code>getblocktemplate</code> keeps working. It validates the transaction set against a
+  zero-value placeholder coinbase, and <code>coinbasevalue</code> is unchanged. Without this, no
+  template can be produced after activation, and every pool and gateway that builds
+  from GBT stops. This is Knots commit <code>8a153ba</code>, not part of the first patch. It is
+  not consensus.</li>
+<li>The pool (or a solo miner&rsquo;s gateway) builds the coinbase:
+  1. collect a signature from each payee for the new tip;
+  2. list only payees whose signature has arrived;
+  3. append their attestation outputs in payee order;
+  4. carry every other share forward.</li>
+<li>The first jobs on a new tip can pay only payees already signed, typically the finder&rsquo;s
+  gateway and the pool, and add more as signatures arrive.</li>
+<li>A payee signs once per tip, not per job: the digest does not cover the transaction
+  set, so one signature serves every job built on that tip.</li>
+<li>A builder with more than <code>MAX_NTA_PAYEES</code> attested payees lists 512 and carries the
+  rest, exactly as it carries unattested payees.</li>
+<li>The payee key is the Taproot <strong>output</strong> key <code>K</code>, used untweaked. A BIP86 wallet
+  address is <code>OP_1 &lt;P + t·G&gt;</code>, so the gateway needs the tweaked secret (<code>d + t</code>), which
+  wallets do not normally export. A release needs a way to export it, or a
+  non-BIP86 payout key (see <a href="#limitations">Limitations</a>).</li>
+</ul>
+<h2 id="rationale">Rationale<a class="headerlink" href="#rationale" title="Permanent link">&para;</a></h2>
+<p><strong>Why inline signatures, not a commitment and a sidecar.</strong> A 38-byte commitment
+with a <code>vtxa</code> sidecar (the original draft), or a leaf in the XBT header&rsquo;s reserved
+slot, saves about 79 bytes per payee. Both need a new service bit, block and
+compact-block relay extensions, and IBD support: SegWit-sized work, whose only v1
+payload would be 64-byte signatures.</p>
+<p>Inline, the attestation is 79 bytes serialized (316 WU) per payee: 0.9% of block weight
+for a 100-payee coinbase. It fits the RDTS 83-byte <code>OP_RETURN</code> limit, and every node
+already relays it. The cost is <strong>permanent</strong>: a later soft fork can add a sidecar but
+cannot remove the v1 outputs.</p>
+<p><strong>Why the digest includes <code>hashPrevBlock</code>.</strong> Not for replay protection. Replaying an
+attestation on a competing branch pays the same key that signed, which harms nobody.
+The tip binding forces a <strong>fresh signature on every block</strong>. That is the only thing
+in v1 that separates a DATUM gateway (which already follows every tip) from a stratum
+hasher (which does not).</p>
+<p>XBT retargets every 2016 blocks, so without <code>prev</code> a payee could pre-sign a whole period
+in one batch, and a stratum pool could satisfy the rule with one wallet signature per
+hasher every two weeks. The inclusion-list extension needs per-tip signatures anyway.
+The cost falls on honest miners:
+- the payout key is hot on the gateway (the P2TR output key is the signing key);
+- new-tip latency: on regtest (SOV-002, loopback, real gateways and Prime), every
+  payee&rsquo;s signature reached the pool <strong>~41 ms</strong> after a mined tip (p50 40.6, p95 40.7 ms)
+  and the full payee set was in the coinbaser at 40.8 ms p95. Tips the gateways learn of
+  only by polling took up to <strong>0.3 s</strong> (p95 298 ms). Mainnet adds propagation to each
+  gateway&rsquo;s node. Signing itself is ~25 µs;
+- offline payees go unpaid until they return.</p>
+<p><strong>Why a cap of 512 payees.</strong> Without one, only block size bounds the payee list: about
+8,000 distinct payees in a maximal non-witness coinbase (122 bytes each), so about 8,000
+BIP340 verifications, single-threaded in <code>ContextualCheckBlock</code>, for a block that has
+already passed proof of work (~0.4 s at ~50 µs each). At 512 that is ~26 ms, and the
+coinbase grows by at most 46.6 KB over P2WPKH payouts (4.7% of block weight).
+512 is the original draft&rsquo;s <code>MAX_ATTESTATIONS</code>; a TIDES window at DATUM scale pays tens
+to low hundreds of payees, and a builder carries anyone past the cap. The cap is
+checked during the scan, before any signature, so an over-cap block costs no
+verification at all.</p>
+<p><strong>Why a new reject reason (<code>bad-nta-too-many</code>, not <code>bad-nta-count</code>).</strong> <code>bad-nta-count</code>
+means &ldquo;a payee is missing its attestation (or there is a spare one)&rdquo;; the fix is to add
+or drop an attestation. Over the cap, every attestation may be present and valid, and
+the fix is to drop payees. Pools act on the reason (SOV-002&rsquo;s Prime releases its books
+on any <code>bad-nta-*</code> and logs which), so one reason per fix is worth one more string.
+Reject reasons are not consensus; this changes no block&rsquo;s validity.</p>
+<p><strong>Why Taproot key-path only.</strong> One signature scheme, 70-byte attestations, and the
+payee key is the script. A P2WPKH payee would need the attestation to reveal its key:
+103 bytes with BIP340, over the RDTS limit, or 71 bytes with recoverable ECDSA, which
+means a second signature scheme in consensus. Revealing the key removes P2WPKH&rsquo;s
+key-hiding benefit anyway.</p>
+<p>Adding P2WPKH later would <strong>relax</strong> a v1 rule, so it would be a hard fork. It is in v1 or
+not at all. Multi-party payees can use a MuSig2 aggregate key. Script-path-only outputs
+cannot be paid.</p>
+<p><strong>Why one attestation per distinct script.</strong> A TIDES split may pay one miner in several
+outputs. Tying one signature to one script keeps the count check simple and the
+coinbase small. Payee order (first occurrence) fixes the pairing without an index field.</p>
+<p><strong>Why exact bytes.</strong> As with the witness commitment, one canonical encoding means no
+parser ambiguity. A malformed attestation is simply an <code>OP_RETURN</code>, and its payee then
+fails the count check.</p>
+<p><strong>Why fail closed.</strong> A payee with no attestation makes the block invalid. Anything
+softer (&ldquo;skip unattested payees&rdquo;) would let a pool keep building today&rsquo;s coinbases
+forever.</p>
+<p><strong>Why no attestation grind.</strong> In the original draft the grind (<code>SHARE_K</code>) stopped a
+copied attestation from riding another script. The payee signature does that
+directly.</p>
+<h2 id="backwards-compatibility">Backwards compatibility<a class="headerlink" href="#backwards-compatibility" title="Permanent link">&para;</a></h2>
+<ul>
+<li><strong>Old full nodes.</strong> Attested blocks contain only <code>P2TR</code> and <code>OP_RETURN</code> outputs, which
+  they already accept. Blocks that v1 nodes reject (unattested payees) remain valid to
+  old nodes. As with every soft fork, old nodes follow the rules only while most
+  hashrate enforces them.</li>
+</ul>
+<p>Evidence, all regtest on Knots 29.4.2 + NTA:
+  - <code>feature_xbt_nta.py</code> (<code>nta@120</code>): the non-enforcing node accepts an unattested block
+    at the activation height. When the enforcing side extends an attested chain, it
+    <strong>reorgs onto it</strong> and reports the unattested block as <code>valid-fork</code>. The enforcing
+    node rejects it.
+  - The 3-node demo (<code>contrib/xbt-nta/nta_demo.py</code>: A and B enforce, C does not). Before
+    activation all three follow an unattested block. After it, B rejects an unattested
+    block at 120 with <code>bad-nta-count</code>. C accepts and relays it, and A and B keep refusing
+    it. A mines attested blocks 120 and 121, and C reorgs onto them.
+  - XBT-071 (4 nodes, <code>nta@139</code>, TIDES coinbases with 3 payees, 3 attestations, a witness
+    commitment and a pool commitment, RDTS on). Enforcing nodes reject the old coinbaser
+    (<code>bad-nta-payee</code>) and the all-P2TR-but-unsigned coinbaser (<code>bad-nta-count</code>). The
+    old-rules node reorgs onto the attested chain. Three consecutive runs passed.
+- <strong>SPV clients.</strong> No change. They never validated coinbase structure.
+- <strong>Wallets.</strong> No new address type. Coinbase payout addresses must be P2TR (<code>bc1p…</code>)
+  by the activation height.
+- <strong>Pools and gateways.</strong> A new message path (payee signature per tip) and a coinbase
+  builder that lists only attested payees. Stock DATUM gateways (<code>v0.4.1-beta</code>) can
+  neither sign nor carry an attestation: after activation they would mine invalid
+  blocks without noticing. A gateway release is a precondition of activation; see
+  <a href="#gateway-readiness">Gateway readiness</a>.
+- <strong>Mining RPCs.</strong> <code>getblocktemplate</code> needs the placeholder change above. <code>generate*</code>
+  cannot mine value-bearing blocks after activation.</p>
+<h2 id="deployment">Deployment<a class="headerlink" href="#deployment" title="Permanent link">&para;</a></h2>
+<p>The reference implementation defines <code>nta</code> as a buried deployment with no height on any
+network. The choice of mechanism belongs to the Knots maintainers. It could be:
+- a buried height announced well in advance, as was done for <code>blake2b</code>;
+- a signalled deployment.</p>
+<p>Suggested order, none of which this document authorizes:</p>
+<ol>
+<li>Review of v1 as specified here.</li>
+<li>A gateway release (signing, and carrying 70-byte attestations) and a pool coinbase
+   builder that lists only attested payees.</li>
+<li>Signet or a private test network with real gateways and a stratum hasher, measuring
+   new-tip signature latency and payee coverage.</li>
+<li>Activation parameters, in a separate document.</li>
+<li>A &ldquo;Taproot payout address&rdquo; deadline for every coinbase payee ahead of the height.</li>
+</ol>
+<p>No single pool can activate this. Blocks from non-enforcing hashrate stay valid to old
+nodes.</p>
+<h3 id="gateway-readiness">Gateway readiness<a class="headerlink" href="#gateway-readiness" title="Permanent link">&para;</a></h3>
+<p><strong>Stock DATUM gateways would mine invalid blocks after activation, silently.</strong> OCEAN
+<code>datum_gateway</code> v0.4.1 (<code>5b06123</code>) parses the pool&rsquo;s coinbaser in
+<code>datum_coinbaser_v2_parse</code> and stops at the first output script longer than 64 bytes
+(<code>src/datum_coinbaser.c:795</code>, <code>if ((slen &lt; 2) || (slen &gt; 64)) { break; }</code>; the buffer is
+<code>output_script[64]</code>, <code>src/datum_stratum.h:115</code>; master <code>dbc3b14</code> keeps the limit at
+:801). Every output from there on is dropped without an error, and the undistributed
+value goes to the pool address. The attestation output is 70 bytes and follows the
+payees, so a stock gateway keeps the payees, drops every attestation, and its blocks
+are <code>bad-nta-count</code> from the activation height on. Nothing tells the operator, the
+miners keep hashing, and the loss is every block that gateway finds. This is not about
+signing: the gateway cannot even carry attestations that the pool signed.</p>
+<p>So activation needs three things that are not in consensus:</p>
+<ol>
+<li><strong>A gateway release</strong> that accepts the exact 70-byte attestation shape in the
+   coinbaser (and, for a signing gateway, signs each tip). The lazarus-gateway
+   prototype and a split-only patch to the C gateway (SOV-007) accept exactly
+   <code>6a44 "NTA" 02 ‖ sig64</code> with value 0 and nothing else over 64 bytes.</li>
+<li><strong>A readiness signal</strong> the pool can measure per gateway (SOV-011):
+   - an updated gateway advertises <code>nta-v1</code> in the DATUM handshake, in a field stock
+     v0.4.1 ignores;
+   - for gateways that don&rsquo;t advertise, the pool probes before activation: it puts a
+     0-value 70-byte NTA-shaped output at the end of one coinbaser per gateway, and
+     checks whether the next share&rsquo;s coinbase still has it. Before activation that
+     output is an ordinary <code>OP_RETURN</code> and changes no payout;
+   - after activation the pool refuses pooled work to a gateway that is not ready, with
+     a message the operator sees, instead of letting it hash on invalid blocks.</li>
+<li><strong>A readiness threshold.</strong> Pools publish the share of their gateway hashrate that is
+   ready. <strong>Proposal:</strong> set the activation height only once the pools that serve DATUM
+   gateways report at least 95% of that hashrate ready, sustained for a full retarget
+   period, and give the remaining operators the announcement lead time to upgrade. This
+   is a coordination rule, not a consensus rule, and it is the maintainers&rsquo; call.</li>
+</ol>
+<p>The same lead time covers the Taproot payout deadline and the untweaked-key export
+(<a href="#limitations">Limitations</a>).</p>
+<h2 id="test-vectors">Test vectors<a class="headerlink" href="#test-vectors" title="Permanent link">&para;</a></h2>
+<p>Derived from the XBT-065 functional test (<code>test/functional/feature_xbt_nta.py</code>, Knots
+<code>5164677</code>): same keys, same digest function, same signer. Each vector was submitted to
+an enforcing regtest node (<code>nta@120</code>), and the verdict below is the node&rsquo;s.</p>
+<p>Vectors 1–3 are unchanged from the first revision; vector 4 was added with the cap and
+has its own parent (the setup chain has wall-clock timestamps, so each generator run
+gets a new <code>hashPrevBlock</code>). The digests and signatures were also re-checked with the
+research model&rsquo;s independent BIP340 code. Full data, including coinbase transactions: <code>vectors/nta-vectors.json</code>.
+Regenerate with <code>vectors/nta_vectors.py</code>; check with <code>vectors/check_vectors.py</code>.</p>
+<p>Setup:
+- Secret keys: <code>sk = SHA256("xbt-nta/" || name)</code>.
+- Signatures: BIP340 with <code>aux_rand</code> = 32 zero bytes (deterministic).
+- Regtest <code>nBits = 0x207fffff</code>.
+- <code>prev</code> is shown in RPC (display) order; the preimage holds it reversed.</p>
+<h3 id="vector-1-one-signed-payee-valid">Vector 1: one signed payee (valid)<a class="headerlink" href="#vector-1-one-signed-payee-valid" title="Permanent link">&para;</a></h3>
+<pre><code>height          120
+nBits           207fffff
+hashPrevBlock   3d7482abfafe2abd5509a1344ca9f4d7cb58c4fcff49048347c8b3a623751bba
+payee (alice)   sk  0ac199acc7329a6ca13218a5deb6fbdd668dbd0e609c4d5a0ad090b86bb0931e
+                K   50f677dabf7111d39d09da91310631c765396bb2b86d770bc8e15343492664ed
+outputs
+  0  5000000000  512050f677dabf7111d39d09da91310631c765396bb2b86d770bc8e15343492664ed
+  1           0  6a444e54410286af4385ba3bf4fb5d711099c6c8e8a60728bd763f16af2672dd89ae90b1
+                 5b122cf75c225f95a0033a15c31da8bf2be4e6d7675ae10f3b98a85569714aea45bd
+preimage        22512050f677dabf7111d39d09da91310631c765396bb2b86d770bc8e15343492664ed
+                78000000 ffff7f20
+                ba1b7523a6b3c847830449fffcc458cbd7f4a94c34a10955bd2afefaab82743d
+digest          196724702dcf9266a83672e0d27d16c86605af1a6c56949d5c04cae05769075d
+sig64           86af4385ba3bf4fb5d711099c6c8e8a60728bd763f16af2672dd89ae90b15b12
+                2cf75c225f95a0033a15c31da8bf2be4e6d7675ae10f3b98a85569714aea45bd
+result          valid
 </code></pre>
-<p>and <code>block_target</code> is the target implied by this block&rsquo;s <code>nBits</code>.
-<code>SHARE_K = 1000</code> in this draft: one thousand times easier than the block
-itself. Each payee is expected to grind this on their own node. The
-block finder still needs full header proof of work.</p>
-<p>If <code>SHA256D(header_A)</code> does not match the committed fields, that is
-<code>att_pow_unbind</code>. If it meets the fields but is not under <code>share_target</code>,
-that is <code>att_pow</code>.</p>
-<h3 id="6-multiplex">6. Multiplex<a class="headerlink" href="#6-multiplex" title="Permanent link">&para;</a></h3>
-<p>Let <code>key = (nHeight, extra.GetHash())</code>. Two attestations in the same
-block with the same <code>key</code> and different <code>scriptPubKey</code> are invalid
-(<code>att_multiplex_tree</code>). One weak template cannot be rewritten into two
-identities by flipping only the coinbase script.</p>
-<p>Distinct extras (distinct node templates) for distinct scripts are valid.
-That is a normal DATUM/TIDES split.</p>
-<h3 id="7-caps">7. Caps<a class="headerlink" href="#7-caps" title="Permanent link">&para;</a></h3>
-<p>These are consensus, not policy.</p>
+<h3 id="vector-2-split-repeated-script-shares-one-attestation-valid">Vector 2: split, repeated script shares one attestation (valid)<a class="headerlink" href="#vector-2-split-repeated-script-shares-one-attestation-valid" title="Permanent link">&para;</a></h3>
+<pre><code>height          121
+nBits           207fffff
+hashPrevBlock   3b9589aefb047c6383a9e12b4acc78456be408739f7c58245b6bc1be38b90687
+payee 0 (alice) K 50f677dabf7111d39d09da91310631c765396bb2b86d770bc8e15343492664ed
+payee 1 (bob)   sk 7974de48046f00ca3cbe4f8b1da2e1b09edd94fe87ea921b4fb993ac74aab162
+                K  0353ea2c4cf26758fc7e168641351fd9a9dd39635db1ec3f34c2ff7430aaabde
+outputs
+  0  1250000000  512050f677dabf7111d39d09da91310631c765396bb2b86d770bc8e15343492664ed  (alice)
+  1  2500000000  51200353ea2c4cf26758fc7e168641351fd9a9dd39635db1ec3f34c2ff7430aaabde  (bob)
+  2  1250000000  512050f677dabf7111d39d09da91310631c765396bb2b86d770bc8e15343492664ed  (alice again)
+  3           0  6a444e5441023ecdcae6fb08209352e30314f1eed7f5c70a69a063839e0281caefb780b4
+                 c773d9eafdf0f023030d74883eb154f448c2ed30445d3ee1f79dd6a65a0ed6778d67  (alice)
+  4           0  6a444e5441024527434fd9dec3c255f640a3e69b072f12474c17e54a05772d8e32d6e451
+                 d304aa172d30633e4323037a97934cad0c25250aadc63caf80aaacef5552bdfd87f9  (bob)
+digest alice    4cd758888977d9113b0e25b17dcc52e40d23c505fe6931439ee080967b48e9ec
+digest bob      43d9f93f38846058ee6a7274c55e4a8dc6fafc67a9ed90c8d208e593b7cc4e3c
+result          valid
+</code></pre>
+<h3 id="vector-3-gifted-attestation-invalid">Vector 3: gifted attestation (invalid)<a class="headerlink" href="#vector-3-gifted-attestation-invalid" title="Permanent link">&para;</a></h3>
+<p>Same parent as vector 1. The payee is <code>customer</code>
+(<code>K = bcbbcdeb177829fc3a6db3c8876bb3bed5f54a0564ae3d91f5473baeccf8f587</code>), but the
+signature over its digest (<code>d6c4a74190fc9ccbacc6673163a89edee27b217a3648bb01b880ac590af5659a</code>)
+is by the <code>pool</code> key:</p>
+<pre><code>  0  5000000000  5120bcbbcdeb177829fc3a6db3c8876bb3bed5f54a0564ae3d91f5473baeccf8f587
+  1           0  6a444e5441024f851cd5397b899f1542eeeb82b26e14b8ae19e4a9acdba358d72625d677
+                 b914bcd13b8fe19e31eb815e89790c06f8d339519882ba628f20f45fa076e9a77fd5
+result          bad-nta-sig
+</code></pre>
+<h3 id="vector-4-over-the-cap-invalid">Vector 4: over the cap (invalid)<a class="headerlink" href="#vector-4-over-the-cap-invalid" title="Permanent link">&para;</a></h3>
+<p><code>x10</code> in <code>vectors/nta-vectors.json</code>, judged by the capped node (branch <code>rnd/sov-014</code>).
+513 distinct P2TR payees, each paid 1,000,000 sats, with keys
+<code>sk_i = SHA256("xbt-nta/" || "cap/" || i)</code> for <code>i = 0…512</code> (decimal <code>i</code>), then 513
+attestations, each a valid signature by its payee for this tip. Every signature
+verifies, so the cap alone rejects the block. The full data (all 513 preimages, digests
+and signatures) is in the JSON.</p>
+<pre><code>height          120
+nBits           207fffff
+hashPrevBlock   49d75917ba2b37707fa9c787bb79ab6fb3357e15a8bccc4881b86f3458d8b58e
+outputs         513 payees, then 513 attestations (1,026 outputs; coinbase tx 62,641 bytes)
+result          bad-nta-too-many
+</code></pre>
+<h3 id="other-rejections-from-the-functional-test">Other rejections (from the functional test)<a class="headerlink" href="#other-rejections-from-the-functional-test" title="Permanent link">&para;</a></h3>
+<table>
+<thead>
+<tr>
+<th>Case</th>
+<th>Reject reason</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>All-P2TR coinbase, no attestation</td>
+<td><code>bad-nta-count</code></td>
+</tr>
+<tr>
+<td>Anyone-can-spend (<code>OP_TRUE</code>) payee</td>
+<td><code>bad-nta-payee</code></td>
+</tr>
+<tr>
+<td>P2WPKH payee, with a placeholder attestation</td>
+<td><code>bad-nta-payee</code></td>
+</tr>
+<tr>
+<td><code>OP_1 &lt;x&gt;</code> with <code>x</code> not on the curve</td>
+<td><code>bad-nta-payee-key</code></td>
+</tr>
+<tr>
+<td>Signature for height+1, <code>nBits</code>−1 or another <code>prev</code></td>
+<td><code>bad-nta-sig</code></td>
+</tr>
+<tr>
+<td>Two payees, attestations in the wrong order</td>
+<td><code>bad-nta-sig</code></td>
+</tr>
+<tr>
+<td>Two payees, one attestation; or one payee, two attestations</td>
+<td><code>bad-nta-count</code></td>
+</tr>
+<tr>
+<td>Attestation output with <code>nValue = 1</code></td>
+<td><code>bad-nta-att-value</code></td>
+</tr>
+<tr>
+<td>Attestation truncated to 63 signature bytes</td>
+<td><code>bad-nta-count</code></td>
+</tr>
+<tr>
+<td>Pool holds the farm&rsquo;s key and signs (custody)</td>
+<td>valid</td>
+</tr>
+<tr>
+<td>Zero-value P2TR output plus a data <code>OP_RETURN</code>, no attestation</td>
+<td>valid</td>
+</tr>
+<tr>
+<td>512 distinct signed payees (one paid twice), 512 attestations: at the cap</td>
+<td>valid</td>
+</tr>
+<tr>
+<td>513 distinct signed payees, 513 valid attestations: over the cap</td>
+<td><code>bad-nta-too-many</code></td>
+</tr>
+<tr>
+<td>513 distinct payees, 513 all-zero attestations: over the cap</td>
+<td><code>bad-nta-too-many</code> (no signature checked)</td>
+</tr>
+</tbody>
+</table>
+<h2 id="reference-implementation">Reference implementation<a class="headerlink" href="#reference-implementation" title="Permanent link">&para;</a></h2>
+<p>Bitcoin Knots <code>v29.4.2.knots20260508</code> plus three research commits, published as
+<code>git format-patch</code> files in <a href="patches/knots-v29.4.2/">patches/knots-v29.4.2/</a> (not merged
+into any Knots branch):</p>
+<table>
+<thead>
+<tr>
+<th>Commit</th>
+<th>What</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>5164677</code> (branch <code>rnd/xbt-065-nta</code>)</td>
+<td>Consensus: <code>CheckNodeTemplateAttestations</code> in <code>validation.cpp</code> (called from <code>ContextualCheckBlock</code>), <code>DEPLOYMENT_NTA</code> / <code>NtaHeight</code>, <code>-testactivationheight=nta@h</code>, <code>getdeploymentinfo</code>; <code>feature_xbt_nta.py</code>; <code>contrib/xbt-nta</code> 3-node demo</td>
+</tr>
+<tr>
+<td><code>8a153ba</code> (branch <code>rnd/a2-nta</code>)</td>
+<td>Mining RPC only: <code>getblocktemplate</code> validates against a zero-value placeholder coinbase after activation</td>
+</tr>
+<tr>
+<td><code>61b07b8</code> (branch <code>rnd/sov-014</code>)</td>
+<td>Consensus: <code>MAX_NTA_PAYEES = 512</code>, <code>bad-nta-too-many</code>; at-cap and over-cap cases in <code>feature_xbt_nta.py</code></td>
+</tr>
+</tbody>
+</table>
+<p>About 80 lines of consensus code. The Python model in this folder (<code>spec.py</code>,
+<code>validate.py</code>, <code>xbt_nta.py</code>) still describes the <a href="docs/original-draft.md">original draft</a>
+plus the XBT profile, including the IL and slot variants that are not ported.</p>
+<h2 id="limitations">Limitations<a class="headerlink" href="#limitations" title="Permanent link">&para;</a></h2>
+<p>v1 proves that <strong>each payee&rsquo;s key was online and consented at this tip</strong>. It does not
+prove that the payee ran a node or chose the template. These gaps are real and are
+stated so reviewers can weigh them:</p>
+<ol>
+<li><strong>A pool-supplied signer.</strong> A stratum pool can ship a small signer, as a desktop app,
+   a proxy, or inside the miner&rsquo;s control board. It holds the hasher&rsquo;s payout key and
+   signs whatever tip the pool sends. The hasher then runs no node, chooses no
+   transactions, and is still paid in the coinbase. v1 raises the cost of paying stratum
+   hashers in the coinbase (key custody and always-on software); it does not end it.</li>
+<li><strong>Template control.</strong> With no inclusion list, a pool can pay every DATUM miner and
+   still choose every transaction (the original draft&rsquo;s &ldquo;pay-and-veto&rdquo; case).</li>
+<li><strong>Self-pay PPS.</strong> A pool that pays only itself and settles off chain is one miner.</li>
+<li><strong>Custody.</strong> A pool that holds a farm&rsquo;s payout key signs for it. The chain cannot
+   tell that apart from the farm signing.</li>
+<li><strong>The finder is not identified</strong>, by design. That is what keeps DATUM shares safe.</li>
+<li><strong>Non-signing payees are not paid on chain.</strong> Offline members, keyless hashers and
+   non-Taproot addresses are carried or paid off chain. The pool holds that value
+   meanwhile.</li>
+<li><strong>At most 512 payees per block.</strong> A pool with more attested payees carries the rest
+   to a later block.</li>
+<li><strong>Per-tip latency.</strong> Payees join a new tip&rsquo;s coinbase as their signatures arrive:
+   ~41 ms after a mined tip on regtest, up to ~0.3 s when a gateway learns of the tip only
+   by polling (one sample of ~1 s right after a pool restart). Until then the first jobs
+   pay only already-signed payees. Mainnet adds propagation.</li>
+<li><strong>Untweaked payout keys.</strong> The gateway signs with the secret of the output key <code>K</code>
+   itself. A standard BIP86 wallet derives <code>K</code> by tweaking an internal key and does not
+   export the tweaked secret, so either wallets export it or payees use a dedicated,
+   non-BIP86 payout key. It is hot on the gateway either way (sweep it regularly).</li>
+<li><strong>Stock gateways fail silently.</strong> See <a href="#gateway-readiness">Gateway readiness</a>: an
+    un-upgraded DATUM v0.4.1 gateway mines <code>bad-nta-count</code> blocks after activation
+    unless its pool detects it and refuses it work.</li>
+</ol>
+<h2 id="follow-up-inclusion-list-extension-not-part-of-v1">Follow-up: inclusion-list extension (not part of v1)<a class="headerlink" href="#follow-up-inclusion-list-extension-not-part-of-v1" title="Permanent link">&para;</a></h2>
+<blockquote>
+<p><strong>Status: design only, not implemented in Knots, not proposed for activation with v1.</strong>
+Kept from the original draft (Python model on <code>rnd/a1-nta</code>, 55 + 10 tests) so the
+path is on record. It would be a <strong>separate soft fork</strong> on top of v1. It only adds
+rules, so v1 nodes stay in consensus.</p>
+</blockquote>
+<p><strong>Goal.</strong> Close limitations 1 and 2 as far as consensus can: if a block pays you, it must
+include the transactions your node wanted, whenever they are still feasible.</p>
+<p><strong>Packaging.</strong>
+- Attestations gain an inclusion list (IL: full transaction bodies, capped) and an
+  <code>extra</code> transaction valid against the parent&rsquo;s UTXO set.
+- These are too large for the coinbase. They travel in an attestation vector <code>vtxa</code>:
+  not hashed into <code>hashMerkleRoot</code>, committed in one coinbase <code>OP_RETURN</code>, and stripped
+  by old peers, as BIP141/144 did for witnesses.
+- The commitment needs a new version byte. The original draft&rsquo;s <code>"NTA" 0x01</code> 38-byte
+  commitment must not be reused, and neither may v1&rsquo;s <code>0x02</code>.
+- Alternatively, the commitment can be a leaf <code>("NTA1", nta_commit)</code> in the XBT header&rsquo;s
+  reserved 32-byte slot (<code>m_mm_rhs</code>). XBT-050 showed that Knots does not constrain the
+  slot, so using it is also a soft fork, and every share of a job then commits to the
+  attestation root.
+- The v1 attestation outputs stay required. The v1 digest has no reserved field, so the
+  extension needs a <strong>second per-payee signature</strong> over the IL root and <code>extra</code>.</p>
+<p><strong>Attestation object</strong> (per payee):
+- <code>scriptPubKey</code>, <code>nHeight</code>, <code>nBits</code>;
+- <code>extra</code> (a non-coinbase transaction valid against the previous UTXO set, not applied);
+- <code>il</code> (full bodies, identity = wtxid);
+- the payee&rsquo;s BIP340 signature over all of the above plus <code>hashPrevBlock</code>.</p>
+<p><strong>Feasible inclusion list</strong> (<code>ConnectBlock</code> reads only chain and block, never the
+mempool):
+- <strong>Catalog.</strong> Every IL body in this block&rsquo;s <code>vtxa</code> plus those in the last <code>W</code> blocks,
+  indexed by wtxid. Two different bodies under one wtxid make the block invalid.
+- <strong>Walk.</strong> Drop confirmed entries. Sort the rest by wtxid. Start from the computed
+  coinbase weight. Take each body that is valid against the previous UTXO set, does not
+  conflict with one already taken, and fits <code>MAX_BLOCK_WEIGHT</code>.
+- <strong>Satisfy.</strong> Every taken body must appear in <code>vtx</code> byte-identical (by wtxid).
+- The walk ignores <code>vtx</code>, so stuffing the block or conflict-replacing cannot evict an IL
+  transaction. Claimed weights are never used.</p>
+<p><strong>Caps</strong> (consensus):</p>
 <table>
 <thead>
 <tr>
 <th>Name</th>
 <th>Value</th>
-<th>Why</th>
 </tr>
 </thead>
 <tbody>
 <tr>
 <td><code>MAX_ATTESTATIONS</code></td>
 <td>512</td>
-<td>DATUM coinbases already cap on this order of outputs</td>
 </tr>
 <tr>
 <td><code>MAX_IL_TXIDS</code></td>
 <td>256</td>
-<td>FOCIL-sized list</td>
 </tr>
 <tr>
 <td><code>MAX_IL_WEIGHT</code></td>
-<td>32_000 WU</td>
-<td>Per attestation; compact, not a mempool</td>
+<td>32,000 WU per attestation</td>
 </tr>
 <tr>
 <td><code>MAX_EXTRA_WEIGHT</code></td>
-<td>32_000 WU</td>
-<td>Per extra transaction</td>
+<td>32,000 WU</td>
 </tr>
 <tr>
 <td><code>MAX_NTA_SERIALIZED</code></td>
-<td>131_072 bytes</td>
-<td>Whole <code>vtxa</code>; DoS bound the Python model lacked as a single cap</td>
+<td>131,072 bytes</td>
 </tr>
 <tr>
-<td><code>WINDOW_BLOCKS</code> (<code>W</code>)</td>
-<td>144</td>
-<td>~1 day of carry-forward</td>
-</tr>
-<tr>
-<td><code>SHARE_K</code></td>
-<td>1000</td>
-<td>Attestation grind vs block target</td>
+<td><code>W</code> (window)</td>
+<td>144 blocks</td>
 </tr>
 </tbody>
 </table>
-<p>Exceeding a cap is invalid. There is no &ldquo;best effort&rdquo; truncation.</p>
-<p><code>vtxa</code> <strong>does not</strong> count toward the 4,000,000 WU block weight. IL
-<strong>feasibility</strong> uses computed <code>vtx</code> weight only, so stuffing <code>vtxa</code> or
-lying about <code>block.weight</code> cannot evict an IL transaction.</p>
-<h3 id="8-feasible-inclusion-list">8. Feasible inclusion list<a class="headerlink" href="#8-feasible-inclusion-list" title="Permanent link">&para;</a></h3>
-<p><code>ConnectBlock</code> is a function of <code>(chain, block)</code> only. It does not read
-the mempool.</p>
-<p><strong>Catalog.</strong> Union of every IL body in <code>vtxa</code> of this block with every IL
-body from attestations in the last <code>W</code> blocks, indexed by wtxid. Conflict
-→ invalid.</p>
-<p><strong>Confirmed.</strong> A set of wtxids already in the active chain&rsquo;s <code>vtx</code>
-(bodies that connected). Those entries are dropped from the mandatory
-set.</p>
-<p><strong>Walk.</strong> Sort remaining catalog bodies by wtxid. Start <code>weight</code> at the
-<strong>computed</strong> coinbase weight (<code>GetTransactionWeight</code> of the actual
-coinbase, including commitment outputs). For each body, skip it if:</p>
-<ul>
-<li>its wtxid is already confirmed, or</li>
-<li>it is not valid against the <strong>previous</strong> UTXO set (missing inputs,
-  overspend, negative output, no inputs, internal double-spend), or</li>
-<li>its inputs overlap an IL transaction already taken in this walk
-  (first-wins by wtxid), or</li>
-<li><code>weight + GetTransactionWeight(body) &gt; MAX_BLOCK_WEIGHT</code>.</li>
-</ul>
-<p>Otherwise take it and add its weight and inputs.</p>
-<p>This walk <strong>does not look at <code>vtx</code></strong>. Filling the block with unrelated
-transactions cannot change who was taken. A conflicting spend in <code>vtx</code>
-cannot replace a taken IL transaction; if <code>vtx</code> spends those inputs on
-something else, the block is invalid when the IL check fires.</p>
-<p><strong>Satisfy.</strong> Every taken body must appear in <code>vtx</code> with the same wtxid
-(byte-identical witness-inclusive serialization). Missing →
-<code>il_unsatisfied</code>.</p>
-<p>Same-block IL <em>chains</em> (child spends parent listed in the same catalog)
-are infeasible against the previous UTXO; only the parent is mandatory.
-The child may still be included as an ordinary extra transaction once the
-parent is in <code>vtx</code>. That is intentional.</p>
-<h3 id="9-connect-and-undo">9. Connect and undo<a class="headerlink" href="#9-connect-and-undo" title="Permanent link">&para;</a></h3>
-<p>On a successful connect, full nodes:</p>
-<ol>
-<li>Apply <code>vtx</code> to the UTXO set as today.</li>
-<li>Add those wtxids to the confirmed set.</li>
-<li>Append this block&rsquo;s IL bodies onto the carry-forward window.</li>
-<li>Drop window entries older than <code>W</code> blocks.</li>
-</ol>
-<p>Reorgs undo those three append-only structures the same way they undo
-UTXO. IBD must download <code>vtxa</code> for at least the last <code>W</code> blocks, the same
-class of requirement SegWit added for witness data. Headers-only nodes
-cannot verify IL satisfaction; they could not verify inflation either.</p>
-<h3 id="10-p2p">10. P2P<a class="headerlink" href="#10-p2p" title="Permanent link">&para;</a></h3>
-<p>Non-normative until a later BIP, but the packaging implies:</p>
-<ul>
-<li>A service bit for NTA-capable peers.</li>
-<li><code>block</code> / <code>cmpctblock</code> / <code>blocktxn</code> extensions that carry <code>vtxa</code> for
-  those peers and omit it for others.</li>
-<li>During IBD, <code>vtxa</code> for the recent window must be available. A
-  <code>getnta</code> / <code>nta</code> pair is enough; the commitment in coinbase lets a peer
-  authenticate the bytes.</li>
-</ul>
-<p>Old peers see a valid pre-activation-style block with an extra
-<code>OP_RETURN</code>. They do not need new messages.</p>
-<h3 id="11-activation">11. Activation<a class="headerlink" href="#11-activation" title="Permanent link">&para;</a></h3>
-<p>Unspecified. This draft must not be read as proposing BIP9, BIP8, Speedy
-Trial, a flag day, or a version bit. A later document can add that if
-the rules survive review.</p>
-<h2 id="rationale">Rationale<a class="headerlink" href="#rationale" title="Permanent link">&para;</a></h2>
-<h3 id="why-a-soft-fork-not-a-new-header-field">Why a soft fork, not a new header field<a class="headerlink" href="#why-a-soft-fork-not-a-new-header-field" title="Permanent link">&para;</a></h3>
-<p>A new header field is a hard fork. Old nodes would not parse the block.
-Bitcoin does not take hard forks. SegWit already showed how to bind extra
-data: put a hash in a coinbase <code>OP_RETURN</code> that old nodes treat as
-anyone-can-not-spend dust, and relay the extra data only to new peers.</p>
-<p>IL transactions themselves <strong>must</strong> live in <code>vtx</code>. That is the only
-transaction list old nodes and new nodes share. The attestation vector
-explains <em>which</em> of those transactions were mandatory and <em>who</em> required
-them. Duplicating IL bodies inside <code>vtxa</code> is deliberate: the catalog
-cannot depend on &ldquo;look this txid up in your mempool,&rdquo; which forks, and it
-cannot depend on &ldquo;it will be in <code>vtx</code>&rdquo; before feasibility is computed,
-which would let stuffing change the walk.</p>
-<h3 id="why-full-bodies-not-txids">Why full bodies, not txids<a class="headerlink" href="#why-full-bodies-not-txids" title="Permanent link">&para;</a></h3>
-<p>An earlier sketch named txids and let each node resolve them from its
-mempool. Two honest nodes, two catalogs, one block, two verdicts. That is
-a consensus split. Test 42 of the reference model is the regression:
-different local knowledge, same verdict, because bodies are in the block.</p>
-<p>wtxid (not txid) is the Bitcoin identity so a witness swap cannot satisfy
-someone else&rsquo;s IL.</p>
-<h3 id="why-previous-utxo-feasibility-not-leftover-weight">Why previous-UTXO feasibility, not leftover weight<a class="headerlink" href="#why-previous-utxo-feasibility-not-leftover-weight" title="Permanent link">&para;</a></h3>
-<p>FOCIL-style &ldquo;include these if they still fit&rdquo; lets the finder fill the
-block with junk and evict the IL. This draft computes the mandatory set
-<em>before</em> optional transactions. Tests 24 and 25 are the regressions for
-conflict-replace and stuffing.</p>
-<p>Claimed <code>block.weight</code> / <code>tx.weight</code> fields are not used. A finder who
-could set those would evict anyone. Weights are computed from
-serialization.</p>
-<h3 id="why-fail-closed">Why fail closed<a class="headerlink" href="#why-fail-closed" title="Permanent link">&para;</a></h3>
-<p>A missing <code>vtxa</code> on a paying coinbase is invalid, not &ldquo;unattested, skip.&rdquo;
-Otherwise a pool ships today&rsquo;s blocks forever.</p>
-<h3 id="why-one-attestation-per-script-not-one-datum-share-for-a-tides-list">Why one attestation per script, not one DATUM share for a TIDES list<a class="headerlink" href="#why-one-attestation-per-script-not-one-datum-share-for-a-tides-list" title="Permanent link">&para;</a></h3>
-<p>A single share that lists many names does not prove each name ran a node
-or chose an IL. Each value-bearing script needs its own extra and grind.
-Test 4 / test 38: paying a member forces <em>that</em> member&rsquo;s IL; piggybacking
-the rest of the split does not attest them.</p>
-<h3 id="why-the-extra-transaction">Why the extra transaction<a class="headerlink" href="#why-the-extra-transaction" title="Permanent link">&para;</a></h3>
-<p>Without <code>extra</code>, an attestation is a grindable header. SPV hardware and
-pool usernames already grind headers. <code>extra</code> must spend a real previous
-output. That is still not &ldquo;this process is bitcoind&rdquo; — see Limitations —
-but it is not a headers-only share.</p>
-<h3 id="why-carry-forward">Why carry-forward<a class="headerlink" href="#why-carry-forward" title="Permanent link">&para;</a></h3>
-<p>If IL died at the end of the block that attested it, a pool could pay a
-DATUM miner, omit the IL, and hope that miner does not find the block.
-Paying them once would have been enough to look compliant. The window
-keeps their list mandatory until it confirms, expires, or becomes
-infeasible.</p>
-<h2 id="limitations">Limitations<a class="headerlink" href="#limitations" title="Permanent link">&para;</a></h2>
-<p>These are not TODOs.</p>
-<p><strong>Self-pay PPS.</strong> A pool that pays only its own script, with an
-attestation from a node it runs, and that settles hashers with IOUs, is
-one miner. The chain cannot tell it from a large solo farm. Monte Carlo
-in <code>world.py</code>: 100% PPS never includes transaction T.</p>
-<p><strong>Gifted attestations.</strong> A pool with a node can grind <code>header_A</code> for a
-customer&rsquo;s <code>scriptPubKey</code> and put the <em>pool&rsquo;s</em> IL in <code>il</code>. The coinbase
-may then pay that customer. Consensus sees a node-template for that
-script. It cannot see whose process produced it. Test 30 and the gifted
-world vector accept this and still allow veto of T.</p>
-<p><strong>Off-chain later spends.</strong> Coinbase rules do not bind what happens when
-the payee spends the output, or what a pool promises in a database.</p>
-<p><strong>Anyone can mine to anyone&rsquo;s address</strong> in the sense of gifted
-eligibility. The rule stops <em>unproven</em> names, not <em>borrowed</em> proofs.</p>
-<p><strong>SHA-256 collisions.</strong> Same assumption Bitcoin already makes.</p>
-<p>The reference model uses <code>SHA256</code> of Python <code>repr</code> as a stand-in for
-<code>SHA256D</code> of Bitcoin serialization, and an 8-byte tag as a stand-in for a
-full uint256 grind. A production port must commit <code>vtxa</code> with <code>SHA256D</code>
-as specified here, not with the Python tags.</p>
+<p><strong>Connect, undo, P2P.</strong>
+- Connecting a block appends to the confirmed-wtxid set and to the IL window.
+- Reorgs undo both.
+- IBD must fetch <code>vtxa</code> for the last <code>W</code> blocks.
+- Peers need a service bit, <code>vtxa</code>-carrying <code>block</code>/<code>cmpctblock</code>/<code>blocktxn</code>, and a
+  <code>getnta</code>/<code>nta</code> pair.</p>
+<p><strong>Why bodies, not txids, and why previous-UTXO feasibility.</strong>
+- If the IL were a list of txids resolved from each node&rsquo;s mempool, two honest nodes
+  could reach two verdicts on one block (model test 42).
+- If the IL were &ldquo;whatever still fits&rdquo;, stuffing would evict it (model tests 24, 25).</p>
+<p><strong>What the extension still does not stop.</strong> A pool-supplied signer that forwards the
+pool&rsquo;s own IL still passes. The proof becomes &ldquo;had a chain view and chose
+transactions&rdquo;, not &ldquo;ran <code>bitcoind</code>&rdquo;. Self-pay PPS and custody are unchanged.</p>
+<h2 id="xbt-notes-what-this-is-not">XBT notes: what this is not<a class="headerlink" href="#xbt-notes-what-this-is-not" title="Permanent link">&para;</a></h2>
+<p>This is not non-outsourceable proof of work. The A1 study (XBT-050) ruled that out on
+XBT hardware. Sia-class ASICs hash an 80-byte job whose root is computed upstream once
+per job, so any per-job key-bound value is computed by the job builder: it proves
+custody, not authorship. Per-share keyed wins (2P-PoW, VRF) push every candidate to the
+pool, tax solo miners the same, and let old nodes accept phase-1-only chains more
+cheaply. NTA constrains payees instead of hashers.</p>
 <h2 id="comparison">Comparison<a class="headerlink" href="#comparison" title="Permanent link">&para;</a></h2>
 <table>
 <thead>
 <tr>
 <th>Design</th>
 <th>Template author</th>
-<th>Pay-and-omit IL</th>
-<th>Unattested username in coinbase</th>
-<th>Fork if mempools differ</th>
+<th>Unattested payee in coinbase</th>
+<th>Gifted payee</th>
+<th>Pay-and-veto</th>
 </tr>
 </thead>
 <tbody>
@@ -604,231 +819,56 @@ as specified here, not with the Python tags.</p>
 <td>Stratum V1 today</td>
 <td>Pool</td>
 <td>Yes</td>
-<td>Yes</td>
 <td>n/a</td>
+<td>Yes</td>
 </tr>
 <tr>
 <td>DATUM / SV2 JD</td>
 <td>Miner node, by protocol</td>
-<td>Yes (not consensus)</td>
 <td>Yes</td>
 <td>n/a</td>
+<td>Yes (not consensus)</td>
 </tr>
 <tr>
-<td>Gossip shares as eligibility</td>
-<td>Ambiguous</td>
-<td>—</td>
-<td>—</td>
-<td><strong>Yes</strong></td>
-</tr>
-<tr>
-<td>Attestations without IL</td>
-<td>Miner-looking grind</td>
-<td><strong>Yes</strong> (test 41)</td>
-<td>No</td>
-<td>No</td>
-</tr>
-<tr>
-<td>FOCIL leftover-weight IL</td>
-<td>Attesters</td>
-<td>Evict by stuffing</td>
-<td>n/a</td>
-<td>Depends</td>
-</tr>
-<tr>
-<td><strong>This draft</strong></td>
+<td>Original draft (grind + IL)</td>
 <td>Payee&rsquo;s committed IL</td>
-<td><strong>No</strong>, if that payee is paid</td>
+<td>No</td>
+<td><strong>Yes</strong></td>
+<td>No</td>
+</tr>
+<tr>
+<td><strong>v1 (this document)</strong></td>
+<td>Unconstrained</td>
 <td><strong>No</strong></td>
-<td><strong>No</strong></td>
+<td><strong>No</strong> (payee key signs)</td>
+<td>Yes</td>
+</tr>
+<tr>
+<td>v1 + IL extension</td>
+<td>Payee&rsquo;s committed IL</td>
+<td>No</td>
+<td>No</td>
+<td>No, if that payee is paid</td>
 </tr>
 </tbody>
 </table>
-<p>Discarded in the research that led here:</p>
-<ol>
-<li>BIP-322 / tip signatures / UTXO-hash slogans — copyable, not a node.</li>
-<li>Floating P2P shares as <code>ConnectBlock</code> eligibility — nodes disagree
-   (simulation: 1% loss, 10 payees, 8 nodes → about 56% of blocks some
-   honest node rejects).</li>
-<li>Attestations with no IL — pool pays DATUM miners and still omits
-   their transactions.</li>
-<li>Leftover-weight IL — stuffing evicts.</li>
-<li>IL as mempool txids — two mempools, two verdicts.</li>
-</ol>
-<h2 id="backwards-compatibility">Backwards compatibility<a class="headerlink" href="#backwards-compatibility" title="Permanent link">&para;</a></h2>
-<p>Old full nodes: new blocks are ordinary blocks plus an <code>OP_RETURN</code> they
-already allow. They do not enforce payee attestations. That is the usual
-soft-fork trust in upgraded hashrate.</p>
-<p>Old SPV clients: they never validated coinbase structure beyond headers.
-No change.</p>
-<p>Wallets: no address format change. Coinbase still pays <code>scriptPubKey</code>s.</p>
-<p>Pools: a pool that wants to pay hashers in the coinbase must collect
-their <code>vtxa</code> entries (DATUM already collects per-miner templates and
-scripts). A pool that pays only itself needs one attestation.</p>
-<p>Miners without nodes: they can still <em>hash</em> for a pool. They cannot be
-coinbase payees unless someone gifts them an attestation.</p>
-<h2 id="datum-and-prime">DATUM and Prime<a class="headerlink" href="#datum-and-prime" title="Permanent link">&para;</a></h2>
-<p>Non-normative.</p>
+<h2 id="references">References<a class="headerlink" href="#references" title="Permanent link">&para;</a></h2>
 <ul>
-<li>Keep jobs and TIDES accounting.</li>
-<li>The coinbaser may list a script only when a valid attestation for that
-  script will appear in <code>vtxa</code> of the published block.</li>
-<li>One share that names many TIDES recipients does not attest those
-  recipients.</li>
-<li>The attestation grind can reuse the gateway&rsquo;s existing share loop:
-  <code>nNonce</code> on <code>header_A</code> is the same class of work as a DATUM share, at
-  <code>SHARE_K</code> times the block target, bound to that miner&rsquo;s script and IL.</li>
-<li>Prime does not see the transaction list in stock DATUM (<code>wire</code>
-  verify). Consensus attestations are a new object, not a stock DATUM
-  share with a new meaning.</li>
-</ul>
-<p>This draft does not require anyone to change Lazarus pool, mempool, or
-Knots in order to discuss the rules.</p>
-<h2 id="reference-implementation">Reference implementation<a class="headerlink" href="#reference-implementation" title="Permanent link">&para;</a></h2>
-<p>Pure Python, no bitcoind:</p>
-<table>
-<thead>
-<tr>
-<th>File</th>
-<th>Role</th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td><code>spec.py</code></td>
-<td>Caps and types</td>
-</tr>
-<tr>
-<td><code>validate.py</code></td>
-<td><code>validate</code> / <code>connect</code> / <code>feasible_il</code></td>
-</tr>
-<tr>
-<td><code>helpers.py</code></td>
-<td>Test builders</td>
-</tr>
-<tr>
-<td><code>test_consensus.py</code></td>
-<td>55 unit tests</td>
-</tr>
-<tr>
-<td><code>world.py</code>, <code>test_world.py</code></td>
-<td>Hashrate mixes</td>
-</tr>
-</tbody>
-</table>
-<pre><code>python3 test_consensus.py
-python3 test_world.py
-</code></pre>
-<p>The model still names <code>block.attestations</code> as an in-object sidecar. That
-is <code>vtxa</code>. The recast in this document is the <strong>commitment and P2P
-stripping</strong>, which the Python model does not need because it has no
-legacy peers.</p>
-<p>Normative Bitcoin serialization, <code>SHA256D</code>, compact <code>nBits</code>, BIP34
-height in the coinbase, and the 80-byte <code>header_A</code> layout above replace
-the model&rsquo;s <code>pow_int</code> tags when this is ported to C++.</p>
-<h3 id="tests-that-state-the-claim">Tests that state the claim<a class="headerlink" href="#tests-that-state-the-claim" title="Permanent link">&para;</a></h3>
-<table>
-<thead>
-<tr>
-<th>Test</th>
-<th>Claim</th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td>03, 18, 39</td>
-<td>Unattested / Stratum-only payee is invalid</td>
-</tr>
-<tr>
-<td>04</td>
-<td>A TIDES list is not an attestation for the other names</td>
-</tr>
-<tr>
-<td>05, 07</td>
-<td>Headers-only and invalid extra fail</td>
-</tr>
-<tr>
-<td>11</td>
-<td>Same extra, two scripts, multiplex fail</td>
-</tr>
-<tr>
-<td>19, 38</td>
-<td>Paying a miner forces that miner&rsquo;s IL transaction</td>
-</tr>
-<tr>
-<td>20</td>
-<td>Self-pay pool may omit T</td>
-</tr>
-<tr>
-<td>22</td>
-<td>Unconfirmed IL carries forward</td>
-</tr>
-<tr>
-<td>24</td>
-<td>A conflicting spend cannot replace the IL tx</td>
-</tr>
-<tr>
-<td>25, 46, 47</td>
-<td>Stuffing / claimed weights cannot evict IL</td>
-</tr>
-<tr>
-<td>30</td>
-<td>Gifted attestation is valid (residual)</td>
-</tr>
-<tr>
-<td>33</td>
-<td>Unpaid extra attestation still forces its IL</td>
-</tr>
-<tr>
-<td>41</td>
-<td>Without the IL rule, pay-and-veto works</td>
-</tr>
-<tr>
-<td>42</td>
-<td>Two nodes, different local knowledge, same verdict</td>
-</tr>
-<tr>
-<td>45, 48, 51, 53</td>
-<td>Hash / tag binding; stolen grind fails</td>
-</tr>
-<tr>
-<td>52, 55</td>
-<td>Caps</td>
-</tr>
-</tbody>
-</table>
-<p>World vectors: 100% PPS never confirms T; unattested usernames are 80/80
-invalid; DATUM and &ldquo;paying a node&rdquo; include T on the next paid block;
-gifted names still veto T.</p>
-<h2 id="deployment">Deployment<a class="headerlink" href="#deployment" title="Permanent link">&para;</a></h2>
-<p>Not specified. Suggested order if this draft is taken up, none of which
-this document authorizes:</p>
-<ol>
-<li>Independent BIP text in <code>bitcoin/bips</code>, still unnumbered until an
-   editor assigns one.</li>
-<li>Signet / Bitcoin Inquisition before any mainnet client ships the
-   rules.</li>
-<li>Activation parameters in a <strong>separate</strong> document.</li>
-</ol>
-<h2 id="reference">Reference<a class="headerlink" href="#reference" title="Permanent link">&para;</a></h2>
-<ul>
-<li>BIP141 — SegWit commitment layout copied here with a different magic.</li>
-<li>BIP144 — witness relay as the pattern for <code>vtxa</code>.</li>
-<li>Ethereum FOCIL — inclusion lists; this draft is stricter on stuffing
-  and does not use a separate attester set (Bitcoin has none).</li>
-<li>DATUM / Ocean — pool protocol this is meant to be compatible with, not
-  to replace.</li>
-<li><code>research/node-template-consensus/</code> in
-  <a href="https://github.com/AwokenLazarus/Bitcoin">AwokenLazarus/Bitcoin</a>
-  — executable model.</li>
+<li>BIP340: Schnorr signatures and tagged hashes.</li>
+<li>BIP341: Taproot outputs (payee script form).</li>
+<li>BIP141 / BIP144: the witness commitment layout and relay pattern reused by the
+  extension.</li>
+<li>Ethereum FOCIL: inclusion lists. The extension is stricter on stuffing.</li>
+<li>DATUM / OCEAN TIDES: the pool protocol and payout scheme this is meant to work with,
+  not replace.</li>
 </ul>
 <footer>
   <p>Canonical markdown:
-    <a href="https://github.com/AwokenLazarus/Bitcoin/blob/nta-soft-fork/research/node-template-consensus/bip-node-template-attestation.md">bip-node-template-attestation.md</a>
+    <a href="https://github.com/AwokenLazarus/Bitcoin/blob/main/research/node-template-consensus/bip-node-template-attestation.md">bip-node-template-attestation.md</a>
     · Reference model:
     <a href="https://github.com/AwokenLazarus/Bitcoin/tree/nta-soft-fork/research/node-template-consensus">node-template-consensus/</a>
   </p>
-  <p>Not a Bitcoin Core or Knots patch. No activation bit. BSD-2-Clause.</p>
+  <p>Not a Bitcoin Core or Knots patch. No activation bit. CC-BY-4.0.</p>
 </footer>
 </div>
 <script type="module">

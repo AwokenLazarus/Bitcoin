@@ -1,0 +1,342 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: michael moore <mrmoore27@pm.me>
+Date: Sat, 26 Sep 2026 00:33:48 +0000
+Subject: [PATCH 1/2] prime, lazarus-gateway: find gateways that can't carry
+ NTA attestations before activation
+
+Stock datum_gateway v0.4.1 stops reading a coinbaser at the first script over
+64 bytes (datum_coinbaser.c:795) and says nothing, so after XBT-NTA activation
+it would keep the payees, drop the 70-byte attestations and mine bad-nta-count
+blocks (SOV-007). SOV-011:
+
+- Capability flag: a gateway that keeps 70-byte outputs sends "nta-v1\0" in
+  its hello right after the header key seed, where stock sends one rand()
+  byte repeated (datum_protocol.c:1028-1033) that every server skips.
+  lazarus-gateway and the split-only C patch send it.
+- Probe: from nta-height - nta-probe-window (2016), one coinbaser per
+  non-advertising gateway per nta-probe-every-secs (3600) ends with a
+  zero-value 70-byte NTA-shaped OP_RETURN. The first full-split share on it
+  decides: kept, ready; dropped, nta-unready. It pays nobody and share
+  classification skips zero-value OP_RETURNs, so payouts do not change.
+  After activation the attestations themselves are the probe.
+- Policy (nta-unready-policy): refuse (default) sends a DATUM server
+  message (proto cmd 7, logged at INFO by stock) and mining sub-command
+  0x4e (unknown to stock, logged at WARN "Perhaps you need to upgrade"),
+  then closes. An upgraded gateway that advertises is served at once.
+  pool-only serves pool-only coinbasers and says why that cannot work: the
+  pool's own output needs its 70-byte attestation too.
+- /nta.json "readiness": gateways and share of the last hour's work that
+  are ready / nta-unready / unknown, and blocks until activation.
+- datum_wire::coinbaser::stock_v041_parse, and lazarus-gateway's
+  LAZARUS_GATEWAY_EMULATE_STOCK_V041=1 demo hook, play stock's parser.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ lazarus/gateway/src/main.rs                   | 49 +++++++++++++++--
+ .../patches/datum-gateway-split-only.patch    | 25 ++++++++-
+ lazarus/protocol/src/coinbaser.rs             | 52 +++++++++++++++++++
+ lazarus/protocol/src/handshake.rs             | 39 +++++++++++++-
+ 4 files changed, 157 insertions(+), 8 deletions(-)
+
+diff --git a/lazarus/gateway/src/main.rs b/lazarus/gateway/src/main.rs
+index 1f3e528..84aa533 100644
+--- a/lazarus/gateway/src/main.rs
++++ b/lazarus/gateway/src/main.rs
+@@ -1340,7 +1340,8 @@ fn connect_prime(cfg: &GwCfg) -> Option<(TcpStream, lazarus_protocol::ChannelKey
+     };
+     let sess = generate_session();
+     let (hello, _nk, mut ch) =
+-        handshake::encode_client_hello(&local, &sess, &pool_x, handshake::SPLIT_GATEWAY_UA).ok()?;
++        handshake::encode_client_hello_caps(&local, &sess, &pool_x, handshake::SPLIT_GATEWAY_UA, !emulate_stock_v041())
++            .ok()?;
+     // Bounded connect and handshake: a Prime (or middlebox) that accepts TCP and goes
+     // quiet would otherwise hang this loop forever, with every share dropped meanwhile.
+     let addr = (cfg.prime_host.as_str(), cfg.prime_port).to_socket_addrs().ok()?.next()?;
+@@ -1366,12 +1367,39 @@ fn connect_prime(cfg: &GwCfg) -> Option<(TcpStream, lazarus_protocol::ChannelKey
+         let peek = Header::decode_obfuscated(hdr2, ch.recv_hdr);
+         let mut p2 = vec![0u8; peek.cmd_len as usize];
+         if sock.read_exact(&mut p2).is_ok() {
+-            let _ = mining::open_frame(&mut ch, hdr2, &p2, None);
+-            log::info!("Prime config received");
++            match mining::open_frame(&mut ch, hdr2, &p2, None) {
++                Some((h, plain)) if log_prime_notice(&h, &plain) => {}
++                _ => log::info!("Prime config received"),
++            }
+         }
+     }
+     Some((sock, ch, sess))
+ }
++/// SOV-011 demo hook, never for a real gateway: `LAZARUS_GATEWAY_EMULATE_STOCK_V041=1` makes this
++/// gateway read coinbasers exactly as stock datum_gateway v0.4.1 does (stop at the first script
++/// over 64 bytes, `datum_coinbaser.c:795`) and leave `nta-v1` out of its hello, so a demo can
++/// show what Prime does with a stock gateway before and after XBT-NTA activation.
++fn emulate_stock_v041() -> bool {
++    std::env::var_os("LAZARUS_GATEWAY_EMULATE_STOCK_V041").is_some_and(|v| v == "1")
++}
++
++/// Say what Prime said, if it said something: a DATUM server message (proto cmd 7) or its
++/// `nta-unready` notice (mining sub-command 0x4e). Returns true if it was one of those.
++fn log_prime_notice(h: &Header, plain: &[u8]) -> bool {
++    let text = |b: &[u8]| String::from_utf8_lossy(b.split(|&c| c == 0).next().unwrap_or_default()).into_owned();
++    if h.proto_cmd == 7 {
++        if !plain.is_empty() {
++            log::warn!("Prime message: {}", text(plain));
++        }
++        return true;
++    }
++    if plain.first() == Some(&0x4e) {
++        log::error!("Prime refuses this gateway (nta-unready): {}", text(&plain[1..]));
++        return true;
++    }
++    false
++}
++
+ fn prime_loop(st: Arc<Shared>, rx: mpsc::Receiver<Vec<u8>>, urgent: mpsc::Receiver<Vec<u8>>) {
+     loop {
+         let Some((mut sock, mut ch, _sess)) = connect_prime(&st.cfg) else {
+@@ -1418,12 +1446,20 @@ fn prime_loop(st: Arc<Shared>, rx: mpsc::Receiver<Vec<u8>>, urgent: mpsc::Receiv
+                     let peek = Header::decode_obfuscated(hdr, ch.recv_hdr);
+                     let mut payload = vec![0u8; peek.cmd_len as usize];
+                     if sock.read_exact(&mut payload).is_err() { break; }
+-                    let Some((_h, plain)) = mining::open_frame(&mut ch, hdr, &payload, None) else { break; };
++                    let Some((h, plain)) = mining::open_frame(&mut ch, hdr, &payload, None) else { break; };
++                    if log_prime_notice(&h, &plain) {
++                        continue;
++                    }
+                     if plain.first() == Some(&mining::SUB_COINBASER_RESP) && plain.len() >= 13 {
+                         let value = u64::from_le_bytes(plain[1..9].try_into().unwrap());
+                         let n = u32::from_le_bytes(plain[9..13].try_into().unwrap()) as usize;
+                         if 13 + n <= plain.len() {
+-                            if let Some(cb) = parse_coinbaser_v2(&plain[13..13 + n]) {
++                            let parsed = if emulate_stock_v041() {
++                                lazarus_protocol::coinbaser::parse_coinbaser_stock_v041(&plain[13..13 + n], value)
++                            } else {
++                                parse_coinbaser_v2(&plain[13..13 + n])
++                            };
++                            if let Some(cb) = parsed {
+                                 log::info!("coinbaser applied value={} outputs={}", value, cb.outputs.len());
+                                 *st.last_cb.lock().unwrap_or_else(|e| e.into_inner()) = Some((value, cb));
+                                 st.cb_cv.notify_all();
+@@ -2375,6 +2411,9 @@ fn enrol_cmd(
+ 
+ fn main() {
+     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
++    if emulate_stock_v041() {
++        log::warn!("LAZARUS_GATEWAY_EMULATE_STOCK_V041=1: playing stock datum_gateway v0.4.1 (coinbasers cut at the first script over 64 bytes, no nta-v1). Demo only: after XBT-NTA activation its blocks are invalid");
++    }
+     let cli = Cli::parse();
+     let raw = std::fs::read_to_string(&cli.config).expect("config");
+     let cfg: GwCfg = serde_json::from_str(&raw).expect("json config");
+diff --git a/lazarus/patches/datum-gateway-split-only.patch b/lazarus/patches/datum-gateway-split-only.patch
+index 73e030d..c7edf56 100644
+--- a/lazarus/patches/datum-gateway-split-only.patch
++++ b/lazarus/patches/datum-gateway-split-only.patch
+@@ -71,6 +71,13 @@
+ #   exactly 70 bytes starting 6a 44 'N' 'T' 'A' 02 with value 0; the output
+ #   buffer grows to 70. Any other script over 64 bytes still voids the list.
+ #
++#   XBT-NTA capability (SOV-011). The hello carries "nta-v1\0" right after the
++#   4-byte header key seed, where stock sends only random padding (stock
++#   datum_protocol.c:1028-1033; every server skips it). Lazarus Prime reads it as
++#   "keeps 70-byte attestation outputs" and does not probe the gateway before NTA
++#   activation; a gateway without it is probed and, if it drops the probe,
++#   refused work from the activation height.
++#
+ diff --git a/CMakeLists.txt b/CMakeLists.txt
+ index ed47e49..a615652 100644
+ --- a/CMakeLists.txt
+@@ -1146,7 +1153,7 @@ index 0000000..567c6d7
+ +	free(s);
+ +}
+ diff --git a/src/datum_protocol.c b/src/datum_protocol.c
+-index 39d2433..43eb4e6 100644
++index 39d2433..f9b48b8 100644
+ --- a/src/datum_protocol.c
+ +++ b/src/datum_protocol.c
+ @@ -75,6 +75,7 @@
+@@ -1157,7 +1164,21 @@ index 39d2433..43eb4e6 100644
+  #include "git_version.h"
+  
+  atomic_int datum_protocol_client_active = 0;
+-@@ -2055,10 +2056,22 @@ int datum_protocol_init(void) {
++@@ -1060,8 +1061,11 @@ int datum_protocol_send_hello(int sockfd) {
++ 	
++ 	nk = upk_u32le(hello_msg, i - 4);
++ 	
++-	// TODO: maybe tack on other useful data here at some point
++-	// ...
+++	// Lazarus (SOV-011): say this gateway keeps 70-byte XBT-NTA attestation outputs
+++	// (datum_coinbaser_v2_parse below). Right after the seed, where stock sends only
+++	// padding that every server skips; Prime marks a gateway that sends it ready for
+++	// NTA activation instead of probing it.
+++	memcpy(&hello_msg[i], "nta-v1", 7); i += 7;
++ 	
++ 	// pad with some randomness
++ 	j = 1 + (rand() % 200);
++@@ -2055,10 +2059,22 @@ int datum_protocol_init(void) {
+  	memset(&pool_keys, 0, sizeof(DATUM_ENC_KEYS));
+  	memset(&session_datum_keys, 0, sizeof(DATUM_ENC_KEYS));
+  	
+diff --git a/lazarus/protocol/src/coinbaser.rs b/lazarus/protocol/src/coinbaser.rs
+index 615b93a..0ba40d1 100644
+--- a/lazarus/protocol/src/coinbaser.rs
++++ b/lazarus/protocol/src/coinbaser.rs
+@@ -78,6 +78,43 @@ pub fn parse_coinbaser_v2(buf: &[u8]) -> Option<CoinbaserV2> {
+     Some(CoinbaserV2 { id, outputs })
+ }
+ 
++/// What stock `datum_gateway` v0.4.1 keeps of a coinbaser v2 list (`datum_coinbaser_v2_parse`,
++/// `datum_coinbaser.c:760-815`, OCEAN `5b06123`): it stops without a word at the first output
++/// whose value would take the running total past `coinbase_value`, or whose script is under 2 or
++/// over 64 bytes (:795), and after 512; what came before is kept. Under 9 bytes: nothing.
++/// Only for `LAZARUS_GATEWAY_EMULATE_STOCK_V041` (SOV-011 demos); never on a real gateway.
++pub fn parse_coinbaser_stock_v041(buf: &[u8], coinbase_value: u64) -> Option<CoinbaserV2> {
++    if buf.len() < 9 {
++        return None;
++    }
++    let id = buf[0];
++    let mut i = 1;
++    let mut tally = 0u64;
++    let mut outputs = Vec::new();
++    while i < buf.len() {
++        let Some(v) = buf.get(i..i + 8) else { break };
++        let sats = u64::from_le_bytes(v.try_into().ok()?);
++        i += 8;
++        if sats.saturating_add(tally) > coinbase_value {
++            break;
++        }
++        let Some(&sl) = buf.get(i) else { break };
++        i += 1;
++        let sl = sl as usize;
++        if !(2..=64).contains(&sl) {
++            break;
++        }
++        let Some(script) = buf.get(i..i + sl) else { break };
++        i += sl;
++        tally += sats;
++        outputs.push(CoinbaserOutput { sats, script: script.to_vec() });
++        if outputs.len() >= 512 {
++            break;
++        }
++    }
++    Some(CoinbaserV2 { id, outputs })
++}
++
+ /// Outputs plus the non-witness serialization of a coinbase transaction.
+ #[derive(Clone, Debug)]
+ pub struct ParsedCoinbase {
+@@ -255,6 +292,21 @@ pub fn split_satisfied(
+ mod tests {
+     use super::*;
+ 
++    #[test]
++    fn stock_v041_emulation_keeps_the_payees_and_drops_the_first_long_script_and_after() {
++        let pay = |n: u8, sats| CoinbaserOutput { sats, script: vec![0x51, 0x20, n, n] };
++        let probe = CoinbaserOutput { sats: 0, script: crate::nta::attestation_script(&[7; 64]) };
++        let list = CoinbaserV2 { id: 4, outputs: vec![pay(1, 600), pay(2, 400), probe, pay(3, 0)] };
++        let enc = list.encode();
++        // lazarus-gateway keeps all four
++        assert_eq!(parse_coinbaser_v2(&enc).unwrap().outputs.len(), 4);
++        let stock = parse_coinbaser_stock_v041(&enc, 1_000).unwrap();
++        assert_eq!(stock.id, 4);
++        assert_eq!(stock.outputs.iter().map(|o| o.script.clone()).collect::<Vec<_>>(), vec![pay(1, 0).script, pay(2, 0).script]);
++        assert_eq!(parse_coinbaser_stock_v041(&enc, 900).unwrap().outputs.len(), 1);
++        assert!(parse_coinbaser_stock_v041(&enc[..8], 1_000).is_none());
++    }
++
+     fn cb(parts: &[u64]) -> CoinbaserV2 {
+         CoinbaserV2 {
+             id: 7,
+diff --git a/lazarus/protocol/src/handshake.rs b/lazarus/protocol/src/handshake.rs
+index 1c2baa6..3a2e32a 100644
+--- a/lazarus/protocol/src/handshake.rs
++++ b/lazarus/protocol/src/handshake.rs
+@@ -30,6 +30,8 @@ pub struct ClientHello {
+     pub sess_x: [u8; 32],
+     pub version: String,
+     pub nk: u32,
++    /// Advertised [`NTA_V1_MARKER`] right after `nk`.
++    pub nta_v1: bool,
+ }
+ 
+ /// Prime: open a client hello (proto_cmd=1, sealed to pool x25519, signed with client LT ed).
+@@ -65,6 +67,7 @@ pub fn open_hello(pool: &PoolKeys, cipher: &[u8]) -> Result<ClientHello, Handsha
+         return Err(HandshakeError::BadHello);
+     }
+     let nk = u32::from_le_bytes(after[1..5].try_into().unwrap());
++    let nta_v1 = after[5..].starts_with(NTA_V1_MARKER);
+     Ok(ClientHello {
+         lt_ed,
+         lt_x,
+@@ -72,6 +75,7 @@ pub fn open_hello(pool: &PoolKeys, cipher: &[u8]) -> Result<ClientHello, Handsha
+         sess_x,
+         version,
+         nk,
++        nta_v1,
+     })
+ }
+ 
+@@ -125,12 +129,28 @@ pub fn prime_channel_after_hello(
+     ChannelKeys::for_prime_after_hello(hello.nk, &hello.sess_ed, &hello.sess_x, &pool_sess.x_sk)
+ }
+ 
+-/// Client (gateway) hello: sign with LT ed, seal to pool x25519.
++/// SOV-011: "this gateway keeps 70-byte XBT-NTA attestation outputs", right after the header
++/// key seed where stock v0.4.1 puts one `rand()` byte repeated (`datum_protocol.c:1028-1033`),
++/// which every server skips. Prime marks a gateway that sends it ready for NTA activation.
++pub const NTA_V1_MARKER: &[u8; 7] = b"nta-v1\0";
++
++/// Client (gateway) hello: sign with LT ed, seal to pool x25519. Advertises [`NTA_V1_MARKER`].
+ pub fn encode_client_hello(
+     local: &PoolKeys,
+     session: &SessionKeys,
+     pool_x_pk: &[u8; 32],
+     version: &str,
++) -> Result<(Vec<u8>, u32, ChannelKeys), HandshakeError> {
++    encode_client_hello_caps(local, session, pool_x_pk, version, true)
++}
++
++/// [`encode_client_hello`], saying `nta-v1` or not (a gateway playing stock v0.4.1 does not).
++pub fn encode_client_hello_caps(
++    local: &PoolKeys,
++    session: &SessionKeys,
++    pool_x_pk: &[u8; 32],
++    version: &str,
++    nta_v1: bool,
+ ) -> Result<(Vec<u8>, u32, ChannelKeys), HandshakeError> {
+     let mut body = Vec::new();
+     body.extend_from_slice(&local.ed_pk);
+@@ -142,6 +162,9 @@ pub fn encode_client_hello(
+     body.push(0xFE);
+     let nk: u32 = rand::random();
+     body.extend_from_slice(&nk.to_le_bytes());
++    if nta_v1 {
++        body.extend_from_slice(NTA_V1_MARKER);
++    }
+     let pad = 1 + (rand::random::<u8>() as usize % 40);
+     body.extend(std::iter::repeat(rand::random::<u8>()).take(pad));
+     let sig = nacl::sign_detached(&body, &local.ed_sk).map_err(|_| HandshakeError::Crypto)?;
+@@ -196,6 +219,20 @@ mod tests {
+         assert!(is_split_gateway("DATUM/lazarus-split"));
+     }
+ 
++    #[test]
++    fn the_hello_advertises_nta_v1_after_the_seed_unless_told_not_to() {
++        let pool = crate::keys::generate_pool_keys();
++        let local = crate::keys::generate_pool_keys();
++        let sess = generate_session();
++        for caps in [true, false] {
++            let (frame, nk, _) = encode_client_hello_caps(&local, &sess, &pool.x_pk, SPLIT_GATEWAY_UA, caps).unwrap();
++            let h = open_hello(&pool, &frame[4..]).unwrap();
++            assert_eq!((h.nk, h.nta_v1, h.version.as_str()), (nk, caps, SPLIT_GATEWAY_UA));
++        }
++        let (frame, _, _) = encode_client_hello(&local, &sess, &pool.x_pk, SPLIT_GATEWAY_UA).unwrap();
++        assert!(open_hello(&pool, &frame[4..]).unwrap().nta_v1, "a lazarus-gateway advertises by default");
++    }
++
+     #[test]
+     fn refuses_stock_ocean_empty_first() {
+         assert!(!is_split_gateway("v0.4.1-beta/c4e7a8c(v0.4.1beta)"));
+-- 
+2.43.0
+
