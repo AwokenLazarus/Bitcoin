@@ -80,7 +80,7 @@ export const TOOLS = [
     name: "miner_overview",
     title: "One payout address at a glance: hashrate, path and fee, window share, earnings, what is paid and pending",
     description:
-      "Summary for one payout address on Lazarus Pool: whether it is online, hashrate, whether it mines through its own DATUM gateway (0% fee + bonus) or the public stratum (15%), " +
+      "Summary for one payout address on Lazarus Pool: whether it is online, hashrate, whether it mines through its own DATUM gateway (0% fee + bonus) or the public stratum (25%), " +
       "its share of the TIDES window, what the next block would pay it, estimated XBT per day, totals paid / maturing / carried, and what it would gain by moving to DATUM. Start here for any question about 'my mining'.",
     heavy: true,
     inputSchema: { type: "object", properties: { address: addressArg }, required: ["address"], additionalProperties: false },
