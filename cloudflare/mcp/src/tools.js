@@ -11,6 +11,18 @@ import { pool, chain, NOTE_LABELS, label, ths, xbt, sats, pct, iso, POOL_SITE, E
 const RANGES = ["1h", "6h", "24h", "3d", "7d", "30d", "all"];
 
 // ---------------------------------------------------------------- tools
+// Which gateway program a DATUM user agent names. "ratum-gateway/0.1.28/f0569180c986" is Ratum (iohzrd's
+// Rust gateway and its forks), "lazarus-gateway/0.1" the pool's own, and the stock "v0.4.1-beta[+flavor]/<hash>"
+// form the C datum_gateway. `generation` is the wire protocol, not the program: Ratum speaks Convoy's.
+export function gatewaySoftware(ua) {
+  const s = String(ua || "");
+  let m = s.match(/^(ratum-gateway|lazarus-gateway)\/([0-9][\w.-]*)/i);
+  if (m) return { name: m[1].toLowerCase(), version: m[2] };
+  m = s.match(/^v?(\d+\.\d+[\w.-]*?)(?:\+[\w.-]+)?(?:\/|$)/);
+  if (m) return { name: "datum_gateway", version: m[1] };
+  return { name: "", version: "" };
+}
+
 export const TOOLS = [
   {
     name: "miner_overview",
@@ -103,9 +115,10 @@ export const TOOLS = [
         if (!g.offline && Number(g.last_share_s) > 600) flags.push("connected but no share for over 10 minutes: are miners pointed at the gateway?");
         if (acc + rej > 100 && rej / (acc + rej) > 0.02) flags.push("over 2% of shares rejected: see last_reject");
         if (/^v0\.4\.1-beta\/UNKNOWN/.test(g.user_agent || "") || g.generation === "ocean") flags.push("older stock build: it can mine jobs whose coinbase pays only the pool on the first job of a height; the iohzrd build is recommended");
+        const sw = gatewaySoftware(g.user_agent);
         return { name: label(g.name || g.secondary_tag), gateway_id: g.gateway, payout_identity: g.identity, pays_fee_as: g.fee_path === "datum" ? "own DATUM gateway (0% + bonus)" : "public stratum", connected: !g.offline,
           connected_for_minutes: Math.round((Number(g.connected_s) || 0) / 60), seconds_since_last_share: g.last_share_s, accepted_shares: acc, rejected_shares: rej, last_reject_reason: label(g.last_reject), accepted_work: g.work,
-          coinbase_splits_received: g.coinbasers, block_candidates_submitted: g.block_candidates, user_agent: label(g.user_agent), generation: g.generation, flags };
+          coinbase_splits_received: g.coinbasers, block_candidates_submitted: g.block_candidates, user_agent: label(g.user_agent), software: sw.name ? `${sw.name} ${sw.version}` : undefined, generation: g.generation, flags };
       });
       return { query, prime_reachable: !!d.reachable, matches: out.length, gateways: out, gateways_connected_total: (d.gateways || []).filter((g) => !g.offline).length,
         hint: out.length ? undefined : "No gateway matched. A gateway appears here once it has connected to the pool's DATUM port (28915) with the right pool pubkey; see connection_info.", labels_note: NOTE_LABELS };

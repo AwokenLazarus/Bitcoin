@@ -33,6 +33,7 @@ globalThis.fetch = async (input) => {
     if ((m = path.match(/^\/api\/miner\/([A-Za-z0-9]+)$/))) file = existsSync(join(FIX, `miner-${m[1]}.json`)) ? `miner-${m[1]}.json` : "miner-unknown.json";
     else if (path === "/api/pool?h=0") file = "pool.json";
     else if (path === "/api/coinbaser") file = "coinbaser.json";
+    else if (path === "/api/gateways") file = "gateways.json";
   } else if (url.startsWith(CHAIN)) {
     let m;
     if (path === "/api/blocks/tip/height") { file = "tip.txt"; text = true; }
@@ -250,6 +251,23 @@ section("lazarus_faq");
   const n0 = fetches.length;
   await call("lazarus_faq", { topic_or_question: "tides" });
   check("lazarus_faq makes no upstream call", fetches.length === n0);
+}
+
+// ---------------------------------------------------------------- gateway_status: which program a gateway runs
+section("gateway_status");
+{
+  const { gatewaySoftware } = await import("../src/tools.js");
+  check("ratum-gateway UA -> ratum-gateway + version", JSON.stringify(gatewaySoftware("ratum-gateway/0.1.28/f0569180c986")) === '{"name":"ratum-gateway","version":"0.1.28"}');
+  check("dirty Ratum build still named", gatewaySoftware("ratum-gateway/0.1.51/cffaf4743ee2-dirty").name === "ratum-gateway");
+  check("stock C UA -> datum_gateway", JSON.stringify(gatewaySoftware("v0.4.1-beta+lazarus-split/121edd06")) === '{"name":"datum_gateway","version":"0.4.1-beta"}');
+  check("house UA -> lazarus-gateway", gatewaySoftware("lazarus-gateway/0.1").name === "lazarus-gateway");
+  check("empty UA -> no name", gatewaySoftware("").name === "" && gatewaySoftware("/").name === "");
+  let r = await call("gateway_status", { query: "nine009" });
+  const g = r.data.gateways?.[0];
+  check("a Ratum gateway is named as Ratum, not by its wire generation", g?.software === "ratum-gateway 0.1.28" && g?.generation === "convoy", g);
+  check("a Ratum gateway is not flagged as an old stock build", g && !g.flags.some((f) => /older stock build/.test(f)), g?.flags);
+  r = await call("gateway_status", { query: "XBT-GW01" });
+  check("a C gateway is named datum_gateway", r.data.gateways?.[0]?.software === "datum_gateway 0.4.1-beta", r.data.gateways?.[0]);
 }
 
 // ---------------------------------------------------------------- validation and abuse
