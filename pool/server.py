@@ -28,7 +28,7 @@ NO_WRITE = os.environ.get("POOL_UI_NO_WRITE") == "1"
 
 POOL_FEE = float(CONF.get("pool_fee_percent", 0))
 # Public-stratum fee when primed is not answering; primed's stats.json is authoritative.
-STRATUM_FEE = float(CONF.get("stratum_fee_percent", 15.0))
+STRATUM_FEE = float(CONF.get("stratum_fee_percent", 25.0))
 STRATUM_HOST = CONF.get("stratum_host", "stratum.lazarus-xbt.xyz")
 STRATUM_PORT = int(CONF.get("stratum_port", 23334))
 DATUM_URL = CONF.get("datum_url", "http://127.0.0.1:7152")
@@ -5013,7 +5013,8 @@ _LLMS_TXT = """# Lazarus Pool
 - Stratum protocol reference (markdown): {site}/stratum-protocol.md
 - Public API reference: {site}/api
 - Explorer: https://mempool.lazarus-xbt.xyz
-- Fee change: from block 973,750 (about 05:00 UTC, 23 Sep 2026) the public stratum fee is 25%, 12.5 points credited to DATUM miners. Bitcoin Knots has announced a rule to invalidate coinbase payouts to addresses that hash through any pool's stratum (SV1); moving to another pool does not avoid it. Run your own DATUM gateway.
+- Public stratum fee: 25% since block 973,750 (23 Sep 2026; 15% before), 12.5 points credited to DATUM miners. Bitcoin Knots has announced a rule to invalidate coinbase payouts to addresses that hash through any pool's stratum (SV1); moving to another pool does not avoid it. Run your own DATUM gateway.
+- Coinbase maturity: Knots 29.4.2 (#419) holds coinbases mined from block 973,440 until block 979,920 (about 5 Nov 2026) for 6,480 blocks instead of 100, so a payout from block N is spendable at about block N + 6,480. DATUM gateway nodes must run Knots 29.4.2 or later.
 - MCP server for AI assistants (read-only, no login, Streamable HTTP): https://mcp.lazarus-xbt.xyz/mcp (guide: https://mcp.lazarus-xbt.xyz)
 - GitHub: https://github.com/AwokenLazarus/Bitcoin
 - Discord: https://discord.gg/fD33dJXnzz
@@ -5045,7 +5046,7 @@ shared with Bitcoin, so use a fresh address here.
 ## Fees
 
 - Own DATUM gateway: 0%, plus the DATUM subsidy taken from the public-stratum fee
-- Public stratum: 15% (7.5 points of that credited back to DATUM miners)
+- Public stratum: 25% (12.5 points of that credited back to DATUM miners)
 - Solo: 7.5%
 
 ## Hardware
@@ -5060,7 +5061,8 @@ to the block subsidy.
 
 TIDES pays out a share of a rolling window worth about eight times network difficulty, inside the
 coinbase of the block that is found — the split coinbase Lazarus Pool was first to run on this
-mainnet. There is no pool balance, no withdrawal, no minimum, and no custody. Miners running their
+mainnet. There is no pool balance, no withdrawal and no custody; an output under 0.005 XBT is carried
+forward and added to the miner's next output that clears it. Miners running their
 own DATUM gateway build their own block templates against their own Bitcoin Knots node, so template
 construction is decentralized rather than delegated to the pool, and the DATUM subsidy — funded by
 the pool's own stratum hashers, another first — pays them extra for doing it. Coins trade as BTCB2
@@ -5085,9 +5087,10 @@ Fees are the least of it. What differs is custody, what happens to the transacti
 block, and whether a pool limits its own share. As each pool published its own terms on 18 September
 2026:
 
-- Lazarus Pool: 0% with your own DATUM gateway, 15% on the public stratum with 7.5 of those points
-  paid back to DATUM miners (25% and 12.5 from block 973,750). TIDES, window of 8x difficulty. No custody at all — the block's
-  coinbase pays your address, so there is no balance, threshold or withdrawal. The block's
+- Lazarus Pool: 0% with your own DATUM gateway, 25% on the public stratum (15% before block 973,750)
+  with 12.5 of those points paid back to DATUM miners. TIDES, window of 8x difficulty. No custody at all — the block's
+  coinbase pays your address, so there is no balance or withdrawal (outputs under 0.005 XBT carry
+  forward to the next block). The block's
   transaction fees scale every miner's payout up. Stratum self-capped at 15%.
 - Riptide (overflow): 0% own DATUM, 1% stratum (variable; currently 1%, half the skim to live DATUM
   miners). TIDES. Coinbase payouts.
@@ -5224,7 +5227,7 @@ _SEO_KEEP = {
     "/api": (),
 }
 # Hash targets that stand for a section without being its id (mirrors ALIAS in app.js).
-_HASH_ALIAS = {"top": "fees", "datum": "connect", "mine": "connect", "window": "payout", "payouts": "dashboard"}
+_HASH_ALIAS = {"top": "fees", "datum": "connect", "ratum": "connect", "mine": "connect", "window": "payout", "payouts": "dashboard"}
 _TOP_SECTION = re.compile(r'\n  <section\b[^>]*\bid="([^"]+)"[^>]*>.*?\n  </section>', re.S)
 _ORG_ID = "https://lazarus-xbt.xyz/#org"
 # Topic pages that are articles, with their schema type and (published, modified) dates. Published

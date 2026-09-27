@@ -75,14 +75,14 @@
   const promoDismissed = () => {
     try { return localStorage.getItem(PROMO_DISMISS_KEY) === "1"; } catch (e) { return false; }
   };
-  try { if (localStorage.getItem("lazarus.stratum25.dismissed") === "1") { const el = $("stratumnotice"); if (el) el.hidden = true; } } catch (e) { /* private mode */ }
+  try { if (localStorage.getItem("lazarus.stratum25.v2.dismissed") === "1") { const el = $("stratumnotice"); if (el) el.hidden = true; } } catch (e) { /* private mode */ }
   $("stratumnotice-dismiss")?.addEventListener("click", () => {
-    try { localStorage.setItem("lazarus.stratum25.dismissed", "1"); } catch (e) { /* private mode */ }
+    try { localStorage.setItem("lazarus.stratum25.v2.dismissed", "1"); } catch (e) { /* private mode */ }
     const el = $("stratumnotice"); if (el) el.hidden = true;
   });
-  try { if (localStorage.getItem("lazarus.softfork419.dismissed") === "1") { const el = $("softfork"); if (el) el.hidden = true; } } catch (e) { /* private mode */ }
+  try { if (localStorage.getItem("lazarus.softfork419.v2.dismissed") === "1") { const el = $("softfork"); if (el) el.hidden = true; } } catch (e) { /* private mode */ }
   $("softfork-dismiss")?.addEventListener("click", () => {
-    try { localStorage.setItem("lazarus.softfork419.dismissed", "1"); } catch (e) { /* private mode */ }
+    try { localStorage.setItem("lazarus.softfork419.v2.dismissed", "1"); } catch (e) { /* private mode */ }
     const el = $("softfork"); if (el) el.hidden = true;
   });
   $("promo-dismiss")?.addEventListener("click", () => {
@@ -1637,15 +1637,16 @@
   }
 
   // Section anchors never trigger an address lookup. "mine" and "datum" are
-  // retired anchors kept so old bookmarks still land somewhere sensible.
+  // retired anchors kept so old bookmarks still land somewhere sensible. "ratum" holds the
+  // place of the Ratum gateway guide (XBT-082) and opens the DATUM tab until it lands.
   const SECTIONS = new Set([
     "", "top", "fees", "status", "payout", "window", "connect", "hardware", "gw-pick", "dashboard", "miners", "gateways",
-    "blocks", "payouts", "pools", "how", "datum", "mine", "solo", "calc", "learn", "hashchart",
+    "blocks", "payouts", "pools", "how", "datum", "ratum", "mine", "solo", "calc", "learn", "hashchart",
   ]);
 
   function fromHash() {
     const a = location.hash.slice(1);
-    if (a === "datum") {
+    if (a === "datum" || a === "ratum") {
       selectTab("tab-datum");
       $("connect")?.scrollIntoView();
       return;

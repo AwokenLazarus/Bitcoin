@@ -19,7 +19,7 @@
     learn: ["learn", "how", "pools"],
   };
   // Hash targets that are not themselves a top-level section.
-  const ALIAS = { "": "fees", top: "fees", datum: "connect", mine: "connect", window: "payout", payouts: "dashboard" };
+  const ALIAS = { "": "fees", top: "fees", datum: "connect", ratum: "connect", mine: "connect", window: "payout", payouts: "dashboard" };
   const SECTION_VIEW = {};
   for (const [v, ids] of Object.entries(VIEWS)) for (const id of ids) SECTION_VIEW[id] = v;
 

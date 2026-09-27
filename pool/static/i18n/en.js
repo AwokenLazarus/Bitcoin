@@ -59,15 +59,15 @@ window.LZ_I18N_DICTS["en"] = {
   },
   "stratumnotice": {
     "kicker": "Urgent · stratum miners: move to your own DATUM gateway",
-    "text": "Nodes are deciding to <b>invalidate coinbase payouts to addresses that hash through a pool's stratum (SV1)</b> instead of their own node. <b>Moving to another pool will not change the outcome</b>: payouts to SV1 hashing addresses will be invalidated on every pool, so leaving for a cheaper pool will not save you the higher fee or earn you more. A stratum hasher there will still not be paid. The only way out is to build your own templates with your own Bitcoin Knots node and DATUM gateway, <b>as soon as possible</b>. To speed the move, from block <b>973,750</b> (about 05:00 UTC, 23 Sep) the public stratum fee rises from 15% to <b>25%</b>: <b>12.5 points</b> are credited to DATUM miners on every block and 12.5 go to the pool. On your own gateway the fee is 0%, and your accepted work comes with you when you switch.",
+    "text": "Nodes are deciding to <b>invalidate coinbase payouts to addresses that hash through a pool's stratum (SV1)</b> instead of their own node. <b>Moving to another pool will not change the outcome</b>: payouts to SV1 hashing addresses will be invalidated on every pool, so leaving for a cheaper pool will not save you the higher fee or earn you more. A stratum hasher there will still not be paid. The only way out is to build your own templates with your own Bitcoin Knots node and a DATUM gateway (stock DATUM or <a href=\"#ratum\">Ratum</a>), <b>as soon as possible</b>. Since block <b>973,750</b> (23 Sep) the public stratum fee is <b>25%</b>: <b>12.5 points</b> are credited to DATUM miners on every block and 12.5 go to the pool. On your own gateway the fee is 0%, and your accepted work comes with you when you switch.",
     "setup": "Set up a DATUM gateway",
     "plan": "The Knots plan (long coinbase maturity, part 1 of 3)",
     "dismiss": "Dismiss notice"
   },
   "softfork": {
-    "kicker": "Network notice · Knots 29.4.2 soft fork",
-    "text": "From block <b>973440</b> (~22 Sep) to <b>979920</b> (~5 Nov) every newly mined coinbase must wait <b>45 days</b> before it can be spent, instead of 100 blocks. It is temporary, and it exists to make hit-and-run mining unprofitable and give miners who stay an edge. Payouts, shares and the split do not change; coins from those blocks just unlock once they have 6,481 confirmations (make-goods too). <b>Lazarus supports it</b> and our nodes switch at block 973400. <b>DATUM gateway operators run their own node, so the choice is yours:</b> to support it, run Knots 29.4.2 before block 973440.",
-    "pr": "The proposal (Knots #419)",
+    "kicker": "Network notice · Knots 29.4.2 long coinbase maturity is in force",
+    "text": "Since block <b>973,440</b> (22 Sep) and until block <b>979,920</b> (~5 Nov), every newly mined coinbase must wait <b>6,480 blocks</b> (about 45 days) before it can be spent, instead of 100. It is temporary, and it exists to make hit-and-run mining unprofitable and give miners who stay an edge. Payouts, shares and the split do not change; an output from block N unlocks once it has 6,481 confirmations, at about block N + 6,480 (make-goods too). <b>DATUM gateway operators: your own node must run Knots 29.4.2 or later.</b> A block built on an older node is rejected by the network, and the whole window loses it.",
+    "pr": "The rule (Knots #419)",
     "dl": "Knots 29.4.2 downloads",
     "dismiss": "Dismiss notice"
   },
