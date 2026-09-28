@@ -145,6 +145,15 @@ The wire format, coinbaser v2 encoding, and BLAKE2b header-v2 share layout were 
 from the MIT-licensed C `datum_gateway` trees listed below (OCEAN, CONVOY, FlyTheElephant1,
 iohzrd's *gateway* fork). That last one is a client miners run; it is not the pool.
 
+### FlyTheElephant — gateway and miner support
+
+[FlyTheElephant](https://github.com/FlyTheElephant1) (`flytheelephant` on Discord) maintains
+[FlyTheElephant1/datum_gateway](https://github.com/FlyTheElephant1/datum_gateway), a BLAKE2b
+DATUM gateway that serves every miner the whole split coinbase and fits it to the block's
+weight and sigop limits, and helps miners set up their nodes and gateways in the pool's
+Discord `#support`. The pool's guide to running it is
+[pool.lazarus-xbt.xyz/flytheelephant](https://pool.lazarus-xbt.xyz/flytheelephant).
+
 ### Ratum — iohzrd (history, and `lazarus/` only)
 
 [**Ratum**](https://github.com/iohzrd/ratum) by [iohzrd](https://github.com/iohzrd) was the

@@ -1,0 +1,70 @@
+# Never hand a pooled miner a full template with a pool-only coinbase
+#
+# Target: FlyTheElephant1/datum_gateway master a5f28aa (also applies to feature/cutting-edge 8002c56).
+# Write-up: PR-fte-late-coinbaser.md. Measured in XBT-084 (regtest, primed + Knots 29.4.2).
+#
+#   git clone https://github.com/FlyTheElephant1/datum_gateway && cd datum_gateway
+#   patch -p1 < datum-gateway-fte-late-coinbaser.patch
+#   cmake . && make && ./datum_gateway --test
+#
+# While the DATUM protocol is active (pooled), when this thread has no coinbaser for the job:
+#   - datum_stratum_coinbase_index returns the subsidy-only id instead of class 0 (class 0 pays
+#     only the pool, and here it would ride on the full template);
+#   - send_mining_notify first asks whether the coinbaser has landed (a client arriving on an
+#     idle thread, a vardiff resend), and sends nothing for a job that has no subsidy-only
+#     coinbase: the miner keeps its current work until the split is in;
+#   - stratum_job_coinbaser_ready no longer gives up after 5 s (the give-up publishes exactly
+#     that full + pool-only job). Solo keeps all three behaviours unchanged.
+#
+diff --git a/src/datum_stratum.c b/src/datum_stratum.c
+index c1efbce..bdb1355 100644
+--- a/src/datum_stratum.c
++++ b/src/datum_stratum.c
+@@ -407,8 +407,10 @@ int datum_stratum_v1_get_thread_subscriber_count(T_DATUM_THREAD_DATA *my) {
+ bool stratum_job_coinbaser_ready(T_DATUM_STRATUM_THREADPOOL_DATA *sdata, T_DATUM_STRATUM_JOB *job) {
+ 	bool a = false;
+ 	// backup timeout for coinbaser on these jobs
+-	if ((sdata->loop_tsms > job->tsms) && (sdata->loop_tsms - job->tsms) > 5000) {
++	if (!datum_protocol_is_active() && (sdata->loop_tsms > job->tsms) && (sdata->loop_tsms - job->tsms) > 5000) {
+ 		// enforce a timeout of 5 seconds on waiting on a coinbaser...
++		// Solo only. Pooled, giving up publishes a full template whose coinbase cannot pay the
++		// pool's split; miners keep their current work until the coinbaser lands instead.
+ 		sdata->full_coinbase_ready = false;
+ 		return true;
+ 	}
+@@ -1595,7 +1597,13 @@ unsigned int datum_stratum_coinbase_index(
+ 	if (new_block) return DATUM_COINBASE_ID_EMPTY;
+ 	if (!sdata || !sdata->cur_stratum_job ||
+ 	    sdata->cur_stratum_job->job_state < JOB_STATE_FULL_PRIORITY_WAIT_COINBASER ||
+-	    !sdata->full_coinbase_ready) return 0;
++	    !sdata->full_coinbase_ready) {
++		// Class 0 pays only the pool. Pooled, a job whose coinbaser is not in yet gets the
++		// subsidy-only coinbase or nothing (see send_mining_notify), never class 0 on a full
++		// template: a block found on that pays the pool alone. Solo, class 0 pays the
++		// configured address and stays.
++		return datum_protocol_is_active() ? DATUM_COINBASE_ID_EMPTY : 0;
++	}
+ 	return COINBASE_TYPE_YUGE;
+ }
+ 
+@@ -1620,6 +1628,20 @@ int send_mining_notify(T_DATUM_CLIENT_DATA *c, bool clean, bool quickdiff, bool
+ 		return -1;
+ 	}
+ 	
++	if (datum_protocol_is_active() && !new_block) {
++		// This thread may not have looked at the job's coinbaser yet (a client arriving on a
++		// thread with no other miners, or a vardiff resend while the blast waits), so ask now.
++		if (!sdata->full_coinbase_ready && j->job_state >= JOB_STATE_FULL_PRIORITY_WAIT_COINBASER) {
++			stratum_job_coinbaser_ready(sdata, j);
++		}
++		// Still not ready and this job has no subsidy-only coinbase (only a new height's job
++		// does): send nothing. The miner keeps the work it has and gets this job with the split
++		// when the coinbaser lands.
++		if (!j->is_new_block && datum_stratum_coinbase_index(sdata, m, false) == DATUM_COINBASE_ID_EMPTY) {
++			return 0;
++		}
++	}
++	
+ 	//job_id - ID of the job. Use this ID while submitting share generated from this job.
+ 	//prevhash - Hash of previous block.
+ 	//coinb1 - Initial part of coinbase transaction.
