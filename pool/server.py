@@ -5481,6 +5481,11 @@ _SITE_VERIFY = {
         "google-site-verification: googleda1d0aa98080ef94.html",
         "text/html; charset=utf-8",
     ),
+    # Brett's Search Console token (one file per verified owner).
+    "/google4631882008b8273c.html": (
+        "google-site-verification: google4631882008b8273c.html",
+        "text/html; charset=utf-8",
+    ),
     # Bing fetches this path exactly as spelled, so it is matched case-sensitively first and the
     # lowercase spelling is aliased below for anything that normalises the URL.
     "/BingSiteAuth.xml": (
