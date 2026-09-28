@@ -1,0 +1,27 @@
+# Lazarus · Bitcoin on BLAKE2b (XBT / BTCB2)
+
+> A hub for Bitcoin continued under BLAKE2b proof of work. The coins trade as XBT (some exchanges list them as BTCB2). Every block up to height 961,640 is shared with SHA-256 Bitcoin; from 30 August 2026 this chain hashes with BLAKE2b-256, so it is mined by Siacoin-style BLAKE2b ASICs, not SHA-256 miners. Most hashrate runs DATUM: the miner's own node builds the block template and pools pay inside the coinbase. Run by Lazarus (x.com/Awoken_Lazarus). All code is public at github.com/AwokenLazarus/Bitcoin.
+
+Key facts:
+- Fork: BLAKE2b from block 961,640 (30 August 2026); 164-byte header; 21 million cap, Bitcoin's halving schedule, 3.125 XBT subsidy, 2016-block retarget.
+- Address safety: never mine or receive XBT to an address that holds real BTC; use a wallet made only for XBT.
+- Coinbase maturity: from block 973,440 to 979,920 (about 5 November 2026) new coinbase outputs need 6,481 confirmations (Bitcoin Knots 29.4.2), then 100 again.
+- Hardware: BLAKE2b ASICs built for Siacoin (e.g. Goldshell SC series, iBeLink BM-S3) work; SHA-256 miners (S19, S21, Whatsminer) cannot.
+
+## Pages
+- [What XBT is](https://lazarus-xbt.xyz/learn/): the fork, address safety, how mining and payouts work, the maturity soft fork, wallets, glossary
+- [FAQ](https://lazarus-xbt.xyz/faq/): short answers on the chain, safety, mining and practical questions
+- [Ecosystem](https://lazarus-xbt.xyz/ecosystem/): pool directory, open-source software, public endpoints, community
+- [XBT Galaxy map](https://lazarus-xbt.xyz/map/): every pool and DATUM gateway, built from coinbase tags
+- [Lazarus Key](https://lazarus-xbt.xyz/key/): a hardware-signed XBT wallet forked from Block's Bitkey app (Android)
+
+## Mine
+- [Lazarus Pool](https://pool.lazarus-xbt.xyz/): TIDES payouts in the coinbase, no custody, and a DATUM bonus for miners who build their own blocks through their own gateway; current fees and stratum details are on the pool site and its llms.txt: https://pool.lazarus-xbt.xyz/llms.txt
+- [Connect a miner](https://pool.lazarus-xbt.xyz/connect)
+- [Siacoin ASICs that mine XBT](https://pool.lazarus-xbt.xyz/hardware)
+
+## Services
+- [Block explorer](https://mempool.lazarus-xbt.xyz/)
+- [MCP server for miners](https://mcp.lazarus-xbt.xyz/)
+- Electrum server: electrum.lazarus-xbt.xyz:50002 (SSL)
+- [Discord](https://discord.gg/fD33dJXnzz)
