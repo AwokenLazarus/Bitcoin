@@ -10,6 +10,19 @@ import { pool, chain, NOTE_LABELS, label, ths, xbt, sats, pct, iso, POOL_SITE, E
 
 const RANGES = ["1h", "6h", "24h", "3d", "7d", "30d", "all"];
 
+// ---------------------------------------------------------------- gateway ranking
+/** The site's DATUM gateway ranking, best first (pool/gateways.json, served at /api/gateway-builds). */
+async function gatewayBuilds(ctx) {
+  try {
+    const d = await pool(ctx, "/api/gateway-builds", 3600);
+    return (d.gateways || []).slice(0, 10).map((g, i) => ({ rank: i + 1, name: label(g.name), repo: String(g.repo || "").slice(0, 120), recommended: !!g.reco,
+      guide: g.guide ? POOL_SITE + String(g.guide).slice(0, 60) : undefined, measured: String(g.summary || "").slice(0, 400) }));
+  } catch {
+    return [];
+  }
+}
+const firstBuild = (builds) => (builds[0] ? builds[0].name : "a current build from the Connect page's list");
+
 // ---------------------------------------------------------------- tools
 // Which gateway program a DATUM user agent names. "ratum-gateway/0.1.28/f0569180c986" is Ratum (iohzrd's
 // Rust gateway and its forks), "lazarus-gateway/0.1" the pool's own, and the stock "v0.4.1-beta[+flavor]/<hash>"
@@ -106,7 +119,7 @@ export const TOOLS = [
     inputSchema: { type: "object", properties: { query: { type: "string", minLength: 3, maxLength: 90, description: "Gateway name or tag, gateway id (hex), or the gateway's payout address" } }, required: ["query"], additionalProperties: false },
     parse: (a) => { if (typeof a.query !== "string" || a.query.trim().length < 3 || a.query.length > 90) throw new Error("query must be 3 to 90 characters"); return { query: a.query.trim() }; },
     async run({ query }, ctx) {
-      const d = await pool(ctx, "/api/gateways", 10);
+      const [d, builds] = await Promise.all([pool(ctx, "/api/gateways", 10), gatewayBuilds(ctx)]);
       const q = query.toLowerCase();
       const hits = (d.gateways || []).filter((g) => [g.gateway, g.name, g.secondary_tag, g.identity].some((f) => String(f || "").toLowerCase().includes(q))).slice(0, 5);
       const out = hits.map((g) => {
@@ -114,7 +127,7 @@ export const TOOLS = [
         if (g.offline) flags.push("offline: the pool has no live connection from this gateway");
         if (!g.offline && Number(g.last_share_s) > 600) flags.push("connected but no share for over 10 minutes: are miners pointed at the gateway?");
         if (acc + rej > 100 && rej / (acc + rej) > 0.02) flags.push("over 2% of shares rejected: see last_reject");
-        if (/^v0\.4\.1-beta\/UNKNOWN/.test(g.user_agent || "") || g.generation === "ocean") flags.push("older stock build: it can mine jobs whose coinbase pays only the pool on the first job of a height; the iohzrd build is recommended");
+        if (/^v0\.4\.1-beta\/UNKNOWN/.test(g.user_agent || "") || g.generation === "ocean") flags.push(`older stock build: it can mine jobs whose coinbase pays only the pool on the first job of a height; rebuild with ${firstBuild(builds)} (ranked list: connection_info gateway_builds)`);
         const sw = gatewaySoftware(g.user_agent);
         return { name: label(g.name || g.secondary_tag), gateway_id: g.gateway, payout_identity: g.identity, pays_fee_as: g.fee_path === "datum" ? "own DATUM gateway (0% + bonus)" : "public stratum", connected: !g.offline,
           connected_for_minutes: Math.round((Number(g.connected_s) || 0) / 60), seconds_since_last_share: g.last_share_s, accepted_shares: acc, rejected_shares: rej, last_reject_reason: label(g.last_reject), accepted_work: g.work,
@@ -222,12 +235,13 @@ export const TOOLS = [
     inputSchema: { type: "object", properties: {}, additionalProperties: false },
     parse: () => ({}),
     async run(_a, ctx) {
-      const p = await pool(ctx, "/api/pool?h=0", 8), d = p.datum || {}, f = p.fees || {};
+      const [p, builds] = await Promise.all([pool(ctx, "/api/pool?h=0", 8), gatewayBuilds(ctx)]);
+      const d = p.datum || {}, f = p.fees || {};
       return { recommended: "own DATUM gateway", datum_gateway: { pool_host: d.pool_host, pool_port: d.pool_port, pool_pubkey: d.pool_pubkey, fee_percent: 0, bonus: "a share of the public stratum's fee is credited to DATUM miners on every block",
-          steps: ["Run Bitcoin Knots for this chain with server=1 and a cookie or RPC user the gateway can read", "Build a DATUM gateway (the iohzrd build is recommended) and put pool_host, pool_port and pool_pubkey in its datum section",
+          steps: ["Run Bitcoin Knots for this chain with server=1 and a cookie or RPC user the gateway can read", `Build a DATUM gateway (${firstBuild(builds)} is first in gateway_builds, ranked by what the pool measured) and put pool_host, pool_port and pool_pubkey in its datum section`,
             "Set mining.pool_address to your payout address", "Set stratum.vardiff_min to 4096 (stock default 16384 makes small miners' stats jumpy)", "Point your machines at your gateway's stratum port with username address.worker"] },
         public_stratum: { url: p.stratum, username: "youraddress.workername", password: "x", fee_percent: f.stratum_percent ?? 25, algorithm: "BLAKE2b (Siacoin-style header), not SHA-256d" },
-        hardware: "Any Siacoin BLAKE2b ASIC", verify: "After connecting, use miner_overview with your address, or gateway_status with your gateway's name.", setup_page: `${POOL_SITE}/connect` };
+        gateway_builds: builds, hardware: "Any Siacoin BLAKE2b ASIC", verify: "After connecting, use miner_overview with your address, or gateway_status with your gateway's name.", setup_page: `${POOL_SITE}/connect` };
     },
   },
   {
