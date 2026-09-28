@@ -214,6 +214,9 @@ table { width: 100%; border-collapse: collapse; font-size: 0.95rem; }
 th, td { text-align: left; padding: 0.7rem 0.9rem; border-bottom: 1px solid var(--line); white-space: nowrap; }
 th { font: 600 0.7rem/1 var(--sans); letter-spacing: 0.12em; text-transform: uppercase; color: var(--faint); background: var(--bg-inset); position: sticky; top: 0; }
 tbody tr:last-child td { border-bottom: 0; }
+.table-wrap.prose-table { margin: 1.2rem 0 1.4rem; }
+.prose-table th, .prose-table td { white-space: normal; vertical-align: top; }
+.prose-table td:first-child { color: var(--muted); }
 tbody tr:hover td { background: oklch(18% 0.013 78); }
 td.num { font-family: var(--mono); font-variant-numeric: tabular-nums; text-align: right; }
 .pill { display: inline-block; font: 600 0.68rem/1 var(--sans); letter-spacing: 0.08em; text-transform: uppercase; padding: 0.28rem 0.55rem; border-radius: 999px; border: 1px solid var(--line-strong); color: var(--muted); }
