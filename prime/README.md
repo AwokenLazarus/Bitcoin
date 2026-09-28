@@ -461,6 +461,11 @@ addresses while primed still owes them as carry. The change, in `consider_sweep`
 blocks have deferred more than the pool holds in carry, `R` is all of it, under-floor balances
 included: the wallet then holds back everything it owes miners in carry.
 
+Primed cannot see the wallet, so it asks to be told: `class-budget = true` does nothing without
+`class-budget-fee-wallet-reserves = true` beside it, the operator's word that the change above is
+live. Given alone it is turned off and a warning at startup says why; the Prime still starts, and
+every reply, row and record is what it is without the key.
+
 `clients[].class_budget_bytes` is the session's budget (null until learned; absent for a session
 the key does not apply to), `class_budget_replies` the coinbasers held to it, and `totals` has
 `class_budget_replies`, `class_budget_ceiling_replies` and `class_budget_held_off`. None of it

@@ -28,10 +28,13 @@
 # learned again six hours after it was last set. The class then keeps the whole list, a block
 # found on it is a full split, and the payees that did not fit wait in carry instead of a
 # make-good. Only CONVOY-generation C gateways; never lazarus-gateway, lazarus-split, ratum, the
-# house gateway or a held-split build. Off (default): every reply is what it always was. BEFORE TURNING IT ON the fee wallet must hold back the
-# carry these blocks record in carry_reserved_sats, or it sweeps miners' money as fee: see
-# README, "Class budgets".
+# house gateway or a held-split build. Off (default): every reply is what it always was.
+# BEFORE TURNING IT ON the fee wallet must hold back the carry these blocks record in
+# carry_reserved_sats, or it sweeps miners' money as fee: see README, "Class budgets". Once it
+# does, say so with class-budget-fee-wallet-reserves = true; class-budget without that is
+# ignored, with a warning at startup.
 # class-budget = false
+# class-budget-fee-wallet-reserves = false
 # No reply is held to a class budget while carry on the books is at or over this many sats;
 # they are again once it is back under three quarters of it. Default 5 XBT.
 # class-budget-carry-ceiling = 500000000

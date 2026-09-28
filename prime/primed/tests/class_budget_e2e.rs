@@ -1,7 +1,8 @@
 //! End-to-end: `class-budget` on a real primed.
 //!
-//! The first test needs no work and runs by default: until a session has learned a budget, and
-//! for every session without the key, a gateway is sent exactly what it always was. The second
+//! The first test needs no work and runs by default: until a session has learned a budget, for
+//! every session without the key, and with the key but not the fee wallet's, a gateway is sent
+//! exactly what it always was. The second
 //! grinds two real diff-1 shares (about 2^33 BLAKE2b hashes, a minute or two across all cores),
 //! so it is ignored:
 //!
@@ -26,6 +27,9 @@ const CONVOY_UA: &str = "v0.4.1-beta/b9ea7dc3eb91352565ab487ec55ed6ee5964a440";
 const RATUM_UA: &str = "ratum-gateway/0.1.28/f0569180c986";
 /// Payees the seeded window lists, every one a P2WPKH output of 31 bytes.
 const MINERS: u16 = 40;
+/// `class-budget` on: the key, and the fee wallet's word that it holds back what capped blocks
+/// defer.
+const ON: &str = "class-budget = true\nclass-budget-fee-wallet-reserves = true";
 
 fn unix_now() -> u32 {
     SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as u32
@@ -106,9 +110,12 @@ fn with_nothing_learned_a_gateway_is_sent_what_it_always_was() {
     let node = node();
     let (convoy_gw, ratum_gw, ocean_gw) = (Identity::generate(), Identity::generate(), Identity::generate());
     let mut runs: Vec<(Vec<Sent>, serde_json::Value)> = Vec::new();
-    for key in ["", "class-budget = true"] {
+    for key in ["", "class-budget = true", ON] {
         let pool = Identity::generate();
         let (primed, port) = start(&node, &pool, key);
+        let said = std::fs::read_to_string(primed.dir.join("primed.err")).unwrap();
+        let unreserved = said.contains("class-budget = true is ignored until class-budget-fee-wallet-reserves");
+        assert_eq!(unreserved, key == "class-budget = true", "{said}");
         let mut sent = Vec::new();
         let mut open = Vec::new();
         for (gw, ua, convoy) in
@@ -132,15 +139,19 @@ fn with_nothing_learned_a_gateway_is_sent_what_it_always_was() {
         }
         runs.push((sent, settled_stats(&primed)));
     }
-    let [(without, off), (with, on)] = <[_; 2]>::try_from(runs).unwrap();
+    let [(without, off), (unreserved, ignored), (with, on)] = <[_; 3]>::try_from(runs).unwrap();
     assert_eq!(with, without, "the same configures and the same coinbasers");
+    assert_eq!(unreserved, without);
 
-    // Without the key no row, and nothing in the document, says anything of class budgets.
-    for gw in [&convoy_gw, &ratum_gw, &ocean_gw] {
-        assert!(!keys(row(&off, gw)).iter().any(|k| k.starts_with("class_budget")), "{}", row(&off, gw));
+    // Without the key, or with it but not the fee wallet's, no row, and nothing in the document,
+    // says anything of class budgets.
+    for doc in [&off, &ignored] {
+        for gw in [&convoy_gw, &ratum_gw, &ocean_gw] {
+            assert!(!keys(row(doc, gw)).iter().any(|k| k.starts_with("class_budget")), "{}", row(doc, gw));
+        }
+        assert!(!keys(&doc["totals"]).iter().any(|k| k.starts_with("class_budget")), "{}", doc["totals"]);
+        assert!(doc.get("carry_reserved").is_none());
     }
-    assert!(!keys(&off["totals"]).iter().any(|k| k.starts_with("class_budget")), "{}", off["totals"]);
-    assert!(off.get("carry_reserved").is_none());
 
     // With it, the CONVOY session's row says it has learned nothing yet, and the two it does not
     // apply to (ratum, and an OCEAN-generation hello) are the rows they always were.
@@ -215,7 +226,7 @@ fn a_class_limited_session_learns_its_budget_and_its_next_list_is_mined_whole() 
     let node = node();
     let gw = Identity::generate();
     let pool = Identity::generate();
-    let (primed, port) = start(&node, &pool, "class-budget = true\nmin-diff = 2");
+    let (primed, port) = start(&node, &pool, &format!("{ON}\nmin-diff = 2"));
     let room = 16 * 31 + 20;
 
     let (mut g, _) = Gateway::connect_convoy_as(port, &pool, &gw, CONVOY_UA);

@@ -88,9 +88,18 @@ pub struct Config {
     /// The size is learned per session from its own accepted shares (`session::ClassBudget`),
     /// only for CONVOY-generation hellos that are not lazarus-gateway, lazarus-split or ratum,
     /// learned again six hours after it was last set, and forgotten when the session ends. Off
-    /// (default): every reply is what it always was.
+    /// (default): every reply is what it always was. Ignored, and said so at startup, unless
+    /// `class-budget-fee-wallet-reserves` is set too.
     #[serde(default)]
     pub class_budget: bool,
+    /// The fee wallet holds back what class-capped blocks record in `carry_reserved_sats` before
+    /// it sweeps the pool's outputs as fee (README, "Class budgets"). Such a block is a split
+    /// owing nothing, and its pool output holds the earnings its budget deferred to carry: a
+    /// wallet that sweeps every split's pool output pays that out as fee while Prime still owes
+    /// it to miners, about a quarter of each Partial(17) coinbase. Setting this says the wallet
+    /// has been changed; nothing else here can know it has, so `class-budget` waits for it.
+    #[serde(default)]
+    pub class_budget_fee_wallet_reserves: bool,
     /// Carry on the books, in sats, at or above which no reply is held to a class budget; they
     /// are held to it again once carry is back under three quarters of this. Blocks mined
     /// meanwhile are Partial and owe as they do without `class-budget`. Default 5 XBT.
@@ -207,6 +216,9 @@ pub struct Config {
     activation_height: Option<u32>,
     #[serde(default)]
     verify_shares: Option<String>,
+    /// `class-budget = true` without `class-budget-fee-wallet-reserves`, turned off by `load`.
+    #[serde(skip)]
+    class_budget_unreserved: bool,
 }
 
 fn d_listen() -> SocketAddr {
@@ -374,6 +386,13 @@ impl Config {
             "owe" | "gateway-solo" => {}
             other => return Err(format!("stock-full-pool-only must be owe or gateway-solo, not {other:?}")),
         }
+        // Off rather than refused (see `legacy_notes`): a Prime that will not start takes every
+        // gateway down, and one that caps blocks for a wallet that sweeps their tail pays
+        // miners' carry out as fee.
+        if c.class_budget && !c.class_budget_fee_wallet_reserves {
+            c.class_budget = false;
+            c.class_budget_unreserved = true;
+        }
         if c.key_file.is_none() {
             // A data dir left by lazarus-prime keeps its identity: same key file, same pubkey.
             let ours = c.data_dir.join("prime.key");
@@ -405,6 +424,15 @@ impl Config {
                     "held-split-builds entry {b:?} is not 7 to 40 hex digits of a git commit hash and matches nothing"
                 ));
             }
+        }
+        if self.class_budget_unreserved {
+            v.push(
+                "class-budget = true is ignored until class-budget-fee-wallet-reserves = true says the fee wallet \
+                 holds back carry_reserved_sats: a class-capped block is a split owing nothing whose pool output \
+                 holds the earnings its budget deferred to carry, and a wallet that sweeps it pays them out as fee \
+                 while Prime still owes them (README, \"Class budgets\")"
+                    .into(),
+            );
         }
         if self.activation_height.is_some() {
             v.push("activation-height is ignored: every share is verified as BLAKE2b header v2; SHA256d shares are rejected as bad-version".into());
@@ -574,9 +602,51 @@ require-split-gateway = true
         std::fs::write(&p, &base).unwrap();
         let c = Config::load(&p).unwrap();
         assert_eq!((c.class_budget, c.class_budget_carry_ceiling), (false, 500_000_000));
-        std::fs::write(&p, format!("{base}class-budget = true\nclass-budget-carry-ceiling = 200000000\n")).unwrap();
+        std::fs::write(
+            &p,
+            format!(
+                "{base}class-budget = true\nclass-budget-fee-wallet-reserves = true\nclass-budget-carry-ceiling = 200000000\n"
+            ),
+        )
+        .unwrap();
         let c = Config::load(&p).unwrap();
         assert_eq!((c.class_budget, c.class_budget_carry_ceiling), (true, 200_000_000));
+        assert!(!c.legacy_notes().iter().any(|n| n.contains("class-budget")));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The review's custody finding. A class-capped block is a split owing nothing, and a fee
+    /// wallet that does not hold back its `carry_reserved_sats` sweeps the tail's earnings as fee.
+    /// So `class-budget` alone is off, said so at startup, and does not stop the Prime starting;
+    /// the wallet's own key alone turns nothing on.
+    #[test]
+    fn class_budget_is_off_until_the_fee_wallet_is_said_to_hold_back_its_carry() {
+        let dir = std::env::temp_dir().join(format!("primed-cfg-cbw-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("prime.toml");
+        let base = LEGACY.replace("/home/umbrel/blake2b/lazarus-prime", dir.to_str().unwrap());
+        let load = |extra: &str| {
+            std::fs::write(&p, format!("{base}{extra}")).unwrap();
+            Config::load(&p).expect("starts either way")
+        };
+        let notes = |c: &Config| -> Vec<String> {
+            c.legacy_notes().into_iter().filter(|n| n.contains("class-budget")).collect()
+        };
+        let c = load("class-budget = true\n");
+        assert!(!c.class_budget);
+        let said = notes(&c);
+        assert_eq!(said.len(), 1, "{said:?}");
+        assert!(said[0].contains("class-budget-fee-wallet-reserves") && said[0].contains("carry_reserved_sats"));
+        assert_eq!(c.legacy_notes().len(), 3, "the legacy file's two, and this");
+
+        let c = load("class-budget = true\nclass-budget-fee-wallet-reserves = false\n");
+        assert!(!c.class_budget && notes(&c).len() == 1);
+        let c = load("class-budget-fee-wallet-reserves = true\n");
+        assert!(!c.class_budget && notes(&c).is_empty());
+        let c = load("class-budget = false\n");
+        assert!(!c.class_budget && notes(&c).is_empty());
+        let c = load("class-budget-fee-wallet-reserves = true\nclass-budget = true\n");
+        assert!(c.class_budget && notes(&c).is_empty());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }
