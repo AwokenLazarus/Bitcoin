@@ -62,6 +62,62 @@ fn held_split_build<'a>(builds: &'a [String], ua: &str) -> Option<&'a str> {
     builds.iter().map(String::as_str).find(|b| crate::config::git_hash_prefix(b) && hash.starts_with(b))
 }
 
+/// Shares with work, every one of them naming the same payout, before a held-split session is
+/// left paying itself.
+///
+/// Section 0 pays the one script it is configured with, so every miner behind a held gateway
+/// mines for whoever that is. A stock gateway passes each miner's own username through by default
+/// (`pool_pass_full_users`), and left on one miner's script, another miner's shares are that
+/// one's solo work: accepted, credited to nobody, and a block on them pays the first. Without the
+/// key the same shares are pool-only, credited, and owed back. Its vardiff sets every miner about
+/// the same share rate, so with a second miner of like rate on the gateway, sixteen shares in a
+/// row naming one payout happen about once in 30 000 sessions. Until then the session owes as it
+/// would without the key.
+const HELD_SPLIT_SHARES: u64 = 16;
+
+/// What a held-split session (`held-split-builds`) has shown of whom it pays.
+///
+/// Held on a payout only once its first [`HELD_SPLIT_SHARES`] shares with work all named it, and
+/// only while no other has mined on it. A payout remembered from an earlier session
+/// (`gateway-scripts.json`) is not taken for this one's: that is whoever dominated then, and
+/// taken on trust, one miner who briefly out-mined the operator would be paid every later block.
+#[derive(Debug, Default)]
+struct HeldPayout {
+    /// Shares with work the session has sent.
+    shares: u64,
+    /// The script it was held on. It stays the session's gateway script once set: every job the
+    /// gateway has out pays it, and a share on one of them held to another would be refused.
+    on: Option<Vec<u8>>,
+}
+
+impl HeldPayout {
+    /// The script to leave the session paying itself with, given how many payouts its shares
+    /// have named: the one it was held on, while that is the only one. A second ends it for the
+    /// session, since a session's payouts are never forgotten.
+    fn script(&self, payouts: usize) -> Option<&[u8]> {
+        self.on.as_deref().filter(|_| payouts == 1)
+    }
+
+    /// Count a share with work. `payouts` is how many payouts the session's shares have named,
+    /// this one's included, and `dominant` the leading one's script, if it is an address that is
+    /// not the pool's. True if the session is held on it from now.
+    fn note(&mut self, payouts: usize, dominant: Option<&[u8]>) -> bool {
+        self.shares += 1;
+        if self.on.is_some() || payouts != 1 || self.shares < HELD_SPLIT_SHARES {
+            return false;
+        }
+        let Some(script) = dominant else { return false };
+        self.on = Some(script.to_vec());
+        true
+    }
+
+    /// Whether a payout that has come to dominate is kept off the session, and not remembered
+    /// for its gateway: it was held on another.
+    fn keeps_off(&self, script: &[u8]) -> bool {
+        self.on.as_deref().is_some_and(|on| on != script)
+    }
+}
+
 /// Whether `class-budget` applies to a gateway by its hello: a CONVOY-generation one, and not
 /// lazarus-gateway or a lazarus-split build, which place the whole list, nor ratum, whose
 /// Partial coinbases are cut by what each template leaves room for rather than by a size class.
@@ -557,10 +613,11 @@ struct Session {
     configured_as_gateway: bool,
     /// This tip already has a coinbaser reply, so jobs should be pool/split.
     split_ready: bool,
-    /// The gateway's build is in `held-split-builds`: it hands its miners the section paying
-    /// the configured script whatever split it holds. Once its own payout script is known it is
-    /// configured with that and left there for the session; see `held_script`.
-    held_split: bool,
+    /// `Some` when the gateway's build is in `held-split-builds`: it hands its miners the section
+    /// paying the configured script whatever split it holds. Once its shares show it has one
+    /// payout it is configured with that and left there while no other mines on it; see
+    /// `held_script`.
+    held: Option<HeldPayout>,
     /// What `class-budget` has learned of this gateway's coinbase sections; `None` without the
     /// key, and for a session it does not apply to (`class_budget_applies`, the house gateway,
     /// a held-split build).
@@ -705,13 +762,9 @@ pub async fn run(shared: Arc<Shared>, mut stream: TcpStream, remote: SocketAddr)
     if let Some(build) = held_build {
         log::info!(
             "[{id}] {remote} gateway={gateway_hex} is a held-split build ({build} in held-split-builds): it hands \
-             its miners section 0 whatever split it holds, so {}",
-            if known_script.is_some() {
-                "it is configured with its own payout script and left there; its full jobs are its own solo work"
-            } else {
-                "once its shares name its payout script it is configured with that and left there; until then its \
-                 full jobs pay the pool and owe the window"
-            }
+             its miners section 0 whatever split it holds, so once its first {HELD_SPLIT_SHARES} shares all name \
+             one payout it is configured with that and left there while no other payout mines on it; until then, \
+             and for good once a second one does, its full jobs pay the pool and owe the window"
         );
     }
     // Never the pool's own gateway, which carries every stratum miner and places the whole list,
@@ -781,7 +834,7 @@ pub async fn run(shared: Arc<Shared>, mut stream: TcpStream, remote: SocketAddr)
         restore_script_at: None,
         configured_as_gateway: false,
         split_ready: false,
-        held_split: held_build.is_some(),
+        held: held_build.map(|_| HeldPayout::default()),
         class_budget,
         last_split_prev: None,
         resume_token: {
@@ -1009,13 +1062,14 @@ impl Session {
         self.class_budget.as_ref()?.bytes.filter(|_| !on_own_script)
     }
 
-    /// The script a held-split gateway is left paying itself with: its own payout, once known.
+    /// The script a held-split gateway is left paying itself with: its own payout, while its
+    /// shares show it is the only one ([`HeldPayout`]).
     ///
     /// The tag that goes with it is the solo one, as for every configure(gateway). A block on
     /// this work pays the gateway alone, and the pool site reads the primary tag to tell the
     /// pool's finds from solo ones: under the pool's own tag it would be booked as a pool block.
     fn held_script(&self) -> Option<Vec<u8>> {
-        self.gateway_script.clone().filter(|_| self.held_split)
+        self.held.as_ref()?.script(self.identity_work.len()).map(<[u8]>::to_vec)
     }
 
     fn gateway_key_hex(&self) -> String {
@@ -1034,39 +1088,63 @@ impl Session {
             return;
         };
         let dom = dom.clone();
-        let Some(script) = address::to_script(&dom, self.shared.network) else {
+        let script = address::to_script(&dom, self.shared.network).filter(|s| *s != self.shared.pool_script);
+        let payouts = self.identity_work.len();
+        let held_now = self.held.as_mut().is_some_and(|h| h.note(payouts, script.as_deref()));
+        let Some(script) = script else {
             return;
         };
-        if script == self.shared.pool_script {
-            return;
-        }
         let changed = self.gateway_script.as_deref() != Some(script.as_slice());
-        if self.held_split && self.configured_as_gateway && changed {
-            // A held-split gateway keeps the script it was left paying itself with for the rest
-            // of the session. Every job it has out pays that one, and a share on any of them held
-            // to another script would be Foreign and refused. Its next session starts on this one.
-            self.shared.remember_gateway(&self.gateway_key_hex(), &dom, &script);
+        if self.held.as_ref().is_some_and(|h| h.keeps_off(&script)) {
+            // Held on another payout, which stays its script for the rest of the session: every
+            // job it has out pays that one, and a share on any of them held to this one would be
+            // Foreign and refused. Not remembered either, so its next session is held only on
+            // what that session's own shares show.
             return;
         }
         self.gateway_script = Some(script.clone());
         self.gateway_identity = Some(dom.clone());
         self.shared.remember_gateway(&self.gateway_key_hex(), &dom, &script);
-        // A held-split gateway goes onto its own script as soon as it is known, split or no
-        // split: a reply does not reach the section it mines.
-        let arm = if self.held_split {
-            !self.configured_as_gateway
-        } else {
-            changed && !self.split_ready && !self.configured_as_gateway
-        };
-        if arm && self.restore_script_at.is_none() {
-            if self.held_split {
+        if held_now {
+            // `follow_held_split` configures it, split or no split: a reply does not reach the
+            // section it mines.
+            return;
+        }
+        if changed && !self.split_ready && !self.configured_as_gateway && self.restore_script_at.is_none() {
+            self.restore_script_at = Some(tokio::time::Instant::now());
+        }
+    }
+
+    /// Put a held-split session where [`Session::held_script`] says after one more share: onto
+    /// its own script once its shares show it has one payout, and back onto the pool's once a
+    /// second payout mines on it (on this tip's split, if it has one; otherwise with the next
+    /// reply, as any session).
+    async fn follow_held_split(&mut self, was_held: bool) -> Result<(), SessionError> {
+        let payout = self.gateway_identity.clone().unwrap_or_default();
+        match (was_held, self.held_script()) {
+            (false, Some(script)) => {
                 log::info!(
-                    "[{}] {} held-split: its payout is {dom}; configuring it to pay itself from its next job",
+                    "[{}] {} held-split: its first {HELD_SPLIT_SHARES} shares all pay {payout}; configuring it to pay \
+                     itself from its next job",
                     self.id,
                     self.gateway_hex
                 );
+                self.send_configure_script(&script, true).await
             }
-            self.restore_script_at = Some(tokio::time::Instant::now());
+            (true, None) => {
+                log::info!(
+                    "[{}] {} held-split: a second payout mines on it besides {payout}; its full jobs pay the pool and \
+                     owe the window again for the rest of the session",
+                    self.id,
+                    self.gateway_hex
+                );
+                if self.split_ready && !self.stay_on_gateway() {
+                    let pool = self.shared.pool_script.clone();
+                    self.send_configure_script(&pool, false).await?;
+                }
+                Ok(())
+            }
+            _ => Ok(()),
         }
     }
 
@@ -1550,7 +1628,7 @@ impl Session {
             empty_solo_fee_bps: self.shared.cfg.empty_solo_fee_bps,
             trusted_target: self.is_house_stratum(),
             uncommitted_pot: self.shared.cfg.uncommitted_pot,
-            held_split: self.held_split,
+            held_split: self.held.is_some(),
         };
         let v = match verify::verify(&mut self.slots[job_id], &s, &policy) {
             Ok(v) => v,
@@ -1589,7 +1667,11 @@ impl Session {
 
         // credit — empty-solo and gateway-solo are accepted work but not window work.
         if v.work > 0 {
+            let was_held = self.held_script().is_some();
             self.note_identity(&identity, v.work);
+            if self.held.is_some() {
+                self.follow_held_split(was_held).await?;
+            }
         }
         let ts = now();
         let solo = matches!(v.coinbase_kind, CoinbaseKind::EmptySolo | CoinbaseKind::GatewaySolo);
@@ -2657,6 +2739,52 @@ mod tests {
         assert_eq!(held_split_build(&["e894b8".into(), "e894b8a+".into(), "".into()], e894), None);
         let full = "e894b8ac29ae06bf6e3b14dafd21f72dcd65fb84".to_string();
         assert_eq!(held_split_build(std::slice::from_ref(&full), e894), Some(full.as_str()));
+    }
+
+    /// The review's multi-miner case. A held gateway pays whoever its section 0 is configured
+    /// with, so it is left paying itself only once its own first shares all name one payout, and
+    /// only while no other mines on it. A second payout puts it back on the pool for the rest of
+    /// the session; a payout that comes to dominate after it was held is kept off it and not
+    /// remembered; and nothing is held on a payout that is not an address.
+    #[test]
+    fn a_held_split_session_pays_itself_only_while_its_shares_name_one_payout() {
+        let (a, b) = (wpkh(1), wpkh(2));
+        let mut h = HeldPayout::default();
+        assert_eq!(h.script(0), None, "a session starts owing, whatever it was remembered paying");
+        for _ in 1..HELD_SPLIT_SHARES {
+            assert!(!h.note(1, Some(&a)));
+            assert_eq!(h.script(1), None, "not before its shares have shown one payout");
+        }
+        assert!(h.note(1, Some(&a)), "the sixteenth share of one payout holds it");
+        assert_eq!(h.script(1), Some(&a[..]));
+        assert!(!h.note(1, Some(&a)) && h.script(1) == Some(&a[..]), "held once, and stays while it is the one");
+        assert!(!h.keeps_off(&a));
+
+        // a second miner's payout: back to the pool, for good
+        assert!(!h.note(2, Some(&a)));
+        assert_eq!(h.script(2), None);
+        for _ in 0..100 {
+            assert!(!h.note(2, Some(&b)));
+        }
+        assert_eq!(h.script(2), None);
+        assert!(h.keeps_off(&b), "the jobs it has out pay the one it was held on");
+
+        // two payouts from its first shares: never held, and it follows the dominant one as any
+        // session does
+        let mut two = HeldPayout::default();
+        assert!(!two.note(1, Some(&a)));
+        for _ in 0..100 {
+            assert!(!two.note(2, Some(&b)));
+        }
+        assert_eq!(two.script(2), None);
+        assert!(!two.keeps_off(&a) && !two.keeps_off(&b));
+
+        // one payout that is not an address, or is the pool's: nothing to hold it on
+        let mut none = HeldPayout::default();
+        for _ in 0..100 {
+            assert!(!none.note(1, None));
+        }
+        assert_eq!(none.script(1), None);
     }
 
     fn wpkh(n: u16) -> Vec<u8> {

@@ -75,9 +75,9 @@ pub struct Config {
     /// job and commit the work to it, so no coinbaser reply ever reaches their miners: under
     /// `owe` every block they find is pool-only and owes the window the whole reward. Matched
     /// against the hash in the hello's user agent (`v0.4.1-beta/<hash>`). Once such a session's
-    /// own payout script is known it is configured with that script and left on it, so what it
-    /// mines is its own solo work: accepted, not credited in the window, and a find owes nobody.
-    /// Empty (default): no build is held.
+    /// first shares all name one payout it is configured with that payout's script and left on
+    /// it while no other payout mines on it, so what it mines is its own solo work: accepted, not
+    /// credited in the window, and a find owes nobody. Empty (default): no build is held.
     #[serde(default)]
     pub held_split_builds: Vec<String>,
     /// Hold a class-limited gateway's coinbaser to the payee bytes its smallest coinbase class

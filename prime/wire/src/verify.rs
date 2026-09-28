@@ -231,8 +231,9 @@ pub struct Policy<'a> {
     /// credited 128 shares' worth). Only work above it is under-credited, so it is set high.
     pub uncommitted_pot: u8,
     /// The gateway is a build that hands its miners the section paying one configured script
-    /// whatever split it holds (primed's `held-split-builds`), and Prime has configured it with
-    /// [`Policy::gateway_script`] for good. A coinbase paying that script and nothing else is
+    /// whatever split it holds (primed's `held-split-builds`), so its section pays whatever Prime
+    /// last configured it with: [`Policy::gateway_script`] while it is held on its own payout, and
+    /// before a tip's split as for any gateway. A coinbase paying that script and nothing else is
     /// then its own solo work even where the issued list also pays the gateway as a window
     /// miner. Without this that coinbase is a listed payee paid far past its amount, Foreign,
     /// and refused. Only a coinbase that would otherwise be refused is looked at again, so

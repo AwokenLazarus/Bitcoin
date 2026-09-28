@@ -12,11 +12,12 @@
 # Gateway builds, by git-hash prefix (7 to 40 hex digits), that hand every miner coinbase
 # section 0 (the whole reward to the one script they were configured with) whatever split
 # they hold, so every block they find owes the window the whole reward. A session whose hello
-# (v0.4.1-beta/<hash>) names one is configured with the gateway's own payout script once that
-# is known (at once for a key seen before, else from its first shares) and left there: its
-# work becomes its own solo work, accepted but not credited in the window, and a find owes
-# nobody. Its operator loses TIDES credit and takes solo variance; the pool stops owing
-# make-goods. A build with local changes (<hash>+), a lazarus-split UA and the house gateway
+# (v0.4.1-beta/<hash>) names one is configured with the gateway's own payout script once its
+# first 16 shares all name that one payout, and left there while no other payout mines on it:
+# its work becomes its own solo work, accepted but not credited in the window, and a find owes
+# nobody. A second payout on the session puts it back on the pool for the rest of the session.
+# Its operator loses TIDES credit and takes solo variance; the pool stops owing make-goods.
+# A build with local changes (<hash>+), a lazarus-split UA and the house gateway
 # are never matched; an entry that is not 7-40 hex digits matches nothing. Empty (default):
 # nothing is held. The builds known to do this are CONVOY commits from c61c2e7 up to, not
 # including, 155b6bf. The ones seen live (beb9461 is not in the published history):

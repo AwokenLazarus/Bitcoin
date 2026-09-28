@@ -354,12 +354,18 @@ The one lever the pool has is the script that section pays. `held-split-builds` 
 by git-hash prefix; none is listed by default. A session whose hello names one
 (`v0.4.1-beta/<hash>`, a clean build: `<hash>+` has local changes, which may be the fix, and a
 `lazarus-split` user agent places the split) is configured with the gateway's own payout script
-once that is known and left there. It is known at once for a gateway key that connected before
-(`gateway-scripts.json`), and otherwise from the dominant username of its first shares; until
-then nothing changes and its work still owes. From then on no coinbaser reply turns it back to
-the pool, and the script stays the same for the rest of the session even if another username
-becomes dominant, because every job it has out pays that script. It is still sent the same
-coinbaser replies as anyone.
+once its shares show it has one, and left there while it does. That takes its first 16 shares
+with work all naming the same payout. Until then nothing changes and its work still owes, even
+for a gateway key that connected before: the payout `gateway-scripts.json` remembers is whoever
+dominated that session, and a held gateway pays whoever it is configured with. From then on no
+coinbaser reply turns it back to the pool. A stock gateway passes each miner's own username
+through by default (`pool_pass_full_users`) and section 0 pays one script whoever mines it, so
+once a second payout mines on the session it goes back to the pool and owes, for the rest of the
+session. Left on the first payout, that miner's work would be the first one's solo work, credited
+to nobody, and a block on it would pay the first. The script it was held on stays its gateway
+script for the session, because every job it has out pays that script, and a payout that comes
+to dominate afterwards is not remembered for its gateway. It is still sent the same coinbaser
+replies as anyone.
 
 Its section 0 is then `GatewaySolo`: accepted, not credited in the window, and a block found on
 it owes nobody. That holds where the gateway is also a window payee, which the live ones are.
@@ -379,7 +385,7 @@ It is a policy choice, not a fix. The operator's work leaves the TIDES window (n
 variance, no fee) and the pool stops owing make-goods for its finds. The fix is `155b6bf` or
 later, or `lazarus-gateway`. There is no detector: a list of builds cannot mistake a healthy
 session for one of these, and a counter of pool-only shares can. `clients[].held_split` is true
-for a held session, and `solo_full_shares` against `pool_only_full_jobs` shows whether it has
+for a held-split build, and `solo_full_shares` against `pool_only_full_jobs` shows whether it has
 moved over.
 
 ### Class budgets

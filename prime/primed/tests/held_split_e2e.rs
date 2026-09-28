@@ -1,6 +1,7 @@
-//! End-to-end: a gateway whose build is in `held-split-builds` is left paying itself once its
-//! payout script is known, and nothing else changes: not its coinbaser, not any other session,
-//! and with the key unset not that session either.
+//! End-to-end: a gateway whose build is in `held-split-builds` owes as any gateway does until its
+//! own shares show its payout (a payout remembered from an earlier session is not taken for it),
+//! and nothing else changes: not its coinbaser, not any other session, and with the key unset
+//! not that session either.
 //!
 //! The gateway here is also a window payee, which is the case the design review found would
 //! have every one of its shares refused. The first test needs no work and runs by default. The
@@ -92,7 +93,7 @@ fn row<'a>(stats: &'a serde_json::Value, gateway: &Identity) -> &'a serde_json::
 }
 
 #[test]
-fn a_held_split_build_is_left_paying_itself_and_nothing_else_changes() {
+fn a_held_split_build_owes_until_its_own_shares_show_its_payout_and_nothing_else_changes() {
     let pool_script = POOL_SCRIPT.to_string();
     let solo = || (GW_SCRIPT.to_string(), "Lazarus/solo".to_string());
     let to_pool = || (pool_script.clone(), "Lazarus".to_string());
@@ -101,15 +102,16 @@ fn a_held_split_build_is_left_paying_itself_and_nothing_else_changes() {
 
     let pool = Identity::generate();
     let (primed, port) = start(&node, &pool, true, &[&held_gw, &stock_gw]);
-    // Held, its payout known from an earlier session: opened on its own script, and no reply
-    // turns it back to the pool.
+    // Held, its payout remembered from an earlier session: opened on that script as any known
+    // gateway is, and turned back to the pool with every reply until this session's own shares
+    // show it. What was remembered is whoever dominated then, which need not be who mines now.
     let (mut held, first) = Gateway::connect_as(port, &pool, &held_gw, HELD_UA);
     assert_eq!(configured(&first), solo());
     let (before, _, held_outputs) = held.request_coinbaser_seeing(VALUE, &TIP);
-    assert_eq!(configures(&before), vec![], "no configure ahead of the reply");
+    assert_eq!(configures(&before), vec![to_pool()], "not held on a remembered payout");
     assert!(held_outputs.iter().any(|o| hex::encode(&o.script) == GW_SCRIPT), "the gateway is a listed payee");
     let (before, _, _) = held.request_coinbaser_seeing(VALUE + 1, &TIP);
-    assert_eq!(configures(&before), vec![], "nor ahead of a later one");
+    assert_eq!(configures(&before), vec![to_pool()], "nor with a later reply");
 
     // Another build on the same Prime, the same payout: configure(pool) with every reply, as ever.
     let (mut stock, first) = Gateway::connect_as(port, &pool, &stock_gw, STOCK_UA);
