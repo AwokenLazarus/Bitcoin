@@ -5237,16 +5237,26 @@ _ORG_ID = "https://lazarus-xbt.xyz/#org"
 _SEO_ARTICLE = {
     "/hardware": ("Article", "2026-09-13", "2026-09-23"),
     "/profitability": ("Article", "2026-09-13", "2026-09-23"),
-    "/pools": ("Article", "2026-09-13", "2026-09-23"),
+    "/pools": ("Article", "2026-09-13", "2026-09-27"),
     "/self-cap": ("Article", "2026-09-13", "2026-09-23"),
-    "/non-custodial": ("Article", "2026-09-13", "2026-09-23"),
-    "/tides": ("Article", "2026-09-13", "2026-09-23"),
+    "/non-custodial": ("Article", "2026-09-13", "2026-09-27"),
+    "/tides": ("Article", "2026-09-13", "2026-09-27"),
     "/bip110": ("Article", "2026-09-13", "2026-09-23"),
     "/how": ("Article", "2026-09-13", "2026-09-23"),
-    "/mine-xbt": ("TechArticle", "2026-09-13", "2026-09-23"),
+    "/mine-xbt": ("TechArticle", "2026-09-13", "2026-09-27"),
     "/connect": ("TechArticle", "2026-09-13", "2026-09-23"),
     "/datum-subsidy": ("TechArticle", "2026-09-13", "2026-09-23"),
     "/api": ("TechArticle", "2026-09-13", "2026-09-23"),
+}
+# The sitemap pages that are not articles, with the date their crawlable copy last changed. Same
+# rule as _SEO_ARTICLE: bump a date in the commit that changes that page's words, never per deploy.
+# Search engines use <lastmod> only while it stays truthful; a sitemap that says "today" for every
+# URL on every deploy teaches them to ignore it.
+_SEO_MODIFIED = {
+    "/": "2026-09-27",
+    "/calculator": "2026-09-23",
+    "/blocks": "2026-09-23",
+    _STRATUM_DOC_PATH: "2026-09-22",
 }
 _OG_IMAGE = "https://pool.lazarus-xbt.xyz/static/og-pool.png"
 
@@ -5421,12 +5431,18 @@ def robots_txt():
     )
 
 
-def _lastmod(freq):
-    """When this URL last changed, as a date.
+def _lastmod(freq, path=None):
+    """When this URL's crawlable copy last changed, as a date.
 
-    Pages built from live pool data genuinely change every day, so they carry today. The rest
-    change when the site is deployed, which is the mtime of the file their copy lives in.
+    Every page in the sitemap has a hand-kept date (_SEO_ARTICLE modified, or _SEO_MODIFIED), the
+    same date its structured data carries. Live figures load in the browser and do not change the
+    HTML a crawler reads, so they do not count. The fallbacks below only cover a page added to
+    _SITEMAP_ORDER without a date.
     """
+    if path in _SEO_ARTICLE:
+        return _SEO_ARTICLE[path][2]
+    if path in _SEO_MODIFIED:
+        return _SEO_MODIFIED[path]
     if freq in ("hourly", "daily"):
         return time.strftime("%Y-%m-%d", time.gmtime())
     try:
@@ -5448,14 +5464,14 @@ def sitemap_xml():
         )
         for loc in (en, zh):
             urls.append(
-                f"  <url><loc>{_xml_attr(loc)}</loc><lastmod>{_lastmod(freq)}</lastmod>"
+                f"  <url><loc>{_xml_attr(loc)}</loc><lastmod>{_lastmod(freq, p)}</lastmod>"
                 f"{alts}<changefreq>{freq}</changefreq><priority>{prio}</priority></url>"
             )
     # The protocol reference is one English document with no Chinese twin, so it declares no
     # alternates rather than pointing hreflang at a page that does not exist.
     urls.append(
         f"  <url><loc>{_xml_attr(_PUBLIC_SITE + _STRATUM_DOC_PATH)}</loc>"
-        f"<lastmod>{_lastmod('weekly')}</lastmod><changefreq>monthly</changefreq><priority>0.7</priority></url>"
+        f"<lastmod>{_lastmod('weekly', _STRATUM_DOC_PATH)}</lastmod><changefreq>monthly</changefreq><priority>0.7</priority></url>"
     )
     return (
         '<?xml version="1.0" encoding="UTF-8"?>\n'
