@@ -40,6 +40,26 @@ fn house_stratum(cfg: &Config, remote: SocketAddr, gateway_key: &str) -> bool {
     cfg.house_gateways.iter().any(|h| !h.is_empty() && g.starts_with(h.as_str()))
 }
 
+/// The `held-split-builds` entry a gateway's hello names, if any.
+///
+/// A C gateway's user agent is `v0.4.1-beta[+flavor]/<hash>` (the hello in `datum_protocol.c`):
+/// the whole commit it was built from, then `+` if the tree had changes on top of it, then
+/// `(tag)` if it was built at a tag. A build with changes is not matched, because the change may
+/// be the very fix, and nor is one whose user agent says it places the split. Only what follows
+/// the first `/` is read, so another program's version (`ratum-gateway/0.1.28/<hash>`) is never
+/// taken for a C gateway's commit.
+fn held_split_build<'a>(builds: &'a [String], ua: &str) -> Option<&'a str> {
+    if builds.is_empty() || handshake::is_split_gateway(ua) {
+        return None;
+    }
+    let (_, rest) = ua.split_once('/')?;
+    let hash = rest.split_once('(').map_or(rest, |(h, _)| h).to_ascii_lowercase();
+    if !hash.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    builds.iter().map(String::as_str).find(|b| crate::config::git_hash_prefix(b) && hash.starts_with(b))
+}
+
 const MAX_HELLO: usize = 4096;
 const KEEPALIVE: Duration = Duration::from_secs(20);
 const IDLE_LIMIT: Duration = Duration::from_secs(300);
@@ -356,6 +376,10 @@ struct Session {
     configured_as_gateway: bool,
     /// This tip already has a coinbaser reply, so jobs should be pool/split.
     split_ready: bool,
+    /// The gateway's build is in `held-split-builds`: it hands its miners the section paying
+    /// the configured script whatever split it holds. Once its own payout script is known it is
+    /// configured with that and left there for the session; see `held_script`.
+    held_split: bool,
     /// `prev_hash` of the last flushed coinbaser (hex), i.e. the tip that split is for.
     last_split_prev: Option<String>,
     /// Convoy configure v3 resume token; reused for every mid-session configure so the
@@ -475,13 +499,28 @@ pub async fn run(shared: Arc<Shared>, mut stream: TcpStream, remote: SocketAddr)
         }
     }
     let known_script = shared.lookup_gateway_script(&gateway_key);
-    let fee_path = if house_stratum(&shared.cfg, remote, &gateway_key) { "stratum" } else { "datum" };
+    let house = house_stratum(&shared.cfg, remote, &gateway_key);
+    let fee_path = if house { "stratum" } else { "datum" };
     log::info!(
         "[{id}] {remote} hello ua={:?} gateway={gateway_hex} gen={:?} fee={fee_path}{}",
         hello.user_agent,
         hello.generation,
         if hello.resume_token.is_some() { " (asked to resume; declined)" } else { "" }
     );
+    // The pool's own gateway carries every stratum miner, and is never left paying itself.
+    let held_build = if house { None } else { held_split_build(&shared.cfg.held_split_builds, &hello.user_agent) };
+    if let Some(build) = held_build {
+        log::info!(
+            "[{id}] {remote} gateway={gateway_hex} is a held-split build ({build} in held-split-builds): it hands \
+             its miners section 0 whatever split it holds, so {}",
+            if known_script.is_some() {
+                "it is configured with its own payout script and left there; its full jobs are its own solo work"
+            } else {
+                "once its shares name its payout script it is configured with that and left there; until then its \
+                 full jobs pay the pool and owe the window"
+            }
+        );
+    }
     // Shown as a client once it has proved it holds the session key (`Session::establish`). A
     // hello can be replayed by anyone who saw one, and re-sealed to us by any other pool its
     // gateway connects to; whoever does that cannot read our reply or send a frame, but would
@@ -497,6 +536,7 @@ pub async fn run(shared: Arc<Shared>, mut stream: TcpStream, remote: SocketAddr)
         gateway: gateway_hex.clone(),
         connected_ts: now(),
         fee_path: fee_path.into(),
+        held_split: held_build.is_some(),
         ..Default::default()
     };
     shared.totals.add(&shared.totals.connections, 1);
@@ -539,6 +579,7 @@ pub async fn run(shared: Arc<Shared>, mut stream: TcpStream, remote: SocketAddr)
         restore_script_at: None,
         configured_as_gateway: false,
         split_ready: false,
+        held_split: held_build.is_some(),
         last_split_prev: None,
         resume_token: {
             let mut t = [0u8; mining::RESUME_TOKEN_LEN];
@@ -753,6 +794,15 @@ impl Session {
         self.shared.cfg.stock_full_pool_only == "gateway-solo" && self.pool_only_full_jobs > 0
     }
 
+    /// The script a held-split gateway is left paying itself with: its own payout, once known.
+    ///
+    /// The tag that goes with it is the solo one, as for every configure(gateway). A block on
+    /// this work pays the gateway alone, and the pool site reads the primary tag to tell the
+    /// pool's finds from solo ones: under the pool's own tag it would be booked as a pool block.
+    fn held_script(&self) -> Option<Vec<u8>> {
+        self.gateway_script.clone().filter(|_| self.held_split)
+    }
+
     fn gateway_key_hex(&self) -> String {
         hex::encode(self.hello.identity_sign_pk)
     }
@@ -776,10 +826,31 @@ impl Session {
             return;
         }
         let changed = self.gateway_script.as_deref() != Some(script.as_slice());
+        if self.held_split && self.configured_as_gateway && changed {
+            // A held-split gateway keeps the script it was left paying itself with for the rest
+            // of the session. Every job it has out pays that one, and a share on any of them held
+            // to another script would be Foreign and refused. Its next session starts on this one.
+            self.shared.remember_gateway(&self.gateway_key_hex(), &dom, &script);
+            return;
+        }
         self.gateway_script = Some(script.clone());
         self.gateway_identity = Some(dom.clone());
         self.shared.remember_gateway(&self.gateway_key_hex(), &dom, &script);
-        if changed && !self.split_ready && !self.configured_as_gateway && self.restore_script_at.is_none() {
+        // A held-split gateway goes onto its own script as soon as it is known, split or no
+        // split: a reply does not reach the section it mines.
+        let arm = if self.held_split {
+            !self.configured_as_gateway
+        } else {
+            changed && !self.split_ready && !self.configured_as_gateway
+        };
+        if arm && self.restore_script_at.is_none() {
+            if self.held_split {
+                log::info!(
+                    "[{}] {} held-split: its payout is {dom}; configuring it to pay itself from its next job",
+                    self.id,
+                    self.gateway_hex
+                );
+            }
             self.restore_script_at = Some(tokio::time::Instant::now());
         }
     }
@@ -1026,7 +1097,15 @@ impl Session {
         prev_hash: [u8; 32],
     ) -> Result<(), SessionError> {
         self.restore_script_at = None;
-        if !self.stay_on_gateway() {
+        if let Some(script) = self.held_script() {
+            // A held-split build hands its miners the section paying the configured script
+            // whatever this reply says. Turned back to the pool here, that section is a
+            // pool-only coinbase until the next tip; left on the gateway it is the gateway's own.
+            // The reply still goes out, the same as anyone's, for whatever else it builds.
+            if !self.configured_as_gateway {
+                self.send_configure_script(&script, true).await?;
+            }
+        } else if !self.stay_on_gateway() {
             let pool = self.shared.pool_script.clone();
             self.send_configure_script(&pool, false).await?;
         }
@@ -1248,6 +1327,7 @@ impl Session {
             empty_solo_fee_bps: self.shared.cfg.empty_solo_fee_bps,
             trusted_target: self.is_house_stratum(),
             uncommitted_pot: self.shared.cfg.uncommitted_pot,
+            held_split: self.held_split,
         };
         let v = match verify::verify(&mut self.slots[job_id], &s, &policy) {
             Ok(v) => v,
@@ -2256,5 +2336,47 @@ mod tests {
         assert!(!house_stratum(&cfg, "127.0.0.1:5000".parse().unwrap(), &lookalike));
         cfg.house_loopback = true;
         assert!(house_stratum(&cfg, "127.0.0.1:5000".parse().unwrap(), &lookalike));
+    }
+
+    /// A build is held by the commit its hello names and by nothing else: not a build with
+    /// changes on top of a listed commit (the change may be the fix), not one that says it
+    /// places the split, not another program's version string, and nothing with the key unset.
+    #[test]
+    fn a_held_split_build_is_named_by_the_commit_in_its_hello() {
+        let builds: Vec<String> =
+            ["e894b8a", "f74c22a", "2fea7e5", "57f1aee", "beb9461"].iter().map(|s| s.to_string()).collect();
+        let held = |ua: &str| held_split_build(&builds, ua);
+        // as the live gateways say it
+        assert_eq!(held("v0.4.1-beta/e894b8ac29ae06bf6e3b14dafd21f72dcd65fb84"), Some("e894b8a"));
+        assert_eq!(held("v0.4.1-beta/f74c22aa1f048cef5bf0440b89f86427e658fb89"), Some("f74c22a"));
+        assert_eq!(held("v0.4.1-beta/2fea7e51286d3821c19dc1c240b8caa92bd92532"), Some("2fea7e5"));
+        assert_eq!(held("v0.4.1-beta/57f1aeebf8b2e55ee03c768e09d0738bc2973ebd"), Some("57f1aee"));
+        assert_eq!(held("v0.4.1-beta/beb946154dde86b69d9afd008974198ddd08bc4c"), Some("beb9461"));
+        // built at a tag, or printed in capitals: the same commit
+        assert_eq!(held("v0.4.1-beta/e894b8ac29ae06bf6e3b14dafd21f72dcd65fb84(v0.4.1)"), Some("e894b8a"));
+        assert_eq!(held("v0.4.1-beta/E894B8AC29AE06BF6E3B14DAFD21F72DCD65FB84"), Some("e894b8a"));
+        // not these
+        for ua in [
+            "v0.4.1-beta/e894b8ac29ae06bf6e3b14dafd21f72dcd65fb84+",
+            "v0.4.1-beta+lazarus-split/e894b8ac29ae06bf6e3b14dafd21f72dcd65fb84",
+            "v0.4.1-beta/b9ea7dc3eb91352565ab487ec55ed6ee5964a440",
+            "v0.4.1-beta/7491a5099dd5d887a027c812f71de63e0d5986a3",
+            "v0.4.1-beta/155b6bf4382b309df9915fb3f49d6229cd7f1d17",
+            "v0.4.1-beta/e894b8bc29ae06bf6e3b14dafd21f72dcd65fb84",
+            "v0.4.1-beta/e894b8",
+            "v0.4.1-beta/UNKNOWN_GIT_HASH",
+            "ratum-gateway/0.1.28/e894b8ac29ae",
+            "lazarus-gateway/0.1",
+            "e894b8ac29ae06bf6e3b14dafd21f72dcd65fb84",
+            "",
+        ] {
+            assert_eq!(held(ua), None, "{ua:?}");
+        }
+        // the key unset holds nothing, and an entry that cannot name a commit matches nothing
+        let e894 = "v0.4.1-beta/e894b8ac29ae06bf6e3b14dafd21f72dcd65fb84";
+        assert_eq!(held_split_build(&[], e894), None);
+        assert_eq!(held_split_build(&["e894b8".into(), "e894b8a+".into(), "".into()], e894), None);
+        let full = "e894b8ac29ae06bf6e3b14dafd21f72dcd65fb84".to_string();
+        assert_eq!(held_split_build(std::slice::from_ref(&full), e894), Some(full.as_str()));
     }
 }

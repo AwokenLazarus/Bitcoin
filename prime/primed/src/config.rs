@@ -69,6 +69,17 @@ pub struct Config {
     /// become gateway-solo with no debt.
     #[serde(default = "d_owe")]
     pub stock_full_pool_only: String,
+    /// Gateway builds, by git-hash prefix (7 to 40 hex digits), that hand every miner the
+    /// coinbase section paying one configured script whatever split they hold. CONVOY-lineage
+    /// commits from `c61c2e7` up to, not including, `155b6bf` select section 0 for every BLAKE2b
+    /// job and commit the work to it, so no coinbaser reply ever reaches their miners: under
+    /// `owe` every block they find is pool-only and owes the window the whole reward. Matched
+    /// against the hash in the hello's user agent (`v0.4.1-beta/<hash>`). Once such a session's
+    /// own payout script is known it is configured with that script and left on it, so what it
+    /// mines is its own solo work: accepted, not credited in the window, and a find owes nobody.
+    /// Empty (default): no build is held.
+    #[serde(default)]
+    pub held_split_builds: Vec<String>,
     /// Test hook: sleep this long before answering a coinbaser, so a stock gateway's
     /// 5 s fetch times out. 0 (default) is production.
     #[serde(default)]
@@ -267,6 +278,12 @@ fn d_solo_tag() -> String {
     "Lazarus/solo".into()
 }
 
+/// Whether `s` can name a commit in `held-split-builds`: git's shortest default abbreviation
+/// up to the whole hash, in lowercase hex.
+pub fn git_hash_prefix(s: &str) -> bool {
+    (7..=40).contains(&s.len()) && s.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
 impl Config {
     /// `stale-after-days` in seconds; 0 when the rule is off.
     pub fn stale_after_secs(&self) -> u32 {
@@ -312,6 +329,9 @@ impl Config {
         for g in &mut c.house_gateways {
             *g = g.to_ascii_lowercase();
         }
+        for b in &mut c.held_split_builds {
+            *b = b.to_ascii_lowercase();
+        }
         if c.uncommitted_pot > 63 {
             return Err("uncommitted-pot is a power-of-two exponent, 63 at most".into());
         }
@@ -351,6 +371,15 @@ impl Config {
                 v.push(format!(
                     "house-gateways entry {g:?} is a {}-digit prefix: a house gateway is trusted with its shares' difficulty, and a short prefix is one a stranger can grind a key to match. Give the full 64-digit key",
                     g.len()
+                ));
+            }
+        }
+        // Said, not enforced, here too. An entry that cannot name a commit matches nothing rather
+        // than something: the shorter the prefix, the more builds it would take off the window.
+        for b in &self.held_split_builds {
+            if !git_hash_prefix(b) {
+                v.push(format!(
+                    "held-split-builds entry {b:?} is not 7 to 40 hex digits of a git commit hash and matches nothing"
                 ));
             }
         }
@@ -478,6 +507,36 @@ require-split-gateway = true
             assert_eq!(notes(&load(weak)), 1, "{weak:?}");
         }
         assert_eq!(load(&full).uncommitted_pot, 20);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// No build is held unless listed. An entry that cannot name a commit is said at startup and
+    /// matches nothing: a short prefix would take more builds off the window than meant.
+    #[test]
+    fn held_split_builds_are_off_by_default_and_a_bad_entry_matches_nothing() {
+        let dir = std::env::temp_dir().join(format!("primed-cfg-hs-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("prime.toml");
+        let base = LEGACY.replace("/home/umbrel/blake2b/lazarus-prime", dir.to_str().unwrap());
+        std::fs::write(&p, &base).unwrap();
+        let c = Config::load(&p).unwrap();
+        assert!(c.held_split_builds.is_empty());
+        assert!(!c.legacy_notes().iter().any(|n| n.contains("held-split-builds")));
+
+        let full = "f74c22aa1f048cef5bf0440b89f86427e658fb89";
+        std::fs::write(
+            &p,
+            format!(
+                "{base}held-split-builds = [\"E894B8A\", \"{full}\", \"e894b8\", \"UNKNOWN_GIT_HASH\", \"{full}0\"]\n"
+            ),
+        )
+        .unwrap();
+        let c = Config::load(&p).unwrap();
+        assert_eq!(&c.held_split_builds[..2], ["e894b8a", full]);
+        let notes: Vec<String> = c.legacy_notes().into_iter().filter(|n| n.contains("held-split-builds")).collect();
+        assert_eq!(notes.len(), 3, "{notes:?}");
+        assert!(git_hash_prefix("e894b8a") && git_hash_prefix(full));
+        assert!(!git_hash_prefix("e894b8") && !git_hash_prefix("e894b8g") && !git_hash_prefix(&format!("{full}0")));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

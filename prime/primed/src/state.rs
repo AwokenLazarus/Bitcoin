@@ -190,6 +190,11 @@ pub struct ClientInfo {
     pub faulted_shares: u64,
     /// Why this gateway's work is not being credited, while that lasts.
     pub template_fault: Option<String>,
+    /// The gateway's build is in `held-split-builds`: once its own payout script is known it is
+    /// left paying itself, and its full jobs count in `solo_full_shares`, not the window. Left
+    /// out of the row when false, so a Prime without the key writes the rows it always has.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub held_split: bool,
 }
 
 #[derive(Default)]

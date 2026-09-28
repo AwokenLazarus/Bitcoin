@@ -163,7 +163,8 @@ pub enum CoinbaseKind {
     /// Accepted as work, not credited to the TIDES window; a find is solo with no debt.
     EmptySolo,
     /// A full template paying only the gateway script. The late-coinbaser / type-0 path
-    /// after Prime has handed that gateway its own script as the configure remainder.
+    /// after Prime has handed that gateway its own script as the configure remainder, and
+    /// every section-0 job of a held-split build ([`Policy::held_split`]).
     /// Same accounting as EmptySolo: accepted, not credited, find is solo with no debt.
     GatewaySolo,
     /// Pays somewhere Prime did not sanction.
@@ -229,6 +230,14 @@ pub struct Policy<'a> {
     /// on average, exactly the work done (at `2^13` and a pot of 20, one share in 128 is
     /// credited 128 shares' worth). Only work above it is under-credited, so it is set high.
     pub uncommitted_pot: u8,
+    /// The gateway is a build that hands its miners the section paying one configured script
+    /// whatever split it holds (primed's `held-split-builds`), and Prime has configured it with
+    /// [`Policy::gateway_script`] for good. A coinbase paying that script and nothing else is
+    /// then its own solo work even where the issued list also pays the gateway as a window
+    /// miner. Without this that coinbase is a listed payee paid far past its amount, Foreign,
+    /// and refused. Only a coinbase that would otherwise be refused is looked at again, so
+    /// nothing accepted without it is classified differently with it.
+    pub held_split: bool,
 }
 
 fn fee_sats(value: u64, bps: u32) -> u64 {
@@ -245,7 +254,56 @@ fn empty_job(job_txn_count: u32, merkle_empty: bool) -> bool {
     merkle_empty && job_txn_count <= 1
 }
 
+/// What a coinbase paying the gateway's script and nothing else (OP_RETURNs aside, which may
+/// carry no value) is, or `None` if it pays anything else: the gateway's own solo work on a
+/// full job or on the per-height subsidy-only job, and Foreign for a subsidy-only job that
+/// carries transactions, which is not a shape any gateway builds.
+fn gateway_only(
+    cb: &Coinbase,
+    gateway: Option<&[u8]>,
+    subsidy_only: bool,
+    job_txn_count: u32,
+    merkle_empty: bool,
+) -> Option<CoinbaseKind> {
+    let gw = gateway.filter(|g| !g.is_empty())?;
+    let paid = cb.outputs.iter().any(|o| !o.is_op_return() && o.script == gw);
+    let only = cb.outputs.iter().all(|o| (o.is_op_return() && o.value == 0) || o.script == gw);
+    if !paid || !only {
+        return None;
+    }
+    Some(if subsidy_only && empty_job(job_txn_count, merkle_empty) {
+        CoinbaseKind::EmptySolo
+    } else if !subsidy_only {
+        CoinbaseKind::GatewaySolo
+    } else {
+        CoinbaseKind::Foreign
+    })
+}
+
 pub fn classify_coinbase(
+    cb: &Coinbase,
+    p: &Policy,
+    subsidy_only: bool,
+    job_txn_count: u32,
+    merkle_empty: bool,
+) -> CoinbaseKind {
+    let kind = classify_outputs(cb, p, subsidy_only, job_txn_count, merkle_empty);
+    // A held-split gateway is configured with its own script and left there, and the section it
+    // hands its miners pays that script the whole reward. Where the gateway is also a window
+    // payee the issued list names that script, and a listed payee paid past its amount is
+    // Foreign: every one of those shares would be refused, for as long as the gateway's
+    // address stays in the window. It is the same coinbase `classify_outputs` calls
+    // GatewaySolo when the gateway is not listed, and it pays nobody else, so no payee's carry
+    // rides it unbooked. Only a refusal is revisited, and only for this one shape.
+    if kind == CoinbaseKind::Foreign && p.held_split {
+        if let Some(solo) = gateway_only(cb, p.gateway_script, subsidy_only, job_txn_count, merkle_empty) {
+            return solo;
+        }
+    }
+    kind
+}
+
+fn classify_outputs(
     cb: &Coinbase,
     p: &Policy,
     subsidy_only: bool,
@@ -384,17 +442,10 @@ pub fn classify_coinbase(
     if pool_paid && only_pool {
         return CoinbaseKind::PoolOnly;
     }
-    let gw = p.gateway_script.unwrap_or(&[]);
-    let only_gateway = gateway_paid && !gw.is_empty() && cb.outputs.iter().all(|o| o.is_op_return() || o.script == gw);
-    if only_gateway {
-        if subsidy_only && empty_job(job_txn_count, merkle_empty) {
-            return CoinbaseKind::EmptySolo;
-        }
-        if !subsidy_only {
-            return CoinbaseKind::GatewaySolo;
-        }
-        return CoinbaseKind::Foreign;
+    if let Some(kind) = gateway_only(cb, p.gateway_script, subsidy_only, job_txn_count, merkle_empty) {
+        return kind;
     }
+    let gw = p.gateway_script.unwrap_or(&[]);
     let gateway_and_pool = gateway_paid
         && pool_paid
         && !gw.is_empty()
@@ -776,6 +827,7 @@ mod tests {
             empty_solo_fee_bps: 250,
             trusted_target: false,
             uncommitted_pot: 20,
+            held_split: false,
         }
     }
 
@@ -1369,6 +1421,7 @@ mod tests {
             empty_solo_fee_bps: 250,
             trusted_target: false,
             uncommitted_pot: 20,
+            held_split: false,
         };
         let v = check(&mut slot, &s, &p).expect("pool-only is valid work");
         assert_eq!(v.coinbase_kind, CoinbaseKind::PoolOnly);
@@ -1499,6 +1552,7 @@ mod tests {
             empty_solo_fee_bps: 250,
             trusted_target: false,
             uncommitted_pot: 20,
+            held_split: false,
         }
     }
 
@@ -1699,6 +1753,103 @@ mod tests {
         let all: Vec<TxOut> = listed.iter().map(pay).collect();
         assert_eq!(kind_of(&[all, vec![wc()]].concat(), &pl), Ok(CoinbaseKind::Split));
         assert_eq!(kind_of(&[pay(&listed[0]), to_gw(VALUE - listed[0].sats), wc()], &pl), foreign);
+    }
+
+    /// The issued list with the pool's fee last and the gateway's own address as its third
+    /// payee: a held-split gateway that is also a window miner, as the live ones are.
+    fn listing_the_gateway(pool: &[u8], gw: &[u8]) -> Vec<Output> {
+        let mut iss = split();
+        iss[2].script = gw.to_vec();
+        let fee = VALUE - iss.iter().map(|o| o.sats).sum::<u64>();
+        iss.push(Output { sats: fee, script: pool.to_vec() });
+        iss
+    }
+
+    /// An old OCEAN-hash CONVOY build hands every miner section 0, which pays the whole reward
+    /// to the one script it was configured with. Configured with the gateway's own script, and
+    /// with that gateway a window payee, the section is a listed payee paid far past its
+    /// amount: refused, every share, until held-split says whose work it is.
+    #[test]
+    fn a_held_split_gateway_paying_itself_the_reward_is_solo_work_even_where_it_is_listed() {
+        let pool = pool_script();
+        let gw = gw_script();
+        let iss = listing_the_gateway(&pool, &gw);
+        let to_gw = |value: u64| TxOut { value, script: gw.clone() };
+        // the extranonce push a stock section 0 carries ahead of its one payout
+        let en = TxOut { value: 0, script: [&[0x6a, 0x0e][..], &[0x5a; 14]].concat() };
+        let section_zero = [en.clone(), to_gw(VALUE), wc()];
+        let mut unflagged = policy(&iss, &pool);
+        unflagged.gateway_script = Some(&gw);
+        let flagged = Policy { held_split: true, gateway_script: Some(&gw), ..policy(&iss, &pool) };
+
+        assert_eq!(kind_of(&section_zero, &unflagged), Err(mining::REJECT_BAD_COINBASE_OUTPUTS));
+        assert_eq!(kind_of(&section_zero, &flagged), Ok(CoinbaseKind::GatewaySolo));
+        assert_eq!(kind_of(&[to_gw(VALUE), wc()], &flagged), Ok(CoinbaseKind::GatewaySolo));
+
+        // the per-height subsidy-only job paying the gateway is empty-solo, as it is unlisted
+        let mut slot = JobSlot::default();
+        let mut s = empty_solo_share(&[to_gw(VALUE), wc()]);
+        grind(&mut slot, &mut s);
+        assert_eq!(check(&mut slot, &s, &unflagged), Err(mining::REJECT_BAD_COINBASE_OUTPUTS));
+        let v = check(&mut slot, &s, &flagged).expect("held-split empty job");
+        assert_eq!((v.coinbase_kind, v.paid_to_pool), (CoinbaseKind::EmptySolo, 0));
+
+        // and a ground share on a full job carries its kind through verification
+        let mut slot = JobSlot::default();
+        let mut s = share(0, 0, 1, &section_zero, &txids(3), 1, [0; 8], [0; 8]);
+        grind(&mut slot, &mut s);
+        let v = check(&mut slot, &s, &flagged).expect("held-split section 0");
+        assert_eq!((v.coinbase_kind, v.paid_to_pool, v.coinbase_value), (CoinbaseKind::GatewaySolo, 0, VALUE));
+    }
+
+    /// Held-split never changes what a share that is accepted today is, and still refuses
+    /// every coinbase that pays anyone besides the gateway past what it was issued.
+    #[test]
+    fn the_held_split_flag_only_turns_a_refusal_into_the_gateways_solo_work() {
+        let pool = pool_script();
+        let gw = gw_script();
+        let stranger = p2wpkh(0xee);
+        let pay = |o: &Output| TxOut { value: o.sats, script: o.script.clone() };
+        let to = |script: &[u8], value: u64| TxOut { value, script: script.to_vec() };
+        let listed = listing_the_gateway(&pool, &gw);
+        let mut unlisted = split();
+        let fee = VALUE - unlisted.iter().map(|o| o.sats).sum::<u64>();
+        unlisted.push(Output { sats: fee, script: pool.clone() });
+        let mut burn = wc();
+        burn.value = 1_000;
+
+        for iss in [&listed, &unlisted] {
+            let whole: Vec<TxOut> = iss.iter().map(pay).collect();
+            let shapes: Vec<Vec<TxOut>> = vec![
+                [whole.clone(), vec![wc()]].concat(),
+                [whole.clone(), vec![to(&gw, 40_000), wc()]].concat(),
+                vec![pay(&iss[0]), to(&pool, VALUE - iss[0].sats), wc()],
+                vec![to(&pool, VALUE), wc()],
+                vec![to(&gw, VALUE), wc()],
+                vec![pay(&iss[0]), to(&gw, VALUE - iss[0].sats), wc()],
+                vec![to(&gw, VALUE - 1_000), to(&stranger, 1_000), wc()],
+                vec![to(&gw, VALUE - 1_000), burn.clone()],
+                vec![to(&gw, VALUE - 1_000), to(&pool, 1_000), wc()],
+                vec![to(&stranger, VALUE), wc()],
+            ];
+            for outs in &shapes {
+                let mut before = policy(iss, &pool);
+                before.gateway_script = Some(&gw);
+                let after = Policy { held_split: true, gateway_script: Some(&gw), ..policy(iss, &pool) };
+                let (was, is) = (kind_of(outs, &before), kind_of(outs, &after));
+                let only_gw = outs.iter().all(|o| o.script == gw || (o.is_op_return() && o.value == 0));
+                if was.is_ok() || !only_gw {
+                    assert_eq!(is, was, "{outs:?}");
+                } else {
+                    assert_eq!(is, Ok(CoinbaseKind::GatewaySolo), "{outs:?}");
+                }
+            }
+        }
+
+        // with no script of its own known yet, a held-split gateway is held to what anyone is
+        let blind = Policy { held_split: true, ..policy(&listed, &pool) };
+        assert_eq!(kind_of(&[to(&gw, VALUE), wc()], &blind), Err(mining::REJECT_BAD_COINBASE_OUTPUTS));
+        assert_eq!(kind_of(&[to(&pool, VALUE), wc()], &blind), Ok(CoinbaseKind::PoolOnly));
     }
 
     #[test]

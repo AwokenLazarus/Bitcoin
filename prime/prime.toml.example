@@ -8,6 +8,19 @@
 # Refuse stock empty-first / size-class gateways. Hello UA must be lazarus-gateway*
 # or contain lazarus-split. Lazarus production sets this true.
 # require-split-gateway = false
+#
+# Gateway builds, by git-hash prefix (7 to 40 hex digits), that hand every miner coinbase
+# section 0 (the whole reward to the one script they were configured with) whatever split
+# they hold, so every block they find owes the window the whole reward. A session whose hello
+# (v0.4.1-beta/<hash>) names one is configured with the gateway's own payout script once that
+# is known (at once for a key seen before, else from its first shares) and left there: its
+# work becomes its own solo work, accepted but not credited in the window, and a find owes
+# nobody. Its operator loses TIDES credit and takes solo variance; the pool stops owing
+# make-goods. A build with local changes (<hash>+), a lazarus-split UA and the house gateway
+# are never matched; an entry that is not 7-40 hex digits matches nothing. Empty (default):
+# nothing is held. The builds known to do this are CONVOY commits from c61c2e7 up to, not
+# including, 155b6bf. The ones seen live (beb9461 is not in the published history):
+# held-split-builds = ["e894b8a", "f74c22a", "2fea7e5", "57f1aee", "beb9461"]
 
 # DATUM listener gateways connect to.
 listen = "0.0.0.0:28915"

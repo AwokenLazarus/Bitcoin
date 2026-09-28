@@ -309,6 +309,7 @@ How bad it is depends on the build, and there are two severities:
 | `CONVOYMining` `b9ea7dc` | only when the coinbaser is late — 1 share in 167 live | [#13](https://github.com/CONVOYMining/datum_gateway/pull/13) |
 | `iohzrd` `7491a50` | same late-coinbaser case; every BLAKE2b miner then gets class YUGE | [#1](https://github.com/iohzrd/datum_gateway/pull/1) |
 | `OCEAN-xyz` `dbc3b14` | same late-coinbaser case, SHA256d (no BLAKE2b code at all) | not filed |
+| CONVOY `c61c2e7` up to `155b6bf` (live: `e894b8a`, `f74c22a`, `2fea7e5`, `57f1aee`, and `beb9461`, which is not in the published history) | **every** BLAKE2b job: section 0 is forced and the work commits to it | `155b6bf` and later; until then see [held-split builds](#held-split-builds) |
 
 Convoy and iohzrd already return `DATUM_COINBASE_ID_EMPTY` on a new block and pair it with
 `subsidy_only_coinbase`, so they avoid the unconditional form. What all of them keep is
@@ -332,6 +333,49 @@ For the same reason Prime **never sends a coinbaser the gateway did not ask for*
 only used when its value equals the requested one, and it lands in a global two-slot buffer
 whose index flips on every reply — so an unsolicited one can make a legitimate in-flight fetch
 read the wrong value and fall back to the pool-only coinbase this is all guarding against.
+
+### Held-split builds
+
+The worst of the table is the CONVOY commits from `c61c2e7` (BLAKE2b header-v2 mining) up to,
+not including, `155b6bf` ("Commit selected BLAKE2b payouts to mining work"). They set
+`cbselect = 0` on every BLAKE2b notify and build the work commitment over `coinbase[0]` whatever
+section they hand out, and section 0 is one output of the whole reward to the script they were
+configured with. They ask for coinbasers and hold the split; none of it ever reaches a miner.
+Configured with the pool's script, as `owe` does after every reply, every full job they publish is
+pool-only and every block they find owes the window the whole reward: 970239, 972562, 972856 and
+974296 (12.19 XBT) were `e894b8a`, a build doing about 1.1% of the pool's work.
+
+The one lever the pool has is the script that section pays. `held-split-builds` lists such builds
+by git-hash prefix; none is listed by default. A session whose hello names one
+(`v0.4.1-beta/<hash>`, a clean build: `<hash>+` has local changes, which may be the fix, and a
+`lazarus-split` user agent places the split) is configured with the gateway's own payout script
+once that is known and left there. It is known at once for a gateway key that connected before
+(`gateway-scripts.json`), and otherwise from the dominant username of its first shares; until
+then nothing changes and its work still owes. From then on no coinbaser reply turns it back to
+the pool, and the script stays the same for the rest of the session even if another username
+becomes dominant, because every job it has out pays that script. It is still sent the same
+coinbaser replies as anyone.
+
+Its section 0 is then `GatewaySolo`: accepted, not credited in the window, and a block found on
+it owes nobody. That holds where the gateway is also a window payee, which the live ones are.
+There the issued list names the gateway's script, and a listed payee paid the whole reward is
+Foreign, so without more every one of its shares would be refused. `Policy::held_split` looks
+again at that refusal only, and only for a coinbase that pays the gateway's script and nothing
+else; every share that is accepted without the flag is classified as before. The other way to
+avoid the refusal, taking the gateway out of the list it is sent, was not taken: it would change
+the replies, and move that payee's earnings into carry for a session whose section 0 never reads
+the list.
+
+The configure keeps the solo tag that goes with every configure(gateway). A block on this work
+pays the gateway alone, and the pool site tells the pool's finds from solo ones by the tag: under
+`Lazarus` it would be booked as a pool block.
+
+It is a policy choice, not a fix. The operator's work leaves the TIDES window (no credit, solo
+variance, no fee) and the pool stops owing make-goods for its finds. The fix is `155b6bf` or
+later, or `lazarus-gateway`. There is no detector: a list of builds cannot mistake a healthy
+session for one of these, and a counter of pool-only shares can. `clients[].held_split` is true
+for a held session, and `solo_full_shares` against `pool_only_full_jobs` shows whether it has
+moved over.
 
 ### Restarts used to throw away a burst of good work
 
@@ -384,7 +428,8 @@ pool UI reads: `pool` (pubkey, fee, window multiple, advertise address, uptime),
 (height, tip hash, difficulty, tip age), `window` (target/total work, fill percent, per-miner
 `work`, `shares`, `hashrate_ghs`, `share_percent`, `payout_sats` at the current reward),
 `clients` (per gateway: generation, user agent, accepted/rejected, last reject reason,
-`pool_only_shares`), `blocks`, `owed`, `totals`. `/ledger.json` is the previous Prime's credits view for the UI's
+`pool_only_shares`, and `held_split: true` for a [held-split build](#held-split-builds), absent
+otherwise), `blocks`, `owed`, `totals`. `/ledger.json` is the previous Prime's credits view for the UI's
 hashrate graph; `/healthz` returns `ok`.
 
 ## Tests
@@ -392,6 +437,7 @@ hashrate graph; `/healthz` returns `ok`.
 ```bash
 cargo test                                  # wire (44), tides (11), primed (12)
 cargo test --release -p primed --test replay_e2e -- --ignored --nocapture   # hostile gateway vs a real primed
+cargo test --release -p primed --test held_split_e2e -- --ignored --nocapture   # a held-split build's section 0, listed
 scripts/regtest-e2e.sh convoy               # or fte | iohzrd | startos: real C gateway + real Knots on regtest
 MINER_CMD='...' scripts/regtest-divergence.sh fte   # two nodes with different mempools and tips
 ```
