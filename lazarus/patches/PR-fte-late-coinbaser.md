@@ -48,12 +48,16 @@ Regtest, Bitcoin Knots 29.4.2, a DATUM Prime (Lazarus `primed`), `a5f28aa` built
 three stratum clients recorded every `mining.notify` (the class is the job id's last byte), two CPU
 miners submitted real shares, and a new block arrived about every 12 s.
 
-| | pool-only class-0 notifies | time miners held one | pool-only blocks/shares |
-|---|---|---|---|
-| `a5f28aa`, normal pool | 76 over 81 new blocks | 0.9 s in 696 s (~10–35 ms per block) | 0 of 8 |
-| `a5f28aa`, pool reply 7 s late | 14 | 61 s in 40 s of observation × 3 clients | 1 |
-| `a5f28aa` + this patch, normal | 0 over 117 blocks | 0 | 0 |
-| `a5f28aa` + this patch, reply 7 s late | 0 | 0 | 0 |
+| | pool-only class-0 notifies | time a miner held one | pool-only shares | time on subsidy-only work |
+|---|---|---|---|---|
+| `a5f28aa`, normal pool | 90 over 93 new blocks | 0.106% (10–37 ms per block) | 0 of 3 | 0.12% |
+| `a5f28aa`, pool reply 7 s late | 14 | 62.6 s over 3 clients | 1 (a real share on a full job) | |
+| `a5f28aa` + this patch, normal | 0 over 126 new blocks | 0 | 0 of 6 | 0.22% |
+| `a5f28aa` + this patch, reply 7 s late | 0 | 0 | 0 | |
+
+The same test on the other C builds: cutting-edge `8002c56` 99/111 blocks, 62.6 s late; iohzrd `c031568`
+47/51, 61.2 s; iohzrd `7491a50` 132/141, 55 s and 1 share; CONVOY `ac9b70c` 222/243, 62.4 s. So the patch
+turns the ~20 ms after each block from pool-only into subsidy-only work, and removes the late case.
 
 Live on Lazarus over the 24 h to 2026-09-27: 6 gateways on FlyTheElephant builds (`1b5567be`,
 `a5f28aa`, `8002c56`), 4 of them flagged by the pool at least once for a pool-only share on a full

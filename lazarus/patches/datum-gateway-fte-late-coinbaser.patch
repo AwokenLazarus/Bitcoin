@@ -14,8 +14,31 @@
 #     idle thread, a vardiff resend), and sends nothing for a job that has no subsidy-only
 #     coinbase: the miner keeps its current work until the split is in;
 #   - stratum_job_coinbaser_ready no longer gives up after 5 s (the give-up publishes exactly
-#     that full + pool-only job). Solo keeps all three behaviours unchanged.
+#     that full + pool-only job);
+#   - datum_coinbaser_thread retries a coinbaser fetch that came back with 0 outputs (timed out)
+#     instead of publishing the job with every class built without the split.
+# Solo keeps all four behaviours unchanged.
 #
+diff --git a/src/datum_coinbaser.c b/src/datum_coinbaser.c
+index a867fb3..5fca305 100644
+--- a/src/datum_coinbaser.c
++++ b/src/datum_coinbaser.c
+@@ -891,7 +891,14 @@ void *datum_coinbaser_thread(void *ptr) {
+ 				s->available_coinbase_outputs_count = 0;
+ 				i = 0;
+ 			}
+-			if (i>=0) {
++			// A pool's reply always carries at least one output (its own), so 0 while pooled
++			// means no reply: the fetch timed out or the reply was for another value. Publishing
++			// then would build every coinbase class without the split and mark the job ready,
++			// so a found block pays the pool alone. Ask again instead; miners keep their current
++			// work (or a new height's subsidy-only job) until the split is in.
++			if (i < 1 && datum_protocol_is_active()) {
++				DLOG_DEBUG("No coinbaser for job %d yet; asking again", sjob);
++			} else if (i>=0) {
+ 				DLOG_DEBUG("Generating coinbases for up to %d outputs", i);
+ 				generate_coinbase_txns_for_stratum_job(s, false);
+ 				if (need_coinbaser_rwlocks_init_done) {
 diff --git a/src/datum_stratum.c b/src/datum_stratum.c
 index c1efbce..bdb1355 100644
 --- a/src/datum_stratum.c
