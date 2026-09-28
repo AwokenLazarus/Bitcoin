@@ -5468,7 +5468,7 @@ _SEO_MODIFIED = {
     "/": "2026-09-28",
     "/calculator": "2026-09-23",
     "/blocks": "2026-09-23",
-    _STRATUM_DOC_PATH: "2026-09-22",
+    _STRATUM_DOC_PATH: "2026-09-28",
 }
 _OG_IMAGE = "https://pool.lazarus-xbt.xyz/static/og-pool.png"
 
