@@ -18,11 +18,14 @@ function pageFile(loc) {
   return join("public", path, "index.html");
 }
 
+// Local calendar date, the same one git's %cs prints for a commit made here.
+const today = () => new Date().toLocaleDateString("en-CA");
+
 function lastChanged(file) {
   const dirty = execFileSync("git", ["status", "--porcelain", "--", file], { cwd: here, encoding: "utf8" }).trim();
-  if (dirty) return new Date().toISOString().slice(0, 10);
+  if (dirty) return today();
   const date = execFileSync("git", ["log", "-1", "--format=%cs", "--", file], { cwd: here, encoding: "utf8" }).trim();
-  return date || new Date().toISOString().slice(0, 10);
+  return date || today();
 }
 
 const xml = readFileSync(sitemapPath, "utf8");
