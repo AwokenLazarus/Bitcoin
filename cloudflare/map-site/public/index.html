@@ -112,7 +112,7 @@
   <h1><span class="kicker">Bitcoin · BLAKE2b proof of work · XBT / BTCB2</span>The same ledger.<br>A <em>different</em> proof of work.</h1>
   <p class="lede">On 30 August 2026, at block 961,640, Bitcoin's history was carried onto a new proof of work: BLAKE2b. The coins, the addresses and every block before that height are unchanged. What changed is who can mine, and how the rewards are paid. Its coins are written XBT, and some exchanges list them as BTCB2. This is a hub for the people building on it.</p>
   <div class="btn-row">
-    <a class="btn" href="https://pool.lazarus-xbt.xyz" rel="noopener">Start mining</a>
+    <a class="btn" href="https://pool.lazarus-xbt.xyz/connect" rel="noopener">Start mining</a>
     <a class="btn ghost" href="/learn/">What is XBT?</a>
     <a class="btn ghost" href="/map/">See the galaxy map</a>
   </div>
@@ -226,7 +226,7 @@
     </a>
   </div>
   <div class="callout warn" data-reveal>
-    <p><strong>Pool stratum is on the way out.</strong> Lazarus is retiring its hosted stratum: work sent through it will not continue to be supported or paid. Nodes are also deciding to invalidate coinbase payouts to addresses that hash through a pool's stratum rather than their own node, which would apply on every pool. Running your own DATUM gateway settles it — the <a href="https://pool.lazarus-xbt.xyz" rel="noopener">pool site</a> has the instructions.</p>
+    <p><strong>Pool stratum is on the way out.</strong> Lazarus is retiring its hosted stratum: work sent through it will not continue to be supported or paid. Nodes are also deciding to invalidate coinbase payouts to addresses that hash through a pool's stratum rather than their own node, which would apply on every pool. Running your own DATUM gateway settles it — the pool site has the <a href="https://pool.lazarus-xbt.xyz/connect" rel="noopener">DATUM gateway setup</a>.</p>
   </div>
 </section>
 
@@ -304,7 +304,7 @@
       <details class="faq"><summary>What can I mine it with?</summary><div class="answer"><p>Anything that can hash BLAKE2b: purpose-built ASICs, GPUs, even a CPU for testing. SHA-256 bitcoin miners cannot.</p></div></details>
       <details class="faq"><summary>How do payouts work on this chain?</summary><div class="answer"><p>Pools running DATUM pay miners inside the coinbase of the block that earned it, so a payout and a block are the same event and no pool holds a balance for you. Each pool sets its own split: the <a href="https://pool.lazarus-xbt.xyz" rel="noopener">Lazarus Pool site</a> documents its scheme, fees and window.</p></div></details>
       <details class="faq"><summary>Why does my payout take so long to spend?</summary><div class="answer"><p>Coinbase outputs always mature before they can be spent. Until block 979,920 that wait is 6,481 confirmations rather than 101, because of the long coinbase maturity soft fork. The coins are yours the moment the block confirms; they are only locked from spending.</p></div></details>
-      <details class="faq"><summary>I am on a pool's stratum today. What should I do?</summary><div class="answer"><p>Move to your own node and DATUM gateway. Your accepted work is tied to your address rather than to how you connect, so your place in a pool's payout window carries over. The <a href="https://pool.lazarus-xbt.xyz" rel="noopener">pool site</a> has the steps.</p></div></details>
+      <details class="faq"><summary>I am on a pool's stratum today. What should I do?</summary><div class="answer"><p>Move to your own node and DATUM gateway. Your accepted work is tied to your address rather than to how you connect, so your place in a pool's payout window carries over. The pool site has the <a href="https://pool.lazarus-xbt.xyz/connect" rel="noopener">DATUM setup steps</a>.</p></div></details>
       <details class="faq"><summary>Where do I ask for help?</summary><div class="answer"><p>The <a href="https://discord.gg/fD33dJXnzz" rel="noopener">Discord</a> is the fastest way to reach miners and the people running the pool. Announcements go out on <a href="https://x.com/Awoken_Lazarus" rel="noopener">X</a>.</p></div></details>
     </div>
     <div class="btn-row"><a class="btn ghost" href="/faq/">All questions</a></div>
@@ -329,9 +329,10 @@
     </div>
     <div class="footer-col">
       <p class="category">Mine</p>
-      <a href="https://pool.lazarus-xbt.xyz" rel="noopener">Lazarus Pool</a>
-      <a href="https://pool.lazarus-xbt.xyz#connect" rel="noopener">Connect a miner</a>
-      <a href="https://pool.lazarus-xbt.xyz#learn" rel="noopener">How the pool works</a>
+      <a href="https://pool.lazarus-xbt.xyz" rel="noopener">XBT mining pool</a>
+      <a href="https://pool.lazarus-xbt.xyz/connect" rel="noopener">Connect a Siacoin ASIC</a>
+      <a href="https://pool.lazarus-xbt.xyz/hardware" rel="noopener">ASICs that mine XBT</a>
+      <a href="https://pool.lazarus-xbt.xyz/how" rel="noopener">How the pool pays</a>
       <a href="/ecosystem/#pools">Other pools</a>
     </div>
     <div class="footer-col">
