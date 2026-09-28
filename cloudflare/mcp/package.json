@@ -1,0 +1,7 @@
+{
+  "name": "lazarus-mcp",
+  "private": true,
+  "type": "module",
+  "description": "mcp.lazarus-xbt.xyz: read-only MCP server for Lazarus Pool (Cloudflare Worker)",
+  "scripts": { "test": "node test/run.mjs", "deploy": "wrangler deploy" }
+}

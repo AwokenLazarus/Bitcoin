@@ -19,6 +19,7 @@ const HERE = dirname(fileURLToPath(import.meta.url)), FIX = join(HERE, "fixtures
 const A1 = "bc1q7u804pdewst4exswy39axt7cunu9sdjdqkem20"; // 4Ethos, DATUM, many queued make-goods
 const A2 = "bc1qesxzdqld56cpu2x6e7r4c9t6tc254djelc025a"; // theFlav, DATUM, pre-973,440 payouts
 const POOL = "https://pool.test", CHAIN = "https://chain.test";
+const RANKING = join(HERE, "..", "..", "..", "pool", "gateways.json");
 
 // ---------------------------------------------------------------- fakes
 let fetches = [], fetchOverride = null;
@@ -34,6 +35,7 @@ globalThis.fetch = async (input) => {
     else if (path === "/api/pool?h=0") file = "pool.json";
     else if (path === "/api/coinbaser") file = "coinbaser.json";
     else if (path === "/api/gateways") file = "gateways.json";
+    else if (path === "/api/gateway-builds") file = RANKING; // the site's single source, not a copy
   } else if (url.startsWith(CHAIN)) {
     let m;
     if (path === "/api/blocks/tip/height") { file = "tip.txt"; text = true; }
@@ -41,8 +43,9 @@ globalThis.fetch = async (input) => {
     else if ((m = path.match(/^\/api\/block\/([0-9a-f]{64})\/txids$/))) file = `txids-${m[1]}.json`;
     else if ((m = path.match(/^\/api\/tx\/([0-9a-f]{64})$/))) file = `tx-${m[1]}.json`;
   }
-  if (!file || !existsSync(join(FIX, file))) return new Response("not found", { status: 404 });
-  const body = readFileSync(join(FIX, file), "utf8");
+  const at = file && (file.startsWith("/") ? file : join(FIX, file));
+  if (!at || !existsSync(at)) return new Response("not found", { status: 404 });
+  const body = readFileSync(at, "utf8");
   if (!text && body.startsWith('{"error"')) return new Response(body, { status: 404 });
   return new Response(body, { status: 200, headers: { "Content-Type": text ? "text/plain" : "application/json" } });
 };
@@ -252,6 +255,10 @@ section("lazarus_faq");
   check("Ratum question -> ratum", r.data.matches[0]?.id === "ratum", r.data.matches.map((m) => m.id));
   r = await call("lazarus_faq", { topic_or_question: "ratum" });
   check("ratum topic id -> exact entry, links the /ratum guide", r.data.matches.length === 1 && r.data.matches[0].links.some((l) => l.endsWith("/ratum")));
+  r = await call("lazarus_faq", { topic_or_question: "which DATUM gateway build should I run?" });
+  check("which-gateway question -> which-gateway", r.data.matches[0]?.id === "which-gateway", r.data.matches.map((m) => m.id));
+  r = await call("lazarus_faq", { topic_or_question: "how do I set up FlyTheElephant's gateway?" });
+  check("FlyTheElephant question -> flytheelephant, links its guide", r.data.matches[0]?.id === "flytheelephant" && r.data.matches[0].links.some((l) => l.endsWith("/flytheelephant")), r.data.matches.map((m) => m.id));
   const n0 = fetches.length;
   await call("lazarus_faq", { topic_or_question: "tides" });
   check("lazarus_faq makes no upstream call", fetches.length === n0);
@@ -275,6 +282,21 @@ section("gateway_status");
 }
 
 // ---------------------------------------------------------------- validation and abuse
+section("gateway ranking");
+{
+  const ids = JSON.parse(readFileSync(RANKING, "utf8")).gateways.map((g) => g.name);
+  let r = await call("connection_info", {});
+  const b = r.data.gateway_builds || [];
+  check("connection_info.gateway_builds follows pool/gateways.json", JSON.stringify(b.map((g) => g.name)) === JSON.stringify(ids), b.map((g) => g.name));
+  check("only the first build is recommended, and the setup step names it", b[0]?.recommended && b.slice(1).every((g) => !g.recommended) && r.data.datum_gateway.steps.some((s) => s.includes(b[0].name)));
+  check("guides are absolute pool-site links", b.filter((g) => g.guide).every((g) => g.guide.startsWith("https://pool.lazarus-xbt.xyz/")), b.map((g) => g.guide));
+  reset();
+  fetchOverride = async (url) => (url.includes("/api/gateway-builds") ? new Response("not found", { status: 404 }) : null);
+  r = await call("connection_info", {});
+  check("without /api/gateway-builds connection_info still answers and points at the Connect list", !r.isError && r.data.gateway_builds.length === 0 && r.data.datum_gateway.steps.some((s) => /Connect page/.test(s)));
+  reset();
+}
+
 section("validation and abuse");
 {
   reset();

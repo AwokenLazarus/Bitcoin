@@ -18,7 +18,7 @@ credentials and sees nothing a browser cannot.
 | `src/upstream.js` | `upstream()`, the single cached door to the pool and explorer; `PublicError`; shared helpers |
 | `src/address.js` | strict mainnet address validation (bech32 / bech32m / base58check checksums) |
 | `src/limiter.js` | exact rate limits in a Durable Object; the numbers are in `RULES` |
-| `test/run.mjs` | offline tests against recorded public-API fixtures: `node test/run.mjs` |
+| `test/run.mjs` | offline tests against recorded public-API fixtures: `npm test` (= `node test/run.mjs`) |
 
 ## Security
 
