@@ -691,6 +691,16 @@
         },
       }, null, 2);
     }
+    // The Ratum guide (/ratum) ships its whole config with the pubkey as of the deploy; keep the pool's
+    // fields current in case they ever move.
+    const rc = $("ratum-config");
+    if (rc && pubkey) {
+      try {
+        const cfg = JSON.parse(rc.textContent);
+        Object.assign(cfg.datum, { pool_host: host, pool_port: port, pool_pubkey: pubkey });
+        rc.textContent = JSON.stringify(cfg, null, 2);
+      } catch (_) { /* leave the shipped copy */ }
+    }
     if ($("datum-host")) $("datum-host").textContent = host;
     if ($("datum-port")) $("datum-port").textContent = String(port);
     if ($("datum-pubkey")) $("datum-pubkey").textContent = pubkey || "\u2014";

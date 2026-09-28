@@ -410,7 +410,7 @@
 
       <div class="gw-pick card" id="gw-pick">
         <h3 class="kicker" id="gw-pick-title" data-i18n="connect.whichTitle">Which DATUM gateway</h3>
-        <p class="note" data-i18n="connect.whichNote">If you run your own node, pick one of these. All three speak BLAKE2b and connect here with no patch; current builds still advertise v0.4.1-beta. Skip this if you use the public stratum.</p>
+        <p class="note" data-i18n="connect.whichNote">If you run your own node, pick one of these. All four speak BLAKE2b and connect here with no patch. Skip this if you use the public stratum.</p>
         <ol class="gw-rank" aria-labelledby="gw-pick-title">
           <li class="reco">
             <span class="n" aria-hidden="true">1</span>
@@ -423,12 +423,19 @@
           <li>
             <span class="n" aria-hidden="true">2</span>
             <div>
+              <strong><a href="/ratum">Ratum</a></strong>
+              <small data-i18n-html="connect.ratum">iohzrd’s Rust gateway, <code>ratum-gateway</code>: one binary for Linux, macOS and Windows, same config file. Every split output in the coinbase; tested release by release against our Prime. <a href="/ratum">Setup guide</a>.</small>
+            </div>
+          </li>
+          <li>
+            <span class="n" aria-hidden="true">3</span>
+            <div>
               <strong><a href="https://github.com/CONVOYMining/datum_gateway" target="_blank" rel="noreferrer">CONVOY</a></strong>
               <small data-i18n-html="connect.convoy">Master <code>b9ea7dc</code>. Firmware size classes still apply on BLAKE2b, so a found block often pays only the first ~17 miners. An Antminer A3 is served a pool-only coinbase.</small>
             </div>
           </li>
           <li>
-            <span class="n" aria-hidden="true">3</span>
+            <span class="n" aria-hidden="true">4</span>
             <div>
               <strong><a href="https://github.com/FlyTheElephant1/datum_gateway" target="_blank" rel="noreferrer">FlyTheElephant</a></strong>
               <small data-i18n-html="connect.fly">Now the same code as CONVOY (<code>b9ea7dc</code>): size classes, and a new height starts subsidy-only. Older FlyTheElephant / OCEAN-lineage builds still send a pool-only full job on every new block — rebuild from current master or switch to iohzrd.</small>
@@ -490,7 +497,7 @@
             <li data-i18n-html="connect.step2">Build the gateway, merge the <code>stratum</code> and <code>datum</code> sections above into its config, and set <code>mining.pool_address</code> to <em>your</em> payout address. Leftover value the split does not name goes there. Stock DATUM defaults <code>stratum.vardiff_min</code> to 16384 if you omit it — that is the floor <em>and</em> the start, and Prime cannot lower it. Set 4096 so new sessions start there; vardiff still climbs for faster boxes.</li>
             <li data-i18n-html="connect.step3">Point miners at your gateway’s stratum (usually <code>stratum+tcp://127.0.0.1:23334</code>). Username <code>address.worker</code>: the part before the first <code>.</code> is who gets paid and must be an address this chain accepts.</li>
             <li data-i18n-html="connect.step4">Watch your gateway appear under <a href="#gateways">Gateways</a> and your address under <a href="#miners">Miners</a>. Stock builds can still publish a job whose coinbase omits the window: current iohzrd, CONVOY, and FlyTheElephant only if the pool split is late. Older FlyTheElephant / OCEAN-lineage <code>v0.4.1-beta</code> builds (no <code>+lazarus-split</code>) still do it on the first job of every height. Prime accepts that work and, if such a job found a block, records what the pool then owes the window.</li>
-            <li data-i18n-html="connect.step5">For a longer Knots + DATUM walkthrough than these four steps, use <a href="https://convoy.xyz/getstarted" target="_blank" rel="noreferrer">CONVOY’s get-started guide</a> (also in <a href="https://convoy.xyz/getstarted?lang=zh" target="_blank" rel="noreferrer">中文</a>), then come back here for the Lazarus host, port, pubkey, and config snippet.</li>
+            <li data-i18n-html="connect.step5">For a longer Knots + DATUM walkthrough than these four steps, use <a href="https://convoy.xyz/getstarted" target="_blank" rel="noreferrer">CONVOY’s get-started guide</a> (also in <a href="https://convoy.xyz/getstarted?lang=zh" target="_blank" rel="noreferrer">中文</a>), then come back here for the Lazarus host, port, pubkey, and config snippet. Running Ratum? Its <a href="/ratum">own guide</a> has the whole config, pointed here.</li>
           </ol>
           <details class="fold">
             <summary data-i18n="connect.whoSummary">Who gets paid, by gateway setting</summary>
@@ -853,7 +860,7 @@
             <span class="pill pool-state" data-pool-state hidden></span>
           </div>
           <p class="pool-fee" data-i18n-html="pools.iohzrdFee"><b>0%</b> DATUM · <b>10%</b> their public gateway</p>
-          <p class="pool-copy" data-i18n-html="pools.iohzrd">Omega Pool, run by the author of the <a href="https://github.com/iohzrd/datum_gateway" target="_blank" rel="noreferrer">gateway we recommend</a>. Own gateway is 0%; their public gateway is 10%. Miners connect through ratum-gateway or CONVOY and are paid from a TIDES window of eight times difficulty.</p>
+          <p class="pool-copy" data-i18n-html="pools.iohzrd">Omega Pool, run by the author of the <a href="https://github.com/iohzrd/datum_gateway" target="_blank" rel="noreferrer">gateway we recommend</a>. Own gateway is 0%; their public gateway is 10%. Miners connect through <a href="/ratum">ratum-gateway</a> or CONVOY and are paid from a TIDES window of eight times difficulty.</p>
           <dl class="pool-facts">
             <dt data-i18n="connect.dtStratum">Stratum</dt><dd><span class="mono">stratum+tcp://gateway.iohzrd.tech:23334</span> <span class="faint" data-i18n="pools.theirGw">· their public gateway</span></dd>
             <dt data-i18n="pools.dtDatum">DATUM</dt><dd>config on <a href="https://pool.iohzrd.tech/" target="_blank" rel="noreferrer">pool.iohzrd.tech</a></dd>
