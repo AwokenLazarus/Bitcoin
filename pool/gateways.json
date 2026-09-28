@@ -1,0 +1,37 @@
+{
+ "_doc": "DATUM gateway builds the site recommends, best first. This file is the only place the order lives: server.py orders the 'Which DATUM gateway' list (index.html items with data-gw=ID; their copy is connect.<i18n> in static/i18n/*.js), writes the llms.txt section, and serves the file at /api/gateway-builds for the MCP. reco marks the first entry Recommended; the Omega Pool card calls iohzrd 'the gateway we recommend' (pools.iohzrd in i18n), which stays true only while iohzrd is first. summary is the English line llms.txt and the MCP use. Evidence: XBT-084 (~/xbt-rnd/xbt-084/results, C builds) and XBT-082 (~/xbt-rnd/xbt-082, Ratum). When FlyTheElephant1/datum_gateway master carries lazarus/patches/datum-gateway-fte-late-coinbaser.patch, move the fte entry to the top with reco true (drop reco from iohzrd), say so in its summary, and edit pools.iohzrd, connect.fly and the /flytheelephant guide's last paragraph to match.",
+ "updated": "2026-09-28",
+ "gateways": [
+  {
+   "id": "iohzrd",
+   "name": "iohzrd datum_gateway",
+   "repo": "https://github.com/iohzrd/datum_gateway",
+   "i18n": "connect.iohzrd",
+   "reco": true,
+   "summary": "Master c031568; StartOS pow_0.4.1_23 ships 7491a50. Every miner gets the whole split, fitted to block weight and sigops. Measured: for ~20 ms after each new block, and for as long as the pool's split is late, it can hand out a job that pays only the pool."
+  },
+  {
+   "id": "fte",
+   "name": "FlyTheElephant datum_gateway",
+   "repo": "https://github.com/FlyTheElephant1/datum_gateway",
+   "i18n": "connect.fly",
+   "guide": "/flytheelephant",
+   "summary": "Master a5f28aa: CONVOY's BLAKE2b code plus FlyTheElephant's fixes; every miner gets the whole split, fitted to block weight and sigops. Measured the same as iohzrd: a pool-only job for ~20 ms after each new block and while the pool's split is late; lazarus/patches/datum-gateway-fte-late-coinbaser.patch removes that (0 pool-only jobs in the same test). No StartOS package; source build or its Dockerfile."
+  },
+  {
+   "id": "ratum",
+   "name": "Ratum (ratum-gateway)",
+   "repo": "https://github.com/iohzrd/ratum",
+   "i18n": "connect.ratum",
+   "guide": "/ratum",
+   "summary": "iohzrd's Rust gateway: one binary for Linux, macOS and Windows, reading the C gateway's config file. Tested on regtest against our Prime on releases 0.1.28, 0.1.39, 0.1.53, master 0.1.54 and the B2Pool and P2Block forks: every found block booked split with every payee paid, and pool-only full work at most 0.006% of the time. Defect on every release: when the pool drops it keeps serving unpooled work, paying mining.pool_address, for 12-26 s before it disconnects miners, so set pool_address to your own address."
+  },
+  {
+   "id": "convoy",
+   "name": "CONVOY datum_gateway",
+   "repo": "https://github.com/CONVOYMining/datum_gateway",
+   "i18n": "connect.convoy",
+   "summary": "Master ac9b70c. Firmware size classes still apply to miners it recognises (Antminer A3 among them), so a block they find can pay only the first ~17 miners; like the other C builds, a pool-only job for ~20 ms after each new block and while the pool's split is late."
+  }
+ ]
+}

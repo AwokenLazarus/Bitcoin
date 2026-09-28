@@ -32,7 +32,7 @@
   const PATH_VIEW = {
     "/how": "learn", "/bip110": "learn", "/tides": "learn", "/non-custodial": "learn", "/self-cap": "learn", "/pools": "learn",
     "/datum-subsidy": "learn", "/api": "learn",
-    "/connect": "mine", "/mine-xbt": "mine", "/ratum": "mine", "/hardware": "mine", "/profitability": "mine", "/calculator": "mine",
+    "/connect": "mine", "/mine-xbt": "mine", "/ratum": "mine", "/flytheelephant": "mine", "/hardware": "mine", "/profitability": "mine", "/calculator": "mine",
     "/blocks": "payouts",
   };
   const pagePath = location.pathname.replace(/^\/zh(?=\/|$)/, "").replace(/\/$/, "") || "/";

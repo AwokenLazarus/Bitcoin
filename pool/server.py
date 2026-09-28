@@ -4571,6 +4571,18 @@ _SEO_PAGES = {
             "scroll": "connect",
         },
     },
+    "/flytheelephant": {
+        "en": {
+            "title": 'Mine XBT with the FlyTheElephant DATUM Gateway | Lazarus Pool',
+            "description": "Build and run FlyTheElephant's datum_gateway against Lazarus Prime (datum.lazarus-xbt.xyz:28915): node settings, a full config, how to check it is working, and what we measured.",
+            "scroll": "connect",
+        },
+        "zh": {
+            "title": '用 FlyTheElephant DATUM 网关在 Lazarus 挖 XBT | Lazarus Pool',
+            "description": '编译并运行 FlyTheElephant 的 datum_gateway，连接 Lazarus Prime（datum.lazarus-xbt.xyz:28915）：节点设置、完整配置、如何确认运行正常，以及我们的实测结果。',
+            "scroll": "connect",
+        },
+    },
     "/profitability": {
         "en": {
             "title": "Is Mining XBT Profitable? Sia ASIC Earnings | Lazarus Pool",
@@ -4841,6 +4853,40 @@ _SEO_INTRO = {
         ]),
     },
     "/ratum": {"en": _RATUM_INTRO_EN, "zh": _RATUM_INTRO_ZH},
+    "/flytheelephant": {
+        "en": ('Mine at Lazarus with the FlyTheElephant gateway', [
+            '<p><a href="https://github.com/FlyTheElephant1/datum_gateway" target="_blank" rel="noreferrer">FlyTheElephant1/datum_gateway</a> is a DATUM gateway for this chain: CONVOY\'s BLAKE2b code plus FlyTheElephant\'s own work. Its <code>master</code> gives every miner the pool\'s whole payout split (the 16&nbsp;KB coinbase) and fits that coinbase to the block\'s weight and sigop limits, so a full split can never make your block invalid. It connects to Lazarus with no patch. FlyTheElephant also helps miners set up in our Discord <code>#support</code>. Thank you.</p>',
+            '<p><b>1. Your node.</b> Bitcoin Knots <b>29.4.2</b> (older builds reject the long coinbase maturity rule and their blocks are invalid), fully synced on this chain. In <code>bitcoin.conf</code>:</p>',
+            '<pre><code>server=1\nblake2b_headline=8-30 NYPost Deride And Conquer\nblockmaxweight=736000\nblocknotify=killall -USR1 datum_gateway</code></pre>',
+            '<p><code>blockmaxweight</code> leaves room for the split coinbase. Knots\' default DNS seeds point at SHA-256 peers, so add a few <code>addnode=</code> lines from a current list for this chain (<a href="https://bitcoinxor.org/node" target="_blank" rel="noreferrer">bitcoinxor.org/node</a>, or <a href="https://convoy.xyz/getstarted" target="_blank" rel="noreferrer">CONVOY\'s guide</a>); a list pasted weeks ago rots. <code>maxtipage</code> only mattered during the slow weeks after the fork and you can leave it out once you are synced.</p>',
+            "<p><b>2. Build the gateway.</b> On Debian or Ubuntu (other systems: the repo's README):</p>",
+            '<pre><code>sudo apt install cmake pkgconf libcurl4-openssl-dev libjansson-dev libsodium-dev libmicrohttpd-dev psmisc\ngit clone https://github.com/FlyTheElephant1/datum_gateway\ncd datum_gateway\ncmake . &amp;&amp; make\n./datum_gateway --test\n./datum_gateway -c datum_gateway_config.json</code></pre>',
+            '<p>There is also a <code>Dockerfile</code> in the repo; in Docker set <code>notify_fallback</code> to <code>false</code> and use <code>blocknotify=wget -q -O /dev/null http://datum-gateway:7152/NOTIFY</code>.</p>',
+            '<p><b>3. Config.</b> A complete <code>datum_gateway_config.json</code> for Lazarus. Copy <code>pool_pubkey</code> from the DATUM tab below; set <code>pool_address</code> to your own address (it only receives value on work that is not pooled); point <code>rpccookiefile</code> or <code>rpcuser</code>/<code>rpcpassword</code> at your node.</p>',
+            '<pre><code>{\n  &quot;bitcoind&quot;: {\n    &quot;rpccookiefile&quot;: &quot;/home/you/.bitcoin/.cookie&quot;,\n    &quot;rpcurl&quot;: &quot;http://127.0.0.1:8332&quot;,\n    &quot;notify_fallback&quot;: true\n  },\n  &quot;stratum&quot;: { &quot;listen_port&quot;: 23334, &quot;vardiff_min&quot;: 4096 },\n  &quot;mining&quot;: {\n    &quot;pool_address&quot;: &quot;bc1q…your address&quot;,\n    &quot;coinbase_tag_primary&quot;: &quot;Lazarus&quot;,\n    &quot;coinbase_tag_secondary&quot;: &quot;your name or rig&quot;\n  },\n  &quot;api&quot;: { &quot;listen_port&quot;: 7152, &quot;admin_password&quot;: &quot;choose one&quot; },\n  &quot;logger&quot;: { &quot;log_level_console&quot;: 2 },\n  &quot;datum&quot;: {\n    &quot;pool_host&quot;: &quot;datum.lazarus-xbt.xyz&quot;,\n    &quot;pool_port&quot;: 28915,\n    &quot;pool_pubkey&quot;: &quot;the pubkey from the DATUM tab below&quot;,\n    &quot;pool_pass_workers&quot;: true,\n    &quot;pool_pass_full_users&quot;: true,\n    &quot;pooled_mining_only&quot;: true\n  }\n}</code></pre>',
+            '<p>Leave <code>vardiff_min</code> at 4096: without it stock DATUM starts every session at 16384, and Prime cannot lower that.</p>',
+            "<p><b>4. Point your miners at the gateway,</b> not at us: <code>stratum+tcp://&lt;your gateway's LAN IP&gt;:23334</code>, username <code>youraddress.worker</code>, password <code>x</code>. The part before the first <code>.</code> is who gets paid.</p>",
+            '<p><b>5. Check it.</b> Within a minute your gateway shows under <a href="#gateways">Gateways</a> as <code>v0.4.1-beta/&lt;commit&gt;</code> with fee path DATUM, and your address appears under <a href="#miners">Miners</a> after its first share. The gateway\'s own dashboard is on port 7152. Its log should say <i>DATUM Server MOTD</i> with our Proverbs line; a found block shows here with its split.</p>',
+            '<p><b>If it does not connect.</b> <i>DATUM not connected and configured for pooled mining only! Rejecting connection</i> means the gateway has no pool session, so it turns miners away (their firmware then fails over to their backup pool): check <code>pool_host</code>, <code>pool_port</code> and that <code>pool_pubkey</code> is the whole key from this page; a wrong key never gets past the handshake. A tip stuck at 961,639 is an old Knots or peers on the other chain. <i>Refused</i> in the log with an upgrade message means your node built a block the chain rejected; upgrade Knots and reconnect, and it lets you back in by itself.</p>',
+            '<p><b>What we measured.</b> We ran this gateway against our own Prime and Knots 29.4.2 on regtest: handshake and pubkey pinning, the split in every found block paying every miner in the window, <code>address.worker</code> and bare-address usernames, the 0% DATUM fee path, reconnects, Prime\'s template checks and refusals all pass. One thing does not, and it is shared by every C DATUM gateway today (iohzrd and CONVOY too): for a fraction of a second after each new block, and for as long as the pool\'s split is late, the gateway can hand out a job whose coinbase pays only the pool. A small patch fixes it by serving the empty subsidy-only job, or nothing, until the split is in. We are offering it to FlyTheElephant; once it is merged this build has no known gaps, and until then you can apply it yourself: <a href="https://github.com/AwokenLazarus/Bitcoin/blob/main/lazarus/patches/datum-gateway-fte-late-coinbaser.patch" target="_blank" rel="noreferrer">datum-gateway-fte-late-coinbaser.patch</a> (<code>patch -p1 &lt;</code> it before <code>cmake</code>).</p>',
+        ]),
+        "zh": ('用 FlyTheElephant 网关在 Lazarus 挖矿', [
+            '<p><a href="https://github.com/FlyTheElephant1/datum_gateway" target="_blank" rel="noreferrer">FlyTheElephant1/datum_gateway</a> 是这条链上的一个 DATUM 网关：基于 CONVOY 的 BLAKE2b 代码，加上 FlyTheElephant 自己的改进。它的 <code>master</code> 让每台矿机都拿到矿池完整的分账（16&nbsp;KB coinbase），并按区块的 weight 和 sigop 上限裁剪这个 coinbase，所以完整分账永远不会让你的区块无效。无需任何补丁即可连接 Lazarus。FlyTheElephant 也在我们 Discord 的 <code>#support</code> 频道帮矿工配置，谢谢他。</p>',
+            '<p><b>1. 节点。</b>Bitcoin Knots <b>29.4.2</b>（旧版本不认长 coinbase 成熟期规则，它们出的块无效），在这条链上完全同步。<code>bitcoin.conf</code> 中：</p>',
+            '<pre><code>server=1\nblake2b_headline=8-30 NYPost Deride And Conquer\nblockmaxweight=736000\nblocknotify=killall -USR1 datum_gateway</code></pre>',
+            '<p><code>blockmaxweight</code> 为分账 coinbase 留出空间。Knots 默认的 DNS 种子指向 SHA-256 节点，所以请从这条链的最新列表加几行 <code>addnode=</code>（<a href="https://bitcoinxor.org/node" target="_blank" rel="noreferrer">bitcoinxor.org/node</a>，或 <a href="https://convoy.xyz/getstarted?lang=zh" target="_blank" rel="noreferrer">CONVOY 的指南</a>）；几周前复制的列表会失效。<code>maxtipage</code> 只在分叉后同步缓慢的那几周有用，同步完成后可以不设。</p>',
+            '<p><b>2. 编译网关。</b>Debian 或 Ubuntu 下（其他系统见仓库 README）：</p>',
+            '<pre><code>sudo apt install cmake pkgconf libcurl4-openssl-dev libjansson-dev libsodium-dev libmicrohttpd-dev psmisc\ngit clone https://github.com/FlyTheElephant1/datum_gateway\ncd datum_gateway\ncmake . &amp;&amp; make\n./datum_gateway --test\n./datum_gateway -c datum_gateway_config.json</code></pre>',
+            '<p>仓库里也有 <code>Dockerfile</code>；用 Docker 时把 <code>notify_fallback</code> 设为 <code>false</code>，并用 <code>blocknotify=wget -q -O /dev/null http://datum-gateway:7152/NOTIFY</code>。</p>',
+            '<p><b>3. 配置。</b>下面是连接 Lazarus 的完整 <code>datum_gateway_config.json</code>。<code>pool_pubkey</code> 从下方 DATUM 标签页复制；<code>pool_address</code> 填你自己的地址（只有非矿池工作才会付到这里）；<code>rpccookiefile</code> 或 <code>rpcuser</code>/<code>rpcpassword</code> 指向你的节点。</p>',
+            '<pre><code>{\n  &quot;bitcoind&quot;: {\n    &quot;rpccookiefile&quot;: &quot;/home/you/.bitcoin/.cookie&quot;,\n    &quot;rpcurl&quot;: &quot;http://127.0.0.1:8332&quot;,\n    &quot;notify_fallback&quot;: true\n  },\n  &quot;stratum&quot;: { &quot;listen_port&quot;: 23334, &quot;vardiff_min&quot;: 4096 },\n  &quot;mining&quot;: {\n    &quot;pool_address&quot;: &quot;bc1q…your address&quot;,\n    &quot;coinbase_tag_primary&quot;: &quot;Lazarus&quot;,\n    &quot;coinbase_tag_secondary&quot;: &quot;your name or rig&quot;\n  },\n  &quot;api&quot;: { &quot;listen_port&quot;: 7152, &quot;admin_password&quot;: &quot;choose one&quot; },\n  &quot;logger&quot;: { &quot;log_level_console&quot;: 2 },\n  &quot;datum&quot;: {\n    &quot;pool_host&quot;: &quot;datum.lazarus-xbt.xyz&quot;,\n    &quot;pool_port&quot;: 28915,\n    &quot;pool_pubkey&quot;: &quot;the pubkey from the DATUM tab below&quot;,\n    &quot;pool_pass_workers&quot;: true,\n    &quot;pool_pass_full_users&quot;: true,\n    &quot;pooled_mining_only&quot;: true\n  }\n}</code></pre>',
+            '<p><code>vardiff_min</code> 保持 4096：不设的话原版 DATUM 每个会话从 16384 起步，Prime 无法调低。</p>',
+            '<p><b>4. 矿机指向你的网关，</b>而不是我们：<code>stratum+tcp://&lt;网关的局域网 IP&gt;:23334</code>，用户名 <code>你的地址.worker</code>，密码 <code>x</code>。第一个 <code>.</code> 之前的部分就是收款地址。</p>',
+            '<p><b>5. 确认运行。</b>一分钟内你的网关会出现在 <a href="#gateways">Gateways</a>，显示为 <code>v0.4.1-beta/&lt;commit&gt;</code>、费用路径 DATUM；第一个份额之后你的地址会出现在 <a href="#miners">Miners</a>。网关自己的面板在 7152 端口。日志里应出现 <i>DATUM Server MOTD</i> 和我们的箴言；找到的区块会连同分账显示在这里。</p>',
+            '<p><b>连不上时。</b>日志出现 <i>DATUM not connected and configured for pooled mining only! Rejecting connection</i>，表示网关没有矿池会话，于是拒绝矿机（矿机固件会切到备用矿池）：检查 <code>pool_host</code>、<code>pool_port</code>，以及 <code>pool_pubkey</code> 是否是本页的完整公钥；公钥错误过不了握手。区块高度卡在 961,639 说明 Knots 版本过旧或连到了另一条链的节点。日志中出现带升级提示的 <i>Refused</i>，说明你的节点出过被链拒绝的区块；升级 Knots 后重连，会自动放行。</p>',
+            '<p><b>我们的实测。</b>我们在 regtest 上用自己的 Prime 和 Knots 29.4.2 测试了这个网关：握手与公钥校验、每个找到的区块都付给窗口里的所有矿工、<code>地址.worker</code> 与纯地址用户名、0% 的 DATUM 费用路径、断线重连、Prime 的模板检查与拒绝，全部通过。有一项没通过，而且目前所有 C 语言 DATUM 网关（包括 iohzrd 和 CONVOY）都有：每个新区块之后的片刻，以及矿池分账迟到的整个期间，网关可能下发一个只付给矿池的 coinbase 任务。一个小补丁可以修复：分账到达之前只发只含区块补贴的空任务，或者不发任务。我们正把它提交给 FlyTheElephant；合并之后这个版本就没有已知缺陷，在此之前你可以自己打上：<a href="https://github.com/AwokenLazarus/Bitcoin/blob/main/lazarus/patches/datum-gateway-fte-late-coinbaser.patch" target="_blank" rel="noreferrer">datum-gateway-fte-late-coinbaser.patch</a>（在 <code>cmake</code> 之前 <code>patch -p1 &lt;</code>）。</p>',
+        ]),
+    },
     "/mine-xbt": {
         "en": ("How to mine Bitcoin XBT (BTCB2)", [
             "You need three things: an ASIC that hashes BLAKE2b, an address on this chain to be paid to, and the pool endpoint. If you already own a Siacoin miner you have the first one — this is the same algorithm, so stock firmware works. Point it at <b>stratum+tcp://stratum.lazarus-xbt.xyz:23334</b> with your address as the username and <code>x</code> as the password, and it will start hashing immediately.",
@@ -5047,6 +5093,7 @@ _LLMS_TXT = """# Lazarus Pool
 - TIDES payouts: {site}/tides
 - DATUM subsidy: {site}/datum-subsidy
 - Mine with a Ratum gateway (ratum-gateway): {site}/ratum
+- Mine with the FlyTheElephant gateway: {site}/flytheelephant
 - Pools on this chain, compared: {site}/pools
 - The 15% stratum cap: {site}/self-cap
 - Why there is no pool balance: {site}/non-custodial
@@ -5086,6 +5133,7 @@ shared with Bitcoin, so use a fresh address here.
   config and per-release test results: {site}/ratum
 - Longer Knots + DATUM setup: https://convoy.xyz/getstarted (Chinese: https://convoy.xyz/getstarted?lang=zh)
 
+GATEWAYSPLACEHOLDER
 ## Fees
 
 - Own DATUM gateway: 0%, plus the DATUM subsidy taken from the public-stratum fee
@@ -5205,7 +5253,7 @@ def _xml_attr(s):
 
 def render_pool_index(path, query=""):
     """Homepage HTML with path/lang-specific title, description, canonical, and scroll target."""
-    raw = (STATIC / "index.html").read_text(encoding="utf-8")
+    raw = _order_gateway_pick((STATIC / "index.html").read_text(encoding="utf-8"))
     meta = _seo_page(path, query)
     title = meta["title"]
     desc = meta["description"]
@@ -5378,6 +5426,7 @@ _SEO_KEEP = {
     "/mine-xbt": ("connect",),
     "/ratum": ("connect",),
     "/datum-subsidy": ("learn",),
+    "/flytheelephant": ("connect", "gateways"),
     "/how": ("how",),
     "/tides": ("how",),
     "/non-custodial": ("how",),
@@ -5408,6 +5457,7 @@ _SEO_ARTICLE = {
     "/connect": ("TechArticle", "2026-09-13", "2026-09-28"),
     "/ratum": ("TechArticle", "2026-09-28", "2026-09-28"),
     "/datum-subsidy": ("TechArticle", "2026-09-13", "2026-09-23"),
+    "/flytheelephant": ("TechArticle", "2026-09-28", "2026-09-28"),
     "/api": ("TechArticle", "2026-09-13", "2026-09-23"),
 }
 # The sitemap pages that are not articles, with the date their crawlable copy last changed. Same
@@ -5560,6 +5610,7 @@ _SITEMAP_ORDER = (
     ("/connect", "weekly", "0.8"),
     ("/ratum", "weekly", "0.8"),
     ("/datum-subsidy", "weekly", "0.8"),
+    ("/flytheelephant", "weekly", "0.8"),
     ("/self-cap", "weekly", "0.8"),
     ("/non-custodial", "weekly", "0.8"),
     ("/tides", "weekly", "0.8"),
@@ -5649,8 +5700,62 @@ def sitemap_xml():
     )
 
 
+# The DATUM gateway builds the site recommends, best first. pool/gateways.json is the one place the
+# order lives: the "Which DATUM gateway" list on the page, llms.txt and /api/gateway-builds (which
+# the MCP reads) all follow it, so moving a gateway up or down is an edit to that file alone.
+_GATEWAYS_JSON = ROOT / "gateways.json"
+
+
+def gateway_builds():
+    try:
+        doc = json.loads(_GATEWAYS_JSON.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {"updated": None, "gateways": []}
+    doc["gateways"] = [g for g in doc.get("gateways", []) if g.get("id")]
+    return doc
+
+
+def _llms_gateways():
+    gws = gateway_builds()["gateways"]
+    if not gws:
+        return ""
+    lines = ["## Which DATUM gateway", "", "Best first, as measured against our Prime (order kept in pool/gateways.json; JSON at "
+             "SITEPLACEHOLDER/api/gateway-builds):", ""]
+    for n, g in enumerate(gws, 1):
+        guide = f" Guide: SITEPLACEHOLDER{g['guide']}" if g.get("guide") else ""
+        lines.append(f"{n}. {g['name']} ({g['repo']}){' — recommended' if g.get('reco') else ''}: {g.get('summary', '')}{guide}")
+    return "\n".join(lines) + "\n\n"
+
+
 def llms_txt():
-    return _LLMS_TXT.replace("SITEPLACEHOLDER", _PUBLIC_SITE)
+    return _LLMS_TXT.replace("GATEWAYSPLACEHOLDER\n", _llms_gateways()).replace("SITEPLACEHOLDER", _PUBLIC_SITE)
+
+
+_GW_PICK = re.compile(r'(<ol class="gw-rank"[^>]*>\n)(.*?)(\n[ \t]*</ol>)', re.S)
+_GW_ITEM = re.compile(r'[ \t]*<li(?: class="reco")? data-gw="([a-z0-9-]+)">.*?</li>', re.S)
+_GW_TAG = re.compile(r'\n[ \t]*<span class="tag" data-i18n="connect.reco">[^<]*</span>')
+
+
+def _order_gateway_pick(raw):
+    """Put the "Which DATUM gateway" items in gateways.json order, number them, and give the
+    Recommended tag to the first one only when gateways.json marks it `reco`. Items the file does
+    not name keep their page order after the named ones."""
+    m = _GW_PICK.search(raw)
+    if not m:
+        return raw
+    items = {i.group(1): i.group(0) for i in _GW_ITEM.finditer(m.group(2))}
+    gws = {g["id"]: g for g in gateway_builds()["gateways"]}
+    order = [k for k in gws if k in items] + [k for k in items if k not in gws]
+    out = []
+    for n, gid in enumerate(order, 1):
+        li = _GW_TAG.sub("", items[gid])
+        reco = n == 1 and gws.get(gid, {}).get("reco")
+        li = re.sub(r'<li(?: class="reco")? data-gw=', '<li class="reco" data-gw=' if reco else "<li data-gw=", li, count=1)
+        li = re.sub(r'<span class="n" aria-hidden="true">\d+</span>', f'<span class="n" aria-hidden="true">{n}</span>', li, count=1)
+        if reco:
+            li = re.sub(r'(<div>\n([ \t]*))', r'\1<span class="tag" data-i18n="connect.reco">Recommended</span>\n\2', li, count=1)
+        out.append(li)
+    return raw[: m.start(2)] + "\n".join(out) + raw[m.end(2) :]
 
 
 def stratum_doc():
@@ -5669,6 +5774,7 @@ _CHEAP_PATHS = frozenset(
         "/how",
         "/bip110",
         "/datum-subsidy",
+        "/flytheelephant",
         "/profitability",
         "/tides",
         "/pools",
@@ -5685,6 +5791,7 @@ _CHEAP_PATHS = frozenset(
         _INDEXNOW_PATH,
         *_SITE_VERIFY,
         "/api/pool",
+        "/api/gateway-builds",
         "/api/miners",
         "/api/coinbaser",
         "/api/solo",
@@ -5899,6 +6006,9 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path == "/api/gateways":
             self.send_json(cached("gateways", 5.0, self._gateways_payload), cache_s=5)
+            return
+        if path == "/api/gateway-builds":
+            self.send_json(gateway_builds(), cache_s=300)
             return
         if path == "/api/payouts":
             self.send_json(cached("payouts", 30.0, self._payouts_payload), cache_s=30)

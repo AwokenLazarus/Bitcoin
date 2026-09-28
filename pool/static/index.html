@@ -202,7 +202,7 @@
         </div>
         <p class="fee-lede-cta">
           <strong data-i18n="hero.ctaStrong">Set up a DATUM gateway.</strong>
-          <span data-i18n-html="hero.ctaBody">Use <a href="https://github.com/iohzrd/datum_gateway" target="_blank" rel="noreferrer">iohzrd</a> so a block you find pays the whole window — and every block anyone finds credits you the bonus.</span>
+          <span data-i18n-html="hero.ctaBody">Run a gateway from <a href="#gw-pick">our measured list</a> so a block you find pays the whole window — and every block anyone finds credits you the bonus.</a> so a block you find pays the whole window — and every block anyone finds credits you the bonus.</span>
           <a class="fee-lede-setup" href="#gw-pick" data-i18n="hero.whichGw">Which gateway</a>
         </p>
       </div>
@@ -413,33 +413,33 @@
         <h3 class="kicker" id="gw-pick-title" data-i18n="connect.whichTitle">Which DATUM gateway</h3>
         <p class="note" data-i18n="connect.whichNote">If you run your own node, pick one of these. All four speak BLAKE2b and connect here with no patch. Skip this if you use the public stratum.</p>
         <ol class="gw-rank" aria-labelledby="gw-pick-title">
-          <li class="reco">
+          <li class="reco" data-gw="iohzrd">
             <span class="n" aria-hidden="true">1</span>
             <div>
               <span class="tag" data-i18n="connect.reco">Recommended</span>
               <strong><a href="https://github.com/iohzrd/datum_gateway" target="_blank" rel="noreferrer">iohzrd</a></strong>
-              <small data-i18n-html="connect.iohzrd">Master <code>7491a50</code> — StartOS <code>pow_0.4.1_23</code> ships the same commit. A found block pays the whole window: every BLAKE2b miner gets the 16&nbsp;KB coinbase. If the pool split is late, one job can still pay only the pool.</small>
+              <small data-i18n-html="connect.iohzrd">Master <code>c031568</code>; StartOS <code>pow_0.4.1_23</code> ships the older <code>7491a50</code>. Every miner gets the whole split, fitted to the block’s weight and sigop limits, so a found block pays the whole window. Measured against our Prime: for about 20&nbsp;ms after each new block, and for as long as a pool’s split is late, it can hand out a job that pays only the pool.</small>
             </div>
           </li>
-          <li>
+          <li data-gw="ratum">
             <span class="n" aria-hidden="true">2</span>
             <div>
               <strong><a href="/ratum">Ratum</a></strong>
-              <small data-i18n-html="connect.ratum">iohzrd’s Rust gateway, <code>ratum-gateway</code>: one binary for Linux, macOS and Windows, same config file. Every split output in the coinbase; tested release by release against our Prime. <a href="/ratum">Setup guide</a>.</small>
+              <small data-i18n-html="connect.ratum">iohzrd’s Rust gateway, <code>ratum-gateway</code>: one binary for Linux, macOS and Windows, same config file. Every split output in the coinbase, and at most 0.006% of the time on a pool-only job, tested release by release against our Prime. When it loses the pool it keeps serving unpooled work for 12–26&nbsp;s, which pays <code>mining.pool_address</code>, so set that to your own address. <a href="/ratum">Setup guide</a>.</small>
             </div>
           </li>
-          <li>
+          <li data-gw="convoy">
             <span class="n" aria-hidden="true">3</span>
             <div>
               <strong><a href="https://github.com/CONVOYMining/datum_gateway" target="_blank" rel="noreferrer">CONVOY</a></strong>
-              <small data-i18n-html="connect.convoy">Master <code>b9ea7dc</code>. Firmware size classes still apply on BLAKE2b, so a found block often pays only the first ~17 miners. An Antminer A3 is served a pool-only coinbase.</small>
+              <small data-i18n-html="connect.convoy">Master <code>ac9b70c</code>. Firmware size classes still apply to miners it recognises (an Antminer A3 among them), so a block they find can pay only the first ~17 miners. Like the other C builds, for about 20&nbsp;ms after each new block, and for as long as a pool’s split is late, it can hand out a job that pays only the pool.</small>
             </div>
           </li>
-          <li>
+          <li data-gw="fte">
             <span class="n" aria-hidden="true">4</span>
             <div>
               <strong><a href="https://github.com/FlyTheElephant1/datum_gateway" target="_blank" rel="noreferrer">FlyTheElephant</a></strong>
-              <small data-i18n-html="connect.fly">Now the same code as CONVOY (<code>b9ea7dc</code>): size classes, and a new height starts subsidy-only. Older FlyTheElephant / OCEAN-lineage builds still send a pool-only full job on every new block — rebuild from current master or switch to iohzrd.</small>
+              <small data-i18n-html="connect.fly">Master <code>a5f28aa</code>: CONVOY’s BLAKE2b code plus FlyTheElephant’s fixes. Every miner gets the whole split coinbase, fitted to the block’s weight and sigop limits, so a found block pays the whole window. Like every C gateway today, for a moment after each new block, and for as long as a pool’s split is late, it can hand out a job that pays only the pool; a one-file patch closes that. <a href="/flytheelephant">Setup guide and test results</a>.</small>
             </div>
           </li>
         </ol>
@@ -919,7 +919,7 @@
       <span class="note faint" data-i18n="footer.electrum">Electrum server (SSL). For wallets that understand this chain’s 164-byte BLAKE2b headers (Electrum protocol 1.8).</span>
       <a href="https://mcp.lazarus-xbt.xyz" target="_blank" rel="noreferrer" data-i18n="footer.mcp">MCP server for AI assistants</a>
       <a href="https://github.com/AwokenLazarus/Bitcoin/tree/main/node" target="_blank" rel="noreferrer" data-i18n="footer.knots">Run a Bitcoin Knots node for this chain</a>
-      <a href="https://github.com/iohzrd/datum_gateway" target="_blank" rel="noreferrer" data-i18n="footer.gw">DATUM gateway (iohzrd)</a>
+      <a href="/connect#gw-pick" data-i18n="footer.gw">Which DATUM gateway</a>
       <a href="https://convoy.xyz/getstarted" target="_blank" rel="noreferrer" data-i18n="footer.convoyGuide">DATUM gateway setup (CONVOY)</a>
       <a href="https://convoy.xyz/getstarted?lang=zh" target="_blank" rel="noreferrer" data-i18n="footer.convoyGuideZh">DATUM 网关安装（CONVOY 中文）</a>
     </div>

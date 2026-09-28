@@ -461,6 +461,20 @@
     font-size: 0.92em;
     color: var(--ink);
   }
+  /* Config and shell blocks in a setup guide (/flytheelephant): scroll sideways on a phone
+     rather than widen the page. */
+  .seo-intro pre {
+    overflow-x: auto;
+    margin: 0;
+    padding: 0.8rem 1rem;
+    border: 1px solid var(--line);
+    border-radius: var(--r-sm);
+    background: var(--bg-inset);
+    font-family: var(--mono);
+    font-size: 0.82rem;
+    line-height: 1.5;
+    color: var(--ink);
+  }
   html.lang-zh .seo-intro h1 { letter-spacing: 0; }
   /* Comparison and reference tables inside that copy. Six columns will not fit a phone, so the
      wrapper scrolls sideways rather than letting the table decide the page width. */
