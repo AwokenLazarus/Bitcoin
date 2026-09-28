@@ -76,6 +76,7 @@ window.LZ_I18N_DICTS["en"] = {
     "title": "The Bitcoin mining pool for Sia ASICs.<br><em>Get paid in the block itself.</em><br>Earn extra for Decentralizing the network.",
     "lede": "No pool balance, no withdrawals, direct to you on chain. Any Siacoin BLAKE2b ASIC works. Build your own blocks with DATUM: pay <span>0%</span> and collect a share of the public stratum’s fee on every block the pool finds.",
     "firsts": "The first pool anywhere to put its <b>stratum hashrate behind a DATUM subsidy</b>, paying miners to decentralize the network instead of charging them for it.",
+    "since": "<b>Here since day one.</b> Run by <a href=\"https://x.com/Awoken_Lazarus\" target=\"_blank\" rel=\"noreferrer\">Lazarus</a>, mining since 2020. Lazarus Pool was built the day Bitcoin moved to BLAKE2b proof of work, and all of its code is public on <a href=\"https://github.com/AwokenLazarus/Bitcoin/commits/main\" target=\"_blank\" rel=\"noreferrer\">GitHub</a>.",
     "setup": "Set up DATUM",
     "lookup": "Look up your stats",
     "more": "How it works",
