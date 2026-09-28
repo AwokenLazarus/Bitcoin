@@ -5404,8 +5404,8 @@ _SEO_ARTICLE = {
     "/tides": ("Article", "2026-09-13", "2026-09-27"),
     "/bip110": ("Article", "2026-09-13", "2026-09-23"),
     "/how": ("Article", "2026-09-13", "2026-09-23"),
-    "/mine-xbt": ("TechArticle", "2026-09-13", "2026-09-27"),
-    "/connect": ("TechArticle", "2026-09-13", "2026-09-23"),
+    "/mine-xbt": ("TechArticle", "2026-09-13", "2026-09-28"),
+    "/connect": ("TechArticle", "2026-09-13", "2026-09-28"),
     "/ratum": ("TechArticle", "2026-09-28", "2026-09-28"),
     "/datum-subsidy": ("TechArticle", "2026-09-13", "2026-09-23"),
     "/api": ("TechArticle", "2026-09-13", "2026-09-23"),
@@ -5415,7 +5415,7 @@ _SEO_ARTICLE = {
 # Search engines use <lastmod> only while it stays truthful; a sitemap that says "today" for every
 # URL on every deploy teaches them to ignore it.
 _SEO_MODIFIED = {
-    "/": "2026-09-27",
+    "/": "2026-09-28",
     "/calculator": "2026-09-23",
     "/blocks": "2026-09-23",
     _STRATUM_DOC_PATH: "2026-09-22",
