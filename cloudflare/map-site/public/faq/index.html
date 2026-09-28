@@ -11,13 +11,181 @@
 <meta property="og:title" content="XBT (BTCB2) FAQ: Fork, Address Safety, Mining &amp; Wallets">
 <meta property="og:description" content="XBT (BTCB2) questions answered: the BLAKE2b fork, address safety, mining with DATUM, TIDES payouts, coinbase maturity and wallets.">
 <meta property="og:url" content="https://lazarus-xbt.xyz/faq/">
-<meta name="twitter:card" content="summary">
+<meta name="twitter:card" content="summary_large_image">
+<meta property="og:image" content="https://lazarus-xbt.xyz/assets/og.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:image:alt" content="The same ledger. A different proof of work. Bitcoin on BLAKE2b (XBT / BTCB2), lazarus-xbt.xyz">
+<meta name="twitter:site" content="@LazarusPoolXBT">
+<meta name="twitter:title" content="XBT (BTCB2) FAQ: Fork, Address Safety, Mining &amp; Wallets">
+<meta name="twitter:description" content="XBT (BTCB2) questions answered: the BLAKE2b fork, address safety, mining with DATUM, TIDES payouts, coinbase maturity and wallets.">
+<meta name="twitter:image" content="https://lazarus-xbt.xyz/assets/og.png">
 <meta name="theme-color" content="#1a1712">
-<link rel="icon" href="data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A//www.w3.org/2000/svg%22%20viewBox%3D%220%200%2020.36%2032%22%3E%3Crect%20width%3D%2220.36%22%20height%3D%2232%22%20fill%3D%22none%22/%3E%3Cpath%20fill%3D%22%23e8b85f%22%20d%3D%22M15.96%204.16C15.96%202.91%2015.56%202.02%2014.61%201.56C14.14%201.33%2013.51%201.21%2012.71%201.21H9.61L9.69%200H13.65C14.77%200%2015.67%200.18%2016.36%200.55C17.04%200.91%2017.54%201.4%2017.86%202.01C18.17%202.63%2018.33%203.32%2018.33%204.07C18.33%204.84%2018.17%205.55%2017.84%206.2C17.52%206.84%2017.01%207.36%2016.32%207.75C15.63%208.13%2015.3%208.33%2014.01%208.33H9.69L9.61%207.12H13.4C14.39%207.12%2015.19%206.66%2015.63%205.78C15.85%205.35%2015.96%204.81%2015.96%204.16ZM11.57%200%2011.57%2010.83V30.94L13.18%2031.55V32H7.2V31.55L8.8%2030.94V10.83V1.06L7.2%200.45V0ZM9.8%2020.31%203.89%2027.07%206.01%2027.79V28.32H0V27.79L2.08%2027.07L9.02%2019.39L9.97%2018.7L15.18%2012.61L13.05%2011.89V11.36H19.07V11.89L16.99%2012.61L10.77%2019.61ZM14.05%2027.07%209.04%2020.79%208.6%2020.39%202.34%2012.63%200.3%2011.89V11.36H8.93V11.89L6.61%2012.61L10.91%2018.05L11.38%2018.5L18.32%2027.04L20.36%2027.79V28.32H11.73V27.79Z%22/%3E%3C/svg%3E">
+<link rel="icon" href="/favicon.ico" sizes="32x32">
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&family=Newsreader:ital,wght@0,400;0,500;1,400&display=swap">
 <link rel="stylesheet" href="/assets/hub.css?v=4">
+<script type="application/ld+json">
+{
+ "@context": "https://schema.org",
+ "@graph": [
+  {
+   "@type": "WebPage",
+   "@id": "https://lazarus-xbt.xyz/faq/#webpage",
+   "url": "https://lazarus-xbt.xyz/faq/",
+   "name": "XBT (BTCB2) FAQ: Fork, Address Safety, Mining & Wallets | Lazarus",
+   "description": "XBT (BTCB2) questions answered: the BLAKE2b fork, address safety, mining with DATUM, TIDES payouts, coinbase maturity and wallets.",
+   "isPartOf": {
+    "@id": "https://lazarus-xbt.xyz/#website"
+   },
+   "inLanguage": "en",
+   "primaryImageOfPage": "https://lazarus-xbt.xyz/assets/og.png",
+   "breadcrumb": {
+    "@id": "https://lazarus-xbt.xyz/faq/#breadcrumb"
+   }
+  },
+  {
+   "@type": "BreadcrumbList",
+   "itemListElement": [
+    {
+     "@type": "ListItem",
+     "position": 1,
+     "name": "Lazarus",
+     "item": "https://lazarus-xbt.xyz/"
+    },
+    {
+     "@type": "ListItem",
+     "position": 2,
+     "name": "FAQ",
+     "item": "https://lazarus-xbt.xyz/faq/"
+    }
+   ],
+   "@id": "https://lazarus-xbt.xyz/faq/#breadcrumb"
+  },
+  {
+   "@type": "FAQPage",
+   "@id": "https://lazarus-xbt.xyz/faq/#faq",
+   "mainEntity": [
+    {
+     "@type": "Question",
+     "name": "Is XBT a new coin or a fork of Bitcoin?",
+     "acceptedAnswer": {
+      "@type": "Answer",
+      "text": "It is Bitcoin's ledger continued under a different proof of work. Every block up to 961,640 is shared with SHA-256 Bitcoin; from that height this chain hashes with BLAKE2b. Balances from before the fork exist on both chains at the same addresses."
+     }
+    },
+    {
+     "@type": "Question",
+     "name": "Why change the proof of work at all?",
+     "acceptedAnswer": {
+      "@type": "Answer",
+      "text": "To reset the hardware race and put block building back with miners. SHA-256 mining concentrated in a few industrial operations, and a handful of pools chose the transactions for most of the network. On BLAKE2b the hardware is new to everyone, and most hashrate here runs DATUM, where each miner's own node builds the block."
+     }
+    },
+    {
+     "@type": "Question",
+     "name": "What is the supply and the block reward?",
+     "acceptedAnswer": {
+      "@type": "Answer",
+      "text": "Bitcoin's: 21 million coins, halving on the same schedule. The subsidy at current heights is 3.125 XBT a block, with ten-minute target spacing and a retarget every 2016 blocks."
+     }
+    },
+    {
+     "@type": "Question",
+     "name": "Can I mine it with a bitcoin ASIC?",
+     "acceptedAnswer": {
+      "@type": "Answer",
+      "text": "No. SHA-256 hardware cannot hash BLAKE2b. You need a BLAKE2b miner: purpose-built hardware, a GPU, or a CPU for testing."
+     }
+    },
+    {
+     "@type": "Question",
+     "name": "Why must I not reuse a bitcoin address?",
+     "acceptedAnswer": {
+      "@type": "Answer",
+      "text": "History is shared up to the fork, so the key that controls an address on Bitcoin controls the matching address here. Receiving XBT to an address that holds real BTC ties your activity on the two chains together and invites mistakes with wallets that cannot tell them apart. Make a wallet used only for XBT."
+     }
+    },
+    {
+     "@type": "Question",
+     "name": "I held bitcoin before the fork. Do I have XBT?",
+     "acceptedAnswer": {
+      "@type": "Answer",
+      "text": "Yes, at the same address, controlled by the same key. Moving those coins means exposing that key to this chain's software, which is a decision to make carefully and never with a hot wallet you also use for bitcoin."
+     }
+    },
+    {
+     "@type": "Question",
+     "name": "Do pools hold my coins?",
+     "acceptedAnswer": {
+      "@type": "Answer",
+      "text": "A pool paying in the coinbase does not: each block it finds pays miners directly inside that block, so there is no balance, no withdrawal button and nothing owed if the pool disappears. Pools that pay from their own wallet do hold your coins until they send them — the galaxy map shows which do which."
+     }
+    },
+    {
+     "@type": "Question",
+     "name": "What does mining cost?",
+     "acceptedAnswer": {
+      "@type": "Answer",
+      "text": "That is each pool's own business. On Lazarus, mining through your own DATUM gateway carries no fee, and the hosted stratum — which did — is being retired and will not continue to be supported or paid. Current figures are on the pool site."
+     }
+    },
+    {
+     "@type": "Question",
+     "name": "What is TIDES and how is my share worked out?",
+     "acceptedAnswer": {
+      "@type": "Answer",
+      "text": "A payout scheme built on a rolling window of accepted work. When a block is found, everyone with work in the window is paid from that block's coinbase in proportion to their share of it, so your hashrate is not your cut: a new rig starts near zero and rises as its work enters the window. The pool site shows the window live."
+     }
+    },
+    {
+     "@type": "Question",
+     "name": "Why can I not spend my payout yet?",
+     "acceptedAnswer": {
+      "@type": "Answer",
+      "text": "Coinbase outputs always mature before they can be spent. Until block 979,920 that wait is 6,481 confirmations instead of 101, because of the long coinbase maturity soft fork. Your pool page counts it down per block."
+     }
+    },
+    {
+     "@type": "Question",
+     "name": "I am on the public stratum. What should I do?",
+     "acceptedAnswer": {
+      "@type": "Answer",
+      "text": "Move to your own node and DATUM gateway while the stratum still runs. Accepted work is keyed to your address, so your place in a pool's payout window carries over untouched. The pool site has the setup steps; the node sync is the only slow part."
+     }
+    },
+    {
+     "@type": "Question",
+     "name": "What wallet should I use?",
+     "acceptedAnswer": {
+      "@type": "Answer",
+      "text": "If you have a Bitkey hardware device, Lazarus Key signs XBT with it and protects your sends against replay on the other chain. Otherwise an Electrum wallet pointed at a server for this chain (electrum.lazarus-xbt.xyz:50002:s), or your own Knots node. Either way, a wallet created fresh for XBT."
+     }
+    },
+    {
+     "@type": "Question",
+     "name": "Where can I trade XBT?",
+     "acceptedAnswer": {
+      "@type": "Answer",
+      "text": "Third-party markets exist; none are run by or affiliated with Lazarus, and none are endorsed here. Check the ticker before sending anything, and do not leave coins on an exchange."
+     }
+    },
+    {
+     "@type": "Question",
+     "name": "Where do I get help?",
+     "acceptedAnswer": {
+      "@type": "Answer",
+      "text": "The Discord, where the miners and operators are. Announcements are on X, and pool questions belong on the pool site."
+     }
+    }
+   ]
+  }
+ ]
+}
+</script>
 </head>
 <body>
 <a class="skip" href="#main">Skip to content</a>
