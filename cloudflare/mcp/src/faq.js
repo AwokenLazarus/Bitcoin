@@ -6,7 +6,7 @@
 // security findings). Figures that move (fees, bonus, minimum output) are given with the date they
 // were true and a pointer to the live tool, so an assistant never presents them as permanent.
 
-export const FAQ_VERSION = "2026-09-26.1";
+export const FAQ_VERSION = "2026-09-28.1";
 
 const S = "https://pool.lazarus-xbt.xyz";
 const E = "https://mempool.lazarus-xbt.xyz";
@@ -51,6 +51,18 @@ export const FAQ = [
       "DATUM: run Bitcoin Knots 29.4.2 (or later) for this chain, build a DATUM gateway, and put the pool's DATUM host (datum.lazarus-xbt.xyz), port (28915) and pool pubkey in its datum section; set mining.pool_address to your payout address and point your machines at your gateway. " +
       "connection_info returns the exact values including the pubkey. After connecting, check miner_overview with your address or gateway_status with your gateway's name.",
     links: [`${S}/connect`, `${S}/mine-xbt`, "https://convoy.xyz/getstarted"],
+  },
+  {
+    id: "ratum",
+    title: "Running a Ratum gateway (ratum-gateway, iohzrd's Rust DATUM gateway) at Lazarus",
+    keywords: ["ratum", "ratum-gateway", "rust", "iohzrd", "omega", "b2pool", "ocminer", "p2block", "binary", "gateway", "release", "switch", "0.1.28", "0.1.53"],
+    answer:
+      "ratum-gateway reads the same datum_gateway_config.json as the C DATUM gateway and connects to Lazarus with no patch: 0% fee and the DATUM bonus, like any own gateway. " +
+      "Set datum.pool_host datum.lazarus-xbt.xyz, pool_port 28915 and the pool pubkey (connection_info returns it), pooled_mining_only true, pool_pass_full_users true; set mining.pool_address to the operator's OWN address and coinbase_tag_secondary to the gateway's name; run Bitcoin Knots 29.4.2. " +
+      "Lazarus tested iohzrd releases 0.1.28, 0.1.39, 0.1.53, master and the B2Pool (ocminer) and P2Block forks against its Prime on 27 Sep 2026: all connect, carry the full split, and book found blocks as split; pool-only work is a few milliseconds per new block. " +
+      "One behaviour to know: when a Ratum gateway loses the pool (a Prime restart or a network drop) it keeps miners on work paying mining.pool_address alone for about 12-26 s before disconnecting them, so a block found in that gap pays pool_address, which is why it should be the operator's own address. " +
+      "gateway_status shows a Ratum gateway as software 'ratum-gateway <version>'. Switching from the C gateway: same file, add api.miner_listen_port if port 8000 is taken; work in the window follows the address, not the gateway.",
+    links: [`${S}/ratum`, "https://github.com/iohzrd/ratum/releases"],
   },
   {
     id: "node-version",
