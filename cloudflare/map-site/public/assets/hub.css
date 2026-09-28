@@ -150,6 +150,7 @@ hr { border: 0; border-top: 1px solid var(--line); margin: 3rem 0; }
 .blocklist .who { color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .blocklist .t { color: var(--faint); font-size: 0.82rem; white-space: nowrap; }
 .hero h1 { max-width: 20ch; }
+h1 .kicker { display: block; }
 .hero h1 em { font-style: italic; color: var(--brass); }
 .hero .lede { margin-top: 1.2rem; }
 
