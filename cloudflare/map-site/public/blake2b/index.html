@@ -133,7 +133,7 @@
      "name": "Why do Siacoin ASICs work on this chain?",
      "acceptedAnswer": {
       "@type": "Answer",
-      "text": "Siacoin's proof of work is BLAKE2b-256, and this chain's 164-byte block header is laid out Sia-style, so Siacoin machines such as the Goldshell SC series, iBeLink BM-S3 and Antminer A3 mine it on stock firmware."
+      "text": "Siacoin's proof of work is BLAKE2b-256, and pools here hand miners the same 80-byte Sia-style work unit, so Siacoin machines such as the Goldshell SC series, iBeLink BM-S3 and Antminer A3 mine it on stock firmware."
      }
     }
    ]
@@ -176,7 +176,7 @@
         <tr><td>Built for</td><td>32-bit words</td><td>64-bit words</td></tr>
         <tr><td>Rounds</td><td>64</td><td>12</td></tr>
         <tr><td>Output</td><td>256 bits</td><td>1 to 64 bytes; this chain uses 256 bits (BLAKE2b-256)</td></tr>
-        <tr><td>How mining uses it</td><td>SHA-256 applied twice (SHA-256d) to an 80-byte block header</td><td>BLAKE2b-256 over a 164-byte, Sia-style block header</td></tr>
+        <tr><td>How mining uses it</td><td>SHA-256 applied twice (SHA-256d) to an 80-byte block header</td><td>BLAKE2b-256 over an 80-byte, Sia-style work unit; blocks carry a 164-byte header</td></tr>
         <tr><td>Known practical attacks</td><td>None</td><td>None</td></tr>
         <tr><td>ASICs that mine it</td><td>Antminer S19 / S21, Whatsminer and other Bitcoin miners</td><td>Siacoin miners: Goldshell SC series, iBeLink BM-S3, Antminer A3</td></tr>
       </tbody>
@@ -198,7 +198,7 @@
   </div>
 </section>
 
-<section class="section wrap" id="questions"><div class="section-head" data-reveal><h2>Questions</h2></div><div data-reveal><details class="faq"><summary>Is BLAKE2b more secure than SHA-256?</summary><div class="answer"><p>Neither has a known practical attack. SHA-256 has been studied for longer; BLAKE was studied heavily as a SHA-3 finalist, and BLAKE2 builds on it. For mining, what matters is hardware: a machine built for one cannot compute the other.</p></div></details><details class="faq"><summary>Can an Antminer S19 mine BLAKE2b?</summary><div class="answer"><p>No. The S19, S21 and Whatsminer series only compute SHA-256, so they cannot produce a valid share on a BLAKE2b chain. You need a BLAKE2b ASIC of the kind built for Siacoin.</p></div></details><details class="faq"><summary>Is BLAKE2b the same as Decred&#x27;s BLAKE-256?</summary><div class="answer"><p>No. Decred uses the original BLAKE-256 with 14 rounds. BLAKE2b is the later redesign with 12 rounds and 64-bit words. The results differ, so Decred and Siacoin ASICs are different machines.</p></div></details><details class="faq"><summary>Why do Siacoin ASICs work on this chain?</summary><div class="answer"><p>Siacoin&#x27;s proof of work is BLAKE2b-256, and this chain&#x27;s 164-byte block header is laid out Sia-style, so Siacoin machines such as the Goldshell SC series, iBeLink BM-S3 and Antminer A3 mine it on stock firmware.</p></div></details></div></section>
+<section class="section wrap" id="questions"><div class="section-head" data-reveal><h2>Questions</h2></div><div data-reveal><details class="faq"><summary>Is BLAKE2b more secure than SHA-256?</summary><div class="answer"><p>Neither has a known practical attack. SHA-256 has been studied for longer; BLAKE was studied heavily as a SHA-3 finalist, and BLAKE2 builds on it. For mining, what matters is hardware: a machine built for one cannot compute the other.</p></div></details><details class="faq"><summary>Can an Antminer S19 mine BLAKE2b?</summary><div class="answer"><p>No. The S19, S21 and Whatsminer series only compute SHA-256, so they cannot produce a valid share on a BLAKE2b chain. You need a BLAKE2b ASIC of the kind built for Siacoin.</p></div></details><details class="faq"><summary>Is BLAKE2b the same as Decred&#x27;s BLAKE-256?</summary><div class="answer"><p>No. Decred uses the original BLAKE-256 with 14 rounds. BLAKE2b is the later redesign with 12 rounds and 64-bit words. The results differ, so Decred and Siacoin ASICs are different machines.</p></div></details><details class="faq"><summary>Why do Siacoin ASICs work on this chain?</summary><div class="answer"><p>Siacoin&#x27;s proof of work is BLAKE2b-256, and pools here hand miners the same 80-byte Sia-style work unit, so Siacoin machines such as the Goldshell SC series, iBeLink BM-S3 and Antminer A3 mine it on stock firmware.</p></div></details></div></section>
 </main>
 <footer class="site-footer">
   <div class="wrap footer-grid">
