@@ -27,7 +27,7 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&family=Newsreader:ital,wght@0,400;0,500;1,400&display=swap">
-<link rel="stylesheet" href="/assets/hub.css?v=4">
+<link rel="stylesheet" href="/assets/hub.css?v=5">
 <script type="application/ld+json">
 {
  "@context": "https://schema.org",
@@ -116,10 +116,18 @@
 <section class="hero wrap">
   <h1><span class="kicker">The chain · XBT / BTCB2 explained</span>What XBT is</h1>
   <p class="lede">Bitcoin's ledger, continued from block 961,640 under BLAKE2b proof of work. Same coins, same rules, different mining. This page explains what carried over, what changed, and what that means if you hold or mine it.</p>
+  <p class="note">Updated 27 September 2026</p>
+  <nav class="toc" aria-label="On this page">
+    <p class="category">On this page</p>
+    <a href="#names">XBT, BTCB2 and BIP-110</a><a href="#fork">The fork</a><a href="#addresses">Address safety</a><a href="#mining">How mining works</a><a href="#softfork">Coinbase maturity soft fork</a><a href="#wallets">Holding XBT</a><a href="#glossary">Glossary</a>
+  </nav>
 </section>
 
 <section class="section wrap">
   <div class="prose" data-reveal>
+    <h2 id="names">XBT, BTCB2, Bitcoin BLAKE2b, BIP-110</h2>
+    <p>All four names mean this chain. Its coins are written XBT here and on the pools, and exchanges such as NonKYC list them as BTCB2. "Bitcoin BLAKE2b" comes from the proof of work. "The BIP-110 fork" comes from August 2026, when nodes enforcing BIP-110 split from SHA-256 Bitcoin; the proof of work changed to BLAKE2b three weeks later. <a href="https://pool.lazarus-xbt.xyz/bip110" rel="noopener">The pool site covers BIP-110 and the split in more detail</a>.</p>
+
     <h2 id="fork">The fork</h2>
     <p>On 30 August 2026, at block 961,640, this chain stopped hashing with SHA-256 and started hashing with BLAKE2b-256. Blocks from that height carry a 164-byte header instead of Bitcoin's 80-byte one, which is why SHA-256 mining hardware cannot work here and why software has to be built for it.</p>
     <p>Everything below that height is Bitcoin's: the same blocks, the same transactions, the same balances at the same addresses. Above it the two chains go their own way. Coins mined here are quoted as <strong>XBT</strong> to keep the two apart in writing and on exchanges.</p>
@@ -137,6 +145,7 @@
 
     <h3>How pools pay here</h3>
     <p>Because rewards are paid inside the coinbase of the block that earned them, a payout and a block are the same event: no pool holds a balance for you, and nothing is owed if a pool disappears overnight. Each pool sets its own split and window — the <a href="https://pool.lazarus-xbt.xyz" rel="noopener">Lazarus Pool site</a> documents the one it uses.</p>
+    <div class="btn-row"><a class="btn" href="https://pool.lazarus-xbt.xyz/connect" rel="noopener">Mine XBT with Lazarus Pool</a><a class="btn ghost" href="https://pool.lazarus-xbt.xyz/hardware" rel="noopener">Which ASICs mine XBT</a></div>
 
     <h2 id="softfork">The long coinbase maturity soft fork</h2>
     <p>From block <strong>973,440</strong> until block <strong>979,920</strong> (about 5 November 2026), Bitcoin Knots 29.4.2 requires newly mined coins to wait <strong>6,480 blocks</strong> before they can be spent, instead of the usual 100. It is temporary, and its purpose is to make hit-and-run mining — arriving for a difficulty dip, dumping the reward, leaving — unprofitable, while miners who stay are unaffected.</p>

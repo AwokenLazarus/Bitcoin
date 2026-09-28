@@ -151,6 +151,9 @@ hr { border: 0; border-top: 1px solid var(--line); margin: 3rem 0; }
 .blocklist .t { color: var(--faint); font-size: 0.82rem; white-space: nowrap; }
 .hero h1 { max-width: 20ch; }
 h1 .kicker { display: block; }
+.toc { display: flex; flex-wrap: wrap; gap: 0.4rem 1.2rem; margin: 1.4rem 0 0; font-size: 0.95rem; }
+.toc .category { flex-basis: 100%; margin: 0; font: 600 0.7rem/1 var(--sans); letter-spacing: 0.14em; text-transform: uppercase; color: var(--faint); }
+.toc a { color: var(--brass); }
 .hero h1 em { font-style: italic; color: var(--brass); }
 .hero .lede { margin-top: 1.2rem; }
 
