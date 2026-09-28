@@ -327,17 +327,28 @@ nodes.
 
 ### Gateway readiness
 
-**Stock DATUM gateways would mine invalid blocks after activation, silently.** OCEAN
-`datum_gateway` v0.4.1 (`5b06123`) parses the pool's coinbaser in
-`datum_coinbaser_v2_parse` and stops at the first output script longer than 64 bytes
-(`src/datum_coinbaser.c:795`, `if ((slen < 2) || (slen > 64)) { break; }`; the buffer is
-`output_script[64]`, `src/datum_stratum.h:115`; master `dbc3b14` keeps the limit at
-:801). Every output from there on is dropped without an error, and the undistributed
-value goes to the pool address. The attestation output is 70 bytes and follows the
-payees, so a stock gateway keeps the payees, drops every attestation, and its blocks
-are `bad-nta-count` from the activation height on. Nothing tells the operator, the
-miners keep hashing, and the loss is every block that gateway finds. This is not about
-signing: the gateway cannot even carry attestations that the pool signed.
+**Stock DATUM gateways would mine invalid blocks after activation, silently.** The
+attestation output is 70 bytes and follows the payees, and no released gateway carries
+a coinbaser script over 64 bytes. Upstream has two behaviours, and both lose every
+attestation:
+
+- **Truncate.** OCEAN `datum_gateway` v0.4.1 (`5b06123`) stops parsing the coinbaser at
+  the first script longer than 64 bytes (`src/datum_coinbaser.c:795`,
+  `if ((slen < 2) || (slen > 64)) { break; }`; the buffer is `output_script[64]`,
+  `src/datum_stratum.h:115`). It keeps the payees before that script, drops everything
+  after it without an error, and the undistributed value goes to the pool address.
+- **Discard.** OCEAN master (`dbc3b14`, `:801–804`) and every XBT lineage checked throw
+  the **whole** coinbaser away instead: `Script length (%d) is invalid. Using
+  default/empty`, zero outputs, and the job pays only the pool. They are the StartOS pin
+  iohzrd `7491a50` (`:832`), iohzrd `c031568` (`:772`), FlyTheElephant1 `a5f28aa`
+  (`:831`) and CONVOY `b9ea7dc` (`:806`). These are the gateways XBT miners run.
+
+Either way, from the activation height every block such a gateway finds is
+`bad-nta-count`. Nothing tells the operator, the miners keep hashing, and the loss is
+every block that gateway finds. This is not about signing: the gateway cannot even carry
+attestations that the pool signed. On regtest, unmodified `7491a50` and `c031568` builds
+discarded every probed coinbaser (146 of 146 and 206 of 206), and one of them found a
+post-activation block that the node refused as `bad-nta-count` (SOV-020).
 
 So activation needs three things that are not in consensus:
 
@@ -348,10 +359,20 @@ So activation needs three things that are not in consensus:
 2. **A readiness signal** the pool can measure per gateway (SOV-011):
    - an updated gateway advertises `nta-v1` in the DATUM handshake, in a field stock
      v0.4.1 ignores;
-   - for gateways that don't advertise, the pool probes before activation: it puts a
+   - the pool probes every gateway before activation, advertised or not: it puts a
      0-value 70-byte NTA-shaped output at the end of one coinbaser per gateway, and
      checks whether the next share's coinbase still has it. Before activation that
      output is an ordinary `OP_RETURN` and changes no payout;
+   - the probe must also count **pool-only** shares. A discarding gateway never returns
+     a share that carries the probed payees, so a rule that judges only such shares
+     never reaches a verdict: in SOV-020 both real XBT builds stayed "unknown" and were
+     still served after activation. A pool-only share at the probed height, on a job
+     with transactions, first seen after the probed coinbaser, is a strike; two strikes
+     make the gateway unready (one is not enough, because stock also sends one
+     pool-only job at each new height). After activation a single pool-only share
+     without the pool's attestation is enough. For such a gateway the probe is not free:
+     its jobs pay only the pool until its next coinbaser, which one probe an hour keeps
+     to about one job window per hour;
    - after activation the pool refuses pooled work to a gateway that is not ready, with
      a message the operator sees, instead of letting it hash on invalid blocks.
 3. **A readiness threshold.** Pools publish the share of their gateway hashrate that is
@@ -521,8 +542,9 @@ stated so reviewers can weigh them:
    export the tweaked secret, so either wallets export it or payees use a dedicated,
    non-BIP86 payout key. It is hot on the gateway either way (sweep it regularly).
 10. **Stock gateways fail silently.** See [Gateway readiness](#gateway-readiness): an
-    un-upgraded DATUM v0.4.1 gateway mines `bad-nta-count` blocks after activation
-    unless its pool detects it and refuses it work.
+    un-upgraded DATUM gateway (OCEAN v0.4.1, which truncates, or any XBT lineage, which
+    discards) mines `bad-nta-count` blocks after activation unless its pool detects it
+    and refuses it work.
 
 ## Follow-up: inclusion-list extension (not part of v1)
 

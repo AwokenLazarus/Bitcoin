@@ -1,0 +1,75 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: michael moore <mrmoore27@pm.me>
+Date: Mon, 28 Sep 2026 04:20:55 +0000
+Subject: [PATCH 6/6] prime: after activation one unattested pool-only share
+ makes a gateway nta-unready (SOV-020)
+
+In regtest lab run 5 the real startos gateway reached activation with no strike
+(its only share was on an unprobed coinbaser), and its first share after it,
+strike one of two, was block 422: PoolOnly, bad-nta-count. After activation a
+pool-only coinbase without the pool's attestation is invalid work whatever the
+cause, so one such share is the verdict.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ prime/primed/src/readiness.rs |  4 +++-
+ prime/primed/src/session.rs   | 25 +++++++++++++++++++------
+ 2 files changed, 22 insertions(+), 7 deletions(-)
+
+diff --git a/prime/primed/src/readiness.rs b/prime/primed/src/readiness.rs
+index 13374b7..53c9d2a 100644
+--- a/prime/primed/src/readiness.rs
++++ b/prime/primed/src/readiness.rs
+@@ -78,7 +78,9 @@ pub enum Evidence {
+     /// After activation: a full-split share lacked an attestation its coinbaser listed.
+     AttestationsDropped,
+     /// Shares on coinbasers that carried payees and a 70-byte output (probe or attestations)
+-    /// paid only the pool, twice: the gateway threw each such coinbaser away whole. The XBT
++    /// paid only the pool, twice before activation or once after it (a pool-only coinbase
++    /// without the pool's attestation is invalid then): the gateway threw each such coinbaser
++    /// away whole. The XBT
+     /// datum lineages (StartOS 7491a50, iohzrd c031568, FTE, CONVOY) do this: any script over
+     /// 64 bytes is "Script length (70) is invalid. Using default/empty" (SOV-020).
+     CoinbaserDiscarded,
+diff --git a/prime/primed/src/session.rs b/prime/primed/src/session.rs
+index f57bd3a..924e1d8 100644
+--- a/prime/primed/src/session.rs
++++ b/prime/primed/src/session.rs
+@@ -1028,15 +1028,28 @@ impl Session {
+     /// default/empty"), build every job on the tip pool-only and cite coinbaser 0, so no
+     /// full-split share ever comes and the probe alone never decides. Stock also publishes a
+     /// pool-only section on the first notify of a height with the split in hand (968440), and
+-    /// a job's first-seen time is its first share's, so one is not a verdict: the second is.
++    /// a job's first-seen time is its first share's, so before activation one is not a
++    /// verdict: the second is. After activation one unattested pool-only share is.
+     fn judge_nta_pool_only(&mut self, v: &VerifiedShare, job_seen: f64) -> bool {
+         let Some(chain) = self.shared.nta_chain() else { return false };
+-        let Some((height, sent, what)) = self.long_coinbaser else { return false };
+-        if v.height != height || v.commitment.txcount <= 1 || job_seen < sent {
+-            return false;
+-        }
++        // After activation a pool-only coinbase without the pool's attestation is invalid work
++        // whatever the cause (a discarded coinbaser, the per-height empty job, stock's type-0
++        // section): one is the verdict. In regtest (SOV-020 run 5) the second strike came one
++        // share too late and that share was block 422, bad-nta-count.
++        let unattested_after =
++            chain.active() && !v.coinbase.outputs.iter().any(|o| datum_wire::nta::is_attestation(&o.script));
++        let what = if unattested_after {
++            "attestations"
++        } else {
++            let Some((height, sent, what)) = self.long_coinbaser else { return false };
++            if v.height != height || v.commitment.txcount <= 1 || job_seen < sent {
++                return false;
++            }
++            what
++        };
++        let height = v.height;
+         self.nta_discards += 1;
+-        if self.nta_discards < 2 {
++        if self.nta_discards < 2 && !unattested_after {
+             log::info!(
+                 "[{}] {} a share at {height} paid only the pool after a coinbaser with payees and the {what}; one more and it is nta-unready",
+                 self.id,
+-- 
+2.43.0
+

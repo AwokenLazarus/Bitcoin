@@ -1,0 +1,658 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: michael moore <mrmoore27@pm.me>
+Date: Mon, 28 Sep 2026 12:54:55 +0000
+Subject: [PATCH] split-only patch: rebase onto FlyTheElephant1 master a5f28aa
+ (SOV-022)
+
+The patch's base, test/console-collapse-pr14-pr17 at 121edd0, was
+force-pushed away upstream and can no longer be fetched, so nobody could
+build the split-only C gateway from the published instructions. Rebased onto
+master a5f28aa, which reworked what the patch touches: one coinbase class for
+every BLAKE2b miner, a subsidy-only coinbase for new blocks, the DRS resume
+extension in the hello, and anti-withholding.
+
+- Split-only is one check in send_mining_notify after
+  datum_stratum_coinbase_index: while pooled, no notify for type 0, the
+  subsidy-only coinbase, or a job whose coinbaser produced no split.
+- "nta-v1\0" follows the DRS resume extension, where Prime reads it for this
+  lineage.
+- Master mines BLAKE2b only: every LZT1 variant is attested, and the SHA256d
+  case and its test are gone.
+- The LZT1 unit test configures a pool without anti-withholding and restores
+  the default afterwards.
+
+Builds; ./datum_gateway --test passes on a5f28aa.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../patches/datum-gateway-split-only.patch    | 288 ++++++++++--------
+ 1 file changed, 163 insertions(+), 125 deletions(-)
+
+diff --git a/lazarus/patches/datum-gateway-split-only.patch b/lazarus/patches/datum-gateway-split-only.patch
+index 8b25b10..b933049 100644
+--- a/lazarus/patches/datum-gateway-split-only.patch
++++ b/lazarus/patches/datum-gateway-split-only.patch
+@@ -1,12 +1,28 @@
+ # Lazarus split-only patch for FlyTheElephant1/datum_gateway
+-# branch test/console-collapse-pr14-pr17 at 121edd06244082df2aa101f3b3c424faed8dd31b
++# master at a5f28aa873bd241f60402259a5ef93bcd34aa4e1 (2026-09-21)
+ #
+-# That tree already hashes the pool's payout coinbase (type 4) on BLAKE2b jobs
+-# instead of type 0. This patch closes the remaining empty-first holes and
+-# sets the hello UA so Lazarus Prime will accept the connection.
++# Rebased (SOV-022) from test/console-collapse-pr14-pr17 at
++# 121edd06244082df2aa101f3b3c424faed8dd31b, the base of every earlier version
++# of this file. That branch was force-pushed away upstream and 121edd0 can no
++# longer be fetched. FTE master reworked the parts this patch touches (one
++# coinbase class for every BLAKE2b miner, a subsidy-only coinbase for new
++# blocks, the "DRS" resume extension in the hello, anti-withholding), so the
++# port differs from the old patch in these places:
++#   - the split-only rule is one check in send_mining_notify after
++#     datum_stratum_coinbase_index: while pooled, no notify goes out for
++#     type 0, for the subsidy-only coinbase, or for a job whose coinbaser
++#     produced no split;
++#   - "nta-v1\0" follows the DRS resume extension, where Prime reads it for
++#     this lineage (prime/wire/src/handshake.rs);
++#   - master mines BLAKE2b only, so every LZT1 variant is attested and the
++#     SHA256d case (and its test) is gone; blake2b_coinbase_index is
++#     COINBASE_TYPE_YUGE once the coinbaser has answered;
++#   - the LZT1 unit test configures a pool without anti-withholding (config
++#     v3 flag) and puts the default back afterwards.
++# Built and `./datum_gateway --test` passes (0 failed) on a5f28aa.
+ #
+-#   git clone -b test/console-collapse-pr14-pr17 https://github.com/FlyTheElephant1/datum_gateway.git
+-#   cd datum_gateway
++#   git clone https://github.com/FlyTheElephant1/datum_gateway.git
++#   cd datum_gateway && git checkout a5f28aa873bd241f60402259a5ef93bcd34aa4e1
+ #   patch -p1 < datum-gateway-split-only.patch
+ #   cmake . && make
+ #   ./datum_gateway --test        # includes the LZT1/identity/NTA tests below
+@@ -20,7 +36,7 @@
+ #   - does not fall back to an empty coinbase if the coinbaser is empty/slow
+ #   - copies the type-4 split into type 0 so "tiny" firmware still pays TIDES
+ #   - disables the 5s coinbaser timeout that would otherwise publish empty work
+-#   - never sends type-0 mining.notify on pooled BLAKE2b jobs
++#   - never sends a type-0 or subsidy-only mining.notify
+ #   - sends clean_jobs=true on the first split notify of a new height
+ #
+ # Sovereign TIDES (SOV-P-002 W12), src/datum_lzt1.[ch]:
+@@ -55,14 +71,12 @@
+ #   coinb2, exactly what Prime assembles) and the id is written into coinb2.
+ #   79 bytes per variant are added to each variant's fixed byte budget
+ #   (cb_req_sz), so the size/weight fit and the per-type caps account for it.
+-#   On SHA256d jobs a variant whose extranonce sits in an OP_RETURN output
+-#   (type 2 always; all types if the scriptSig is too long) varies per share
+-#   and is left unattested. BLAKE2b jobs zero that slot, so all are attested.
++#   BLAKE2b jobs (the only kind this tree mines) zero the extranonce slot, so
++#   every variant is attested.
+ #   Before a job is released (coinbaser thread, before need_coinbaser=false)
+ #   the gateway sends, via datum_protocol_mining_cmd, one 253-byte message
+ #       0x5A | datum job id | coinbase id | A | ed25519 sig | 0xFE
+-#   per published variant (BLAKE2b: blake2b_coinbase_index only; SHA256d: all
+-#   attested variants). sig = crypto_sign_detached over
++#   for the one published variant (blake2b_coinbase_index). sig = crypto_sign_detached over
+ #   "XBT-SOVEREIGN-TIDES/1\0" || A. Setting DATUM_LZT1_DUMP=<file> appends,
+ #   per variant, the arguments of prime's lzt1_check
+ #   (<msg> <coinbase> <prev> <G> <branches...>).
+@@ -71,8 +85,9 @@
+ #   exactly 70 bytes starting 6a 44 'N' 'T' 'A' 02 with value 0; the output
+ #   buffer grows to 70. Any other script over 64 bytes still voids the list.
+ #
+-#   XBT-NTA capability (SOV-011). The hello carries "nta-v1\0" right after the
+-#   4-byte header key seed, where stock sends only random padding (stock
++#   XBT-NTA capability (SOV-011). The hello carries "nta-v1\0" after the
++#   4-byte header key seed and the DRS resume extension, where stock sends only
++#   random padding (OCEAN v0.4.1
+ #   datum_protocol.c:1028-1033; every server skips it). Lazarus Prime reads it as
+ #   "keeps 70-byte attestation outputs": ready. It still probes the gateway
+ #   before NTA activation, and one that drops the probe (flag or not) is refused
+@@ -87,23 +102,23 @@
+ #   it after its first post-activation share.
+ #
+ diff --git a/CMakeLists.txt b/CMakeLists.txt
+-index ed47e49..a615652 100644
++index 1e45f64..9619c47 100644
+ --- a/CMakeLists.txt
+ +++ b/CMakeLists.txt
+-@@ -26,6 +26,8 @@ add_executable(datum_gateway
+- 	src/datum_gateway.c
+- 	src/datum_jsonrpc.c
++@@ -29,6 +29,8 @@ add_executable(datum_gateway
+  	src/datum_logger.c
++ 	src/datum_parent_fetch.c
++ 	src/datum_parent_fetch_tests.c
+ +	src/datum_lzt1.c
+ +	src/datum_lzt1_tests.c
+  	src/datum_pow.c
++ 	src/datum_pow_tests.c
+  	src/datum_protocol.c
+- 	src/datum_queue.c
+ diff --git a/src/datum_blocktemplates.c b/src/datum_blocktemplates.c
+-index 601c462..2d36da8 100644
++index 7b2813a..61b1110 100644
+ --- a/src/datum_blocktemplates.c
+ +++ b/src/datum_blocktemplates.c
+-@@ -698,7 +698,6 @@ void *datum_gateway_template_thread(void *args) {
++@@ -514,7 +514,6 @@ void *datum_gateway_template_thread(void *args) {
+  					const bool new_block = strcmp(t->previousblockhash, p1);
+  					if (new_block || notify_othercause) {
+  						notify_othercause = 0;
+@@ -111,7 +126,7 @@ index 601c462..2d36da8 100644
+  						if (new_block) {
+  							last_block_change = current_time_millis();
+  							strcpy(p1, t->previousblockhash);
+-@@ -707,24 +706,24 @@ void *datum_gateway_template_thread(void *args) {
++@@ -523,24 +522,24 @@ void *datum_gateway_template_thread(void *args) {
+  						} else {
+  							DLOG_DEBUG("Urgent work update triggered");
+  						}
+@@ -154,10 +169,10 @@ index 601c462..2d36da8 100644
+  						if (was_notified) {
+  							// we got a notification of a new block, but there doesn't seem to actually be a new block.
+ diff --git a/src/datum_coinbaser.c b/src/datum_coinbaser.c
+-index 00fbb54..8f2caea 100644
++index a867fb3..f960e21 100644
+ --- a/src/datum_coinbaser.c
+ +++ b/src/datum_coinbaser.c
+-@@ -53,6 +53,7 @@
++@@ -54,6 +54,7 @@
+  #include "datum_jsonrpc.h"
+  #include "datum_protocol.h"
+  #include "datum_coinbaser.h"
+@@ -165,7 +180,7 @@ index 00fbb54..8f2caea 100644
+  
+  CURL *coinbaser_curl = NULL;
+  
+-@@ -242,6 +243,7 @@ void generate_coinbase_txns_for_stratum_job_subtypebysize(T_DATUM_STRATUM_JOB *s
++@@ -192,6 +193,7 @@ void generate_coinbase_txns_for_stratum_job_subtypebysize(T_DATUM_STRATUM_JOB *s
+  	uint64_t mval = 0;
+  	bool c1full = false;
+  	bool en_done = false;
+@@ -173,24 +188,20 @@ index 00fbb54..8f2caea 100644
+  	// chicken and egg problem.  we need to know the output count before we can close off coinb1 if !space_for_en_in_coinbase
+  	// either way, we want to start out coinb2 with outputs
+  	i = remaining_size;
+-@@ -251,6 +253,16 @@ void generate_coinbase_txns_for_stratum_job_subtypebysize(T_DATUM_STRATUM_JOB *s
++@@ -201,6 +203,12 @@ void generate_coinbase_txns_for_stratum_job_subtypebysize(T_DATUM_STRATUM_JOB *s
+  		if (i2 < 0) i2 = 0;
+  		space_for_en_in_coinbase = false;
+  	}
+ +	// LZT1: the attestation commits to every other output, so it needs outputs
+-+	// that do not vary per share. On BLAKE2b the extranonce slot is always zero;
+-+	// on SHA256d it must live in the scriptSig, not in an OP_RETURN output.
+++	// that do not vary per share. This tree mines BLAKE2b only, where the
+++	// extranonce slot is always zero, so every variant can be attested.
+ +	if (s->lzt1_on) {
+-+		if (space_for_en_in_coinbase || (s->block_template && s->block_template->header_version >= 2)) {
+-+			lzt1 = true;
+-+		} else {
+-+			DLOG_DEBUG("LZT1: coinbase type %d carries the extranonce in an output on a SHA256d job; not attesting it", coinbase_index);
+-+		}
+++		lzt1 = true;
+ +	}
+  	m = 0;
+  	mval = 0;
+  	// technically an output script could be > 0x4B, meaning an extra byte would be eaten here... but that's not currently the standard
+-@@ -270,11 +282,15 @@ void generate_coinbase_txns_for_stratum_job_subtypebysize(T_DATUM_STRATUM_JOB *s
++@@ -233,11 +241,15 @@ void generate_coinbase_txns_for_stratum_job_subtypebysize(T_DATUM_STRATUM_JOB *s
+  			m++;
+  			mval += s->available_coinbase_outputs[k].value_sats;
+  			if (i < 30) break;
+@@ -207,7 +218,7 @@ index 00fbb54..8f2caea 100644
+  	if (space_for_en_in_coinbase) {
+  		// we'll start the empty coinb2 with the "sequence"
+  		m+=2; // pool addr + witness
+-@@ -326,7 +342,6 @@ void generate_coinbase_txns_for_stratum_job_subtypebysize(T_DATUM_STRATUM_JOB *s
++@@ -291,7 +303,6 @@ void generate_coinbase_txns_for_stratum_job_subtypebysize(T_DATUM_STRATUM_JOB *s
+  			}
+  			if (!m) break;
+  			if (j < 30) break;
+@@ -215,7 +226,7 @@ index 00fbb54..8f2caea 100644
+  		}
+  	}
+  	
+-@@ -357,6 +372,11 @@ void generate_coinbase_txns_for_stratum_job_subtypebysize(T_DATUM_STRATUM_JOB *s
++@@ -322,6 +333,11 @@ void generate_coinbase_txns_for_stratum_job_subtypebysize(T_DATUM_STRATUM_JOB *s
+  		cb2idx[coinbase_index] += sprintf(&s->coinbase[coinbase_index].coinb2[cb2idx[coinbase_index]], "0000000000000000036a0100"); // TODO: Is a naked OP_RETURN without any bytes after safe?  Above TODO is probably better than investigating.
+  	}
+  	
+@@ -227,8 +238,8 @@ index 00fbb54..8f2caea 100644
+  	// witness commit output costs 46 bytes
+  	// append the default_witness_commitment
+  	cb2idx[coinbase_index] += sprintf(&s->coinbase[coinbase_index].coinb2[cb2idx[coinbase_index]], "0000000000000000%2.2x%s", (unsigned int)strlen(s->block_template->default_witness_commitment)>>1, s->block_template->default_witness_commitment);
+-@@ -582,7 +602,8 @@ void generate_coinbase_txns_for_stratum_job(T_DATUM_STRATUM_JOB *s, bool empty_o
+- 		memcpy(&s->pool_addr_script[0], datum_config.override_mining_pool_scriptsig, datum_config.override_mining_pool_scriptsig_len);
++@@ -550,7 +566,8 @@ void generate_coinbase_txns_for_stratum_job(T_DATUM_STRATUM_JOB *s, bool empty_o
++ 		memcpy(&s->pool_addr_script[0], datum_config.override_mining_pool_scriptpubkey, datum_config.override_mining_pool_scriptpubkey_len);
+  		s->is_datum_job = true;
+  		if (s->available_coinbase_outputs_count == 0) {
+ -			empty_only = true;
+@@ -237,7 +248,7 @@ index 00fbb54..8f2caea 100644
+  		}
+  	} else {
+  		// No pool
+-@@ -590,6 +611,11 @@ void generate_coinbase_txns_for_stratum_job(T_DATUM_STRATUM_JOB *s, bool empty_o
++@@ -558,6 +575,11 @@ void generate_coinbase_txns_for_stratum_job(T_DATUM_STRATUM_JOB *s, bool empty_o
+  		s->is_datum_job = false;
+  		empty_only = true;
+  	}
+@@ -249,7 +260,7 @@ index 00fbb54..8f2caea 100644
+  	if (!s->pool_addr_script_len) {
+  		DLOG_FATAL("Could not generate output script for pool addr! Perhaps invalid? This is bad.");
+  		panic_from_thread(__LINE__);
+-@@ -761,6 +787,13 @@ void generate_coinbase_txns_for_stratum_job(T_DATUM_STRATUM_JOB *s, bool empty_o
++@@ -734,6 +756,13 @@ void generate_coinbase_txns_for_stratum_job(T_DATUM_STRATUM_JOB *s, bool empty_o
+  			cb_req_sz[2] += 10; // always OP_RETURN extranonce for type 2
+  		}
+  		
+@@ -263,7 +274,7 @@ index 00fbb54..8f2caea 100644
+  		// TYPE 1 - "Nicehash" friendly, max 500 bytes
+  		i = datum_stratum_coinbase_fit_to_template(500, cb_req_sz[1], s);
+  		generate_coinbase_txns_for_stratum_job_subtypebysize(s, 1, i, space_for_en_in_coinbase, cb1idx, cb2idx, false);
+-@@ -780,6 +813,14 @@ void generate_coinbase_txns_for_stratum_job(T_DATUM_STRATUM_JOB *s, bool empty_o
++@@ -753,6 +782,14 @@ void generate_coinbase_txns_for_stratum_job(T_DATUM_STRATUM_JOB *s, bool empty_o
+  		// TYPE 2 - Older Antminer stock (S19)
+  		i = datum_stratum_coinbase_fit_to_template(755, cb_req_sz[2], s);
+  		generate_coinbase_txns_for_stratum_job_subtypebysize(s, 2, i, false, cb1idx, cb2idx, true);
+@@ -278,7 +289,7 @@ index 00fbb54..8f2caea 100644
+  	}
+  	
+  	// prep binary versions of the coinbase for speeding up later
+-@@ -813,6 +854,12 @@ void generate_coinbase_txns_for_stratum_job(T_DATUM_STRATUM_JOB *s, bool empty_o
++@@ -786,6 +823,20 @@ void generate_coinbase_txns_for_stratum_job(T_DATUM_STRATUM_JOB *s, bool empty_o
+  		}
+  	}
+  
+@@ -288,10 +299,18 @@ index 00fbb54..8f2caea 100644
+ +		datum_lzt1_finalize_job(s);
+ +	}
+ +	
+- 	// A BLAKE2b job commits every client to one coinbase, so commit to the
+- 	// one that carries the pool's payout outputs when there are any. Type 4
+- 	// has the largest budget, and the Sia hasher never parses the Bitcoin
+-@@ -863,7 +910,10 @@ int datum_coinbaser_v2_parse(T_DATUM_STRATUM_JOB *s, unsigned char *coinbaser, i
+++	// A BLAKE2b job commits every client to one coinbase, so commit to the
+++	// one that carries the pool's payout outputs when there are any. Type 4
+++	// has the largest budget, and the Sia hasher never parses the Bitcoin
+++	// coinbase, so the miner-specific layouts of the other types do not
+++	// matter here. Type 0 pays the pool address alone and remains the
+++	// fallback until the coinbaser answers.
+++	s->blake2b_coinbase_index = empty_only ? 0 : COINBASE_TYPE_YUGE;
+++	
++ 	datum_stratum_job_refresh_blake2b(s);
++ }
++ 
++@@ -828,7 +879,10 @@ int datum_coinbaser_v2_parse(T_DATUM_STRATUM_JOB *s, unsigned char *coinbaser, i
+  			break;
+  		}
+  		slen = coinbaser[cidx]; cidx++;
+@@ -303,7 +322,7 @@ index 00fbb54..8f2caea 100644
+  			DLOG_ERROR("Script length (%d) is invalid. Using default/empty", slen);
+  			s->available_coinbase_outputs_count = 0;
+  			return 0;
+-@@ -926,9 +976,15 @@ void *datum_coinbaser_thread(void *ptr) {
++@@ -891,9 +945,15 @@ void *datum_coinbaser_thread(void *ptr) {
+  				s->available_coinbase_outputs_count = 0;
+  				i = 0;
+  			}
+@@ -320,7 +339,7 @@ index 00fbb54..8f2caea 100644
+  				if (need_coinbaser_rwlocks_init_done) {
+  					pthread_rwlock_wrlock(&need_coinbaser_rwlocks[sjob]);
+  					s->need_coinbaser = false;
+-@@ -936,6 +992,8 @@ void *datum_coinbaser_thread(void *ptr) {
++@@ -901,6 +961,8 @@ void *datum_coinbaser_thread(void *ptr) {
+  					need_coinbaser = false;
+  				}
+  				DLOG_DEBUG("Generated and notified.");
+@@ -330,10 +349,10 @@ index 00fbb54..8f2caea 100644
+  		}
+  		
+ diff --git a/src/datum_conf.c b/src/datum_conf.c
+-index ba4a651..0a98280 100644
++index 66187fe..9b171f3 100644
+ --- a/src/datum_conf.c
+ +++ b/src/datum_conf.c
+-@@ -214,6 +214,10 @@ const T_DATUM_CONFIG_ITEM datum_config_options[] = {
++@@ -213,6 +213,10 @@ const T_DATUM_CONFIG_ITEM datum_config_options[] = {
+  		.required = false, .ptr = &datum_config.datum_pooled_mining_only, 	.default_bool = true },
+  	{ .var_type = DATUM_CONF_INT, 		.category = "datum", 		.name = "protocol_global_timeout",		.description = "If no valid messages are received from the DATUM server in this many seconds, give up and try to reconnect",
+  		.required = false, .ptr = &datum_config.datum_protocol_global_timeout, 	.default_int = 60 },
+@@ -345,32 +364,32 @@ index ba4a651..0a98280 100644
+  
+  #define NUM_CONFIG_ITEMS (sizeof(datum_config_options) / sizeof(datum_config_options[0]))
+ diff --git a/src/datum_conf.h b/src/datum_conf.h
+-index e81215d..afd52e0 100644
++index 186334c..768aee4 100644
+ --- a/src/datum_conf.h
+ +++ b/src/datum_conf.h
+-@@ -171,6 +171,8 @@ typedef struct {
++@@ -177,6 +177,8 @@ typedef struct {
+  	char datum_pool_pubkey[1024];
+  	int datum_protocol_global_timeout;
+  	uint64_t datum_protocol_global_timeout_ms;
+ +	char datum_identity_key_file[1024];
+ +	bool datum_lzt1_attest;
+  	
+- 	uint32_t prime_id;
+- 	unsigned char override_mining_pool_scriptsig[256];
++ 	uint64_t prime_id;
++ 	uint8_t override_mining_pool_scriptpubkey[MAX_OUTPUT_SCRIPT_LEN];
+ diff --git a/src/datum_gateway.c b/src/datum_gateway.c
+-index 8ca1c4d..28aaccb 100644
++index baf5209..fe89a4c 100644
+ --- a/src/datum_gateway.c
+ +++ b/src/datum_gateway.c
+-@@ -86,6 +86,7 @@ void datum_stratum_tests(void);
+- void datum_conf_tests(void);
++@@ -91,6 +91,7 @@ void datum_protocol_tests(void);
++ void datum_stratum_dupes_tests(void);
+  void datum_utils_tests(void);
+  void datum_submitblock_tests(void);
+ +void datum_lzt1_tests(void);
+  
+  static error_t parse_opt(int key, char *arg, struct argp_state *state) {
+  	struct arguments *arguments = state->input;
+-@@ -110,6 +111,7 @@ static error_t parse_opt(int key, char *arg, struct argp_state *state) {
+- 			datum_coinbaser_tests();
++@@ -120,6 +121,7 @@ static error_t parse_opt(int key, char *arg, struct argp_state *state) {
++ 			datum_stratum_dupes_tests();
+  			datum_stratum_tests();
+  			datum_submitblock_tests();
+ +			datum_lzt1_tests();
+@@ -379,10 +398,10 @@ index 8ca1c4d..28aaccb 100644
+  			return ARGP_ERR_UNKNOWN;
+ diff --git a/src/datum_lzt1.c b/src/datum_lzt1.c
+ new file mode 100644
+-index 0000000..b5a994e
++index 0000000..2cf2ece
+ --- /dev/null
+ +++ b/src/datum_lzt1.c
+-@@ -0,0 +1,441 @@
++@@ -0,0 +1,440 @@
+ +/*
+ + *
+ + * DATUM Gateway
+@@ -811,14 +830,13 @@ index 0000000..b5a994e
+ +
+ +int datum_lzt1_send_job(T_DATUM_STRATUM_JOB *s) {
+ +	unsigned char buf[LZT1_MSG_LEN + crypto_box_MACBYTES];
+-+	const bool blake2b = s->block_template && s->block_template->header_version >= 2;
+ +	int k, sent = 0;
+ +
+ +	if (!s->lzt1_on || datum_protocol_client_active != 3) return 0;
+ +	for (k = 0; k < MAX_COINBASE_TYPES; k++) {
+ +		if (!s->lzt1_ready[k]) continue;
+ +		// a pooled BLAKE2b job publishes only the one coinbase every client shares
+-+		if (blake2b && k != s->blake2b_coinbase_index) continue;
+++		if (k != s->blake2b_coinbase_index) continue;
+ +		memcpy(buf, s->lzt1_msg[k], LZT1_MSG_LEN); // encrypted in place
+ +		if (datum_protocol_mining_cmd(buf, LZT1_MSG_LEN) == 0) sent++;
+ +	}
+@@ -900,10 +918,10 @@ index 0000000..cda4088
+ +#endif
+ diff --git a/src/datum_lzt1_tests.c b/src/datum_lzt1_tests.c
+ new file mode 100644
+-index 0000000..567c6d7
++index 0000000..899e050
+ --- /dev/null
+ +++ b/src/datum_lzt1_tests.c
+-@@ -0,0 +1,273 @@
++@@ -0,0 +1,298 @@
+ +/*
+ + *
+ + * DATUM Gateway
+@@ -932,6 +950,7 @@ index 0000000..567c6d7
+ +#include "datum_utils.h"
+ +#include "datum_stratum.h"
+ +#include "datum_protocol.h"
+++#include "datum_protocol_internal.h"
+ +#include "datum_coinbaser.h"
+ +#include "datum_lzt1.h"
+ +
+@@ -1054,14 +1073,35 @@ index 0000000..567c6d7
+ +	free(cb);
+ +}
+ +
+-+static void lzt1_tests_job(T_DATUM_TEMPLATE_DATA *t, T_DATUM_STRATUM_JOB *s, uint32_t header_version) {
+++static void lzt1_tests_configure(unsigned char flags) {
+++	// a minimal configure v3 (as datum_protocol_tests.c builds it)
+++	unsigned char payload[128] = {0};
+++	const unsigned char saved_state = datum_state;
+++	size_t i = 0;
+++	payload[i++] = 3;
+++	payload[i++] = 1;
+++	payload[i++] = 0x51;
+++	pk_u64le(payload, i, UINT64_C(0x887766555d965e4e)); i += 8;
+++	pk_u64le(payload, i, UINT64_C(0x887766555d965e4e));
+++	memset(payload + i + 8, 0x5a, 32);
+++	i += 40;
+++	payload[i++] = 3;
+++	memcpy(payload + i, "tag", 3); i += 3;
+++	pk_u64le(payload, i, 1024); i += 8;
+++	payload[i++] = flags;
+++	payload[i++] = 0xFE;
+++	datum_state = 3;
+++	datum_test(datum_protocol_client_configure((int)i, payload));
+++	datum_state = saved_state;
+++}
+++
+++static void lzt1_tests_job(T_DATUM_TEMPLATE_DATA *t, T_DATUM_STRATUM_JOB *s) {
+ +	unsigned char cbr[2048];
+ +	unsigned char script[70];
+ +	int n, k, i;
+ +
+ +	memset(t, 0, sizeof(*t));
+ +	memset(s, 0, sizeof(*s));
+-+	t->header_version = header_version;
+ +	t->height = 966267;
+ +	t->coinbasevalue = 312512345;
+ +	t->curtime = 1788408500;
+@@ -1127,6 +1167,7 @@ index 0000000..567c6d7
+ +	T_DATUM_TEMPLATE_DATA *t;
+ +	T_DATUM_STRATUM_JOB *s;
+ +	const int saved_active = datum_protocol_client_active;
+++	const global_config_t saved_config = datum_config;
+ +	const bool saved_attest = datum_config.datum_lzt1_attest;
+ +	const bool saved_persisted = datum_identity_persisted;
+ +	const unsigned char p2wpkh[22] = { 0x00, 0x14, 1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20 };
+@@ -1151,25 +1192,27 @@ index 0000000..567c6d7
+ +	datum_identity_persisted = true;
+ +	datum_config.datum_lzt1_attest = true;
+ +	datum_protocol_client_active = 3;
+-+	memcpy(datum_config.override_mining_pool_scriptsig, p2wpkh, sizeof(p2wpkh));
+-+	datum_config.override_mining_pool_scriptsig_len = sizeof(p2wpkh);
+++	// a pool that has not asked for anti-withholding (config v3 flag), so the
+++	// gateway counts as pooled without an ABW assignment
+++	lzt1_tests_configure(DATUM_CONFIG_FLAG_ABW_DISABLED);
+++	memcpy(datum_config.override_mining_pool_scriptpubkey, p2wpkh, sizeof(p2wpkh));
+++	datum_config.override_mining_pool_scriptpubkey_len = sizeof(p2wpkh);
+ +	strcpy(datum_config.override_mining_coinbase_tag_primary, "Lazarus");
+ +
+-+	// BLAKE2b job: every variant attested
+-+	lzt1_tests_job(t, s, 2);
+++	// BLAKE2b job (this tree mines nothing else): every variant attested
+++	lzt1_tests_job(t, s);
+ +	lzt1_tests_msgs(s, false);
+-+	datum_test(s->blake2b_coinbase_index == 4);
+-+
+-+	// SHA256d job: type 2 keeps its extranonce in an output and is skipped
+-+	lzt1_tests_job(t, s, 0);
+-+	lzt1_tests_msgs(s, true);
+++	datum_test(s->blake2b_coinbase_index == COINBASE_TYPE_YUGE);
+ +
+ +	// no persisted key: nothing reserved, nothing emitted
+ +	datum_identity_persisted = false;
+-+	lzt1_tests_job(t, s, 2);
+++	lzt1_tests_job(t, s);
+ +	datum_test(!s->lzt1_on && !s->lzt1_ready[4]);
+ +	datum_test(strstr(s->coinbase[4].coinb2, "466a444c5a5431") == NULL);
+ +
+++	lzt1_tests_configure(0);   // back to the default: anti-withholding required
+++	datum_protocol_abw_reset();
+++	datum_config = saved_config;
+ +	datum_protocol_client_active = saved_active;
+ +	datum_config.datum_lzt1_attest = saved_attest;
+ +	datum_identity_persisted = saved_persisted;
+@@ -1178,32 +1221,31 @@ index 0000000..567c6d7
+ +	free(s);
+ +}
+ diff --git a/src/datum_protocol.c b/src/datum_protocol.c
+-index 39d2433..f9b48b8 100644
++index ff069ba..481f2d2 100644
+ --- a/src/datum_protocol.c
+ +++ b/src/datum_protocol.c
+-@@ -75,6 +75,7 @@
+- #include "datum_coinbaser.h"
++@@ -79,6 +79,7 @@
+  #include "datum_queue.h"
+  #include "datum_pow.h"
++ #include "datum_submitblock.h"
+ +#include "datum_lzt1.h"
+  #include "git_version.h"
+  
+  atomic_int datum_protocol_client_active = 0;
+-@@ -1060,8 +1061,11 @@ int datum_protocol_send_hello(int sockfd) {
+- 	
+- 	nk = upk_u32le(hello_msg, i - 4);
++@@ -2368,6 +2369,12 @@ int datum_protocol_send_hello(int sockfd) {
++ 			DATUM_RESUME_TOKEN_SIZE);
++ 	}
+  	
+--	// TODO: maybe tack on other useful data here at some point
+--	// ...
+ +	// Lazarus (SOV-011): say this gateway keeps 70-byte XBT-NTA attestation outputs
+-+	// (datum_coinbaser_v2_parse below). Right after the seed, where stock sends only
+-+	// padding that every server skips; Prime marks a gateway that sends it ready for
+-+	// NTA activation instead of probing it.
+++	// (datum_coinbaser_v2_parse). After the seed and the "DRS" resume extension,
+++	// where stock sends only padding that every server skips; Prime reads it there
+++	// and marks a gateway that sends it ready for NTA activation.
+ +	memcpy(&hello_msg[i], "nta-v1", 7); i += 7;
+- 	
+++	
+  	// pad with some randomness
+  	j = 1 + (rand() % 200);
+-@@ -2055,10 +2059,22 @@ int datum_protocol_init(void) {
++ 	memset(&hello_msg[i], rand(), j);
++@@ -3393,10 +3400,22 @@ int datum_protocol_init(void) {
+  	memset(&pool_keys, 0, sizeof(DATUM_ENC_KEYS));
+  	memset(&session_datum_keys, 0, sizeof(DATUM_ENC_KEYS));
+  	
+@@ -1228,12 +1270,12 @@ index 39d2433..f9b48b8 100644
+  	DLOG_INFO("Our public keys:");
+  	datum_encrypt_log_pubkeys(&local_datum_keys);
+ diff --git a/src/datum_protocol.h b/src/datum_protocol.h
+-index 706f41d..057ea0e 100644
++index 0ba64c0..a002a59 100644
+ --- a/src/datum_protocol.h
+ +++ b/src/datum_protocol.h
+-@@ -47,7 +47,7 @@
+- // Works out to over 5 minutes of jobs at 30-40 second work change intervals. No miner should be holding on to work this long.
+- #define MAX_DATUM_PROTOCOL_JOBS 8
++@@ -53,7 +53,7 @@
++ #define DATUM_ABW_ASSIGNMENT_SLOTS 16
++ #define DATUM_ABW_ASSIGNMENT_ACTIVE 0x01
+  
+ -#define DATUM_PROTOCOL_VERSION "v0.4.1-beta" // this is sent to the server as a UA
+ +#define DATUM_PROTOCOL_VERSION "v0.4.1-beta+lazarus-split" // this is sent to the server as a UA
+@@ -1241,10 +1283,10 @@ index 706f41d..057ea0e 100644
+  
+  #define DATUM_PROTOCOL_MAX_CMD_DATA_SIZE 4194304 // 2^22 - protocol limit!
+ diff --git a/src/datum_stratum.c b/src/datum_stratum.c
+-index 36df144..5f0ba4d 100644
++index c1efbce..95c0bc8 100644
+ --- a/src/datum_stratum.c
+ +++ b/src/datum_stratum.c
+-@@ -408,8 +408,8 @@ int datum_stratum_v1_get_thread_subscriber_count(T_DATUM_THREAD_DATA *my) {
++@@ -407,8 +407,8 @@ int datum_stratum_v1_get_thread_subscriber_count(T_DATUM_THREAD_DATA *my) {
+  bool stratum_job_coinbaser_ready(T_DATUM_STRATUM_THREADPOOL_DATA *sdata, T_DATUM_STRATUM_JOB *job) {
+  	bool a = false;
+  	// backup timeout for coinbaser on these jobs
+@@ -1255,7 +1297,7 @@ index 36df144..5f0ba4d 100644
+  		sdata->full_coinbase_ready = false;
+  		return true;
+  	}
+-@@ -1740,6 +1740,12 @@ int send_mining_notify(T_DATUM_CLIENT_DATA *c, bool clean, bool quickdiff, bool
++@@ -1619,6 +1619,12 @@ int send_mining_notify(T_DATUM_CLIENT_DATA *c, bool clean, bool quickdiff, bool
+  	if (!j) {
+  		return -1;
+  	}
+@@ -1268,36 +1310,29 @@ index 36df144..5f0ba4d 100644
+  	
+  	//job_id - ID of the job. Use this ID while submitting share generated from this job.
+  	//prevhash - Hash of previous block.
+-@@ -1828,14 +1834,18 @@ int send_mining_notify(T_DATUM_CLIENT_DATA *c, bool clean, bool quickdiff, bool
+- 	// coinbase selection is tacked on to the job ID
+- 	// prepending a Q means it's a duplicate job, but with a new diff (needed per stratum protocol "spec")
+- 	// prepending an N means this is an empty (subsidy-only) block with a small coinbase and has coinbase ID 255/0xff
+--	if (new_block) {
+-+	if (stratum_job_is_blake2b(j) && datum_protocol_is_active()) {
+-+		// Pooled BLAKE2b: never send type 0. The job waits until the coinbaser
+-+		// has filled blake2b_coinbase_index (type 4). Skipping notify here is
+-+		// cheaper than hashing an unsplit coinbase.
+-+		if (!full_coinbase || j->blake2b_coinbase_index == 0) {
+-+			return 0;
+-+		}
+-+		cbselect = (unsigned int)j->blake2b_coinbase_index;
+-+	} else if (new_block) {
+- 		cbselect = 0;
+- 	} else if (stratum_job_is_blake2b(j)) {
+--		// Every v2 client shares one coinbase, since the hasher extranonce
+--		// lives in the header. The job-level choice therefore applies to all
+--		// of them: the payout-carrying coinbase once the coinbaser has
+--		// answered, the pool-address-only type 0 before that. The job ID
+--		// carries the index, so the submit path and the pool protocol follow.
+-+		// Solo BLAKE2b: type 4 once a split exists, type 0 until then.
+- 		cbselect = full_coinbase ? (unsigned int)j->blake2b_coinbase_index : 0;
+- 	} else {
+- 		if (full_coinbase) {
++@@ -1693,6 +1699,17 @@ int send_mining_notify(T_DATUM_CLIENT_DATA *c, bool clean, bool quickdiff, bool
++ 	cbselect = datum_stratum_coinbase_index(sdata, m, new_block);
++ 	const bool subsidy_only = cbselect == DATUM_COINBASE_ID_EMPTY;
++ 	cb = subsidy_only ? &j->subsidy_only_coinbase : &j->coinbase[cbselect];
+++
+++	// Lazarus split-only: a pooled job never sends a pool-only coinbase (type 0
+++	// before the coinbaser answers, or a job whose coinbaser was empty or
+++	// unusable) or a subsidy-only one (a new block). The miner keeps its
+++	// current work until the split is in hand; the first split notify of a new
+++	// height is clean (above).
+++	if (datum_protocol_is_active() &&
+++	    (cbselect == 0 || subsidy_only || j->blake2b_coinbase_index != (int)cbselect)) {
+++		c->out_buf = notify_out_buf_start;
+++		return 0;
+++	}
++ 	
++ 	if (quickdiff) {
++ 		snprintf(s, sizeof(s), "\"Q%s%2.2x\",\"%s\",\"", j->job_id, cbselect, j->prevhash);
+ diff --git a/src/datum_stratum.h b/src/datum_stratum.h
+-index 89c0211..2be6932 100644
++index 3cb1fd4..ab3c169 100644
+ --- a/src/datum_stratum.h
+ +++ b/src/datum_stratum.h
+-@@ -112,8 +112,12 @@ typedef struct {
++@@ -113,8 +113,12 @@ typedef struct {
+  	int coinb2_len;
+  } T_DATUM_STRATUM_COINBASE;
+  
+@@ -1311,7 +1346,7 @@ index 89c0211..2be6932 100644
+  	int output_script_len;
+  	uint64_t value_sats;
+  	int sigops;
+-@@ -180,6 +184,17 @@ typedef struct {
++@@ -178,6 +182,20 @@ typedef struct T_DATUM_STRATUM_JOB {
+  	bool is_datum_job;
+  	unsigned char datum_job_idx;
+  	unsigned char datum_coinbaser_id;
+@@ -1322,6 +1357,9 @@ index 89c0211..2be6932 100644
+ +	// output starts (valid when lzt1_has[k]). lzt1_msg[k]: the 0x5A DATUM
+ +	// message for variant k (valid when lzt1_ready[k]).
+ +	bool lzt1_on;
+++	// the one coinbase[] a pooled BLAKE2b job commits every client to (COINBASE_TYPE_YUGE once
+++	// the coinbaser has answered, 0 before): its LZT1 attestation is the one sent to the pool
+++	int blake2b_coinbase_index;
+ +	bool lzt1_has[MAX_COINBASE_TYPES];
+ +	bool lzt1_ready[MAX_COINBASE_TYPES];
+ +	int lzt1_cb2_off[MAX_COINBASE_TYPES];
+-- 
+2.43.0
+

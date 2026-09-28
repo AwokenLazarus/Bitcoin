@@ -20,8 +20,8 @@ share carried, so the block is valid whoever found it.
 
 **Evidence** (Knots 29.4.2 + [patch](patches/knots-v29.4.2/), regtest only):
 - A buried `nta` deployment, unscheduled everywhere: ~80 lines in
-  `ContextualCheckBlock`, plus a `getblocktemplate` fix. A functional test covers gifted
-  signatures, wrong tip, count, value, encoding, custody and the payee cap.
+  `ContextualCheckBlock`, plus a `getblocktemplate` fix. A functional test covers each
+  failure case and the payee cap.
 - Upgraded nodes reject an unattested block; an old node that accepted it **reorgs onto
   the attested chain** (soft fork).
 - Real gateways signing each tip, Prime building TIDES coinbases: stratum-found and
@@ -36,11 +36,12 @@ share carried, so the block is valid whoever found it.
 - Payout keys are hot on the gateway and used untweaked (BIP86 wallets must export the
   tweaked secret). Payees join a new tip ~41 ms after it is mined (≤0.3 s worst,
   regtest); offline payees are paid when they return.
-- **Every DATUM gateway needs a release before activation.** Stock v0.4.1 silently drops
-  coinbaser scripts from the first one over 64 bytes (`datum_coinbaser.c:795`), so it
-  would mine invalid blocks unnoticed. Activation therefore needs a gateway
-  release, a per-gateway readiness signal (handshake flag plus a pre-activation probe)
-  and a readiness threshold (we propose 95% of DATUM hashrate).
+- **Every DATUM gateway needs a release before activation.** None carries a coinbaser
+  script over 64 bytes: OCEAN v0.4.1 truncates the coinbaser there
+  (`datum_coinbaser.c:795`); master and the XBT forks discard it whole and pay only the
+  pool (`:801–804`). Every block is then invalid, unnoticed. Activation also needs a
+  per-gateway readiness signal (handshake flag, plus a probe that counts pool-only
+  shares) and a readiness threshold (we propose 95% of DATUM hashrate).
 - It needs most of the hashrate; no single pool can activate it.
 
 **What it doesn't stop.**
@@ -50,7 +51,7 @@ share carried, so the block is valid whoever found it.
 - Self-pay PPS and pools holding their farms' keys look like solo miners.
 
 v1 raises the cost of stratum-with-coinbase-payouts; it does not end it. An
-inclusion-list extension is specified as a later soft fork, but it is much larger work.
+inclusion-list extension is specified as a later, much larger soft fork.
 
 **Open questions for the maintainers.**
 1. Is "payees must sign" an acceptable form of step 3, or does step 3 aim at something
@@ -60,10 +61,9 @@ inclusion-list extension is specified as a later soft fork, but it is much large
    per retarget)? We recommend keeping it.
 3. Is Taproot-only acceptable, given it is permanent? We propose capping payees at 512
    per block (`bad-nta-too-many`, checked before any signature): at most ~26 ms of
-   verification instead of ~0.4 s; pools carry the rest. Patch and test included.
+   verification instead of ~0.4 s; pools carry the rest.
 4. Activation: a buried height like `blake2b`, or signalled?
 
 **The ask.** Would you look at the patch and draft and tell us whether this fits step 3
 as you intend it? If it does, we'll do the rest: the gateway release,
-signet with real gateways and a stratum hasher, and any changes you want before
-anything is public. Patch, tests and draft: [patches/knots-v29.4.2](patches/knots-v29.4.2/), [the BIP draft](bip-node-template-attestation.md).
+signet with real gateways and a stratum hasher, and any changes you want. Patch, tests and draft: [patches/knots-v29.4.2](patches/knots-v29.4.2/), [the BIP draft](bip-node-template-attestation.md).

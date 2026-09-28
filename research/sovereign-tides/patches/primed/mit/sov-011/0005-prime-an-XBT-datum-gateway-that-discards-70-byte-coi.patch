@@ -1,0 +1,203 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: michael moore <mrmoore27@pm.me>
+Date: Mon, 28 Sep 2026 02:44:27 +0000
+Subject: [PATCH 5/6] prime: an XBT datum gateway that discards 70-byte
+ coinbasers is nta-unready (SOV-020)
+
+The XBT datum lineages (StartOS 7491a50, iohzrd c031568, FTE, CONVOY) do not
+truncate a coinbaser at a script over 64 bytes as OCEAN v0.4.1 :795 does; they
+throw the whole coinbaser away ("Script length (70) is invalid. Using
+default/empty"), build every job on that tip pool-only and cite coinbaser 0.
+judge_nta only judged Split shares, so in a regtest lab both stayed unknown through
+146 and 206 probes, were served after activation, and startos mined block 422
+with a pool-only coinbase: bad-nta-count.
+
+The session now remembers the last coinbaser it sent when it carried payees and
+a 70-byte output (probe, or attestations after activation). A PoolOnly share on
+a job with transactions at that height, first seen after it, is a strike; the
+second makes the gateway nta-unready (CoinbaserDiscarded). One is not enough:
+stock also publishes a pool-only section on the first notify of a height with
+the split in hand (968440).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ prime/primed/src/readiness.rs | 26 ++++++++++++++-
+ prime/primed/src/session.rs   | 62 +++++++++++++++++++++++++++++++++--
+ 2 files changed, 85 insertions(+), 3 deletions(-)
+
+diff --git a/prime/primed/src/readiness.rs b/prime/primed/src/readiness.rs
+index add4f77..13374b7 100644
+--- a/prime/primed/src/readiness.rs
++++ b/prime/primed/src/readiness.rs
+@@ -77,6 +77,11 @@ pub enum Evidence {
+     AttestationsKept,
+     /// After activation: a full-split share lacked an attestation its coinbaser listed.
+     AttestationsDropped,
++    /// Shares on coinbasers that carried payees and a 70-byte output (probe or attestations)
++    /// paid only the pool, twice: the gateway threw each such coinbaser away whole. The XBT
++    /// datum lineages (StartOS 7491a50, iohzrd c031568, FTE, CONVOY) do this: any script over
++    /// 64 bytes is "Script length (70) is invalid. Using default/empty" (SOV-020).
++    CoinbaserDiscarded,
+ }
+ 
+ impl Evidence {
+@@ -88,6 +93,7 @@ impl Evidence {
+             Evidence::ProbeDropped => "probe dropped",
+             Evidence::AttestationsKept => "attestations kept",
+             Evidence::AttestationsDropped => "attestations dropped",
++            Evidence::CoinbaserDiscarded => "coinbaser discarded",
+         }
+     }
+ }
+@@ -254,6 +260,13 @@ impl Book {
+         changed.then_some(e.status)
+     }
+ 
++    /// Shares on 70-byte coinbasers paid only the pool (see [`Evidence::CoinbaserDiscarded`]).
++    pub fn note_coinbaser_discarded(&mut self, gw: &str, now: u64) -> Option<Status> {
++        let e = self.entry(gw, now);
++        e.probes_dropped += 1;
++        e.set(Status::Unready, Evidence::CoinbaserDiscarded, now).then_some(e.status)
++    }
++
+     /// A full-split share on an attested coinbaser, after activation. An advertised gateway
+     /// that drops them has lied or broken; the coinbase outranks the hello.
+     pub fn note_attestation_verdict(&mut self, gw: &str, kept: bool, now: u64) -> Option<Status> {
+@@ -368,10 +381,11 @@ pub fn attestations_kept(issued: &[Output], cb: &Coinbase) -> Option<bool> {
+ pub fn refusal_text(nta_height: u32, evidence: Evidence) -> String {
+     let seen = match evidence {
+         Evidence::AttestationsDropped => "its coinbases dropped the XBT-NTA attestations Prime sent",
++        Evidence::CoinbaserDiscarded => "it threw away every coinbaser carrying a 70-byte XBT-NTA output and paid only the pool",
+         _ => "it dropped the 70-byte XBT-NTA probe output Prime sent",
+     };
+     format!(
+-        "Prime refuses this gateway from block {nta_height}: {seen}. Stock datum_gateway v0.4.1 stops reading a coinbaser at the first script over 64 bytes (datum_coinbaser.c:795), so every block it builds after XBT-NTA activation is invalid. Upgrade to lazarus-gateway or a datum_gateway with the Lazarus split-only patch (it advertises nta-v1) and reconnect: an upgraded gateway is served straight away"
++        "Prime refuses this gateway from block {nta_height}: {seen}. Stock datum_gateway v0.4.1 stops reading a coinbaser at the first script over 64 bytes (datum_coinbaser.c:795) and the XBT lineages discard such a coinbaser whole, so every block it builds after XBT-NTA activation is invalid. Upgrade to lazarus-gateway or a datum_gateway with the Lazarus split-only patch (it advertises nta-v1) and reconnect: an upgraded gateway is served straight away"
+     )
+ }
+ 
+@@ -381,6 +395,16 @@ mod tests {
+ 
+     const CHAIN: Chain = Chain { nta_height: 3000, probe_window: 2016, next_height: Some(900) };
+ 
++    #[test]
++    fn a_discarded_coinbaser_is_unready_and_says_why() {
++        let mut b = Book::default();
++        assert_eq!(b.note_coinbaser_discarded("g", 1), Some(Status::Unready));
++        assert_eq!(b.note_coinbaser_discarded("g", 2), None);
++        let t = refusal_text(3000, Evidence::CoinbaserDiscarded);
++        assert!(t.contains("threw away every coinbaser") && t.contains("datum_coinbaser.c:795") && !t.contains("  "));
++        assert_eq!(Evidence::CoinbaserDiscarded.as_str(), "coinbaser discarded");
++    }
++
+     #[test]
+     fn probing_runs_from_the_window_to_activation_only() {
+         let at = |h| Chain { next_height: Some(h), ..CHAIN };
+diff --git a/prime/primed/src/session.rs b/prime/primed/src/session.rs
+index addc722..f57bd3a 100644
+--- a/prime/primed/src/session.rs
++++ b/prime/primed/src/session.rs
+@@ -387,6 +387,12 @@ struct Session {
+     /// a full-split share on one says whether the gateway kept it. As many as coinbasers kept: a
+     /// gateway may go on mining a job built from an older one.
+     nta_probes: VecDeque<(u8, Vec<u8>)>,
++    /// SOV-020: pool-only shares on jobs built after a coinbaser that carried payees and a
++    /// 70-byte output (see `judge_nta_pool_only`).
++    nta_discards: u32,
++    /// SOV-020: the last coinbaser sent, if it carried payees and a 70-byte output: (height it
++    /// was built for, unix time sent, "probe" or "attestations").
++    long_coinbaser: Option<(u32, f64, &'static str)>,
+     nta_pool_only_warned: bool,
+ }
+ 
+@@ -548,6 +554,8 @@ pub async fn run(shared: Arc<Shared>, mut stream: TcpStream, remote: SocketAddr)
+         newest_slot: None,
+         canary_check: None,
+         nta_probes: VecDeque::new(),
++        nta_discards: 0,
++        long_coinbaser: None,
+         nta_pool_only_warned: false,
+         row: Some(row),
+     };
+@@ -1013,11 +1021,54 @@ impl Session {
+         Some(script)
+     }
+ 
++    /// SOV-020: a pool-only share on a job with transactions, at the height of the last
++    /// coinbaser Prime sent this session, first seen after it, when that coinbaser carried
++    /// payees and a 70-byte output (the probe before activation, attestations after). The XBT
++    /// datum lineages throw such a coinbaser away whole ("Script length (70) is invalid. Using
++    /// default/empty"), build every job on the tip pool-only and cite coinbaser 0, so no
++    /// full-split share ever comes and the probe alone never decides. Stock also publishes a
++    /// pool-only section on the first notify of a height with the split in hand (968440), and
++    /// a job's first-seen time is its first share's, so one is not a verdict: the second is.
++    fn judge_nta_pool_only(&mut self, v: &VerifiedShare, job_seen: f64) -> bool {
++        let Some(chain) = self.shared.nta_chain() else { return false };
++        let Some((height, sent, what)) = self.long_coinbaser else { return false };
++        if v.height != height || v.commitment.txcount <= 1 || job_seen < sent {
++            return false;
++        }
++        self.nta_discards += 1;
++        if self.nta_discards < 2 {
++            log::info!(
++                "[{}] {} a share at {height} paid only the pool after a coinbaser with payees and the {what}; one more and it is nta-unready",
++                self.id,
++                self.gateway_hex,
++            );
++            return false;
++        }
++        self.nta_probes.clear();
++        let changed = self.shared.readiness.lock().unwrap().note_coinbaser_discarded(&self.gateway_hex, now());
++        if changed.is_some() {
++            log::warn!(
++                "[{}] {} ua={:?} discards coinbasers with a 70-byte output: {} shares on jobs built after a coinbaser carrying payees and the {what} paid only the pool (the XBT datum lineages log \"Script length (70) is invalid. Using default/empty\"): nta-unready. From block {} it {} (nta-unready-policy = {}).",
++                self.id,
++                self.gateway_hex,
++                self.hello.user_agent,
++                self.nta_discards,
++                chain.nta_height,
++                if self.shared.cfg.nta_unready_policy == "refuse" { "gets no work" } else { "is served pool-only coinbasers, whose blocks are invalid all the same" },
++                self.shared.cfg.nta_unready_policy,
++            );
++        }
++        changed.is_some()
++    }
++
+     /// What a full-split share says about this gateway: whether it kept the probe its coinbaser
+     /// ended with, or (after activation) every attestation its coinbaser listed. Only a share
+     /// that pays every issued payee counts: a smaller coinbase dropped outputs by design.
+     /// Returns true if the gateway was just found unready.
+-    fn judge_nta(&mut self, coinbaser_id: u8, v: &VerifiedShare, issued: Option<&[Output]>) -> bool {
++    fn judge_nta(&mut self, coinbaser_id: u8, v: &VerifiedShare, issued: Option<&[Output]>, job_seen: f64) -> bool {
++        if matches!(v.coinbase_kind, CoinbaseKind::PoolOnly) {
++            return self.judge_nta_pool_only(v, job_seen);
++        }
+         if !matches!(v.coinbase_kind, CoinbaseKind::Split) {
+             return false;
+         }
+@@ -1315,6 +1366,12 @@ impl Session {
+                 outputs.push(Output { sats: 0, script });
+             }
+         }
++        let long = outputs.iter().any(|o| o.sats == 0 && o.script.len() == 70 && o.script[..2] == [0x6a, 0x44]);
++        let payees = outputs.iter().any(|o| o.sats > 0 && o.script != self.shared.pool_script);
++        self.long_coinbaser = (long && payees).then(|| {
++            let height = self.shared.tip_snapshot().map_or(0, |t| t.height + 1);
++            (height, crate::sovereignty::now_f64(), if nta.is_some() { "attestations" } else { "probe" })
++        });
+         let encoded = coinbaser::encode_v2(id, &outputs);
+         self.send_coinbaser_reply(value, &encoded, prev_hash).await?;
+ 
+@@ -1672,7 +1729,8 @@ impl Session {
+         if !credited {
+             return self.reject(&s, mining::REJECT_BAD_USERNAME).await;
+         }
+-        let nta_unready = self.judge_nta(coinbaser_id, &v, issued_outputs.as_deref());
++        let job_seen = self.job_seen.get(usize::from(s.job_id)).copied().unwrap_or(0.0);
++        let nta_unready = self.judge_nta(coinbaser_id, &v, issued_outputs.as_deref(), job_seen);
+         if self.shared.nta_chain().is_some() {
+             // Readiness weighs a gateway by the difficulty of the shares it gets accepted, not by
+             // credit: a share whose difficulty is outside its hash is credited by hash alone
+-- 
+2.43.0
+

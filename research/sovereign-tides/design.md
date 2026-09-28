@@ -230,6 +230,58 @@ Clusters: `[POOL, PROXY]`, and every other gateway alone.
 - Honest Jaccard with the pool node is ~0.3 here and will be far higher on mainnet, where mempools converge. `lead` doesn't depend on convergence: on a random relay graph an honest node is first on a share of txs either way.
 - The detector sees only Lazarus's own gateways. Other pools are scored on tags and attestations alone.
 
+### Canary delivery off loopback (SOV-020, 2026-09-28)
+
+SOV-015's foreign-canary settings were calibrated on loopback. SOV-020 re-ran the sov-015 demo
+over emulated WAN links (netem, 20–80 ms one-way, on the DATUM port and every P2P port) and over
+a private Tor network (onion services in front of each gateway node, 15–75 ms per relay hop). On
+any real link the shipped defaults **switch foreign detection off, silently**.
+
+**What `max_lag_secs` measures.** The sidecar counts a twin C′ only if its node's `pong` came back
+within `max_lag_secs` of C being sent. That is a *pong lag*: C's send plus a full round trip to the
+target. It is not the number that decides the relay race, which is the skew between C and C′
+*arriving* at the target node. The pong lag is always at least one round trip, so:
+- at 20 ms one-way the pong lag was ~80 ms while the true skew never passed 65 ms;
+- over Tor it is at least one circuit round trip, ~0.65 s.
+
+With the loopback default `max_lag_secs = 0.05` every twin was "late" at every tested latency
+(806/810 at 20 ms, 450/450 over Tor), no foreign canary was judged, the farm was not clustered,
+and nothing logged an error. `status` → `foreign.late` is the only sign.
+
+**Settings for any non-loopback link:**
+
+| Link | `[foreign] order` | `max_lag_secs` | Measured (SOV-020) |
+|---|---|---|---|
+| loopback (the demos) | `own-ack` | 0.05 (default) | as in SOV-015 |
+| direct, ≤ 80 ms one-way | `pipelined` (either order passed at 80 ms) | **0.5** (about 2 × RTT + 0.1 s) | 80 ± 20 ms: both orders PASS, honest nodes carried 0/367 foreign canaries |
+| Tor (`[delivery] mode = "socks5"`) | **`pipelined`** | **2–3** | 390/390 own and 1,950/1,950 twins delivered; farm clustered 3/3; honest false clusters 0/6 |
+
+- **Use `pipelined` over Tor.** `own-ack` waits for C's `pong` (a full circuit round trip) before
+  sending any twin, so twins arrived 0.9–1.2 s after C and honest nodes took C by relay (4 of ~230
+  chances). With `pipelined` the true skew was p95 ≈ 250 ms, max ≈ 370 ms, and honest nodes took
+  C in 2 of ~750 chances (0.27%); the join rule (≥ 3 hits at ≥ 0.25 over ≥ 10 due) absorbs that.
+- **The margin shrinks over Tor.** A farm node reached under three onions at once got C first only
+  56–71% of the time, and the farm's foreign rate fell to 0.21–0.35, around the 0.25 bar. It
+  still clustered in every run. Watch `foreign_due`; a lower bar may be needed once due counts are
+  larger.
+- **Alert when `foreign.late / twins` exceeds 0.1.** A better fix is in the sidecar: gate on the
+  estimated one-way skew, `(t_C′ sent + rtt_T/2) − (t_C sent + rtt_G/2)`, from the handshake RTT
+  each connection already measures, instead of on pong lag.
+- **Tor budget.** About 1.6 s to connect (p50; p95 3.1 s) plus ~0.65 s round trip per peer: a
+  6-gateway round with 30 fan-out connections took ~37 s.
+- **Tor on an isolated lab.** `apt install tor` on Debian/Ubuntu starts `tor@default`, a client on
+  the public Tor network, straight away. On a box that must not reach the public network,
+  `systemctl disable --now tor@default` right after installing (or install with the service
+  masked) and run your own `tor` instances.
+
+**W8 (canary checks) needs share traffic.** At 20–80 ms every canary check primed sent was
+answered (84/84 per profile, 0 refused) and honest own and shared hit rates stayed at 100%. But
+those gateways were simulators that send one job per template. A real DATUM gateway shows Prime a
+new job only together with a share, so W8's "newest job" is only as fresh as the gateway's share
+rate. A gateway needs **several shares a minute** for W8 to work; a CPU miner at difficulty 1
+(about one share per four minutes) starves it. Stage S3 has to measure the share of jobs left
+unjudged on real gateways.
+
 ## 6. The TIDES bonus
 Attested DATUM work gets extra TIDES credit. Like the rebate, it is credited **as carry when a block is found** and reversed on orphan. Two funding sources, both closed-form on window totals (V = block value, T/S = total/stratum work, D_u = unattested DATUM work):
 ```

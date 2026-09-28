@@ -20,7 +20,11 @@ python3 race_probe.py <bitcoind> 32880 run/race $WT/lazarus/canary 40   # the fu
   sidecar reads them from primed's `GET /sovereignty/nodes`. `gwsim/` is SOV-013's DATUM gateway
   simulator built against this branch's `datum-wire`.
 - The sidecar runs for real with `[foreign] enabled = true`, `fanout = 0` (every other gateway),
-  `order = "own-ack"`, `max_lag_secs = 0.05`, 15 s rounds.
+  `order = "own-ack"`, `max_lag_secs = 0.05`, 15 s rounds. **These are loopback settings.** Off
+  loopback they turn foreign detection off without an error; use `order = "pipelined"` and a
+  `max_lag_secs` sized to the link ([../../TRY-IT.md](../../TRY-IT.md#off-loopback-canary-settings-for-wan-and-tor)).
+- If a run stops in setup with `nodes did not sync` (a Knots peering flake, about 1 run in 10),
+  run the demo again: it is not a detector result.
 
 | gateway | registered node | template | expected |
 |---|---|---|---|

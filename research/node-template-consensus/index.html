@@ -473,17 +473,28 @@ network. The choice of mechanism belongs to the Knots maintainers. It could be:
 <p>No single pool can activate this. Blocks from non-enforcing hashrate stay valid to old
 nodes.</p>
 <h3 id="gateway-readiness">Gateway readiness<a class="headerlink" href="#gateway-readiness" title="Permanent link">&para;</a></h3>
-<p><strong>Stock DATUM gateways would mine invalid blocks after activation, silently.</strong> OCEAN
-<code>datum_gateway</code> v0.4.1 (<code>5b06123</code>) parses the pool&rsquo;s coinbaser in
-<code>datum_coinbaser_v2_parse</code> and stops at the first output script longer than 64 bytes
-(<code>src/datum_coinbaser.c:795</code>, <code>if ((slen &lt; 2) || (slen &gt; 64)) { break; }</code>; the buffer is
-<code>output_script[64]</code>, <code>src/datum_stratum.h:115</code>; master <code>dbc3b14</code> keeps the limit at
-:801). Every output from there on is dropped without an error, and the undistributed
-value goes to the pool address. The attestation output is 70 bytes and follows the
-payees, so a stock gateway keeps the payees, drops every attestation, and its blocks
-are <code>bad-nta-count</code> from the activation height on. Nothing tells the operator, the
-miners keep hashing, and the loss is every block that gateway finds. This is not about
-signing: the gateway cannot even carry attestations that the pool signed.</p>
+<p><strong>Stock DATUM gateways would mine invalid blocks after activation, silently.</strong> The
+attestation output is 70 bytes and follows the payees, and no released gateway carries
+a coinbaser script over 64 bytes. Upstream has two behaviours, and both lose every
+attestation:</p>
+<ul>
+<li><strong>Truncate.</strong> OCEAN <code>datum_gateway</code> v0.4.1 (<code>5b06123</code>) stops parsing the coinbaser at
+  the first script longer than 64 bytes (<code>src/datum_coinbaser.c:795</code>,
+  <code>if ((slen &lt; 2) || (slen &gt; 64)) { break; }</code>; the buffer is <code>output_script[64]</code>,
+  <code>src/datum_stratum.h:115</code>). It keeps the payees before that script, drops everything
+  after it without an error, and the undistributed value goes to the pool address.</li>
+<li><strong>Discard.</strong> OCEAN master (<code>dbc3b14</code>, <code>:801–804</code>) and every XBT lineage checked throw
+  the <strong>whole</strong> coinbaser away instead: <code>Script length (%d) is invalid. Using
+  default/empty</code>, zero outputs, and the job pays only the pool. They are the StartOS pin
+  iohzrd <code>7491a50</code> (<code>:832</code>), iohzrd <code>c031568</code> (<code>:772</code>), FlyTheElephant1 <code>a5f28aa</code>
+  (<code>:831</code>) and CONVOY <code>b9ea7dc</code> (<code>:806</code>). These are the gateways XBT miners run.</li>
+</ul>
+<p>Either way, from the activation height every block such a gateway finds is
+<code>bad-nta-count</code>. Nothing tells the operator, the miners keep hashing, and the loss is
+every block that gateway finds. This is not about signing: the gateway cannot even carry
+attestations that the pool signed. On regtest, unmodified <code>7491a50</code> and <code>c031568</code> builds
+discarded every probed coinbaser (146 of 146 and 206 of 206), and one of them found a
+post-activation block that the node refused as <code>bad-nta-count</code> (SOV-020).</p>
 <p>So activation needs three things that are not in consensus:</p>
 <ol>
 <li><strong>A gateway release</strong> that accepts the exact 70-byte attestation shape in the
@@ -493,10 +504,20 @@ signing: the gateway cannot even carry attestations that the pool signed.</p>
 <li><strong>A readiness signal</strong> the pool can measure per gateway (SOV-011):
    - an updated gateway advertises <code>nta-v1</code> in the DATUM handshake, in a field stock
      v0.4.1 ignores;
-   - for gateways that don&rsquo;t advertise, the pool probes before activation: it puts a
+   - the pool probes every gateway before activation, advertised or not: it puts a
      0-value 70-byte NTA-shaped output at the end of one coinbaser per gateway, and
      checks whether the next share&rsquo;s coinbase still has it. Before activation that
      output is an ordinary <code>OP_RETURN</code> and changes no payout;
+   - the probe must also count <strong>pool-only</strong> shares. A discarding gateway never returns
+     a share that carries the probed payees, so a rule that judges only such shares
+     never reaches a verdict: in SOV-020 both real XBT builds stayed &ldquo;unknown&rdquo; and were
+     still served after activation. A pool-only share at the probed height, on a job
+     with transactions, first seen after the probed coinbaser, is a strike; two strikes
+     make the gateway unready (one is not enough, because stock also sends one
+     pool-only job at each new height). After activation a single pool-only share
+     without the pool&rsquo;s attestation is enough. For such a gateway the probe is not free:
+     its jobs pay only the pool until its next coinbaser, which one probe an hour keeps
+     to about one job window per hour;
    - after activation the pool refuses pooled work to a gateway that is not ready, with
      a message the operator sees, instead of letting it hash on invalid blocks.</li>
 <li><strong>A readiness threshold.</strong> Pools publish the share of their gateway hashrate that is
@@ -707,8 +728,9 @@ stated so reviewers can weigh them:</p>
    export the tweaked secret, so either wallets export it or payees use a dedicated,
    non-BIP86 payout key. It is hot on the gateway either way (sweep it regularly).</li>
 <li><strong>Stock gateways fail silently.</strong> See <a href="#gateway-readiness">Gateway readiness</a>: an
-    un-upgraded DATUM v0.4.1 gateway mines <code>bad-nta-count</code> blocks after activation
-    unless its pool detects it and refuses it work.</li>
+    un-upgraded DATUM gateway (OCEAN v0.4.1, which truncates, or any XBT lineage, which
+    discards) mines <code>bad-nta-count</code> blocks after activation unless its pool detects it
+    and refuses it work.</li>
 </ol>
 <h2 id="follow-up-inclusion-list-extension-not-part-of-v1">Follow-up: inclusion-list extension (not part of v1)<a class="headerlink" href="#follow-up-inclusion-list-extension-not-part-of-v1" title="Permanent link">&para;</a></h2>
 <blockquote>

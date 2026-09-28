@@ -40,7 +40,7 @@ rollout stages: [staging-summary.md](staging-summary.md).
 | Canary detector (own, shared, decoy, foreign) | built; regtest: honest gateways never flagged, proxy / mimic / both hybrids flagged 3/3, third-party-fed gateways clustered 3/3 |
 | Pool-safe rework (S0) | built and verified on regtest (10 suites); 72 h soak in progress |
 | Registration v1/v2 with BIP322 | built, cross-checked against Knots-signed vectors |
-| NTA signing and attested coinbases | built (regtest), with gateway readiness detection |
+| NTA signing and attested coinbases | built (regtest), with gateway readiness detection; the detection was corrected on 2026-09-28 for stock gateways that discard the coinbaser (series `sov-011`, [gateway-readiness.md](../node-template-consensus/gateway-readiness.md)) |
 | Public score | computed from real chain data (network score 15.3 over 7 days, 0 attested blocks: nobody emits LZT1 yet); not published by the pool |
 | Bonus | designed and unit-tested; **off**, and a separate decision |
 
@@ -49,8 +49,26 @@ rollout stages: [staging-summary.md](staging-summary.md).
 - **Mainnet calibration.** The detector was only run on regtest, where mempools diverge
   far more than on mainnet. Honest miss rates, cadence and thresholds need a shadow run on
   real gateways (stage S3).
-- **Real network conditions.** Everything ran on loopback. Canary delivery over Tor is
-  tested only at the framing level. The C gateway patch ran live only on regtest.
+- **Real networks.** SOV-020 ran the demos over emulated WAN links (netem, 20–80 ms one-way,
+  on the DATUM port and every P2P port) and over a private Tor network (onion services in front
+  of every gateway node). What it showed:
+  - canary checks (W8) were all answered and honest canary hit rates stayed at 100%;
+  - canaries delivered over Tor: 390/390 own and 1,950/1,950 twins, 0 failures;
+  - **the loopback defaults switch foreign detection off on any real link**, silently. Off
+    loopback use `order = "pipelined"` and a `max_lag_secs` sized to the link. With those
+    settings the farm clustered in every run and honest nodes had 0 false clusters. See
+    [design.md](design.md#canary-delivery-off-loopback-sov-020-2026-09-28) and
+    [TRY-IT.md](TRY-IT.md#off-loopback-canary-settings-for-wan-and-tor);
+  - NTA per-tip signatures reached the pool in p95 ≤ 0.5 s at 80 ms one-way.
+
+  Not yet run: the public Tor network, real WAN hosts, and real hashrate. The Tor margin is
+  thin (the farm's foreign hit rate was 0.21–0.35 against a 0.25 bar). W8 needs several shares
+  a minute per real gateway, which lab CPU miners can't give.
+- **Real stock gateways.** Unmodified StartOS-pin (`7491a50`) and iohzrd (`c031568`) builds
+  ran against the NTA readiness checks on regtest. They **discard** coinbasers with 70-byte
+  scripts instead of truncating them, which the first published checks missed; fixed in
+  `sov-011` `mit/0005`–`0006` (see gateway-readiness.md). The split-only C gateway patch now
+  applies to FlyTheElephant1 master `a5f28aa` and ran live only on regtest.
 - **A farm that tailors each gateway's template on conflicts** is not caught.
 - **Self-reported fields** in `A` (mempool digest, node tag) are not trusted by the
   detector, and prove nothing on their own.
@@ -66,7 +84,7 @@ rollout stages: [staging-summary.md](staging-summary.md).
 | [design.md](design.md) | the design and prototype record, with later updates inline |
 | [staging-summary.md](staging-summary.md) | the pool-safe rework (S0) and the stages after it |
 | [tools/](tools/) | Python: score over real chain data, LZT1 verifier, detector, RDTS test, unit tests |
-| [demos/](demos/) | regtest harnesses: hybrid proxy (sov-004), canary sidecar (sov-008), foreign canaries (sov-015), the S0 verify driver (sov-010) |
+| [demos/](demos/) | regtest harnesses: hybrid proxy (sov-004), canary sidecar (sov-008), NTA gateway readiness (sov-011), foreign canaries (sov-015), the S0 verify driver (sov-010) |
 | [results/](results/) | score tables, detector runs, demo evidence (regtest and public chain data only) |
 | [patches/primed/](patches/primed/) | the Prime / gateway / sidecar changes as `git format-patch` series that apply to this repo's `main` at `f14bb4c` (MIT for `prime/` and `pool/`, AGPL-3.0 for `lazarus/`); see its README |
 

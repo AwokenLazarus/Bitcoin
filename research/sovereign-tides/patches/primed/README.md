@@ -30,7 +30,7 @@ the source branch. Every series was checked that way with `git am`.
 | Series | Applies on | `mit/` | `agpl/` | What |
 |---|---|---:|---:|---|
 | `s0` | `main` `f14bb4c` | 27 | 8 | The S0 stack: Sovereign TIDES made pool-safe, the canary sidecar, registration, NTA signing |
-| `sov-011` | `f14bb4c` + `s0` | 4 | 2 | NTA activation safety: find and refuse gateways that can't carry attestations |
+| `sov-011` | `f14bb4c` + `s0` | 6 | 3 | NTA activation safety: find and refuse gateways that can't carry attestations |
 | `sov-015` | `f14bb4c` + `s0` | 2 | 1 | Foreign canaries: cluster gateways fed by one third-party node |
 | `sov-017` | `f14bb4c` + `s0` | 4 | 3 | Direct NTA attestations for payees without a gateway (`nta-signer`) |
 
@@ -51,7 +51,7 @@ sidecar's `python3 -m unittest test_lazarus_canary`): all pass.
 | Tip | `prime/` tests | `lazarus/` tests | sidecar tests |
 |---|---:|---:|---:|
 | `s0` | 260 | 131 | 18 |
-| `s0` + `sov-011` | 273 | 133 | 18 |
+| `s0` + `sov-011` | 274 | 133 | 18 |
 | `s0` + `sov-015` | 267 | 131 | 22 |
 | `s0` + `sov-017` | 265 | 135 | 18 |
 
@@ -126,7 +126,8 @@ Prime tells apart gateways that can carry NTA attestations and those that can't 
 hello flag and the pre-activation probe). After activation it refuses unready gateways, and it
 reports fleet readiness in `/nta.json`. This series includes the fix to the split-only C gateway
 patch, which dropped zero-value outputs after its payees. See
-[../../../node-template-consensus/gateway-readiness.md](../../../node-template-consensus/gateway-readiness.md).
+[../../../node-template-consensus/gateway-readiness.md](../../../node-template-consensus/gateway-readiness.md)
+and the demo in [../../demos/sov-011/](../../demos/sov-011/).
 
 | `mit/` | `agpl/` | Change |
 |---|---|---|
@@ -134,6 +135,18 @@ patch, which dropped zero-value outputs after its payees. See
 | 0002 | | a share on any probe coinbaser still held decides, not only the newest |
 | 0003 | | readiness weighs gateways by accepted share difficulty; refused reconnects log once per ten minutes |
 | 0004 | 0002 | probe advertisers too; the C gateway keeps zero-value outputs after its payees |
+| 0005 | | a gateway that **discards** 70-byte coinbasers is `nta-unready` after two pool-only strikes (added 2026-09-28) |
+| 0006 | | after activation one unattested pool-only share makes a gateway `nta-unready` (added 2026-09-28) |
+| | 0003 | the split-only C gateway patch, rebased onto FlyTheElephant1 master `a5f28aa` (added 2026-09-28) |
+
+**Added 2026-09-28 (SOV-020, SOV-022).** The first publication had `mit/0001`–`0004` and
+`agpl/0001`–`0002`. They judged a gateway only on a full-split share. Real XBT stock gateways
+throw a coinbaser with a 70-byte script away whole and mine pool-only jobs, so they were never
+judged and one mined an invalid block after activation (see gateway-readiness.md §1 and §5).
+`mit/0005` and `0006` count pool-only shares on probed or attested coinbasers. `agpl/0003`
+moves the C patch to a base that still exists upstream: its old base, FlyTheElephant1 `121edd0`,
+was force-pushed away. The new patch builds and passes `./datum_gateway --test` on `a5f28aa`, and
+its header lists how the port differs. Apply the whole series, as before: `mit/` then `agpl/`.
 
 ### `sov-015`: foreign canaries
 
