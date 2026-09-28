@@ -1742,11 +1742,7 @@ impl Session {
             if settles { rebate_deferred } else { 0 },
         );
         if settles {
-            let (total, holders) = {
-                let mut ledger = self.shared.ledger.lock().unwrap();
-                ledger.book_debits(&carry_delta, &mut books);
-                (ledger.window.total_carry(), ledger.window.carries().len())
-            };
+            let (total, holders) = self.shared.book_block_debits(&carry_delta, &mut books);
             let waiting: i64 = carry_delta.iter().map(|d| d.1.max(0)).sum();
             log::info!(
                 "[{}] block {hash_hex} carry: {carry_paid} sats of carry paid in {} outputs and {} sats of owed DATUM rebate drawn, off the books now; {waiting} sats of deferred earnings and rebate credits ({} entries) and {rebate_deferred} sats of undistributed rebate go on when the node confirms it; pool now holds {total} sats of carry for {holders} miners",

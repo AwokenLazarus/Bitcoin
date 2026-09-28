@@ -516,10 +516,30 @@ impl Shared {
         base
     }
 
-    /// Forget the shared coinbaser snapshot: balances were moved by hand, and the next
-    /// coinbaser must not be priced off what they were.
+    /// Forget the shared coinbaser snapshot: balances moved (a block paid carry, a confirmation
+    /// or an orphan booked it, or they were moved by hand), and the next coinbaser must not be
+    /// priced off what they were. Call it after the ledger lock is released: `coinbaser_base`
+    /// takes this lock and then the ledger's, so holding them the other way round can deadlock.
     pub fn drop_coinbaser_base(&self) {
         *self.coinbaser_base.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    }
+
+    /// Take a found block's paid carry and drawn rebate off the books, and stop the coinbaser
+    /// snapshot from offering them again.
+    ///
+    /// The snapshot lives up to [`COINBASER_BASE_TTL`], and every gateway asks for a coinbaser
+    /// the moment the tip moves, which is exactly when a found block has just been booked. A
+    /// reply priced off the snapshot from before the debit would hand the same carry out a second
+    /// time, out of the pool's remainder, in whatever block that split is mined into.
+    /// Returns the pool's carry total and the number of holders after the debit.
+    pub fn book_block_debits(&self, carry_delta: &[(String, i64)], books: &mut tides::Books) -> (u64, usize) {
+        let after = {
+            let mut ledger = self.ledger.lock().unwrap_or_else(|e| e.into_inner());
+            ledger.book_debits(carry_delta, books);
+            (ledger.window.total_carry(), ledger.window.carries().len())
+        };
+        self.drop_coinbaser_base();
+        after
     }
 
     pub fn gateway_scripts_path(&self) -> std::path::PathBuf {
@@ -666,6 +686,93 @@ impl Shared {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A real `Shared` over a temporary data dir, for tests of what sessions and the node poller
+    /// do to it. Nothing here opens a socket: the RPC client only connects when called.
+    fn test_shared(tag: &str) -> (Arc<Shared>, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!("primed-state-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let toml = dir.join("prime.toml");
+        std::fs::write(
+            &toml,
+            format!(
+                "listen = \"127.0.0.1:0\"\nstats-listen = \"127.0.0.1:0\"\ndata-dir = \"{}\"\n\
+                 payout-address = \"bc1qk3kxstl02hqnhynwtx0zws7merw6ynut52vtzs\"\nprime-id = 1\n\
+                 network = \"mainnet\"\nrpc = \"http://127.0.0.1:1\"\nrpc-user = \"u\"\nrpc-password = \"p\"\n",
+                dir.display()
+            ),
+        )
+        .unwrap();
+        let cfg = Config::load(&toml).unwrap();
+        let (tip_tx, tip) = watch::channel(None);
+        let (notify, _) = broadcast::channel(4);
+        let shared = Arc::new(Shared {
+            split_params: SplitParams {
+                fee_bps: 0,
+                stratum_fee_bps: 0,
+                datum_rebate_bps: 0,
+                min_payout: 546,
+                max_outputs: 511,
+                output_budget_bytes: 13_927,
+                stale_after: 0,
+                stale_min_payout: 10_000,
+                stale_max_outputs: 25,
+            },
+            pool_script: address::to_script(&cfg.payout_address, Network::Mainnet).unwrap(),
+            pool: Identity::generate(),
+            network: Network::Mainnet,
+            ledger: Mutex::new(Ledger::open(dir.join("ledger")).unwrap()),
+            blocks: Mutex::new(Vec::new()),
+            block_log: BlockLog::open(&dir),
+            clients: Mutex::new(Default::default()),
+            quarantine: Default::default(),
+            seen: Mutex::new(Default::default()),
+            connections: Mutex::new(Default::default()),
+            tip_tx,
+            tip,
+            notify,
+            rpc: Rpc::new("http://127.0.0.1:1", None, Some("u"), Some("p")).unwrap(),
+            refresh: Default::default(),
+            totals: Totals::default(),
+            started: Instant::now(),
+            started_ts: 0,
+            next_client_id: AtomicU64::new(1),
+            coinbaser_base: Mutex::new(None),
+            gateway_payouts: Mutex::new(Default::default()),
+            parents: Default::default(),
+            faults: crate::validity::Faults::with_ttl(cfg.quarantine_max_hours.saturating_mul(3600)),
+            cfg,
+        });
+        (shared, dir)
+    }
+
+    fn carry_in(base: &CoinbaserBase, who: &str) -> u64 {
+        base.miners.iter().find(|m| m.identity == who).map_or(0, |m| m.carry)
+    }
+
+    /// Every gateway asks for a coinbaser as the tip moves, which is the second a found block is
+    /// booked. A snapshot from before the block's debits would offer the carry it just paid a
+    /// second time, out of the pool's remainder.
+    #[test]
+    fn carry_a_block_paid_is_not_offered_again_by_the_coinbaser_snapshot() {
+        let (shared, dir) = test_shared("carry");
+        let who = "bc1qpxcy2pgedcfccfpw0p9xpzm3edkgajmjl5xe02";
+        {
+            let mut ledger = shared.ledger.lock().unwrap();
+            ledger.credit(who, 1_000, 1, 100, tides::SOURCE_DATUM).unwrap();
+            ledger.book_credits(&[(who.to_string(), 40_000)], &mut tides::Books::new(0, 0));
+        }
+        let before = shared.coinbaser_base();
+        assert_eq!(carry_in(&before, who), 40_000);
+        // a found block paid it out, well inside the snapshot's lifetime
+        let (total, _) = shared.book_block_debits(&[(who.to_string(), -40_000)], &mut tides::Books::new(0, 0));
+        assert_eq!(total, 0);
+        let after = shared.coinbaser_base();
+        assert_eq!(carry_in(&after, who), 0, "the snapshot still offers carry the block already paid");
+        assert!(!Arc::ptr_eq(&before, &after));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     fn h(n: u64) -> Hash {
         let mut a = [0u8; 32];

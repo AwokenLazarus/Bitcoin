@@ -275,6 +275,9 @@ fn settle_confirmed(shared: &Shared, hash: &str) {
     if let Err(e) = ledger.sync() {
         log::error!("ledger sync after settling {hash} failed: {e}");
     }
+    // Carry and rebate just moved; a coinbaser snapshot from before must not be served.
+    drop(ledger);
+    shared.drop_coinbaser_base();
 }
 
 /// Whether a `submitblock` result proves the block the miner hashed is invalid.
@@ -370,6 +373,9 @@ pub fn mark_orphan(shared: &Shared, hash: &str, height: u32, why: &str) {
     if let Err(e) = ledger.sync() {
         log::error!("ledger sync after orphaning {hash} failed: {e}");
     }
+    // The carry the orphan had paid is owed again; the next coinbaser must see it.
+    drop(ledger);
+    shared.drop_coinbaser_base();
 }
 
 #[cfg(test)]
