@@ -1,4 +1,4 @@
-// Advanced-mode Pages worker. _routes.json sends only /api/* and the Search Console proof here;
+// Advanced-mode Pages worker. _routes.json sends only /api/* and the Search Console proofs here;
 // every other URL is served straight from the static assets without invoking it.
 //
 // /api/*: pass the request to the node and hand the answer back, same-origin.
@@ -7,16 +7,17 @@
 // day longer as a fallback: if the node is unreachable or answers 5xx, the last good copy goes
 // out instead, marked X-Lazarus-Stale, so a node restart does not blank the dashboard.
 const STALE_S = 86400;
-const GOOGLE_PROOF = "/googleda1d0aa98080ef94.html";
+// One file per Search Console owner (Mike, Brett). Each is that Google account's own token.
+const GOOGLE_PROOFS = new Set(["/googleda1d0aa98080ef94.html", "/google4631882008b8273c.html"]);
 
 export default {
   async fetch(request, env, ctx) {
     const path = new URL(request.url).pathname;
     if (path.startsWith("/api/")) return api(request, env, ctx);
     // Pages 308s every /x.html to /x and Search Console will not follow a redirect when it
-    // re-verifies ownership, so this one file is answered here at its exact path.
-    if (path === GOOGLE_PROOF) {
-      return new Response("google-site-verification: " + GOOGLE_PROOF.slice(1), {
+    // re-verifies ownership, so these files are answered here at their exact paths.
+    if (GOOGLE_PROOFS.has(path)) {
+      return new Response("google-site-verification: " + path.slice(1), {
         headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "public, max-age=0, s-maxage=86400" },
       });
     }

@@ -1,5 +1,9 @@
 {
   "version": 1,
-  "include": ["/api/*", "/googleda1d0aa98080ef94.html"],
+  "include": [
+    "/api/*",
+    "/googleda1d0aa98080ef94.html",
+    "/google4631882008b8273c.html"
+  ],
   "exclude": []
 }
