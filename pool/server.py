@@ -5203,7 +5203,124 @@ def render_pool_index(path, query=""):
                                    "inLanguage": meta["lang"]}, ensure_ascii=False, separators=(",", ":")),
             raw, count=1)
     raw = _inject_intro(raw, meta)
-    return raw if home else _keyword_page(raw, meta)
+    raw = raw if home else _keyword_page(raw, meta)
+    return _localize_zh(raw) if meta["lang"] == "zh-CN" else raw
+
+
+# Server-side Chinese. i18n.js translates [data-i18n*] elements in the browser, so before this a
+# /zh/ page shipped English everywhere except its intro, and crawlers that do not run scripts
+# (Baidu, most AI crawlers, Bing's first pass) read an English page labelled zh-CN. The same
+# dictionaries are applied here with the same rules as i18n.js apply(), so the browser's pass
+# afterwards changes nothing.
+_I18N_ASSIGN = re.compile(r'window\.LZ_I18N_DICTS\["([^"]+)"\]((?:\.[A-Za-z_]\w*)*)\s*=\s*\{')
+_I18N_CACHE = {}
+
+
+def _i18n_dict(locale):
+    """The dictionary a locale's i18n/*.js file builds, including its later `.app = {...}` parts."""
+    path = STATIC / "i18n" / f"{locale}.js"
+    try:
+        stamp = path.stat().st_mtime
+    except OSError:
+        return {}
+    hit = _I18N_CACHE.get(locale)
+    if hit and hit[0] == stamp:
+        return hit[1]
+    src = path.read_text(encoding="utf-8")
+    root, dec = {}, json.JSONDecoder()
+    for m in _I18N_ASSIGN.finditer(src):
+        if m.group(1) != locale:
+            continue
+        obj, _end = dec.raw_decode(src, m.end() - 1)
+        keys = [k for k in m.group(2).split(".") if k]
+        if not keys:
+            root = obj
+            continue
+        node = root
+        for k in keys[:-1]:
+            node = node.setdefault(k, {})
+        node[keys[-1]] = obj
+    _I18N_CACHE[locale] = (stamp, root)
+    return root
+
+
+def _i18n_t(key, zh, en):
+    """i18n.js t(key) with no vars: zh, else en, else the key itself; plurals take "other"."""
+    def get(d):
+        for k in key.split("."):
+            d = d.get(k) if isinstance(d, dict) else None
+            if d is None:
+                return None
+        return d
+    val = get(zh)
+    if val is None:
+        val = get(en)
+    if val is None:
+        return key
+    if isinstance(val, dict) and ("one" in val or "other" in val):
+        val = val.get("other") if val.get("other") is not None else val.get("one", "")
+    return val if isinstance(val, str) else None
+
+
+_I18N_ELEMENT = {
+    "data-i18n": re.compile(r'<([a-zA-Z][\w-]*)\b[^>]*\sdata-i18n="([^"]*)"[^>]*>'),
+    "data-i18n-html": re.compile(r'<([a-zA-Z][\w-]*)\b[^>]*\sdata-i18n-html="([^"]*)"[^>]*>'),
+}
+_I18N_ATTR = (("data-i18n-title", "title"), ("data-i18n-aria", "aria-label"), ("data-i18n-placeholder", "placeholder"))
+
+
+def _close_of(raw, tag, start):
+    """Index of the </tag> that closes the element whose content starts at `start`, or -1."""
+    depth, pos = 1, start
+    pattern = re.compile(rf"<(/?){re.escape(tag)}\b[^>]*?(/?)>", re.I)
+    for m in pattern.finditer(raw, pos):
+        if m.group(1):
+            depth -= 1
+            if depth == 0:
+                return m.start()
+        elif not m.group(2):
+            depth += 1
+    return -1
+
+
+def _localize_zh(raw):
+    zh, en = _i18n_dict("zh-CN"), _i18n_dict("en")
+    if not zh:
+        return raw
+    cut = raw.find("<body")
+    if cut < 0:
+        return raw
+    head, body = raw[:cut], raw[cut:]
+    # Text first, then HTML, as apply() does; last to first so earlier offsets stay valid.
+    for attr, pattern in _I18N_ELEMENT.items():
+        for m in reversed(list(pattern.finditer(body))):
+            val = _i18n_t(m.group(2), zh, en)
+            if not val:
+                continue
+            end = _close_of(body, m.group(1), m.end())
+            if end < 0:
+                continue
+            inner = html.escape(val, quote=False) if attr == "data-i18n" else val
+            body = body[: m.end()] + inner + body[end:]
+
+    def set_attr(m, source, target):
+        tag = m.group(0)
+        key = re.search(rf'\s{source}="([^"]*)"', tag).group(1)
+        val = _i18n_t(key, zh, en)
+        if val is None:
+            return tag
+        val = _xml_attr(val)
+        if re.search(rf'\s{target}="[^"]*"', tag):
+            return re.sub(rf'(\s{target}=")[^"]*(")', lambda x: x.group(1) + val + x.group(2), tag, count=1)
+        return tag.replace(f" {source}=", f' {target}="{val}" {source}=', 1)
+
+    for source, target in _I18N_ATTR:
+        body = re.sub(rf'<[^>]*\s{source}="[^"]*"[^>]*>', lambda m, s=source, g=target: set_attr(m, s, g), body)
+    # Google Fonts do not load in mainland China; the stylesheet already falls back to PingFang,
+    # Songti and system fonts for Chinese, so /zh/ does without the request.
+    head = re.sub(r'<noscript><link[^>]*fonts\.googleapis\.com[^>]*></noscript>\n?', "", head)
+    head = re.sub(r'<link[^>]*fonts\.(?:googleapis|gstatic)\.com[^>]*>\n?', "", head)
+    return head + body
 
 
 # The dashboard sections a keyword page keeps under its own article; the homepage keeps them all.
