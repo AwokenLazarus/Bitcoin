@@ -10,6 +10,7 @@ Key facts:
 
 ## Pages
 - [What XBT is](https://lazarus-xbt.xyz/learn/): the fork, address safety, how mining and payouts work, the maturity soft fork, wallets, glossary
+- [BLAKE2b vs SHA-256](https://lazarus-xbt.xyz/blake2b/): the hash function, how it differs from SHA-256, and which ASICs can mine it
 - [FAQ](https://lazarus-xbt.xyz/faq/): short answers on the chain, safety, mining and practical questions
 - [Ecosystem](https://lazarus-xbt.xyz/ecosystem/): pool directory, open-source software, public endpoints, community
 - [XBT Galaxy map](https://lazarus-xbt.xyz/map/): every pool and DATUM gateway, built from coinbase tags
