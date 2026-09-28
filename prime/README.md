@@ -417,7 +417,11 @@ the usual order, largest earned-plus-carry first and first-fit; whoever does not
 `OverBudget` exactly as under the pool's own 14 kB budget and their earnings are deferred to
 carry; the pool's output is still last. A list whose payees fit in the bytes the class kept is
 kept whole by it, so a block found on it is a full split and owes nothing. The budget belongs to
-the session: a reconnect starts without one and learns it again in under a minute. An over-rate
+the session: a reconnect starts without one and learns it again in under a minute. Within a
+session it lasts six hours from when it was last set, and is then forgotten with every sighting
+it was learned from and learned again from the classes in use by then. Nothing else could raise
+it: a list cut to it is kept whole by every class with that much room, so no share shows there
+is more, and a class that is still mining shows its size again at once. An over-rate
 repeat is only ever of a reply held to the same budget, and a session whose reply leaves it on
 its own script (`stock-full-pool-only = "gateway-solo"`) is not held to one, since the pool's
 output that a class may drop would then pay the gateway.
@@ -425,7 +429,8 @@ output that a class may drop would then pay the gateway.
 It does not reduce what is owed. The tail's earnings are paid later, inside later coinbases out
 of their pool remainder, instead of by a make-good. Fewer identities are paid per capped block
 (the largest balances are placed first, so whoever waits climbs), and one small class on a
-gateway, NiceHash's class 1 at about 10 outputs, sets that whole gateway's budget. Nothing
+gateway, NiceHash's class 1 at about 9 outputs, sets that whole gateway's budget, for up to six
+hours after it last showed it. Nothing
 changes for a gateway whose shares are never Partial: class 0 (pool-only), iohzrd `7491a50`
 (every BLAKE2b miner on its whole-list class), ratum, and the held-split builds.
 

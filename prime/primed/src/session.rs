@@ -190,6 +190,17 @@ fn template_left_room(kept: usize, txn_total_weight: u32) -> bool {
 const CLASS_BUDGET_SIGHTINGS: usize = 3;
 /// Payee byte counts one section keeps a tally of at once, the oldest dropped first.
 const CLASS_BUDGET_TALLY: usize = 8;
+/// How long a class budget stands after it was last set before it, and every sighting it was
+/// learned from, is forgotten and learned again.
+///
+/// Nothing else can raise it. A list cut to it is kept whole by every class with that much room,
+/// so no share ever shows there is more. One NiceHash miner (CONVOY's class 1, 500 bytes, about
+/// 300 of them payees) that mined for a few minutes, or a run of fuller templates that still left
+/// room, would otherwise hold every class on the gateway to about 9 payees instead of class 2's
+/// 17 for the rest of a session that can last a day, and put about twice the tail into carry on
+/// every capped block. Learning again costs under a minute of Partial work, and a class still in
+/// use shows its size again straight away.
+const CLASS_BUDGET_TTL: Duration = Duration::from_secs(6 * 3600);
 
 /// What `class-budget` has learned of one session's coinbase sections.
 ///
@@ -199,21 +210,34 @@ const CLASS_BUDGET_TALLY: usize = 8;
 /// was: one list goes to every class, so it has to fit the smallest. A list whose payees fit in
 /// those bytes is kept whole by that section (first-fit into a room at least that large places
 /// every output, and the pool's output after them is paid the remainder either way), so a
-/// block found on it is Split. The budget only ever goes down, and only on the same evidence: a
+/// block found on it is Split. The budget only goes down, and only on the same evidence: a
 /// share still Partial under it teaches a smaller one. A budget that is too small is safe (more
 /// of the list waits in carry), and one too large only leaves blocks Partial, as they were. It is
-/// the session's and ends with it; a reconnect learns again.
+/// the session's and ends with it, and within it lasts [`CLASS_BUDGET_TTL`] from when it was last
+/// set; then it is learned again from the classes miners are using by then.
 #[derive(Debug, Default)]
 struct ClassBudget {
     /// Per section (the gateway's `cbselect`): payee bytes kept, and the coinbaser ids they were
     /// kept on, up to [`CLASS_BUDGET_SIGHTINGS`].
     seen: HashMap<u8, Vec<(usize, Vec<u8>)>>,
     bytes: Option<usize>,
+    /// When `bytes` was last set.
+    set_at: Option<Instant>,
 }
 
 impl ClassBudget {
-    /// Count one sighting; true if it changed the budget.
-    fn observe(&mut self, section: u8, coinbaser_id: u8, kept: usize) -> bool {
+    /// Forget the budget and everything it was learned from once it is [`CLASS_BUDGET_TTL`] old;
+    /// true if it did.
+    fn expire(&mut self, now: Instant) -> bool {
+        if !self.set_at.is_some_and(|t| now.saturating_duration_since(t) >= CLASS_BUDGET_TTL) {
+            return false;
+        }
+        *self = ClassBudget::default();
+        true
+    }
+
+    /// Count one sighting at `now`; true if it changed the budget.
+    fn observe(&mut self, section: u8, coinbaser_id: u8, kept: usize, now: Instant) -> bool {
         let tally = self.seen.entry(section).or_default();
         let at = match tally.iter().position(|t| t.0 == kept) {
             Some(i) => i,
@@ -233,6 +257,7 @@ impl ClassBudget {
             return false;
         }
         self.bytes = Some(kept);
+        self.set_at = Some(now);
         true
     }
 }
@@ -1261,6 +1286,7 @@ impl Session {
         // The class budget this reply is held to, if the session has one and carry is under the
         // ceiling. Settled before the bucket, because a repeat must be of a reply held to the
         // same budget; without a budget to hold it to nothing here runs.
+        self.expire_class_budget();
         let learned = self.reply_class_budget();
         let base = learned.map(|_| self.shared.coinbaser_base());
         let budget = learned.filter(|_| base.as_ref().is_some_and(|b| self.shared.class_budget_open(b.total_carry())));
@@ -2038,8 +2064,9 @@ impl Session {
         if !template_left_room(kept, txn_total_weight) {
             return;
         }
+        self.expire_class_budget();
         let Some(budget) = self.class_budget.as_mut() else { return };
-        if !budget.observe(section, coinbaser_id, kept) {
+        if !budget.observe(section, coinbaser_id, kept, Instant::now()) {
             return;
         }
         log::info!(
@@ -2050,6 +2077,25 @@ impl Session {
             self.gateway_hex,
         );
         self.shared.client_update(self.id, |c| c.class_budget_bytes = Some(Some(kept)));
+    }
+
+    /// Forget this session's class budget once it is [`CLASS_BUDGET_TTL`] old, so that it is
+    /// learned again from the classes its miners use now.
+    fn expire_class_budget(&mut self) {
+        let Some(budget) = self.class_budget.as_mut() else { return };
+        let was = budget.bytes;
+        if !budget.expire(Instant::now()) {
+            return;
+        }
+        log::info!(
+            "[{}] {} class budget {} bytes is {} h old: forgotten with what it was learned from, so coinbasers \
+             go out at the pool's budget until this session's Partial shares show it again",
+            self.id,
+            self.gateway_hex,
+            was.unwrap_or(0),
+            CLASS_BUDGET_TTL.as_secs() / 3600,
+        );
+        self.shared.client_update(self.id, |c| c.class_budget_bytes = Some(None));
     }
 
     /// Count a reject or malformed message against the session's flood budget.
@@ -2905,8 +2951,8 @@ mod tests {
         let placed: usize = cb.outputs.iter().filter(|o| o.script != pool).map(|o| 9 + o.script.len()).sum();
         assert_eq!(kept, placed);
 
-        let mut budget = ClassBudget::default();
-        assert!(!budget.observe(2, 1, kept) && !budget.observe(2, 2, kept) && budget.observe(2, 3, kept));
+        let (mut budget, t) = (ClassBudget::default(), Instant::now());
+        assert!(!budget.observe(2, 1, kept, t) && !budget.observe(2, 2, kept, t) && budget.observe(2, 3, kept, t));
         let capped = split_of(&miners, &scripts, &class_params(&pool_params(), budget.bytes));
         let short = coinbaser_outputs(&capped, &pool);
         assert!(capped.payees.iter().map(|p| 9 + p.script.len()).sum::<usize>() <= kept);
@@ -3008,32 +3054,68 @@ mod tests {
     /// it is the smallest section's, since every section is handed the one list.
     #[test]
     fn a_class_budget_is_the_same_kept_bytes_on_three_coinbasers_and_only_goes_down() {
-        let mut b = ClassBudget::default();
+        let (mut b, t) = (ClassBudget::default(), Instant::now());
         for _ in 0..10 {
-            assert!(!b.observe(2, 1, 527), "one coinbaser's shares are one sighting however many");
+            assert!(!b.observe(2, 1, 527, t), "one coinbaser's shares are one sighting however many");
         }
-        assert!(!b.observe(2, 2, 527));
+        assert!(!b.observe(2, 2, 527, t));
         assert_eq!(b.bytes, None, "two can be two nearly full templates in a row");
-        assert!(!b.observe(2, 3, 539), "other bytes are another tally");
-        assert!(!b.observe(4, 3, 527), "and so is another section");
-        assert!(b.observe(2, 4, 527));
+        assert!(!b.observe(2, 3, 539, t), "other bytes are another tally");
+        assert!(!b.observe(4, 3, 527, t), "and so is another section");
+        assert!(b.observe(2, 4, 527, t));
         assert_eq!(b.bytes, Some(527));
         // more room on another list, or a bigger class, never raises it
         for id in 5..9 {
-            assert!(!b.observe(2, id, 539) && !b.observe(5, id, 4_000));
+            assert!(!b.observe(2, id, 539, t) && !b.observe(5, id, 4_000, t));
         }
         assert_eq!(b.bytes, Some(527));
         // a smaller class on the same gateway (NiceHash's), or a fuller template still cut under
         // the budget, lowers it on the same evidence
-        assert!(!b.observe(1, 10, 310) && !b.observe(1, 11, 310));
+        assert!(!b.observe(1, 10, 310, t) && !b.observe(1, 11, 310, t));
         assert_eq!(b.bytes, Some(527));
-        assert!(b.observe(1, 12, 310));
+        assert!(b.observe(1, 12, 310, t));
         assert_eq!(b.bytes, Some(310));
         // a section's tally is bounded
         for (id, kept) in (100..200usize).enumerate() {
-            assert!(!b.observe(3, id as u8, kept));
+            assert!(!b.observe(3, id as u8, kept, t));
         }
         assert_eq!(b.seen[&3].len(), CLASS_BUDGET_TALLY);
+    }
+
+    /// The review's NiceHash case. One class-1 miner sets the budget to its ~310 bytes, and
+    /// nothing on a list cut to that can show more room. So the budget lasts `CLASS_BUDGET_TTL`
+    /// from when it was last set, and then it and every sighting behind it are gone: the classes
+    /// in use by then teach it again, from three fresh coinbasers.
+    #[test]
+    fn a_class_budget_is_forgotten_six_hours_after_it_was_set_and_learned_again() {
+        let t = Instant::now();
+        let mut b = ClassBudget::default();
+        assert!(!b.expire(t + CLASS_BUDGET_TTL * 10), "nothing to forget before a budget is set");
+        assert!(!b.observe(2, 1, 527, t) && !b.observe(2, 2, 527, t));
+        assert!(!b.expire(t + CLASS_BUDGET_TTL * 10), "nor while sightings are still being gathered");
+        assert_eq!(b.seen[&2][0].1.len(), 2, "which are kept");
+        assert!(!b.observe(1, 3, 310, t) && !b.observe(1, 4, 310, t) && b.observe(1, 5, 310, t));
+        assert_eq!(b.bytes, Some(310));
+
+        let later = t + CLASS_BUDGET_TTL - Duration::from_secs(1);
+        assert!(!b.expire(later));
+        assert_eq!(b.bytes, Some(310), "still standing a second short of it");
+        // lowered again an hour in: it stands six hours from then
+        let lowered = t + Duration::from_secs(3600);
+        assert!(!b.observe(1, 6, 300, lowered) && !b.observe(1, 7, 300, lowered) && b.observe(1, 8, 300, lowered));
+        assert!(!b.expire(t + CLASS_BUDGET_TTL));
+        assert_eq!(b.bytes, Some(300));
+
+        let gone = lowered + CLASS_BUDGET_TTL;
+        assert!(b.expire(gone));
+        assert_eq!((b.bytes, b.set_at, b.seen.is_empty()), (None, None, true), "forgotten, sightings and all");
+        assert!(!b.expire(gone + CLASS_BUDGET_TTL), "once");
+        // one more class-1 sighting is one sighting, not a fourth
+        assert!(!b.observe(1, 9, 300, gone));
+        assert_eq!(b.bytes, None);
+        // class 2, still mining, sets it again on three fresh coinbasers
+        assert!(!b.observe(2, 10, 527, gone) && !b.observe(2, 11, 527, gone) && b.observe(2, 12, 527, gone));
+        assert_eq!(b.bytes, Some(527));
     }
 
     /// Only a cut a size class makes says what the class holds.

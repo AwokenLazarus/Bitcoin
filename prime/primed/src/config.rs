@@ -87,7 +87,8 @@ pub struct Config {
     /// every block found on one is Partial(17), owing the rest to the window through a make-good.
     /// The size is learned per session from its own accepted shares (`session::ClassBudget`),
     /// only for CONVOY-generation hellos that are not lazarus-gateway, lazarus-split or ratum,
-    /// and forgotten when the session ends. Off (default): every reply is what it always was.
+    /// learned again six hours after it was last set, and forgotten when the session ends. Off
+    /// (default): every reply is what it always was.
     #[serde(default)]
     pub class_budget: bool,
     /// Carry on the books, in sats, at or above which no reply is held to a class budget; they
