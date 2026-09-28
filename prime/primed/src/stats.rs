@@ -116,13 +116,15 @@ pub fn build(shared: &Shared) -> Value {
         })
         .collect();
 
-    let (blocks, finds, owed) = {
+    let (blocks, finds, owed, carry_reserved) = {
         let b = shared.blocks.lock().unwrap();
         let finds = tides::gateway_finds(&b);
         let blocks: Vec<Value> =
             b.iter().rev().take(100).map(|r| serde_json::to_value(r).unwrap_or(Value::Null)).collect();
         let owed: u64 = b.iter().filter(|r| !r.kind.starts_with("orphan")).map(|r| r.owed_sats).sum();
-        (blocks, finds, owed)
+        let carry_reserved: u64 =
+            b.iter().filter(|r| !r.kind.starts_with("orphan")).map(|r| r.carry_reserved_sats).sum();
+        (blocks, finds, owed, carry_reserved)
     };
     let found_total: u64 = finds.values().map(|f| f.found).sum();
     let clients: Vec<Value> = {
@@ -192,7 +194,7 @@ pub fn build(shared: &Shared) -> Value {
         .map(|(h, p)| (h.to_string(), p.parse::<u16>().unwrap_or(shared.cfg.listen.port())))
         .unwrap_or_else(|| (shared.cfg.advertise_address.clone(), shared.cfg.listen.port()));
 
-    json!({
+    let mut doc = json!({
         "ts": ts,
         "build": { "name": "primed", "version": env!("CARGO_PKG_VERSION") },
         "uptime_s": shared.started.elapsed().as_secs(),
@@ -308,7 +310,26 @@ pub fn build(shared: &Shared) -> Value {
         "owed": owed,
         "template_faults": shared.faults.all().into_iter().map(|(k, f)| serde_json::json!({"gateway": &k[..16.min(k.len())], "fault": f})).collect::<Vec<_>>(),
         "blocks": blocks,
-    })
+    });
+    // Only with `class-budget`, or once a block carries a class-budget reserve, so a Prime that
+    // has never had the key writes the document it always has.
+    if shared.cfg.class_budget || carry_reserved > 0 {
+        if let Some(o) = doc["totals"].as_object_mut() {
+            // coinbasers held to a session's class budget, and ones a budget would have held
+            // but for carry being over `class-budget-carry-ceiling` (`class_budget_held_off`)
+            o.insert("class_budget_replies".into(), json!(t.class_budget_replies.load(Ordering::Relaxed)));
+            o.insert(
+                "class_budget_ceiling_replies".into(),
+                json!(t.class_budget_ceiling_replies.load(Ordering::Relaxed)),
+            );
+            o.insert("class_budget_held_off".into(), json!(shared.class_budget_held_off.load(Ordering::Relaxed)));
+        }
+        // Earnings class-capped blocks left in the pool's output for their earners' carry, over
+        // the blocks in memory (`carry_reserved_sats`). What the fee wallet holds back is the
+        // smaller of this and `window.carry_total_sats`; see the README.
+        doc["carry_reserved"] = json!(carry_reserved);
+    }
+    doc
 }
 
 /// The legacy `ledger.json` shape (`{"credits":[{ts,identity,work}], ...}`) for the last hour.

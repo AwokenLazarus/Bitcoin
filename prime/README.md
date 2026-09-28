@@ -217,8 +217,10 @@ than ever pushing the outputs past the template value. An identity whose work ha
 of the window entirely is still a payee while its carry alone clears the floor. Carry is
 adjusted by *deltas* when a block is found (so two blocks found off snapshots that predate
 each other's settlement still add up), reversed if the block is orphaned, and re-applied if
-it comes back. Each `BlockRecord` carries `carry_paid` and `carry_delta`; `stats.json`
-reports `carry_sats` per miner and `carry_total_sats` / `carry_holders` for the window.
+it comes back. Each `BlockRecord` carries `carry_paid` and `carry_delta` (and, for a block
+mined on a coinbaser held to a [class budget](#class-budgets), `carry_reserved_sats`);
+`stats.json` reports `carry_sats` per miner and `carry_total_sats` / `carry_holders` for the
+window.
 
 **Stale balances.** A miner who leaves with less than `min-payout` on the books has nothing
 more coming to push it over the floor. Prime keeps each identity's last credited share
@@ -300,6 +302,9 @@ mitigation. With `require-split-gateway = true` (Lazarus production), a hello wh
 Unpatched Convoy size-class prefixes and unpatched OCEAN/FTE type-0 full jobs therefore
 cannot hash as us. Capping the issued list at ~17 outputs would make Convoy finds look complete
 while dropping small miners from every split, including house finds — worse than make-good.
+[Class budgets](#class-budgets) are the narrow form of that cap: off by default, per session,
+only where a CONVOY gateway's own shares show the size of its class, never on the house gateway,
+and what does not fit goes to carry rather than being dropped.
 
 How bad it is depends on the build, and there are two severities:
 
@@ -377,6 +382,80 @@ session for one of these, and a counter of pool-only shares can. `clients[].held
 for a held session, and `solo_full_shares` against `pool_only_full_jobs` shows whether it has
 moved over.
 
+### Class budgets
+
+Most Partial blocks have one shape. A CONVOY `b9ea7dc`-lineage gateway hands most miners size
+class 2, 755 bytes of coinbase, and packs Prime's list into it first-fit in order: about 17
+P2WPKH outputs, however long the list. Every block found on such a job is Partial(17) and the
+rest of the list is owed through a make-good: 48 blocks and 40.30 XBT from 2026-09-21 to 09-28
+(`b9ea7dc`, `b9ea7dc+`, `e998e38` and `UNKNOWN_GIT_HASH` sessions), against 4 pool-only blocks
+and 11.78 XBT.
+
+`class-budget = true` holds each such session's coinbasers to what its smallest class keeps.
+No new message is needed: an accepted Partial share already shows which issued outputs its
+section kept. Their bytes, `8 + 1 + script` each (the measure `output_budget_bytes` uses), are
+that section's size, taken only when
+
+* the session is CONVOY-generation and not lazarus-gateway, lazarus-split, ratum, the house
+  gateway or a [held-split build](#held-split-builds);
+* what the section kept is a first-fit cut of the list (every output it skipped is bigger than
+  everything it kept after it), and the coinbase is worth the whole list, so it was cut for room
+  and not for value, sigops or by choice;
+* the share was built under the pool's own tag, not the solo tag five bytes longer, and its
+  template left 512 bytes more than the section kept, so the class cut it, not the template;
+* the same bytes were kept on three different coinbasers, each asked for a template of its own.
+
+The session's budget is then the smallest of its sections', and it only ever goes down. From the
+next reply on, the split is computed with `output_budget_bytes` set to it: payees are placed in
+the usual order, largest earned-plus-carry first and first-fit; whoever does not fit is
+`OverBudget` exactly as under the pool's own 14 kB budget and their earnings are deferred to
+carry; the pool's output is still last. A list whose payees fit in the bytes the class kept is
+kept whole by it, so a block found on it is a full split and owes nothing. The budget belongs to
+the session: a reconnect starts without one and learns it again in under a minute. An over-rate
+repeat is only ever of a reply held to the same budget, and a session whose reply leaves it on
+its own script (`stock-full-pool-only = "gateway-solo"`) is not held to one, since the pool's
+output that a class may drop would then pay the gateway.
+
+It does not reduce what is owed. The tail's earnings are paid later, inside later coinbases out
+of their pool remainder, instead of by a make-good. Fewer identities are paid per capped block
+(the largest balances are placed first, so whoever waits climbs), and one small class on a
+gateway, NiceHash's class 1 at about 10 outputs, sets that whole gateway's budget. Nothing
+changes for a gateway whose shares are never Partial: class 0 (pool-only), iohzrd `7491a50`
+(every BLAKE2b miner on its whole-list class), ratum, and the held-split builds.
+
+Two guards come with it:
+
+* **Carry ceiling.** No reply is held to a class budget while the carry on the books is at or
+  over `class-budget-carry-ceiling` (5 XBT), and none is again until it is back under three
+  quarters of that. Blocks found meanwhile are Partial and owe as before. Carry goes on the books
+  when a block confirms, so the ceiling lags the finds by that many blocks.
+* **Custody.** A capped block records `carry_reserved_sats`: the earnings its coinbaser deferred
+  for room, which sit in the pool's output. `stats.json` sums them as `carry_reserved`.
+
+**The fee wallet must change before `class-budget` is turned on.** `lazarus-ops/fee_wallet.py`
+reserves a partial or pool-only coinbase while it has `owed_sats`, and sweeps every other mature
+pool output as fee (`classify_kind`). A capped block is `split` with `owed_sats` 0, so without the
+change the tail's earnings, about a quarter of a Partial(17) coinbase, are swept to the fee
+addresses while primed still owes them as carry. The change, in `consider_sweep` and `status`:
+
+1. `R = min(sum of carry_reserved_sats over the blocks.jsonl records whose kind does not start
+   with "orphan", 0 where absent; window.carry_total_sats from primed's stats.json)`. If
+   stats.json cannot be read, `R` is the sum alone.
+2. Hold back sweepable-fee UTXOs, newest first, until they add up to at least `R`; log them as
+   `reserved-carry` and sweep the rest as today.
+3. Nothing else changes: `classify_kind`, the make-goods and `owed_sats` stay as they are. The
+   rule is on amounts, not outputs, so a make-good's change output is covered like any other.
+
+`R` falls as later coinbases pay the carry out, and the wallet sweeps what it held. Once capped
+blocks have deferred more than the pool holds in carry, `R` is all of it, under-floor balances
+included: the wallet then holds back everything it owes miners in carry.
+
+`clients[].class_budget_bytes` is the session's budget (null until learned; absent for a session
+the key does not apply to), `class_budget_replies` the coinbasers held to it, and `totals` has
+`class_budget_replies`, `class_budget_ceiling_replies` and `class_budget_held_off`. None of it
+appears in the stats of a Prime that has never had the key; one that had it and no longer does
+keeps reporting `carry_reserved` while the blocks it recorded are in memory.
+
 ### Restarts used to throw away a burst of good work
 
 A reconnecting gateway is still serving jobs whose coinbases carry the split from coinbaser ids
@@ -428,8 +507,10 @@ pool UI reads: `pool` (pubkey, fee, window multiple, advertise address, uptime),
 (height, tip hash, difficulty, tip age), `window` (target/total work, fill percent, per-miner
 `work`, `shares`, `hashrate_ghs`, `share_percent`, `payout_sats` at the current reward),
 `clients` (per gateway: generation, user agent, accepted/rejected, last reject reason,
-`pool_only_shares`, and `held_split: true` for a [held-split build](#held-split-builds), absent
-otherwise), `blocks`, `owed`, `totals`. `/ledger.json` is the previous Prime's credits view for the UI's
+`pool_only_shares`, `held_split: true` for a [held-split build](#held-split-builds), absent
+otherwise, and `class_budget_bytes` / `class_budget_replies` where a [class
+budget](#class-budgets) applies), `blocks`, `owed`, `totals`, and with `class-budget` the
+`carry_reserved` the fee wallet holds back. `/ledger.json` is the previous Prime's credits view for the UI's
 hashrate graph; `/healthz` returns `ok`.
 
 ## Tests
@@ -438,6 +519,7 @@ hashrate graph; `/healthz` returns `ok`.
 cargo test                                  # wire (44), tides (11), primed (12)
 cargo test --release -p primed --test replay_e2e -- --ignored --nocapture   # hostile gateway vs a real primed
 cargo test --release -p primed --test held_split_e2e -- --ignored --nocapture   # a held-split build's section 0, listed
+cargo test --release -p primed --test class_budget_e2e -- --ignored --nocapture # Partial(16) three times, then a full split
 scripts/regtest-e2e.sh convoy               # or fte | iohzrd | startos: real C gateway + real Knots on regtest
 MINER_CMD='...' scripts/regtest-divergence.sh fte   # two nodes with different mempools and tips
 ```

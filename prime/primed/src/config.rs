@@ -80,6 +80,21 @@ pub struct Config {
     /// Empty (default): no build is held.
     #[serde(default)]
     pub held_split_builds: Vec<String>,
+    /// Hold a class-limited gateway's coinbaser to the payee bytes its smallest coinbase class
+    /// actually keeps, so that class keeps the whole list and a block found on it is a full
+    /// split, and defer whoever does not fit to carry. A CONVOY `b9ea7dc`-lineage gateway hands
+    /// most miners a size class with room for about 17 outputs of whatever list it is given, and
+    /// every block found on one is Partial(17), owing the rest to the window through a make-good.
+    /// The size is learned per session from its own accepted shares (`session::ClassBudget`),
+    /// only for CONVOY-generation hellos that are not lazarus-gateway, lazarus-split or ratum,
+    /// and forgotten when the session ends. Off (default): every reply is what it always was.
+    #[serde(default)]
+    pub class_budget: bool,
+    /// Carry on the books, in sats, at or above which no reply is held to a class budget; they
+    /// are held to it again once carry is back under three quarters of this. Blocks mined
+    /// meanwhile are Partial and owe as they do without `class-budget`. Default 5 XBT.
+    #[serde(default = "d_class_budget_carry_ceiling")]
+    pub class_budget_carry_ceiling: u64,
     /// Test hook: sleep this long before answering a coinbaser, so a stock gateway's
     /// 5 s fetch times out. 0 (default) is production.
     #[serde(default)]
@@ -276,6 +291,13 @@ fn d_owe() -> String {
 }
 fn d_solo_tag() -> String {
     "Lazarus/solo".into()
+}
+/// The under-floor carry the pool holds anyway (0.79 XBT on 2026-09-28) plus the 3.7-4.1 XBT a
+/// simulation of a 17-output cap put the added float at: a guard at the level it was expected
+/// to settle, so that a float that keeps growing (CONVOY hashrate leaving, the pool shrinking)
+/// stops growing there, not one that trims the expected case.
+fn d_class_budget_carry_ceiling() -> u64 {
+    500_000_000
 }
 
 /// Whether `s` can name a commit in `held-split-builds`: git's shortest default abbreviation
@@ -537,6 +559,23 @@ require-split-gateway = true
         assert_eq!(notes.len(), 3, "{notes:?}");
         assert!(git_hash_prefix("e894b8a") && git_hash_prefix(full));
         assert!(!git_hash_prefix("e894b8") && !git_hash_prefix("e894b8g") && !git_hash_prefix(&format!("{full}0")));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A config that does not name `class-budget` has it off, and its ceiling at 5 XBT for when
+    /// it is turned on.
+    #[test]
+    fn class_budget_is_off_by_default_with_a_five_xbt_carry_ceiling() {
+        let dir = std::env::temp_dir().join(format!("primed-cfg-cb-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("prime.toml");
+        let base = LEGACY.replace("/home/umbrel/blake2b/lazarus-prime", dir.to_str().unwrap());
+        std::fs::write(&p, &base).unwrap();
+        let c = Config::load(&p).unwrap();
+        assert_eq!((c.class_budget, c.class_budget_carry_ceiling), (false, 500_000_000));
+        std::fs::write(&p, format!("{base}class-budget = true\nclass-budget-carry-ceiling = 200000000\n")).unwrap();
+        let c = Config::load(&p).unwrap();
+        assert_eq!((c.class_budget, c.class_budget_carry_ceiling), (true, 200_000_000));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

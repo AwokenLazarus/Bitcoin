@@ -1076,6 +1076,19 @@ pub struct BlockRecord {
     /// `rebate_delta` went on when the candidate was seen and come off as one on an orphan.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub books: Option<Books>,
+    /// Earnings this block's coinbase left in the pool's output because its coinbaser was held
+    /// to the gateway's class budget (primed `class-budget`): what every identity the budget
+    /// had no room for earned in this block, which `carry_delta` also credits to them. A block
+    /// the gateway cut short records what it cut in `owed_sats`, and the fee wallet reserves
+    /// that; this is the same money kept in carry instead, and the fee wallet must hold it back
+    /// from its sweep the same way until carry has paid it out. 0, and absent from the record,
+    /// for a coinbaser no class budget applied to, which is every block without the key.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub carry_reserved_sats: u64,
+}
+
+fn is_zero(n: &u64) -> bool {
+    *n == 0
 }
 
 /// A found block's effect on the ledger, booked in two steps and undone exactly.
@@ -1531,6 +1544,7 @@ mod tests {
             submit: "accepted".into(),
             gateway: "ab".into(),
             books: None,
+            carry_reserved_sats: 0,
         };
         log.append(&r).unwrap();
         assert_eq!(log.read_all().unwrap(), vec![r.clone()]);
@@ -1538,6 +1552,30 @@ mod tests {
         r2.submit = "duplicate".into();
         log.append(&r2).unwrap();
         assert_eq!(log.read_all().unwrap(), vec![r2]);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// `carry_reserved_sats` is new. A line written before it loads with it at 0, and a record
+    /// with it at 0 writes exactly the line it always did, so `blocks.jsonl` and everything that
+    /// reads it (the fee wallet, the pool site) see no change from a Prime without the key.
+    #[test]
+    fn carry_reserved_is_absent_from_old_lines_and_from_records_without_it() {
+        let old = r#"{"ts":1,"height":2,"hash":"00","finder":"bc1q","coinbase_value":3,"kind":"partial","owed_sats":5,"split":[["bc1q",3]],"pool_sats":0,"carry_paid":0,"carry_delta":[["bc1q",4]],"rebate_credited":0,"rebate_delta":0,"settled":false,"submit":"pending","gateway":"ab"}"#;
+        let r: BlockRecord = serde_json::from_str(old).unwrap();
+        assert_eq!((r.kind.as_str(), r.owed_sats, r.carry_reserved_sats), ("partial", 5, 0));
+        assert_eq!(serde_json::to_string(&r).unwrap(), old, "written back byte for byte");
+
+        let capped = BlockRecord { kind: "split".into(), owed_sats: 0, carry_reserved_sats: 4, ..r };
+        let line = serde_json::to_string(&capped).unwrap();
+        assert!(line.ends_with(r#","carry_reserved_sats":4}"#), "{line}");
+        assert_eq!(serde_json::from_str::<BlockRecord>(&line).unwrap(), capped);
+        // and the log reads either kind of line
+        let dir = std::env::temp_dir().join(format!("tides-test-{}-{}", std::process::id(), line!()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("blocks.jsonl"), format!("{old}\n{}\n", line.replace("\"00\"", "\"01\""))).unwrap();
+        let read = BlockLog::open(&dir).read_all().unwrap();
+        assert_eq!(read.iter().map(|r| r.carry_reserved_sats).collect::<Vec<_>>(), vec![0, 4]);
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -1560,6 +1598,7 @@ mod tests {
             submit: "accepted".into(),
             gateway: gw.into(),
             books: None,
+            carry_reserved_sats: 0,
         }
     }
 

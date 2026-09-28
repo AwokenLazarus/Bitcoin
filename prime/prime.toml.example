@@ -21,6 +21,19 @@
 # nothing is held. The builds known to do this are CONVOY commits from c61c2e7 up to, not
 # including, 155b6bf. The ones seen live (beb9461 is not in the published history):
 # held-split-builds = ["e894b8a", "f74c22a", "2fea7e5", "57f1aee", "beb9461"]
+#
+# Hold a class-limited CONVOY gateway's coinbasers to the payee bytes its smallest size class
+# keeps, learned per session from its own Partial shares (the same bytes on 3 coinbasers). The
+# class then keeps the whole list, a block found on it is a full split, and the payees that did
+# not fit wait in carry instead of a make-good. Only CONVOY-generation C gateways; never
+# lazarus-gateway, lazarus-split, ratum, the house gateway or a held-split build. Off (default):
+# every reply is what it always was. BEFORE TURNING IT ON the fee wallet must hold back the
+# carry these blocks record in carry_reserved_sats, or it sweeps miners' money as fee: see
+# README, "Class budgets".
+# class-budget = false
+# No reply is held to a class budget while carry on the books is at or over this many sats;
+# they are again once it is back under three quarters of it. Default 5 XBT.
+# class-budget-carry-ceiling = 500000000
 
 # DATUM listener gateways connect to.
 listen = "0.0.0.0:28915"

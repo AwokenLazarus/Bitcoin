@@ -2,7 +2,7 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::net::IpAddr;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -195,6 +195,15 @@ pub struct ClientInfo {
     /// out of the row when false, so a Prime without the key writes the rows it always has.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub held_split: bool,
+    /// The payee bytes `class-budget` holds this session's coinbasers to, and null until its
+    /// shares have shown one (see `session::ClassBudget`). Both fields are left out of the row
+    /// for a session the key does not apply to, so a Prime without it writes the rows it always
+    /// has.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub class_budget_bytes: Option<Option<usize>>,
+    /// Coinbasers issued to this session held to that budget.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub class_budget_replies: Option<u64>,
 }
 
 #[derive(Default)]
@@ -245,6 +254,11 @@ pub struct Totals {
     /// Gateway templates checked with our node (`getblocktemplate` proposal), and how many failed.
     pub template_checks: AtomicU64,
     pub template_checks_failed: AtomicU64,
+    /// Coinbasers held to a session's class budget (`class-budget`).
+    pub class_budget_replies: AtomicU64,
+    /// Coinbasers a session's class budget would have held, issued at the pool's budget instead
+    /// because carry was over `class-budget-carry-ceiling`.
+    pub class_budget_ceiling_replies: AtomicU64,
 }
 
 impl Totals {
@@ -279,6 +293,27 @@ pub struct CoinbaserBase {
 impl CoinbaserBase {
     pub fn script_for(&self, identity: &str) -> Option<Vec<u8>> {
         self.scripts.get(identity).cloned()
+    }
+
+    /// All the carry on the books at snapshot time: `miners` holds every identity with any.
+    pub fn total_carry(&self) -> u64 {
+        self.miners.iter().fold(0u64, |a, m| a.saturating_add(m.carry))
+    }
+}
+
+/// Whether class budgets are held off, given whether they were and the carry on the books.
+///
+/// They stop at the ceiling and start again only under three quarters of it. A capped block adds
+/// about a quarter of a coinbase to carry (0.8 XBT), a quarter of the 5 XBT default is more than
+/// that, and so one block's tail landing or being paid out does not turn them back and forth.
+/// A ceiling of 0 holds them off for good.
+pub fn class_budget_held_off(held_off: bool, carry: u64, ceiling: u64) -> bool {
+    if ceiling == 0 {
+        true
+    } else if held_off {
+        carry > ceiling - ceiling / 4
+    } else {
+        carry >= ceiling
     }
 }
 
@@ -464,6 +499,9 @@ pub struct Shared {
     pub parents: crate::validity::ParentBook,
     /// Gateways whose templates our node found invalid; their shares earn nothing until one passes.
     pub faults: crate::validity::Faults,
+    /// Carry reached `class-budget-carry-ceiling` and has not yet fallen back far enough: no
+    /// reply is held to a class budget. See [`Shared::class_budget_open`].
+    pub class_budget_held_off: AtomicBool,
 }
 
 /// What Prime last learned as a gateway's own payout, persisted in `gateway-scripts.json`.
@@ -545,6 +583,30 @@ impl Shared {
         };
         self.drop_coinbaser_base();
         after
+    }
+
+    /// Whether a coinbaser may be held to a session's class budget with `carry` sats of carry on
+    /// the books. The carry a capped block defers goes on the books when the block confirms, so
+    /// this lags the blocks found by that many.
+    pub fn class_budget_open(&self, carry: u64) -> bool {
+        let ceiling = self.cfg.class_budget_carry_ceiling;
+        let was = self.class_budget_held_off.load(Ordering::Relaxed);
+        let now = class_budget_held_off(was, carry, ceiling);
+        if now != was
+            && self.class_budget_held_off.compare_exchange(was, now, Ordering::Relaxed, Ordering::Relaxed).is_ok()
+        {
+            if now {
+                log::warn!(
+                    "class-budget: carry on the books is {carry} sats, at or over class-budget-carry-ceiling \
+                     ({ceiling}): coinbasers go out at the pool's budget, and blocks found on a class-limited \
+                     gateway are Partial and owe, until carry is back under {}",
+                    ceiling - ceiling / 4
+                );
+            } else {
+                log::info!("class-budget: carry on the books is down to {carry} sats; class budgets apply again");
+            }
+        }
+        !now
     }
 
     pub fn gateway_scripts_path(&self) -> std::path::PathBuf {
@@ -747,6 +809,7 @@ mod tests {
             gateway_payouts: Mutex::new(Default::default()),
             parents: Default::default(),
             faults: crate::validity::Faults::with_ttl(cfg.quarantine_max_hours.saturating_mul(3600)),
+            class_budget_held_off: AtomicBool::new(false),
             cfg,
         });
         (shared, dir)
@@ -776,6 +839,29 @@ mod tests {
         let after = shared.coinbaser_base();
         assert_eq!(carry_in(&after, who), 0, "the snapshot still offers carry the block already paid");
         assert!(!Arc::ptr_eq(&before, &after));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Class budgets stop at the carry ceiling and start again only a quarter of it lower, so one
+    /// block's tail going onto the books or being paid off them does not turn them on and off.
+    #[test]
+    fn class_budgets_stop_at_the_carry_ceiling_and_resume_a_quarter_below_it() {
+        let c = 500_000_000u64;
+        assert!(!class_budget_held_off(false, c - 1, c));
+        assert!(class_budget_held_off(false, c, c));
+        assert!(class_budget_held_off(true, c - 1, c), "under the ceiling is not yet far enough");
+        assert!(class_budget_held_off(true, 375_000_001, c));
+        assert!(!class_budget_held_off(true, 375_000_000, c));
+        for (was, carry) in [(false, 0), (true, 0), (false, u64::MAX)] {
+            assert!(class_budget_held_off(was, carry, 0), "a ceiling of 0 holds them off for good");
+        }
+
+        let (shared, dir) = test_shared("ceiling");
+        assert!(shared.class_budget_open(0) && shared.class_budget_open(c - 1));
+        assert!(!shared.class_budget_open(c));
+        assert!(!shared.class_budget_open(400_000_000), "held off until well under it");
+        assert!(shared.class_budget_open(375_000_000));
+        assert!(shared.class_budget_open(c - 1));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

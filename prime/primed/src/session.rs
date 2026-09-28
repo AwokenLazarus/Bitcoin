@@ -4,6 +4,7 @@
 //! A session is a single task owning both halves of the socket; there is no per-message
 //! locking beyond a short ledger critical section on accepted shares.
 
+use std::borrow::Cow;
 use std::collections::{HashMap, VecDeque};
 use std::net::SocketAddr;
 use std::sync::atomic::Ordering;
@@ -19,7 +20,8 @@ use datum_wire::mining::{self, ClientMsg, JobValidationReply, PowSubmit, Validat
 use datum_wire::verify::{self, CoinbaseKind, JobSlot, Policy, VerifiedShare};
 use datum_wire::{cmd, MAX_CMD_LEN};
 use rand_core::{OsRng, RngCore};
-use tides::{BlockRecord, Payee, SOURCE_DATUM, SOURCE_STRATUM};
+use tides::split::Split;
+use tides::{BlockRecord, Payee, SplitParams, SOURCE_DATUM, SOURCE_STRATUM};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::time::{interval, MissedTickBehavior};
@@ -58,6 +60,155 @@ fn held_split_build<'a>(builds: &'a [String], ua: &str) -> Option<&'a str> {
         return None;
     }
     builds.iter().map(String::as_str).find(|b| crate::config::git_hash_prefix(b) && hash.starts_with(b))
+}
+
+/// Whether `class-budget` applies to a gateway by its hello: a CONVOY-generation one, and not
+/// lazarus-gateway or a lazarus-split build, which place the whole list, nor ratum, whose
+/// Partial coinbases are cut by what each template leaves room for rather than by a size class.
+/// The house gateway and held-split builds are left out where this is asked.
+fn class_budget_applies(generation: Generation, ua: &str) -> bool {
+    generation == Generation::Convoy
+        && !handshake::is_split_gateway(ua)
+        && !ua.trim_start().to_ascii_lowercase().starts_with("ratum")
+}
+
+/// The payee bytes a class-limited coinbase kept of the list it was issued, when what it kept is
+/// what packing that list in order into some fixed room keeps.
+///
+/// A payee is measured as `SplitParams::output_budget_bytes` measures one, `8 + 1 + script`, over
+/// the issued miner outputs the coinbase pays. A CONVOY size class places the list first-fit and
+/// in order: an output that does not fit what is left is skipped and the next one tried, and it
+/// stops once under 30 bytes are left (`datum_coinbaser.c` at `b9ea7dc`). Every output it skipped
+/// is then bigger than everything it placed after it. A coinbase where that is not so was cut by
+/// something other than room (sigops, a gateway picking its own subset), and so was one worth less
+/// than the list, whose outputs were dropped for value. Neither says what the class holds: `None`,
+/// as for a coinbase that kept all of the list or none of it.
+fn kept_payee_bytes(issued: &[Output], pool_script: &[u8], cb: &coinbase::Coinbase) -> Option<usize> {
+    let issued_value = issued.iter().fold(0u64, |a, o| a.saturating_add(o.sats));
+    if cb.total_output_value() < issued_value {
+        return None;
+    }
+    // walked from the end, so `kept` is what was placed after each output
+    let (mut kept, mut skipped) = (0usize, false);
+    for o in issued.iter().rev().filter(|o| o.script != pool_script) {
+        let need = 8 + 1 + o.script.len();
+        if cb.paid_to(&o.script) > 0 {
+            kept += need;
+        } else if need <= kept {
+            return None;
+        } else {
+            skipped = true;
+        }
+    }
+    (kept > 0 && skipped).then_some(kept)
+}
+
+/// The block weight CONVOY fits a coinbase class into (`datum_stratum_coinbase_fit_to_template`
+/// in `datum_coinbaser.c`): the consensus limit less the header and coinbase frame it counts. A
+/// template of `txn_total_weight` leaves a class `(this - txn_total_weight) / 4` bytes.
+const TEMPLATE_WEIGHT_LIMIT: u32 = 4_000_000 - 340 - 36;
+/// Room a template must leave beyond the payee bytes a section kept for the cut to have been its
+/// class's and not the template's: a class's fixed part (the coinbase frame, scriptSig and pool
+/// output, about 250 bytes on a live CONVOY gateway) and one more output, with margin.
+const CLASS_BUDGET_TEMPLATE_SLACK: usize = 512;
+
+/// Whether a template of `txn_total_weight` left room enough that a section keeping `kept` payee
+/// bytes was cut by its size class, not by the template. Bitcoin Core's default template (4 000
+/// weight units kept for the coinbase) leaves about 1 900 bytes, more than a class of 17 outputs
+/// needs; one packed to the last few thousand weight units does not, and says nothing about the
+/// class. The weight is the gateway's word: a gateway that lies about it can only stop itself
+/// teaching a budget, or teach itself a smaller one, as it could with the shares it sends anyway.
+fn template_left_room(kept: usize, txn_total_weight: u32) -> bool {
+    let left = (TEMPLATE_WEIGHT_LIMIT.saturating_sub(txn_total_weight) / 4) as usize;
+    left >= kept + CLASS_BUDGET_TEMPLATE_SLACK
+}
+
+/// Distinct coinbasers on which one coinbase section must keep exactly the same payee bytes
+/// before `class-budget` takes them as that section's size.
+///
+/// One sighting is one template. A section can keep less than its class holds for reasons
+/// [`kept_payee_bytes`] and [`template_left_room`] cannot see, and templates built one after
+/// another off the same mempool are alike. The same bytes on three coinbasers, each asked for a
+/// template of its own, is the class. A gateway asks every ten seconds or so, so learning costs
+/// well under a minute of Partial work.
+const CLASS_BUDGET_SIGHTINGS: usize = 3;
+/// Payee byte counts one section keeps a tally of at once, the oldest dropped first.
+const CLASS_BUDGET_TALLY: usize = 8;
+
+/// What `class-budget` has learned of one session's coinbase sections.
+///
+/// Each accepted Partial share says how many payee bytes its section kept of the list
+/// ([`kept_payee_bytes`]). Once a section has kept the same bytes on
+/// [`CLASS_BUDGET_SIGHTINGS`] coinbasers, the session's budget is the smaller of that and what it
+/// was: one list goes to every class, so it has to fit the smallest. A list whose payees fit in
+/// those bytes is kept whole by that section (first-fit into a room at least that large places
+/// every output, and the pool's output after them is paid the remainder either way), so a
+/// block found on it is Split. The budget only ever goes down, and only on the same evidence: a
+/// share still Partial under it teaches a smaller one. A budget that is too small is safe (more
+/// of the list waits in carry), and one too large only leaves blocks Partial, as they were. It is
+/// the session's and ends with it; a reconnect learns again.
+#[derive(Debug, Default)]
+struct ClassBudget {
+    /// Per section (the gateway's `cbselect`): payee bytes kept, and the coinbaser ids they were
+    /// kept on, up to [`CLASS_BUDGET_SIGHTINGS`].
+    seen: HashMap<u8, Vec<(usize, Vec<u8>)>>,
+    bytes: Option<usize>,
+}
+
+impl ClassBudget {
+    /// Count one sighting; true if it changed the budget.
+    fn observe(&mut self, section: u8, coinbaser_id: u8, kept: usize) -> bool {
+        let tally = self.seen.entry(section).or_default();
+        let at = match tally.iter().position(|t| t.0 == kept) {
+            Some(i) => i,
+            None => {
+                if tally.len() >= CLASS_BUDGET_TALLY {
+                    tally.remove(0);
+                }
+                tally.push((kept, Vec::new()));
+                tally.len() - 1
+            }
+        };
+        let ids = &mut tally[at].1;
+        if ids.len() < CLASS_BUDGET_SIGHTINGS && !ids.contains(&coinbaser_id) {
+            ids.push(coinbaser_id);
+        }
+        if ids.len() < CLASS_BUDGET_SIGHTINGS || self.bytes.is_some_and(|b| b <= kept) {
+            return false;
+        }
+        self.bytes = Some(kept);
+        true
+    }
+}
+
+/// The split parameters a coinbaser is computed with: the pool's, or for a session with a class
+/// budget the same with the payee bytes held to it. Whoever does not fit is `OverBudget` exactly
+/// as under the pool's own budget: the order is the same, their earnings go to carry, and the
+/// pool's output is still last.
+fn class_params(pool: &SplitParams, budget: Option<usize>) -> Cow<'_, SplitParams> {
+    match budget {
+        Some(b) if b < pool.output_budget_bytes => Cow::Owned(SplitParams { output_budget_bytes: b, ..pool.clone() }),
+        _ => Cow::Borrowed(pool),
+    }
+}
+
+/// The list a coinbaser reply carries for `split`.
+fn coinbaser_outputs(split: &Split, pool_script: &[u8]) -> Vec<Output> {
+    let mut outputs: Vec<Output> =
+        split.payees.iter().map(|p| Output { sats: p.sats, script: p.script.clone() }).collect();
+    // The list is complete: the pool's fee and whatever the split could not place go
+    // last, to the pool's own script, so the outputs sum to `value`. A stock gateway
+    // pays the list verbatim and only appends its own pool output for funds left over
+    // (none when the template value matches); lazarus-gateway writes exactly the list,
+    // so without this line the fee would be burned. Last, because the size classes a
+    // stock gateway builds for small miners keep a prefix of the list, and the pool's
+    // remainder is what those may drop.
+    if split.pool_sats > 0 || outputs.is_empty() {
+        // Also guarantees at least one output: a gateway treats a shorter list as "no
+        // coinbaser" and forgets the id.
+        outputs.push(Output { sats: split.pool_sats.max(1), script: pool_script.to_vec() });
+    }
+    outputs
 }
 
 const MAX_HELLO: usize = 4096;
@@ -157,6 +308,8 @@ struct IssuedCoinbaser {
     rebate_credits: Vec<(String, u64)>,
     rebate_owed_credited: u64,
     rebate_deferred: u64,
+    /// The class budget it was held to (`class-budget`), if any.
+    class_budget: Option<usize>,
 }
 
 /// The parts of a coinbaser a found block settles against: one we still hold, or a fresh split
@@ -168,6 +321,8 @@ struct Coinbaser<'a> {
     rebate_credits: &'a [(String, u64)],
     rebate_owed_credited: u64,
     rebate_deferred: u64,
+    /// It was held to a class budget, so what it deferred for room sits in the pool's output.
+    class_capped: bool,
 }
 
 /// What a found block does to the books.
@@ -184,6 +339,9 @@ struct Settlement {
     carry_delta: Vec<(String, i64)>,
     rebate_credited: u64,
     rebate_delta: i64,
+    /// Of `carry_delta`, what a class-capped coinbaser deferred for room: the earnings its
+    /// budget left in the pool's output (`BlockRecord::carry_reserved_sats`).
+    carry_reserved: u64,
 }
 
 /// Settle a found block against the coinbaser it was mined on.
@@ -211,6 +369,7 @@ fn settle(
         carry_delta: vec![],
         rebate_credited: 0,
         rebate_delta: 0,
+        carry_reserved: 0,
     };
     let name = match kind {
         CoinbaseKind::Split => "split",
@@ -229,6 +388,19 @@ fn settle(
     let placed = |p: &Payee| !pool_only && paid_to(&p.script) > 0;
     let carry_delta = tides::split::carry_delta(cb.payees, cb.unpaid, cb.rebate_credits, |_| true);
     let rebate_delta = tides::split::rebate_delta(cb.rebate_owed_credited, cb.rebate_deferred);
+    // A class-capped coinbaser's tail: every identity it deferred for room, whose earnings stay
+    // in the pool's output and go to their carry. Worked out as `carry_delta` works them out, so
+    // the two agree to the sat. A coinbaser held only to the pool's own budget reserves nothing,
+    // as it never has.
+    let reserved = |each: &dyn Fn(u64) -> u64| -> u64 {
+        if !cb.class_capped {
+            return 0;
+        }
+        cb.unpaid
+            .iter()
+            .filter(|u| u.reason == tides::UnpaidReason::OverBudget && u.defers())
+            .fold(0u64, |a, u| a.saturating_add(each(u.earned)))
+    };
 
     // The coinbaser was priced for the value the gateway asked about, and that is the gateway's
     // number: nothing ties it to the template it then mined. Close to it (a template that
@@ -244,6 +416,7 @@ fn settle(
             carry_delta,
             rebate_credited: cb.rebate_credits.iter().map(|r| r.1).sum(),
             rebate_delta,
+            carry_reserved: reserved(&|e| e),
         };
     }
 
@@ -270,6 +443,7 @@ fn settle(
             .collect(),
         rebate_credited: cb.rebate_credits.iter().map(|r| rescale(r.1)).sum(),
         rebate_delta,
+        carry_reserved: reserved(&|e| rescale(e).min(i64::MAX as u64)),
     }
 }
 
@@ -293,11 +467,18 @@ enum CoinbaserAction {
     FreshOverRate,
 }
 
-fn coinbaser_action(tokens: u32, issued: &VecDeque<IssuedCoinbaser>, value: u64) -> CoinbaserAction {
+/// `budget` is the class budget this reply would be held to: a repeat is only of a reply held to
+/// the same one (`class-budget`; always `None` without it).
+fn coinbaser_action(
+    tokens: u32,
+    issued: &VecDeque<IssuedCoinbaser>,
+    value: u64,
+    budget: Option<usize>,
+) -> CoinbaserAction {
     if tokens > 0 {
         return CoinbaserAction::Fresh;
     }
-    match issued.iter().rev().find(|c| c.value == value) {
+    match issued.iter().rev().find(|c| c.value == value && c.class_budget == budget) {
         Some(c) => CoinbaserAction::Repeat(c.id),
         None => CoinbaserAction::FreshOverRate,
     }
@@ -380,6 +561,10 @@ struct Session {
     /// the configured script whatever split it holds. Once its own payout script is known it is
     /// configured with that and left there for the session; see `held_script`.
     held_split: bool,
+    /// What `class-budget` has learned of this gateway's coinbase sections; `None` without the
+    /// key, and for a session it does not apply to (`class_budget_applies`, the house gateway,
+    /// a held-split build).
+    class_budget: Option<ClassBudget>,
     /// `prev_hash` of the last flushed coinbaser (hex), i.e. the tip that split is for.
     last_split_prev: Option<String>,
     /// Convoy configure v3 resume token; reused for every mid-session configure so the
@@ -426,6 +611,14 @@ fn pool_only_cause(section: u8, coinbaser_id: u8, payees: usize) -> String {
              before our reply landed",
         )
     }
+}
+
+/// Where an accepted Partial share was mined: the gateway's own section index (its `cbselect`,
+/// the size class), the coinbaser its job cited, and the weight of that job's template.
+struct PartialJob {
+    section: u8,
+    coinbaser_id: u8,
+    txn_total_weight: u32,
 }
 
 /// What an accepted pool-only share says about why its coinbase had no miner outputs.
@@ -521,6 +714,13 @@ pub async fn run(shared: Arc<Shared>, mut stream: TcpStream, remote: SocketAddr)
             }
         );
     }
+    // Never the pool's own gateway, which carries every stratum miner and places the whole list,
+    // nor a held-split build, which sits on its own script where a dropped pool output pays it.
+    let class_budget = (shared.cfg.class_budget
+        && !house
+        && held_build.is_none()
+        && class_budget_applies(hello.generation, &hello.user_agent))
+    .then(ClassBudget::default);
     // Shown as a client once it has proved it holds the session key (`Session::establish`). A
     // hello can be replayed by anyone who saw one, and re-sealed to us by any other pool its
     // gateway connects to; whoever does that cannot read our reply or send a frame, but would
@@ -537,6 +737,8 @@ pub async fn run(shared: Arc<Shared>, mut stream: TcpStream, remote: SocketAddr)
         connected_ts: now(),
         fee_path: fee_path.into(),
         held_split: held_build.is_some(),
+        class_budget_bytes: class_budget.as_ref().map(|_| None),
+        class_budget_replies: class_budget.as_ref().map(|_| 0),
         ..Default::default()
     };
     shared.totals.add(&shared.totals.connections, 1);
@@ -580,6 +782,7 @@ pub async fn run(shared: Arc<Shared>, mut stream: TcpStream, remote: SocketAddr)
         configured_as_gateway: false,
         split_ready: false,
         held_split: held_build.is_some(),
+        class_budget,
         last_split_prev: None,
         resume_token: {
             let mut t = [0u8; mining::RESUME_TOKEN_LEN];
@@ -794,6 +997,18 @@ impl Session {
         self.shared.cfg.stock_full_pool_only == "gateway-solo" && self.pool_only_full_jobs > 0
     }
 
+    /// The class budget this session's next coinbaser is to be held to, carry permitting.
+    ///
+    /// None while the reply leaves the gateway on its own script (`stay_on_gateway`; a
+    /// held-split build never has a class budget). A list cut to a class's room can leave the
+    /// pool's output as the one that does not fit, and the gateway pays the remainder to the
+    /// script it is configured with: on the pool's, that is the same output, and on its own it
+    /// makes the coinbase the gateway's solo work.
+    fn reply_class_budget(&self) -> Option<usize> {
+        let on_own_script = self.held_script().is_some() || self.stay_on_gateway();
+        self.class_budget.as_ref()?.bytes.filter(|_| !on_own_script)
+    }
+
     /// The script a held-split gateway is left paying itself with: its own payout, once known.
     ///
     /// The tag that goes with it is the solo one, as for every configure(gateway). A block on
@@ -965,7 +1180,13 @@ impl Session {
             self.coinbaser_tokens = (self.coinbaser_tokens.saturating_add(n)).min(COINBASER_BURST);
             self.coinbaser_refill_at = Instant::now();
         }
-        match coinbaser_action(self.coinbaser_tokens, &self.coinbasers, value) {
+        // The class budget this reply is held to, if the session has one and carry is under the
+        // ceiling. Settled before the bucket, because a repeat must be of a reply held to the
+        // same budget; without a budget to hold it to nothing here runs.
+        let learned = self.reply_class_budget();
+        let base = learned.map(|_| self.shared.coinbaser_base());
+        let budget = learned.filter(|_| base.as_ref().is_some_and(|b| self.shared.class_budget_open(b.total_carry())));
+        match coinbaser_action(self.coinbaser_tokens, &self.coinbasers, value, budget) {
             CoinbaserAction::Fresh => self.coinbaser_tokens -= 1,
             CoinbaserAction::Repeat(prev_id) => {
                 // Already answered for this exact value: repeat that reply rather than issue a
@@ -976,7 +1197,7 @@ impl Session {
                     .coinbasers
                     .iter()
                     .rev()
-                    .find(|c| c.id == prev_id && c.value == value && !c.outputs.is_empty())
+                    .find(|c| c.id == prev_id && c.value == value && c.class_budget == budget && !c.outputs.is_empty())
                     .map(|c| coinbaser::encode_v2(c.id, &c.outputs));
                 if let Some(repeat) = repeat {
                     log::debug!("[{}] coinbaser over rate; repeating #{prev_id} for value={value}", self.id);
@@ -1004,38 +1225,33 @@ impl Session {
 
         // Computed off a shared snapshot, so a reply never waits on the ledger mutex behind
         // share crediting or the other gateways asking at the same tip change.
-        let base = self.shared.coinbaser_base();
+        let base = base.unwrap_or_else(|| self.shared.coinbaser_base());
         let split = tides::split::compute(
             base.miners.clone(),
             base.total_work,
             value,
-            &self.shared.split_params,
+            &class_params(&self.shared.split_params, budget),
             base.rebate_owed,
             now() as u32,
             |ident| base.script_for(ident),
         );
         let (target, total_work) = (base.target_work, base.total_work);
-        let mut outputs: Vec<Output> =
-            split.payees.iter().map(|p| Output { sats: p.sats, script: p.script.clone() }).collect();
-        // The list is complete: the pool's fee and whatever the split could not place go
-        // last, to the pool's own script, so the outputs sum to `value`. A stock gateway
-        // pays the list verbatim and only appends its own pool output for funds left over
-        // (none when the template value matches); lazarus-gateway writes exactly the list,
-        // so without this line the fee would be burned. Last, because the size classes a
-        // stock gateway builds for small miners keep a prefix of the list, and the pool's
-        // remainder is what those may drop.
-        if split.pool_sats > 0 || outputs.is_empty() {
-            // Also guarantees at least one output: a gateway treats a shorter list as "no
-            // coinbaser" and forgets the id.
-            outputs.push(Output { sats: split.pool_sats.max(1), script: self.shared.pool_script.clone() });
-        }
+        let outputs = coinbaser_outputs(&split, &self.shared.pool_script);
         let encoded = coinbaser::encode_v2(id, &outputs);
         self.send_coinbaser_reply(value, &encoded, prev_hash).await?;
 
         let mut ph = prev_hash;
         ph.reverse();
+        let class = match (learned, budget) {
+            (Some(_), Some(b)) => {
+                let over = split.unpaid.iter().filter(|u| u.reason == tides::UnpaidReason::OverBudget).count();
+                format!(" class-budget={b} over-budget={over}")
+            }
+            (Some(b), None) => format!(" class-budget={b} held-off"),
+            _ => String::new(),
+        };
         log::debug!(
-            "[{}] coinbaser #{id} value={value} prev={} outputs={} pool={} carry_paid={} rebate_credit={} rebate_owed_out={} deferred={} window={}/{}",
+            "[{}] coinbaser #{id} value={value} prev={} outputs={} pool={} carry_paid={} rebate_credit={} rebate_owed_out={} deferred={} window={}/{}{class}",
             self.id,
             &hex::encode(ph)[..16],
             outputs.len(),
@@ -1047,6 +1263,12 @@ impl Session {
             total_work,
             target
         );
+        if budget.is_some() {
+            self.shared.totals.add(&self.shared.totals.class_budget_replies, 1);
+            self.shared.client_update(self.id, |c| *c.class_budget_replies.get_or_insert(0) += 1);
+        } else if learned.is_some() {
+            self.shared.totals.add(&self.shared.totals.class_budget_ceiling_replies, 1);
+        }
         self.coinbasers.push_back(IssuedCoinbaser {
             id,
             value,
@@ -1058,6 +1280,7 @@ impl Session {
             rebate_credits: split.rebate_credits,
             rebate_owed_credited: split.rebate_owed_credited,
             rebate_deferred: split.rebate_deferred,
+            class_budget: budget,
         });
         while self.coinbasers.len() > COINBASERS_KEPT {
             self.coinbasers.pop_front();
@@ -1219,8 +1442,8 @@ impl Session {
             );
             return self.reject(&s, mining::REJECT_COINBASE_TOO_LARGE).await;
         }
-        let (height, coinbaser_id, prev_hash, nbits) = match &self.slots[job_id].job {
-            Some(j) => (j.height, j.coinbaser_id, j.prev_hash, j.nbits_u32()),
+        let (height, coinbaser_id, prev_hash, nbits, txn_total_weight) = match &self.slots[job_id].job {
+            Some(j) => (j.height, j.coinbaser_id, j.prev_hash, j.nbits_u32(), j.txn_total_weight),
             None => return self.reject(&s, mining::REJECT_BAD_JOB_ID).await,
         };
         // The job section is the gateway's account of the chain; the node's is the one that
@@ -1447,6 +1670,10 @@ impl Session {
                 }
             }
         });
+        if matches!(v.coinbase_kind, CoinbaseKind::Partial(_)) {
+            let job = PartialJob { section: s.coinbase_id, coinbaser_id, txn_total_weight };
+            self.note_partial_share(job, issued_outputs.as_deref(), &v.coinbase);
+        }
         let status = if matches!(v.coinbase_kind, CoinbaseKind::Split) {
             mining::ACCEPTED
         } else {
@@ -1711,6 +1938,38 @@ impl Session {
         );
     }
 
+    /// Learn this session's class budget from an accepted Partial share (`class-budget`): the
+    /// payee bytes its section kept of the list its job was issued.
+    fn note_partial_share(&mut self, job: PartialJob, issued: Option<&[Output]>, cb: &coinbase::Coinbase) {
+        let PartialJob { section, coinbaser_id, txn_total_weight } = job;
+        if self.class_budget.is_none() {
+            return;
+        }
+        let Some(issued) = issued else { return };
+        // Every reply goes out with configure(pool) under the pool's own tag; a section built
+        // under the solo tag had a scriptSig five bytes longer, and less room to keep the list in.
+        let solo = self.solo_tag();
+        if cb.script_sig.windows(solo.len()).any(|w| w == solo.as_bytes()) {
+            return;
+        }
+        let Some(kept) = kept_payee_bytes(issued, &self.shared.pool_script, cb) else { return };
+        if !template_left_room(kept, txn_total_weight) {
+            return;
+        }
+        let Some(budget) = self.class_budget.as_mut() else { return };
+        if !budget.observe(section, coinbaser_id, kept) {
+            return;
+        }
+        log::info!(
+            "[{}] {} class budget {kept} bytes: section {section} kept the same {kept} bytes of payee outputs on \
+             {CLASS_BUDGET_SIGHTINGS} coinbasers, so this session's coinbasers now list only the payees that fit \
+             in {kept} bytes and the rest wait in carry",
+            self.id,
+            self.gateway_hex,
+        );
+        self.shared.client_update(self.id, |c| c.class_budget_bytes = Some(Some(kept)));
+    }
+
     /// Count a reject or malformed message against the session's flood budget.
     fn note_reject(&mut self) -> Result<(), SessionError> {
         let now = Instant::now();
@@ -1795,6 +2054,7 @@ impl Session {
                 rebate_credits: &c.rebate_credits,
                 rebate_owed_credited: c.rebate_owed_credited,
                 rebate_deferred: c.rebate_deferred,
+                class_capped: c.class_budget.is_some(),
             }),
             (None, Some(sp)) => Some(Coinbaser {
                 value: sp.value,
@@ -1803,12 +2063,13 @@ impl Session {
                 rebate_credits: &sp.rebate_credits,
                 rebate_owed_credited: sp.rebate_owed_credited,
                 rebate_deferred: sp.rebate_deferred,
+                class_capped: false,
             }),
             (None, None) => None,
         };
         let (rebate_owed_credited, rebate_deferred) =
             cb.as_ref().map_or((0, 0), |c| (c.rebate_owed_credited, c.rebate_deferred));
-        let Settlement { kind, owed, split, carry_paid, carry_delta, rebate_credited, rebate_delta } =
+        let Settlement { kind, owed, split, carry_paid, carry_delta, rebate_credited, rebate_delta, carry_reserved } =
             settle(&v.coinbase_kind, cb, v.coinbase_value, |script| v.coinbase.paid_to(script));
         let _ = fee;
         // Booked in two steps (`tides::Books`). Now: what this coinbase took off the books, so
@@ -1832,6 +2093,14 @@ impl Session {
                 carry_delta.iter().filter(|d| d.1 > 0).count(),
             );
         }
+        if carry_reserved > 0 {
+            log::info!(
+                "[{}] block {hash_hex} was mined on a coinbaser held to this gateway's class budget: {carry_reserved} \
+                 sats its budget had no room for are in the pool's output and go to their earners' carry \
+                 (carry_reserved_sats; the fee wallet holds them back)",
+                self.id,
+            );
+        }
         let record = BlockRecord {
             ts: now(),
             height: v.height,
@@ -1850,6 +2119,7 @@ impl Session {
             submit: "pending".into(),
             gateway: self.gateway_hex.clone(),
             books: Some(books),
+            carry_reserved_sats: carry_reserved,
         };
         self.shared.record_block(record);
 
@@ -2104,7 +2374,15 @@ mod tests {
     }
 
     fn coinbaser<'a>(value: u64, payees: &'a [Payee]) -> Coinbaser<'a> {
-        Coinbaser { value, payees, unpaid: &[], rebate_credits: &[], rebate_owed_credited: 0, rebate_deferred: 0 }
+        Coinbaser {
+            value,
+            payees,
+            unpaid: &[],
+            rebate_credits: &[],
+            rebate_owed_credited: 0,
+            rebate_deferred: 0,
+            class_capped: false,
+        }
     }
 
     fn cleared(s: &Settlement) -> std::collections::HashMap<&str, i64> {
@@ -2237,6 +2515,7 @@ mod tests {
             rebate_credits: vec![],
             rebate_owed_credited: 0,
             rebate_deferred: 0,
+            class_budget: None,
         }
     }
 
@@ -2252,7 +2531,7 @@ mod tests {
             for value in [312_500_000u64, 312_644_067] {
                 for q in [&mut empty, &mut seen] {
                     // no variant of the decision withholds a reply
-                    match coinbaser_action(tokens, q, value) {
+                    match coinbaser_action(tokens, q, value, None) {
                         CoinbaserAction::Fresh | CoinbaserAction::Repeat(_) | CoinbaserAction::FreshOverRate => {}
                     }
                 }
@@ -2282,8 +2561,8 @@ mod tests {
     fn inside_the_bucket_every_request_is_computed_fresh() {
         let mut q = VecDeque::new();
         q.push_back(issued(7, 312_500_000));
-        assert_eq!(coinbaser_action(1, &q, 312_500_000), CoinbaserAction::Fresh);
-        assert_eq!(coinbaser_action(32, &q, 312_500_000), CoinbaserAction::Fresh);
+        assert_eq!(coinbaser_action(1, &q, 312_500_000, None), CoinbaserAction::Fresh);
+        assert_eq!(coinbaser_action(32, &q, 312_500_000, None), CoinbaserAction::Fresh);
     }
 
     #[test]
@@ -2293,14 +2572,14 @@ mod tests {
         q.push_back(issued(8, 312_644_067));
         // The gateway only accepts a reply whose value equals the one it asked about, so a
         // repeat is only usable when the value matches exactly.
-        assert_eq!(coinbaser_action(0, &q, 312_500_000), CoinbaserAction::Repeat(7));
-        assert_eq!(coinbaser_action(0, &q, 312_644_067), CoinbaserAction::Repeat(8));
+        assert_eq!(coinbaser_action(0, &q, 312_500_000, None), CoinbaserAction::Repeat(7));
+        assert_eq!(coinbaser_action(0, &q, 312_644_067, None), CoinbaserAction::Repeat(8));
         // newest wins when a value was answered twice
         q.push_back(issued(9, 312_500_000));
-        assert_eq!(coinbaser_action(0, &q, 312_500_000), CoinbaserAction::Repeat(9));
+        assert_eq!(coinbaser_action(0, &q, 312_500_000, None), CoinbaserAction::Repeat(9));
         // a value never answered is computed rather than skipped
-        assert_eq!(coinbaser_action(0, &q, 999_999_999), CoinbaserAction::FreshOverRate);
-        assert_eq!(coinbaser_action(0, &VecDeque::new(), 312_500_000), CoinbaserAction::FreshOverRate);
+        assert_eq!(coinbaser_action(0, &q, 999_999_999, None), CoinbaserAction::FreshOverRate);
+        assert_eq!(coinbaser_action(0, &VecDeque::new(), 312_500_000, None), CoinbaserAction::FreshOverRate);
     }
 
     /// The warning has to fire while there is still margin, or it is just an obituary.
@@ -2378,5 +2657,367 @@ mod tests {
         assert_eq!(held_split_build(&["e894b8".into(), "e894b8a+".into(), "".into()], e894), None);
         let full = "e894b8ac29ae06bf6e3b14dafd21f72dcd65fb84".to_string();
         assert_eq!(held_split_build(std::slice::from_ref(&full), e894), Some(full.as_str()));
+    }
+
+    fn wpkh(n: u16) -> Vec<u8> {
+        let mut s = vec![0x00, 0x14];
+        s.extend_from_slice(&[0xaa; 20]);
+        s[20..22].copy_from_slice(&n.to_le_bytes());
+        s
+    }
+
+    fn tr(n: u16) -> Vec<u8> {
+        let mut s = vec![0x51, 0x20];
+        s.extend_from_slice(&[0xee; 32]);
+        s[32..34].copy_from_slice(&n.to_le_bytes());
+        s
+    }
+
+    /// What a CONVOY size class with `room` bytes makes of `list` (`datum_coinbaser.c` at
+    /// `b9ea7dc`): first fit in order, stopping under 30 bytes, and whatever value it did not
+    /// place to the script it was configured with.
+    fn convoy_class(list: &[Output], room: usize, value: u64, configured: &[u8]) -> coinbase::Coinbase {
+        let (mut left, mut placed) = (room, 0u64);
+        let mut outs = Vec::new();
+        for o in list {
+            if left < 30 || placed >= value {
+                break;
+            }
+            let need = o.script.len() + 9;
+            if need <= left && placed + o.sats <= value {
+                outs.push(coinbase::TxOut { value: o.sats, script: o.script.clone() });
+                left -= need;
+                placed += o.sats;
+            }
+        }
+        if value > placed {
+            outs.push(coinbase::TxOut { value: value - placed, script: configured.to_vec() });
+        }
+        let (bytes, _, _) = coinbase::build(966_267, b"Lazarus", &outs, 0);
+        coinbase::parse(&bytes).unwrap()
+    }
+
+    fn pool_params() -> SplitParams {
+        SplitParams {
+            fee_bps: 0,
+            stratum_fee_bps: 0,
+            datum_rebate_bps: 0,
+            min_payout: 546,
+            max_outputs: 511,
+            output_budget_bytes: 14_000 - 9 - 64,
+            stale_after: 0,
+            stale_min_payout: 10_000,
+            stale_max_outputs: 25,
+        }
+    }
+
+    /// 91 miners, about what a live window holds: mostly P2WPKH, one in seven P2TR, one in five
+    /// with carry waiting.
+    fn window() -> (Vec<tides::MinerStat>, HashMap<String, Vec<u8>>) {
+        let (mut miners, mut scripts) = (Vec::new(), HashMap::new());
+        for i in 0..91u16 {
+            let identity = format!("m{i:02}");
+            scripts.insert(identity.clone(), if i % 7 == 3 { tr(i) } else { wpkh(i) });
+            let carry = if i % 5 == 0 { 50_000 } else { 0 };
+            miners.push(tides::MinerStat {
+                identity,
+                work: 10_000 - u64::from(i) * 100,
+                stratum_work: 0,
+                credits: 1,
+                last_ts: 0,
+                carry,
+            });
+        }
+        (miners, scripts)
+    }
+
+    const VALUE: u64 = 312_538_966;
+
+    fn split_of(miners: &[tides::MinerStat], scripts: &HashMap<String, Vec<u8>>, p: &SplitParams) -> Split {
+        let total = miners.iter().map(|m| m.work).sum();
+        tides::split::compute(miners.to_vec(), total, VALUE, p, 0, 0, |i| scripts.get(i).cloned())
+    }
+
+    fn policy<'a>(pool: &'a [u8], issued: &'a [Output]) -> Policy<'a> {
+        Policy {
+            pool_script: pool,
+            issued: Some(issued),
+            tolerance: 2,
+            now: 0,
+            min_pot: 0,
+            gateway_script: None,
+            empty_solo_fee_bps: 0,
+            trusted_target: false,
+            uncommitted_pot: 20,
+            held_split: false,
+        }
+    }
+
+    fn classify(cb: &coinbase::Coinbase, pool: &[u8], issued: &[Output]) -> CoinbaseKind {
+        verify::classify_coinbase(cb, &policy(pool, issued), false, 3, false)
+    }
+
+    /// The whole of `class-budget` on one window. A b9ea7dc class-2 section keeps the head of the
+    /// list and the block would be Partial; its shares say how many payee bytes it kept; the next
+    /// list is held to those bytes, the section keeps all of it, and a block on it is a split that
+    /// owes nothing, with the tail's earnings in carry and recorded for the fee wallet to hold.
+    #[test]
+    fn a_class_budget_learned_from_partial_shares_turns_the_next_block_into_a_split() {
+        let pool = wpkh(9999);
+        let (miners, scripts) = window();
+        let full = split_of(&miners, &scripts, &pool_params());
+        let list = coinbaser_outputs(&full, &pool);
+        assert_eq!(full.payees.len(), 91, "the pool's budget places every miner");
+        // class 2: 755 bytes less what the rest of the coinbase takes
+        let room = 557;
+        let cb = convoy_class(&list, room, VALUE, &pool);
+        let CoinbaseKind::Partial(n) = classify(&cb, &pool, &list) else { panic!("{:?}", classify(&cb, &pool, &list)) };
+        assert!((15..=17).contains(&n), "{n}");
+        let kept = kept_payee_bytes(&list, &pool, &cb).expect("a first-fit cut");
+        let placed: usize = cb.outputs.iter().filter(|o| o.script != pool).map(|o| 9 + o.script.len()).sum();
+        assert_eq!(kept, placed);
+
+        let mut budget = ClassBudget::default();
+        assert!(!budget.observe(2, 1, kept) && !budget.observe(2, 2, kept) && budget.observe(2, 3, kept));
+        let capped = split_of(&miners, &scripts, &class_params(&pool_params(), budget.bytes));
+        let short = coinbaser_outputs(&capped, &pool);
+        assert!(capped.payees.iter().map(|p| 9 + p.script.len()).sum::<usize>() <= kept);
+        let cb = convoy_class(&short, room, VALUE, &pool);
+        assert_eq!(classify(&cb, &pool, &short), CoinbaseKind::Split, "the class keeps the whole list now");
+
+        let tail: Vec<&tides::Unpaid> =
+            capped.unpaid.iter().filter(|u| u.reason == tides::UnpaidReason::OverBudget).collect();
+        assert_eq!(capped.payees.len() + tail.len(), full.payees.len(), "everyone is placed or deferred");
+        let cbr = Coinbaser {
+            value: VALUE,
+            payees: &capped.payees,
+            unpaid: &capped.unpaid,
+            rebate_credits: &capped.rebate_credits,
+            rebate_owed_credited: 0,
+            rebate_deferred: 0,
+            class_capped: true,
+        };
+        let s = settle(&CoinbaseKind::Split, Some(cbr), VALUE, |script| cb.paid_to(script));
+        assert_eq!((s.kind, s.owed), ("split", 0));
+        let d = cleared(&s);
+        for u in &tail {
+            assert!(u.defers());
+            assert_eq!(d.get(u.identity.as_str()), Some(&(u.earned as i64)), "{} waits in carry", u.identity);
+        }
+        assert_eq!(s.carry_reserved, tail.iter().map(|u| u.earned).sum::<u64>());
+        assert!(s.carry_reserved > VALUE / 5, "the tail is most of what Partial(17) owed: {}", s.carry_reserved);
+    }
+
+    /// The budget cuts the list where the pool's own budget would have if it were that small:
+    /// the same order, the head placed first-fit, the tail deferred to carry, the pool last.
+    #[test]
+    fn a_class_budget_defers_the_tail_to_carry_and_keeps_the_order() {
+        let pool = wpkh(9999);
+        let (miners, scripts) = window();
+        let full = split_of(&miners, &scripts, &pool_params());
+        for budget in [527usize, 539, 310, 31, 30] {
+            let capped = split_of(&miners, &scripts, &class_params(&pool_params(), Some(budget)));
+            // first fit, in the uncapped list's order
+            let mut left = budget;
+            let expect: Vec<&str> = full
+                .payees
+                .iter()
+                .filter(|p| {
+                    let need = 9 + p.script.len();
+                    let fits = need <= left;
+                    if fits {
+                        left -= need;
+                    }
+                    fits
+                })
+                .map(|p| p.identity.as_str())
+                .collect();
+            let got: Vec<&str> = capped.payees.iter().map(|p| p.identity.as_str()).collect();
+            assert_eq!(got, expect, "budget {budget}");
+            for p in &full.payees {
+                if !got.contains(&p.identity.as_str()) {
+                    let u = capped.unpaid.iter().find(|u| u.identity == p.identity).expect("deferred, not dropped");
+                    assert_eq!((u.reason, u.earned), (tides::UnpaidReason::OverBudget, p.sats - p.carry));
+                }
+            }
+            let out = coinbaser_outputs(&capped, &pool);
+            assert_eq!(out.last().unwrap().script, pool, "the pool's output is last");
+            assert_eq!(out.iter().map(|o| o.sats).sum::<u64>(), VALUE);
+            assert_eq!(out.len(), capped.payees.len() + 1);
+        }
+    }
+
+    /// Without a class budget, or with one the list fits in, a reply is byte for byte what it was
+    /// before class budgets existed.
+    #[test]
+    fn without_a_class_budget_a_reply_is_the_bytes_it_always_was() {
+        // the reply as it was built before `coinbaser_outputs`
+        let before = |split: &Split, pool: &[u8]| {
+            let mut outputs: Vec<Output> =
+                split.payees.iter().map(|p| Output { sats: p.sats, script: p.script.clone() }).collect();
+            if split.pool_sats > 0 || outputs.is_empty() {
+                outputs.push(Output { sats: split.pool_sats.max(1), script: pool.to_vec() });
+            }
+            coinbaser::encode_v2(7, &outputs)
+        };
+        let pool = wpkh(9999);
+        let (miners, scripts) = window();
+        let p = pool_params();
+        let today = before(&split_of(&miners, &scripts, &p), &pool);
+        let whole: usize = split_of(&miners, &scripts, &p).payees.iter().map(|p| 9 + p.script.len()).sum();
+        for budget in [None, Some(p.output_budget_bytes), Some(usize::MAX), Some(whole)] {
+            let params = class_params(&p, budget);
+            assert_eq!(matches!(params, Cow::Borrowed(_)), budget != Some(whole), "{budget:?}");
+            let reply = coinbaser::encode_v2(7, &coinbaser_outputs(&split_of(&miners, &scripts, &params), &pool));
+            assert_eq!(reply, today, "{budget:?}");
+        }
+        // an empty window is still one pool output
+        let empty = split_of(&[], &scripts, &p);
+        assert_eq!(coinbaser::encode_v2(7, &coinbaser_outputs(&empty, &pool)), before(&empty, &pool));
+    }
+
+    /// A section's size is the same payee bytes kept on three coinbasers. It only goes down, and
+    /// it is the smallest section's, since every section is handed the one list.
+    #[test]
+    fn a_class_budget_is_the_same_kept_bytes_on_three_coinbasers_and_only_goes_down() {
+        let mut b = ClassBudget::default();
+        for _ in 0..10 {
+            assert!(!b.observe(2, 1, 527), "one coinbaser's shares are one sighting however many");
+        }
+        assert!(!b.observe(2, 2, 527));
+        assert_eq!(b.bytes, None, "two can be two nearly full templates in a row");
+        assert!(!b.observe(2, 3, 539), "other bytes are another tally");
+        assert!(!b.observe(4, 3, 527), "and so is another section");
+        assert!(b.observe(2, 4, 527));
+        assert_eq!(b.bytes, Some(527));
+        // more room on another list, or a bigger class, never raises it
+        for id in 5..9 {
+            assert!(!b.observe(2, id, 539) && !b.observe(5, id, 4_000));
+        }
+        assert_eq!(b.bytes, Some(527));
+        // a smaller class on the same gateway (NiceHash's), or a fuller template still cut under
+        // the budget, lowers it on the same evidence
+        assert!(!b.observe(1, 10, 310) && !b.observe(1, 11, 310));
+        assert_eq!(b.bytes, Some(527));
+        assert!(b.observe(1, 12, 310));
+        assert_eq!(b.bytes, Some(310));
+        // a section's tally is bounded
+        for (id, kept) in (100..200usize).enumerate() {
+            assert!(!b.observe(3, id as u8, kept));
+        }
+        assert_eq!(b.seen[&3].len(), CLASS_BUDGET_TALLY);
+    }
+
+    /// Only a cut a size class makes says what the class holds.
+    #[test]
+    fn only_a_first_fit_cut_says_what_a_class_holds() {
+        let pool = wpkh(9999);
+        let out = |script: Vec<u8>| Output { sats: 1_000_000, script };
+        let list = vec![out(wpkh(1)), out(tr(2)), out(wpkh(3)), out(wpkh(4)), out(wpkh(5)), out(pool.clone())];
+        let value = 6_000_000;
+        // room for the first P2WPKH, not the P2TR after it, then one more P2WPKH and under 30 left
+        let cb = convoy_class(&list, 70, value, &pool);
+        assert_eq!(classify(&cb, &pool, &list), CoinbaseKind::Partial(2));
+        assert_eq!(kept_payee_bytes(&list, &pool, &cb), Some(62));
+        let paying = |scripts: &[&Vec<u8>], rest: u64| {
+            let mut outs: Vec<coinbase::TxOut> =
+                scripts.iter().map(|s| coinbase::TxOut { value: 1_000_000, script: s.to_vec() }).collect();
+            outs.push(coinbase::TxOut { value: rest, script: pool.clone() });
+            let (bytes, _, _) = coinbase::build(966_267, b"Lazarus", &outs, 0);
+            coinbase::parse(&bytes).unwrap()
+        };
+        let (s1, s3, s4) = (&list[0].script, &list[2].script, &list[3].script);
+        // a subset no room gives: the third output is no bigger than the fourth, kept after it
+        assert_eq!(kept_payee_bytes(&list, &pool, &paying(&[s1, s4], 4_000_000)), None);
+        // worth less than the list: dropped for value, not room
+        assert_eq!(kept_payee_bytes(&list, &pool, &paying(&[s1, s3], 1_000_000)), None);
+        // all of it, or none of it
+        let all: Vec<&Vec<u8>> = list[..5].iter().map(|o| &o.script).collect();
+        assert_eq!(kept_payee_bytes(&list, &pool, &paying(&all, 1_000_000)), None);
+        assert_eq!(kept_payee_bytes(&list, &pool, &paying(&[], value)), None);
+    }
+
+    /// A section is taken for its class only where the template left it more room than it kept.
+    #[test]
+    fn a_section_cut_by_a_full_template_is_not_taken_for_its_class() {
+        // what a node's default template leaves (4 000 weight units kept for the coinbase)
+        assert!(template_left_room(527, 3_992_000));
+        assert!(template_left_room(310, 3_992_000) && template_left_room(1_300, 3_992_000));
+        assert!(template_left_room(527, 0));
+        // packed to the last few thousand, or past the limit
+        assert!(!template_left_room(527, 3_996_000));
+        assert!(!template_left_room(1_500, 3_992_000));
+        assert!(!template_left_room(31, 4_100_000));
+    }
+
+    /// CONVOY C gateways only. iohzrd's `7491a50` is one, and never learns a budget: every
+    /// BLAKE2b miner on it gets the class that holds the whole list, so its shares are never
+    /// Partial.
+    #[test]
+    fn a_class_budget_is_only_for_convoy_c_gateways() {
+        for ua in [
+            "v0.4.1-beta/b9ea7dc3eb91352565ab487ec55ed6ee5964a440",
+            "v0.4.1-beta/b9ea7dc3eb91352565ab487ec55ed6ee5964a440+",
+            "v0.4.1-beta/e998e38ee198da26129e45ffa80402157ae76c55",
+            "v0.4.1-beta/UNKNOWN_GIT_HASH",
+            "v0.4.1-beta/7491a5099dd5d887a027c812f71de63e0d5986a3",
+        ] {
+            assert!(class_budget_applies(Generation::Convoy, ua), "{ua}");
+            assert!(!class_budget_applies(Generation::Ocean, ua), "{ua}");
+        }
+        for ua in [
+            "lazarus-gateway/0.1",
+            "v0.4.1-beta+lazarus-split/121edd06244082df2aa101f3b3c424faed8dd31b+",
+            "ratum-gateway/0.1.28/f0569180c986",
+            "ratum-gateway/0.1.51/cffaf4743ee2-dirty",
+            "Ratum-Gateway/0.2",
+            "ratum/0.1",
+        ] {
+            assert!(!class_budget_applies(Generation::Convoy, ua), "{ua}");
+        }
+    }
+
+    /// What a class-capped block reserves is its deferred-for-room earnings, whatever it is
+    /// classified as, and moves with the reward as `carry_delta` does. Held only to the pool's own
+    /// budget, a coinbaser reserves nothing, and its books are the same either way.
+    #[test]
+    fn a_class_capped_block_reserves_the_tail_it_left_in_the_pool_output() {
+        use tides::UnpaidReason::{BelowMinimum, OverBudget};
+        let payees = vec![payee("A", 1_000_000, 400_000, 1), payee("B", 800_000, 0, 2)];
+        let unpaid = [
+            tides::Unpaid { identity: "C".into(), sats: 700_000, earned: 600_000, reason: OverBudget },
+            tides::Unpaid { identity: "D".into(), sats: 500_000, earned: 500_000, reason: OverBudget },
+            tides::Unpaid { identity: "E".into(), sats: 300, earned: 300, reason: BelowMinimum },
+        ];
+        let cb = |class_capped| Coinbaser { unpaid: &unpaid, class_capped, ..coinbaser(312_500_000, &payees) };
+        let s = settle(&CoinbaseKind::Split, Some(cb(true)), 312_500_000, |_| 1);
+        assert_eq!((s.kind, s.owed, s.carry_reserved), ("split", 0, 1_100_000));
+        let d = cleared(&s);
+        assert_eq!((d.get("C"), d.get("D"), d.get("E")), (Some(&600_000), Some(&500_000), Some(&300)));
+        let plain = settle(&CoinbaseKind::Split, Some(cb(false)), 312_500_000, |_| 1);
+        assert_eq!((plain.carry_reserved, &plain.carry_delta), (0, &s.carry_delta));
+
+        // Partial on a capped coinbaser (a fuller template than the budget was learned on): the
+        // payee it dropped is owed as ever, and the tail is still reserved
+        let a = [0x00, 0x14, 1];
+        let p = settle(&CoinbaseKind::Partial(1), Some(cb(true)), 312_500_000, |s| if s == a { 1_000_000 } else { 0 });
+        assert_eq!((p.kind, p.owed, p.carry_reserved), ("partial", 800_000, 1_100_000));
+        // a reward twice the one asked about: what the tail earned doubles, in the books and here
+        let far = settle(&CoinbaseKind::Split, Some(cb(true)), 625_000_000, |_| 1);
+        assert_eq!((cleared(&far).get("C"), far.carry_reserved), (Some(&1_200_000), 2_200_000));
+        for kind in [CoinbaseKind::GatewaySolo, CoinbaseKind::EmptySolo, CoinbaseKind::Foreign] {
+            assert_eq!(settle(&kind, Some(cb(true)), 312_500_000, |_| 0).carry_reserved, 0);
+        }
+    }
+
+    /// A reply over the bucket repeats one held to the same class budget, or none.
+    #[test]
+    fn a_repeat_is_only_of_a_reply_held_to_the_same_class_budget() {
+        let mut q = VecDeque::new();
+        q.push_back(issued(7, 312_500_000));
+        q.push_back(IssuedCoinbaser { class_budget: Some(527), ..issued(8, 312_500_000) });
+        assert_eq!(coinbaser_action(0, &q, 312_500_000, None), CoinbaserAction::Repeat(7));
+        assert_eq!(coinbaser_action(0, &q, 312_500_000, Some(527)), CoinbaserAction::Repeat(8));
+        assert_eq!(coinbaser_action(0, &q, 312_500_000, Some(310)), CoinbaserAction::FreshOverRate);
     }
 }
