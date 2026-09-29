@@ -346,7 +346,7 @@ def renumber_pools(cur, merged, ids):
     moves = {o: n for o, n in mapping.items() if o != n}
     if DRY_RUN:
         for o, n in sorted(moves.items(), key=lambda x: x[1])[:12]:
-            log(f"  would move id {o} -> {n} ({dict(rows)[o]})")
+            log(f"  would move id {o} -> {n} ({dict(rows).get(o, 'new this run')})")
         log(f"  ... {len(moves)} moves in total")
         return len(moves)
 
