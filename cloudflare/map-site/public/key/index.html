@@ -126,7 +126,7 @@
   <div class="section-head" data-reveal><p class="kicker">Features</p><h2>What it does</h2></div>
   <div class="grid three" data-reveal>
     <article class="card"><h3>Hardware signing</h3><p>Every send is signed by your Bitkey over NFC. The app holds one key, the device holds another, and neither can move your money alone.</p></article>
-    <article class="card"><h3>Replay protection</h3><p>Sends are signed with a unified sighash that SHA-256 Bitcoin rejects. A transaction made here cannot be replayed onto the other chain against your pre-fork coins.</p></article>
+    <article class="card"><h3>Replay protection</h3><p>Sends are signed with a unified sighash that SHA-256 Bitcoin rejects, which is designed to stop a transaction made here from being replayed onto the other chain. We are tightening cases where it might not be applied; until the next release, do not rely on it alone for coins from before block 961,640.</p></article>
     <article class="card"><h3>Your node, not ours</h3><p>On first launch it asks for your own Electrum server. The Lazarus Pool server is offered only if you say you have none, and you can change it whenever you like.</p></article>
     <article class="card"><h3>Nothing reported</h3><p>No crash reporting, no usage analytics, no firmware telemetry. Your wallet addresses are never registered with anyone. What the app knows stays on the phone.</p></article>
     <article class="card"><h3>Long maturity, handled</h3><p>Mined coins need 6,480 confirmations until block 979,920. The balance counts them separately so you always know what is spendable now.</p></article>
@@ -171,7 +171,7 @@
       <li>Install Lazarus Key and choose <strong>I already have a wallet</strong>, then <strong>Import using Emergency Exit Kit</strong>.</li>
       <li>Enter the backup code from the kit and tap your Bitkey when asked. Your balance appears once the wallet syncs.</li>
     </ol>
-    <div class="callout warn"><p><strong>Move your XBT first.</strong> A coin that existed before block 961,640 sits at the same address on both chains. Spending it in the official Bitkey app produces a signature that can be replayed here. Send your XBT with Lazarus Key first — that splits the coins — and then use either app freely.</p></div>
+    <div class="callout warn"><p><strong>Move your XBT first.</strong> A coin that existed before block 961,640 sits at the same address on both chains. Spending it in the official Bitkey app produces a signature that can be replayed here. Replay protection in Lazarus Key is being tightened: if you hold coins from before the fork, wait for the next release (it will be announced on this page) before splitting them.</p></div>
 
     <h3>If your Bitkey is new</h3>
     <ol class="steps">
