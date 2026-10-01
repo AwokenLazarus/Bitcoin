@@ -228,13 +228,13 @@ The cost falls on honest miners:
   payee's signature reached the pool **~41 ms** after a mined tip (p50 40.6, p95 40.7 ms)
   and the full payee set was in the coinbaser at 40.8 ms p95. Tips the gateways learn of
   only by polling took up to **0.3 s** (p95 298 ms). Mainnet adds propagation to each
-  gateway's node. Signing itself is ~25 µs;
+  gateway's node. Signing itself took ~25 µs in that demo (a single demo measurement, not yet a reproducible benchmark);
 - offline payees go unpaid until they return.
 
 **Why a cap of 512 payees.** Without one, only block size bounds the payee list: about
 8,000 distinct payees in a maximal non-witness coinbase (122 bytes each), so about 8,000
 BIP340 verifications, single-threaded in `ContextualCheckBlock`, for a block that has
-already passed proof of work (~0.4 s at ~50 µs each). At 512 that is ~26 ms, and the
+already passed proof of work (~0.4 s at ~50 µs each: an **estimate, not yet measured**). At 512 that is ~26 ms (same estimate), and the
 coinbase grows by at most 46.6 KB over P2WPKH payouts (4.7% of block weight).
 512 is the original draft's `MAX_ATTESTATIONS`; a TIDES window at DATUM scale pays tens
 to low hundreds of payees, and a builder carries anyone past the cap. The cap is

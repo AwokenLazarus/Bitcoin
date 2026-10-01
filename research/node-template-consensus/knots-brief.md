@@ -61,7 +61,7 @@ inclusion-list extension is specified as a later, much larger soft fork.
    per retarget)? We recommend keeping it.
 3. Is Taproot-only acceptable, given it is permanent? We propose capping payees at 512
    per block (`bad-nta-too-many`, checked before any signature): at most ~26 ms of
-   verification instead of ~0.4 s; pools carry the rest.
+   verification instead of ~0.4 s (estimated); pools carry the rest.
 4. Activation: a buried height like `blake2b`, or signalled?
 
 **The ask.** Would you look at the patch and draft and tell us whether this fits step 3
