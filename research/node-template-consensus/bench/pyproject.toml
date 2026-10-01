@@ -1,0 +1,12 @@
+[tool.ruff]
+target-version = "py312"
+
+[tool.ruff.lint]
+# E402 is on so the Knots-import noqa in bench_blocks.py is a real exemption:
+# those imports must follow the KNOTS_DIR sys.path insert.
+extend-select = ["E402", "E722", "S110"]
+
+[tool.mypy]
+ignore_missing_imports = true
+check_untyped_defs = true
+files = ["bench_blocks.py", "write_report.py"]

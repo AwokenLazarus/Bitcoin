@@ -13,7 +13,8 @@ submitted to the Knots maintainers.
 
 | | |
 | --- | --- |
-| Spec | [bip-node-template-attestation.md](bip-node-template-attestation.md) (v1, updated 2026-09-26) |
+| Spec | [bip-node-template-attestation.md](bip-node-template-attestation.md) (v1, updated 2026-10-01) |
+| Benchmark | [bench/](bench/): verify ~21 µs, 8,000 verifies ~0.17 s, 512-payee block check ~17 ms, signing ~14 µs. `KNOTS_DIR=… PROTOCOL_DIR=… bench/bench.sh` |
 | Decisions behind v1 | [v1-decisions.md](v1-decisions.md): inline attestations, keep `hashPrevBlock`, no inclusion list in v1, Taproot-only payees, 512-payee cap |
 | Brief for the Knots maintainers | [knots-brief.md](knots-brief.md) (**draft for discussion**, not sent) |
 | XBT specifics | [XBT-PROFILE.md](XBT-PROFILE.md): BLAKE2b header, RDTS 83-byte `OP_RETURN` limit, the unconstrained reserved header slot |

@@ -59,9 +59,10 @@ inclusion-list extension is specified as a later, much larger soft fork.
 2. Should the digest keep the previous block hash (per-tip freshness, but hot keys and
    latency) or allow pre-signing (cold keys, but a pool gets hashers' signatures once
    per retarget)? We recommend keeping it.
-3. Is Taproot-only acceptable, given it is permanent? We propose capping payees at 512
-   per block (`bad-nta-too-many`, checked before any signature): at most ~26 ms of
-   verification instead of ~0.4 s (estimated); pools carry the rest.
+3. Is Taproot-only acceptable, given it is permanent? Cap payees at 512
+   (`bad-nta-too-many`, before any signature): at most ~17 ms, measured
+   (`bench/bench.sh`; Ryzen 9 9950X3D, 2 CPUs; modest hardware pending);
+   pools carry the rest.
 4. Activation: a buried height like `blake2b`, or signalled?
 
 **The ask.** Would you look at the patch and draft and tell us whether this fits step 3

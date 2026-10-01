@@ -7,13 +7,14 @@ Everything in this folder is by Mike Moore (AwokenLazarus) unless a file says ot
 | What | Licence |
 |---|---|
 | Documents: every `.md` file, `index.html` (rendered from the BIP) | [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/) |
-| Code: the Python model, `vectors/*.py`, `generate_html.py` | MIT, full text below |
+| Code: the Python model, `vectors/*.py`, `generate_html.py`, `bench/` | MIT, full text below |
 | Data: `vectors/nta-vectors.json` | MIT, as the code that reads it |
 | `block_header_v2_vector.json` | one vector from Bitcoin Knots' `src/test/data/block_header_v2.json` (its `source` field says which): MIT, Copyright (c) The Bitcoin Core developers |
 | [`patches/knots-v29.4.2/`](patches/knots-v29.4.2/) | MIT, the licence of Bitcoin Knots. The upstream copyright notices in the patched files are kept; see its README |
 
 Code files carry an `SPDX-License-Identifier` header. `xbt_pow.py` ports
 `CBlockHeader::GetHash` from Bitcoin Knots (Copyright (c) The Bitcoin Core developers, MIT).
+`bench/src/bench_verify.c` links `libsecp256k1` (MIT).
 
 ## Attribution (CC BY 4.0)
 

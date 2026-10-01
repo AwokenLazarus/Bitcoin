@@ -1,0 +1,12 @@
+[package]
+name = "nta-sign-bench"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Time NtaAttestationHash + BIP340 sign the way the gateway does"
+
+# This manifest is the package description. It does not name a machine path.
+# bench.sh writes sign-bench/.bench/Cargo.toml with
+# lazarus-protocol = { path = "$PROTOCOL_DIR" } and builds that file
+# (`cargo build --manifest-path sign-bench/.bench/Cargo.toml`).
+# A symlink would hide the crate's workspace, which it inherits from.

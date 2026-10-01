@@ -8,7 +8,7 @@ Status: Draft
 Type: Standards Track
 Layer: Consensus (soft fork)
 Created: 2026-09-07
-Updated: 2026-09-26
+Updated: 2026-10-01
 License: CC-BY-4.0
 Post-History:
 ```
@@ -228,13 +228,13 @@ The cost falls on honest miners:
   payee's signature reached the pool **~41 ms** after a mined tip (p50 40.6, p95 40.7 ms)
   and the full payee set was in the coinbaser at 40.8 ms p95. Tips the gateways learn of
   only by polling took up to **0.3 s** (p95 298 ms). Mainnet adds propagation to each
-  gateway's node. Signing itself took ~25 µs in that demo (a single demo measurement, not yet a reproducible benchmark);
+  gateway's node. Signing itself is ~14 µs (`bench/bench.sh`; Ryzen 9 9950X3D, capped at 2 CPUs, load ~2–3), better than the earlier ~25 µs estimate;
 - offline payees go unpaid until they return.
 
 **Why a cap of 512 payees.** Without one, only block size bounds the payee list: about
 8,000 distinct payees in a maximal non-witness coinbase (122 bytes each), so about 8,000
 BIP340 verifications, single-threaded in `ContextualCheckBlock`, for a block that has
-already passed proof of work (~0.4 s at ~50 µs each: an **estimate, not yet measured**). At 512 that is ~26 ms (same estimate), and the
+already passed proof of work. Measured (`bench/bench.sh`; Ryzen 9 9950X3D, capped at 2 CPUs, load ~2–3): one verify is ~21 µs and 8,000 verifies are ~0.17 s; a 512-payee block check is ~17 ms, of which the verifies are ~10 ms. All better than the earlier estimates (50 µs, 0.4 s, 26 ms). The
 coinbase grows by at most 46.6 KB over P2WPKH payouts (4.7% of block weight).
 512 is the original draft's `MAX_ATTESTATIONS`; a TIDES window at DATUM scale pays tens
 to low hundreds of payees, and a builder carries anyone past the cap. The cap is
@@ -633,6 +633,10 @@ cheaply. NTA constrains payees instead of hashers.
 | Original draft (grind + IL) | Payee's committed IL | No | **Yes** | No |
 | **v1 (this document)** | Unconstrained | **No** | **No** (payee key signs) | Yes |
 | v1 + IL extension | Payee's committed IL | No | No | No, if that payee is paid |
+
+## Changes
+
+2026-10-01: the cost numbers are now **measured** (`bench/bench.sh`). Earlier versions published unmeasured estimates (50 µs per verify, 0.4 s, 26 ms, 25 µs signing) as if they were figures. They happened to be conservative, but that was luck, not caution, and they should not have been published unmeasured. All numbers so far come from a desktop CPU; **a measurement on modest hardware (Pi-class or small VPS) is pending.** Run `bench/bench.sh` on yours and tell us.
 
 ## References
 
