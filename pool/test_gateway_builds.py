@@ -98,5 +98,38 @@ class GatewayBuilds(unittest.TestCase):
         self.assertEqual(order[: len(self.ids)], self.ids)
 
 
+
+class KitDownloads(unittest.TestCase):
+    """/kit/install.sh and the kit tarball redirect to R2; nothing else under /kit/ does."""
+
+    @classmethod
+    def setUpClass(cls):
+        import http.client
+        import threading
+
+        cls.http = http.client
+        cls.srv = server.ThreadingHTTPServer(("127.0.0.1", 0), server.Handler)
+        threading.Thread(target=cls.srv.serve_forever, daemon=True).start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.srv.shutdown()
+
+    def get(self, path):
+        c = self.http.HTTPConnection("127.0.0.1", self.srv.server_address[1], timeout=10)
+        c.request("GET", path)
+        r = c.getresponse()
+        r.read()
+        return r.status, r.getheader("Location")
+
+    def test_kit_files_redirect_to_r2(self):
+        for name in ("install.sh", "lazarus-gateway-kit-v1.tar.gz"):
+            self.assertEqual(self.get("/kit/" + name), (302, "https://snapshots.lazarus-xbt.xyz/kit/" + name))
+
+    def test_other_kit_paths_do_not_redirect(self):
+        for path in ("/kit/../config.json", "/kit/evil.sh", "/kit/install.sh.bak"):
+            self.assertNotEqual(self.get(path)[0], 302, path)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

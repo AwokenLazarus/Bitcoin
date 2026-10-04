@@ -5048,6 +5048,9 @@ _SEO_ALIASES["/mine-btcb2"] = "/mine-xbt"
 # actually derived, so this is the page a developer or a model looking for it should land on, and
 # markdown is the form both read most reliably.
 _STRATUM_DOC_PATH = "/stratum-protocol.md"
+# Gateway kit downloads (XBT-097): /kit/install.sh and /kit/lazarus-gateway-kit-<tag>.tar.gz.
+_KIT_HOST = "https://snapshots.lazarus-xbt.xyz"
+_KIT_FILE = re.compile(r"/kit/(install\.sh|lazarus-gateway-kit-v[0-9]+\.tar\.gz)")
 
 _STRATUM_DOC = """# Stratum on the BLAKE2b Bitcoin chain (XBT / BTCB2)
 
@@ -6113,6 +6116,14 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path == _STRATUM_DOC_PATH:
             self.send_text(stratum_doc(), "text/markdown; charset=utf-8", cache_s=3600)
+            return
+        if _KIT_FILE.fullmatch(path):
+            # Kit files live in R2 beside the snapshots; the installer pins the tarball's sha256.
+            self.send_response(302)
+            self.send_header("Location", _KIT_HOST + path)
+            self.send_header("Cache-Control", "no-cache")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
             return
         bare = split_lang_prefix(path)[1]
         if _SEO_ALIASES.get(bare, bare) in _SEO_PAGES:
