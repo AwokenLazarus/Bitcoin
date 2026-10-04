@@ -976,6 +976,16 @@ window.LZ_I18N_DICTS["en"] = {
     },
     "pendingNone": "nothing waiting to mature",
     "paidSub": "matured coinbase outputs, lifetime",
+    "earned24": "Earned, last 24 h",
+    "earned24Split": {
+      "one": "blocks: {blocks} in {n} block · make-goods: {mg}",
+      "other": "blocks: {blocks} in {n} blocks · make-goods: {mg}"
+    },
+    "earned24Note": "Earned is not spendable yet: block outputs {a}mature after {need} confirmations{enda}, and make-goods pay when due.",
+    "earned24Failed": " · {amt} in a failed make-good is not counted",
+    "earned24Since": "{amt} from blocks found since {when}",
+    "earned24Unavailable": "unavailable",
+    "earned24UnavailableSub": "the pool could not read its block records just now · this is not zero, check back shortly",
     "workersNote": "One row per stratum session. “Public stratum” is our gateway; “own gateway” is share credit arriving through a DATUM gateway you run. Session hashrate is what each connection reports; the credited total is the Hashrate figure on Overview.",
     "thWorker": "Worker",
     "thPath": "Path",

@@ -713,15 +713,17 @@ def makegood_unpaid(rec, onchain_sats, pool_addr):
     return unpaid
 
 
-def makegood_owed_rows():
-    """One row per (block, address) that a partial or pool-only block owes: primed's record
-    of the issued split, against what the coinbase actually paid. Cached on blocks.jsonl."""
+def _makegood_owed_scan():
+    """(rows, complete): one row per (block, address) that a partial or pool-only block owes:
+    primed's record of the issued split, against what the coinbase actually paid. Cached on
+    blocks.jsonl. `complete` is False when the log or a block's coinbase could not be read, so
+    a caller that sums the rows can tell a short list from the whole one."""
     sig, latest = _block_log_latest()
     if sig is None:
-        return []
+        return [], False
     c = _makegood_owed_cache
     if c["sig"] == sig:
-        return c["rows"]
+        return c["rows"], True
     prime_pool = str(((prime_doc().get("pool") or {}).get("address")) or "")
     rows = []
     complete = True
@@ -764,7 +766,11 @@ def makegood_owed_rows():
             )
     if complete:
         c.update(sig=sig, rows=rows)
-    return rows
+    return rows, complete
+
+
+def makegood_owed_rows():
+    return _makegood_owed_scan()[0]
 
 
 def makegood_jobs():
@@ -927,6 +933,60 @@ def makegoods_payload():
         "paid_sats": sum(b["owed_sats"] for b in blocks if b["status"] == "paid"),
         "failed_blocks": sum(1 for b in blocks if b["status"] == "failed"),
         "blocks": blocks,
+    }
+
+
+# --- Earned in the last 24 hours ------------------------------------------------------------
+EARNED_WINDOW_S = 86400
+# A make-good counts as earned from the moment primed books it, whatever stage its payment has
+# reached: owed, queued and broadcast are the same debt on its way, and paid is that debt
+# settled. A failed one is money the node refused to move; it is reported beside the total, not
+# inside it, until an operator requeues it.
+MAKEGOOD_EARNED = MAKEGOOD_PENDING + ("paid",)
+
+
+def earned_window(address, fb_rows, makegoods, now=None, window_s=EARNED_WINDOW_S):
+    """What `address` earned from blocks found in the last `window_s` seconds, in sats: its
+    coinbase outputs and its make-goods, as two figures.
+
+    The two never overlap. A make-good row is an entry of the split primed issued that the
+    coinbase did not pay (`makegood_unpaid`, the rule the fee wallet signs by), so for one
+    block an address's coinbase output and its make-good are different sats of the same
+    issued split, and their sum is what the block owed it.
+
+    `fb_rows` is every found block (hash, ts) and `makegoods` this address's rows with their
+    status. A block is in the window by its header time, the same for both figures; a
+    make-good on a block the site has not scanned yet falls back to primed's own time for it.
+    None when a coinbase in the window, or the make-good record, cannot be read."""
+    now = int(time.time() if now is None else now)
+    since = now - int(window_s)
+    block_ts = {fb["hash"]: int(fb["ts"] or 0) for fb in fb_rows}
+    block_sats = 0
+    blocks = 0
+    for h, ts in block_ts.items():
+        if ts < since:
+            continue
+        splits = coinbase_splits(h)
+        if splits is None:
+            return None
+        sats = round(miner_coinbase_btc(address, h, splits) * 1e8)
+        if sats > 0:
+            block_sats += sats
+            blocks += 1
+    if not _makegood_owed_scan()[1]:
+        return None
+    in_window = [r for r in makegoods if block_ts.get(r["hash"], int(r.get("ts") or 0)) >= since]
+    counted = [r for r in in_window if r["status"] in MAKEGOOD_EARNED]
+    makegood_sats = sum(int(r["sats"]) for r in counted)
+    return {
+        "block_sats": block_sats,
+        "makegood_sats": makegood_sats,
+        "total_sats": block_sats + makegood_sats,
+        "blocks": blocks,
+        "makegood_blocks": len({r["hash"] for r in counted}),
+        "makegood_failed_sats": sum(int(r["sats"]) for r in in_window if r["status"] == "failed"),
+        "window_s": int(window_s),
+        "since_ts": since,
     }
 
 
@@ -2413,6 +2473,19 @@ def pool_output_parts(pool_addr, on_chain_btc, pb, reward_btc=None):
             fee_btc = min(total, int(fee_sats) / 1e8)
             return max(0.0, total - fee_btc), fee_btc
     return 0.0, total
+
+
+def miner_coinbase_btc(address, blockhash, splits):
+    """What a block's coinbase paid `address` as a miner. Mining to the pool wallet must not
+    count the pool fee as miner earnings, so for that address it is the output less the fee."""
+    amt = float(splits.get(address) or 0)
+    if amt <= 0:
+        return 0.0
+    pool_addr = ((prime_doc().get("pool") or {}).get("address") or "")
+    if pool_addr and address == pool_addr:
+        pb = next((b for b in (prime_doc().get("blocks") or []) if b.get("hash") == blockhash), None)
+        amt, _fee = pool_output_parts(pool_addr, amt, pb, sum(splits.values()) or 1.0)
+    return amt
 
 
 def _is_pool_block(blockhash):
@@ -4045,24 +4118,19 @@ def miner_payload(address):
     paid_btc = 0.0
     immature_btc = 0.0
     used_chain = False
+    splits_unreadable = False
     for fb in fb_rows:
         splits = coinbase_splits(fb["hash"])
         if splits is None:
             used_chain = False
             payouts = None
+            splits_unreadable = True
             break
         used_chain = True
-        amt = float(splits.get(address) or 0)
+        amt = miner_coinbase_btc(address, fb["hash"], splits)
         if amt <= 0:
             continue
         reward_split = sum(splits.values()) or 1.0
-        # Mining to the pool wallet must not count the pool fee as miner earnings.
-        pool_addr = ((prime_doc().get("pool") or {}).get("address") or "")
-        if pool_addr and address == pool_addr:
-            pb = next((b for b in (prime_doc().get("blocks") or []) if b.get("hash") == fb["hash"]), None)
-            amt, _fee = pool_output_parts(pool_addr, amt, pb, reward_split)
-            if amt <= 0:
-                continue
         st = payout_status_for_height(fb["height"], tip)
         confs = max(0, int(tip) - int(fb["height"]) + 1) if tip and fb["height"] else 0
         payouts.append(
@@ -4180,6 +4248,8 @@ def miner_payload(address):
     makegoods = makegood_rows_for(address, tip) if address else []
     mg_pending = [r for r in makegoods if r["status"] in MAKEGOOD_PENDING]
     known = known or bool(makegoods)
+    # Null, never zero, when the coinbases could not be read: the page says "unavailable".
+    earned_24h = None if splits_unreadable or not address else earned_window(address, fb_rows, makegoods)
     out = {
         "address": address if known else "",
         "known": known,
@@ -4246,6 +4316,9 @@ def miner_payload(address):
         "long_maturity_release": LONG_MATURITY_RELEASE,
         "makegood_paid_btc": sum(r["sats"] for r in makegoods if r["status"] == "paid") / 1e8,
         "makegood_failed_blocks": sum(1 for r in makegoods if r["status"] == "failed"),
+        # Coinbase outputs and make-goods from blocks found in the last 24 hours, in sats.
+        # Earned, not spendable: see `maturity_confs` and each make-good's `payable_at`.
+        "earned_24h": earned_24h,
         "tip_height": int(tip or 0),
         "maturity_confs": current_maturity_confs(tip),
         "hr_1h_ghs": hr_1h,
