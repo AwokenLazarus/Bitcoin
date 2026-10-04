@@ -4583,6 +4583,18 @@ _SEO_PAGES = {
             "scroll": "connect",
         },
     },
+    "/kit": {
+        "en": {
+            "title": "Gateway in a box: Knots and a DATUM gateway | Lazarus Pool",
+            "description": "One command installs Bitcoin Knots 29.4.2 (pruned) and FlyTheElephant's DATUM gateway with our late-coinbaser patch. One gateway on your LAN, many ASICs, 0% fee.",
+            "scroll": "connect",
+        },
+        "zh": {
+            "title": "网关盒子：Knots 节点和 DATUM 网关一条命令装好 | Lazarus Pool",
+            "description": "一条命令安装 Bitcoin Knots 29.4.2（修剪）和打过我们 late-coinbaser 补丁的 FlyTheElephant DATUM 网关。局域网一台网关接多台矿机，手续费 0%。",
+            "scroll": "connect",
+        },
+    },
     "/profitability": {
         "en": {
             "title": "Is Mining XBT Profitable? Sia ASIC Earnings | Lazarus Pool",
@@ -4887,6 +4899,52 @@ _SEO_INTRO = {
             '<p><b>我们的实测。</b>我们在 regtest 上用自己的 Prime 和 Knots 29.4.2 测试了这个网关：握手与公钥校验、每个找到的区块都付给窗口里的所有矿工、<code>地址.worker</code> 与纯地址用户名、0% 的 DATUM 费用路径、断线重连、Prime 的模板检查与拒绝，全部通过。有一项没通过，而且目前所有 C 语言 DATUM 网关（包括 iohzrd 和 CONVOY）都有：每个新区块之后的片刻，以及矿池分账迟到的整个期间，网关可能下发一个只付给矿池的 coinbase 任务。一个小补丁可以修复：分账到达之前只发只含区块补贴的空任务，或者不发任务。我们正把它提交给 FlyTheElephant；合并之后这个版本就没有已知缺陷，在此之前你可以自己打上：<a href="https://github.com/AwokenLazarus/Bitcoin/blob/main/lazarus/patches/datum-gateway-fte-late-coinbaser.patch" target="_blank" rel="noreferrer">datum-gateway-fte-late-coinbaser.patch</a>（在 <code>cmake</code> 之前 <code>patch -p1 &lt;</code>）。</p>',
         ]),
     },
+    "/kit": {
+        "en": ("A Knots node and a DATUM gateway, in one command", [
+            "<p>This kit is Docker Compose on a machine you own. It runs <b>Bitcoin Knots 29.4.2</b> pruned (<code>prune=550</code>) and <a href=\"https://github.com/FlyTheElephant1/datum_gateway\" target=\"_blank\" rel=\"noreferrer\">FlyTheElephant's datum_gateway</a> at commit <code>a5f28aa</code>, plus <a href=\"https://github.com/AwokenLazarus/Bitcoin/blob/main/lazarus/patches/datum-gateway-fte-late-coinbaser.patch\" target=\"_blank\" rel=\"noreferrer\">our late-coinbaser patch</a>. The patch is applied at image build; the Dockerfile pins that commit and the patch sha256. One gateway. Every ASIC in the hall points at it. Your node builds the template. The fee on that work is 0%.</p>",
+            "<h2>What you need</h2>",
+            "<ul><li>A Linux machine that stays on, on the same network as the ASICs, 64-bit x86. Docker, with the Compose plugin.</li><li>An address on <b>this</b> chain (<code>bc1…</code>). Do not reuse an address that holds SHA-256 Bitcoin.</li><li>BLAKE2b ASICs (any Siacoin miner). Stock firmware is fine.</li><li>Outbound TCP to <code>datum.lazarus-xbt.xyz</code> port <b>28915</b>.</li></ul>",
+            "<h2>The short path</h2>",
+            "<p>On the hall machine:</p>",
+            "<pre><code>curl -fsSL https://pool.lazarus-xbt.xyz/kit/install.sh | sh -s -- --address bc1qYOURADDRESS</code></pre>",
+            "<p>The script checks for Docker. If Docker or the Compose plugin is missing, it prints <code>curl -fsSL https://get.docker.com | sh</code> and stops. It does not install Docker for you. It then downloads kit tag <code>v1</code> and refuses to unpack it unless the sha256 matches the pin in the script. It fetches our pool host, port and pubkey from <code>https://pool.lazarus-xbt.xyz/api/pool</code>, prints them, and starts the stack. Add <code>--tag hall1</code> if you want a name other than <code>hall</code> on the Gateways table.</p>",
+            "<p><b>What we measured</b> (AgentLaz, 2026-10-04). Command <code>COLD=1 ./test-regtest.sh</code> wipes the kit images, rebuilds them with <code>--no-cache</code>, mines a regtest chain and waits for one accepted share: <b>114 seconds</b> that time (the share arrived in 55 seconds, which is early). Command <code>./scripts/kit-selftest.sh</code> then brought the stack up with images already built, checked a split coinbase and two ASIC sessions, and waited for another share: <b>585 seconds</b> for that stack portion. On this machine two nice cores sustain about 11 MH/s, and a difficulty-1 share at that rate is often several minutes. Neither number includes downloading a mainnet snapshot. The steps on this page are the short path. They are not a measured 15 minutes on mainnet, because <code>snapshots.lazarus-xbt.xyz</code> was not serving a snapshot when this page was written.</p>",
+            "<p>By default the installer imports <code>https://snapshots.lazarus-xbt.xyz/latest</code>. The sha256 is checked before anything is extracted. A missing checksum or a mismatch is a refusal, and the node is left empty. <code>--no-snapshot</code> syncs from the network instead. That is not a short job.</p>",
+            "<h2>Point the ASICs</h2>",
+            "<p>One gateway, many machines. On each ASIC (Goldshell Hub or iBeLink MinerTool):</p>",
+            "<pre><code>URL:      stratum+tcp://&lt;this-machine-LAN-IP&gt;:23334\nuser:     &lt;that ASIC's payout address&gt;\npassword: x</code></pre>",
+            "<p>The username <b>is</b> the payout address. A <code>.rig1</code> after it is only a label; the address before the first dot is who is paid. Each ASIC can use its own address. The kit sets <code>datum.pool_pass_full_users</code> so the gateway sends that username to us unchanged.</p>",
+            "<p>FlyTheElephant's gateway at <code>a5f28aa</code> has no <code>stratum.require_address_username</code>. That switch exists on Ratum, not here. A username that is not an address is still accepted, and the work is credited to a name that can never be paid. Use the address.</p>",
+            "<h2>Check it on the Gateways table</h2>",
+            "<ul><li>Within a minute the gateway is on the <a href=\"#gateways\">Gateways</a> table. The name is the tag (<code>hall</code>, or whatever you passed to <code>--tag</code>). The build shows as <code>v0.4.1-beta/a5f28aa</code>. The fee path is DATUM.</li><li>After the first accepted share the address is under <a href=\"#miners\">Miners</a>. Look it up at <code>pool.lazarus-xbt.xyz/#bc1…</code>.</li><li>The gateway's own page is on this machine only: <code>http://127.0.0.1:7152/</code>. It should say <i>Connected and Ready</i>. Port 7152 is not published on the LAN. This commit does not authenticate that page.</li></ul>",
+            "<h2>If it does not come up</h2>",
+            "<ul><li><b>The installer stopped and printed get.docker.com.</b> Docker was missing. Run that line yourself, then run the installer again. The installer will not run it for you.</li><li><b>sha256 mismatch, refused to extract.</b> The pin and the file disagree. Do not bypass the check. Download again. If it still fails, the published file changed and the pin has not; wait for the updated installer.</li><li><b>Pooled mining only, miners rejected.</b> The gateway has no pool session. The host, port and pubkey come from <code>/api/pool</code>. Outbound TCP 28915 has to work. A wrong pubkey never finishes the handshake.</li><li><b>Height stuck at 961,639.</b> The node is on the other chain, or you passed <code>--no-snapshot</code> and it is still finding peers. Knots 29.4.2 is required. An older node builds blocks this chain rejects.</li><li><b>ASICs connect and get no work.</b> The node is still syncing. The gateway serves nothing until the template carries the BLAKE2b rule.</li><li><b>The worker name is not an address.</b> This gateway will not refuse it. Change the username to the payout address, or the shares sit on an identity we cannot pay.</li><li><b>A few <code>bad-coinbase-outputs</code> just after a restart.</b> Jobs from before the new split. They clear in seconds. No credit is lost.</li></ul>",
+            "<h2>Updating</h2>",
+            "<p>Run the same <code>curl</code> line again, with the same <code>--address</code> and <code>--tag</code>. The sha256 pin is checked again. Do not skip it. Work already in the window stays on your address. The new process has a new gateway key, so the Gateways table gains a row and the old one goes offline.</p>",
+        ]),
+        "zh": ("一条命令装好 Knots 节点和 DATUM 网关", [
+            "<p>这个套件在你自己的机器上用 Docker Compose 运行。<b>Bitcoin Knots 29.4.2</b>，修剪模式（<code>prune=550</code>），加上 <a href=\"https://github.com/FlyTheElephant1/datum_gateway\" target=\"_blank\" rel=\"noreferrer\">FlyTheElephant 的 datum_gateway</a> 提交 <code>a5f28aa</code>，以及<a href=\"https://github.com/AwokenLazarus/Bitcoin/blob/main/lazarus/patches/datum-gateway-fte-late-coinbaser.patch\" target=\"_blank\" rel=\"noreferrer\">我们的 late-coinbaser 补丁</a>。补丁在构建镜像时打上；Dockerfile 里钉死了这次提交和补丁的 sha256。一台网关。机房里每台矿机都指向它。区块模板由你的节点构建。这条路上的手续费是 0%。</p>",
+            "<h2>你需要什么</h2>",
+            "<ul><li>一台一直开着的 Linux 机器，和矿机在同一网络，64 位 x86。装好 Docker 和 Compose 插件。</li><li>一个<b>本链</b>地址（<code>bc1…</code>）。不要复用持有 SHA-256 比特币的地址。</li><li>BLAKE2b 矿机（任何 Siacoin 矿机）。原厂固件即可。</li><li>能向外连接 <code>datum.lazarus-xbt.xyz</code> 的 TCP 端口 <b>28915</b>。</li></ul>",
+            "<h2>短路径</h2>",
+            "<p>在机房那台机器上：</p>",
+            "<pre><code>curl -fsSL https://pool.lazarus-xbt.xyz/kit/install.sh | sh -s -- --address bc1q你的地址</code></pre>",
+            "<p>脚本先检查 Docker。如果没有 Docker 或 Compose 插件，它会打印 <code>curl -fsSL https://get.docker.com | sh</code> 然后停下来。它不会替你安装 Docker。接着它下载标签 <code>v1</code> 的套件，sha256 与脚本里的钉不一致就拒绝解包。它从 <code>https://pool.lazarus-xbt.xyz/api/pool</code> 取我们的矿池主机、端口和公钥，打印出来，然后启动。Gateways 表上的名字默认是 <code>hall</code>，要换就加 <code>--tag hall1</code>。</p>",
+            "<p><b>我们测到的时间</b>（AgentLaz，2026-10-04）。命令 <code>COLD=1 ./test-regtest.sh</code> 会清掉套件镜像，用 <code>--no-cache</code> 重建，在 regtest 上挖一条链并等到第一个被接受的份额：那一次 <b>114 秒</b>（份额在 55 秒时到，偏早）。命令 <code>./scripts/kit-selftest.sh</code> 在镜像已经建好之后再次拉起，检查拆分 coinbase 和两路矿机会话，并再等一个份额：栈这一段 <b>585 秒</b>。这台机器上两个低优先级核心大约 11 MH/s，难度 1 的份额经常要好几分钟。这两个数都不含下载主网快照。本页的步骤是短路径，不是主网上测得的 15 分钟，因为写这一页时 <code>snapshots.lazarus-xbt.xyz</code> 还没有在提供快照。</p>",
+            "<p>安装程序默认导入 <code>https://snapshots.lazarus-xbt.xyz/latest</code>。解包之前会核对 sha256。没有校验和，或校验和不符，都会拒绝，节点目录保持为空。<code>--no-snapshot</code> 改为从网络同步，那不是一件短事。</p>",
+            "<h2>把矿机指过来</h2>",
+            "<p>一台网关，多台机器。每台矿机上（金贝 Hub 或 iBeLink MinerTool）：</p>",
+            "<pre><code>URL:      stratum+tcp://&lt;这台机器的局域网 IP&gt;:23334\nuser:     &lt;这台矿机的收款地址&gt;\npassword: x</code></pre>",
+            "<p>用户名<b>就是</b>收款地址。后面的 <code>.rig1</code> 只是标签；第一个点之前的地址才是收款人。每台矿机可以用自己的地址。套件把 <code>datum.pool_pass_full_users</code> 设为真，网关会把这个用户名原样交给我们。</p>",
+            "<p>FlyTheElephant 的 <code>a5f28aa</code> 没有 <code>stratum.require_address_username</code>。这个开关在 Ratum 上，不在这里。不是地址的用户名也会被接受，工作量记到一个永远付不出的名字上。请填地址。</p>",
+            "<h2>在 Gateways 表上确认</h2>",
+            "<ul><li>一分钟内网关会出现在 <a href=\"#gateways\">Gateways</a> 表。名字是标签（<code>hall</code>，或你传给 <code>--tag</code> 的那个）。版本显示为 <code>v0.4.1-beta/a5f28aa</code>。费用路径是 DATUM。</li><li>第一个份额被接受后，地址出现在 <a href=\"#miners\">Miners</a>。用 <code>pool.lazarus-xbt.xyz/#bc1…</code> 查。</li><li>网关自己的页面只在这台机器上：<code>http://127.0.0.1:7152/</code>。应显示 <i>Connected and Ready</i>。7152 不会发布到局域网上。这个提交没有给该页面做认证。</li></ul>",
+            "<h2>起不来的时候</h2>",
+            "<ul><li><b>安装程序停了，并打印了 get.docker.com。</b> 当时没有 Docker。你自己跑那一行，再跑安装程序。安装程序不会替你跑。</li><li><b>sha256 不符，拒绝解包。</b> 钉和文件不一致。不要绕过检查。重新下载。若仍然失败，说明发布的文件变了而钉还没更新，等新的安装脚本。</li><li><b>只允许矿池挖矿，矿机被拒绝。</b> 网关没有矿池会话。主机、端口和公钥来自 <code>/api/pool</code>。向外的 TCP 28915 必须通。公钥错误，握手完不成。</li><li><b>高度停在 961,639。</b> 节点在另一条链上，或者你加了 <code>--no-snapshot</code> 它还在找节点。必须是 Knots 29.4.2。更旧的节点出的块会被这条链拒绝。</li><li><b>矿机连上了但没有任务。</b> 节点还在同步。模板里还没有 BLAKE2b 规则时，网关不下发工作。</li><li><b>矿工名不是地址。</b> 这个网关不会拒绝。把用户名改成收款地址，否则份额记在我们无法支付的身份上。</li><li><b>重启后出现少量 <code>bad-coinbase-outputs</code>。</b> 那是旧分账的任务。几秒后消失，已记的工作量不会丢。</li></ul>",
+            "<h2>更新</h2>",
+            "<p>用同一个 <code>--address</code> 和 <code>--tag</code> 再跑一次上面的 <code>curl</code>。sha256 的钉会再查一次。不要跳过。窗口里已有的工作量仍记在你的地址上。新进程有一把新的网关密钥，Gateways 表会多一行，旧的那行变为离线。</p>",
+        ]),
+    },
     "/mine-xbt": {
         "en": ("How to mine Bitcoin XBT (BTCB2)", [
             "You need three things: an ASIC that hashes BLAKE2b, an address on this chain to be paid to, and the pool endpoint. If you already own a Siacoin miner you have the first one — this is the same algorithm, so stock firmware works. Point it at <b>stratum+tcp://stratum.lazarus-xbt.xyz:23334</b> with your address as the username and <code>x</code> as the password, and it will start hashing immediately.",
@@ -5094,6 +5152,7 @@ _LLMS_TXT = """# Lazarus Pool
 - DATUM subsidy: {site}/datum-subsidy
 - Mine with a Ratum gateway (ratum-gateway): {site}/ratum
 - Mine with the FlyTheElephant gateway: {site}/flytheelephant
+- Gateway in a box (Knots 29.4.2 + FlyTheElephant, one command): {site}/kit
 - Pools on this chain, compared: {site}/pools
 - The 15% stratum cap: {site}/self-cap
 - Why there is no pool balance: {site}/non-custodial
@@ -5427,6 +5486,7 @@ _SEO_KEEP = {
     "/ratum": ("connect",),
     "/datum-subsidy": ("learn",),
     "/flytheelephant": ("connect", "gateways"),
+    "/kit": ("connect", "gateways"),
     "/how": ("how",),
     "/tides": ("how",),
     "/non-custodial": ("how",),
@@ -5458,6 +5518,7 @@ _SEO_ARTICLE = {
     "/ratum": ("TechArticle", "2026-09-28", "2026-09-28"),
     "/datum-subsidy": ("TechArticle", "2026-09-13", "2026-09-23"),
     "/flytheelephant": ("TechArticle", "2026-09-28", "2026-09-28"),
+    "/kit": ("TechArticle", "2026-10-04", "2026-10-04"),
     "/api": ("TechArticle", "2026-09-13", "2026-09-23"),
 }
 # The sitemap pages that are not articles, with the date their crawlable copy last changed. Same
@@ -5611,6 +5672,7 @@ _SITEMAP_ORDER = (
     ("/ratum", "weekly", "0.8"),
     ("/datum-subsidy", "weekly", "0.8"),
     ("/flytheelephant", "weekly", "0.8"),
+    ("/kit", "weekly", "0.8"),
     ("/self-cap", "weekly", "0.8"),
     ("/non-custodial", "weekly", "0.8"),
     ("/tides", "weekly", "0.8"),
@@ -5775,6 +5837,7 @@ _CHEAP_PATHS = frozenset(
         "/bip110",
         "/datum-subsidy",
         "/flytheelephant",
+        "/kit",
         "/profitability",
         "/tides",
         "/pools",
