@@ -227,6 +227,10 @@ db_conn.executescript(
     -- big farm) matching rows costs a lookup into the 3 GB table and the query took 83s.
     CREATE INDEX IF NOT EXISTS idx_samples_addr_ts_hr ON samples(address, ts, hr_ghs);
     CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT);
+    -- Tagged blocks the scanner has passed that primed's block log did not have yet. Looked at
+    -- again on every pass until the log has them, the chain drops them, or the chain is
+    -- SCAN_PENDING_BLOCKS past them (see `recheck_pending_blocks`).
+    CREATE TABLE IF NOT EXISTS scan_pending (height INTEGER PRIMARY KEY, hash TEXT, first_tip INTEGER);
     CREATE TABLE IF NOT EXISTS round_work (
       address TEXT PRIMARY KEY, work REAL NOT NULL DEFAULT 0, last_diff_acc INTEGER DEFAULT 0
     );
@@ -2713,6 +2717,34 @@ def close_round_for_block(height, blockhash, reward, fee_btc, miner_btc, vouts=N
     db("INSERT INTO rounds(started_ts,status,total_work) VALUES(?, 'open', 0)", (int(time.time()),), write=True)
 
 
+def record_round_only(height, blockhash, ts, reward, fee_btc, miner_btc, vouts):
+    """A closed round for a block booked late, without touching the open round.
+
+    `close_round_for_block` ends whatever round is open and deletes its work. That is right
+    for the block that has just been found and wrong for one booked after a later block
+    already closed a round: the work it would take belongs to the round still running. So a
+    late block gets its own row, with what its coinbase paid and no work figure; the open
+    round and `round_work` are left exactly as they were."""
+    if db("SELECT id FROM rounds WHERE height=?", (height,), one=True):
+        return
+    rid = db(
+        "INSERT INTO rounds(started_ts,closed_ts,height,hash,reward_btc,fee_btc,miner_btc,total_work,status)"
+        " VALUES(?,?,?,?,?,?,?,0,'immature')",
+        (ts, ts, height, blockhash, reward, fee_btc, miner_btc),
+        write=True,
+    )
+    if rid is None:
+        return
+    paid = splits_from_vouts(vouts)
+    total = sum(paid.values()) or 1.0
+    for addr, amt in paid.items():
+        db(
+            "INSERT OR REPLACE INTO round_payouts(round_id,address,work,share,amount_btc,status) VALUES(?,?,?,?,?,?)",
+            (rid, addr, 0.0, amt / total, amt, "immature"),
+            write=True,
+        )
+
+
 def mature_rounds():
     tip = rpc("getblockcount") or 0
     rows = db("SELECT id, height FROM rounds WHERE status='immature'")
@@ -3053,14 +3085,123 @@ def _prime_knows_block(blockhash):
     return blockhash in latest
 
 
+# How many blocks past a tagged block the scanner keeps asking primed's log about it. primed
+# logs a block when the finding share reaches it, which for a gateway's block is after the
+# gateway's own node has started relaying it: seconds in practice. 100 blocks is most of a day.
+SCAN_PENDING_BLOCKS = 100
+
+
+def insert_found_block(height, blockhash, blk, vouts, coinbase_text):
+    """Write the `found_blocks` row for a pool block. Returns (existed, reward, fee, miner):
+    whether the height already had a row, and the figures the round tables want."""
+    reward = sum(float(v.get("value") or 0) for v in vouts)
+    addrs = [a for a in (vout_address(v) for v in vouts) if a]
+    miner_btc = reward * (1 - POOL_FEE / 100.0)
+    fee_btc = reward * (POOL_FEE / 100.0)
+    finder = addrs[0] if addrs else ""
+    existed = db("SELECT height FROM found_blocks WHERE height=?", (height,), one=True)
+    db(
+        "INSERT OR REPLACE INTO found_blocks(height,hash,ts,reward_btc,finder,pool_fee_btc,miner_btc,coinbase) VALUES(?,?,?,?,?,?,?,?)",
+        (height, blockhash, blk.get("time"), reward, finder, fee_btc, miner_btc, coinbase_text[:200]),
+        write=True,
+    )
+    return bool(existed), reward, fee_btc, miner_btc
+
+
+def _book_found_block(height, blockhash, blk, vouts, coinbase_text):
+    existed, reward, fee_btc, miner_btc = insert_found_block(height, blockhash, blk, vouts, coinbase_text)
+    if value_output_count(vouts) < 2:
+        print("unsplit_template", height, "keeping_round_work", flush=True)
+    elif existed:
+        return
+    elif db("SELECT 1 FROM rounds WHERE height > ? LIMIT 1", (height,), one=True):
+        # booked after a later block closed its round: the open round is not this block's
+        record_round_only(height, blockhash, blk.get("time"), reward, fee_btc, miner_btc, vouts)
+        print("found_block_booked_late", height, blockhash, flush=True)
+    else:
+        close_round_for_block(height, blockhash, reward, fee_btc, miner_btc, vouts)
+
+
+def _scan_block(height, tip):
+    """Look at the main-chain block at `height`. False when the node did not answer, so the
+    caller asks about this height again instead of moving past it."""
+    h = rpc("getblockhash", [height])
+    if not h:
+        return False
+    blk = rpc("getblock", [h, 2])
+    if not blk:
+        return False
+    tx0 = (blk.get("tx") or [None])[0] or {}
+    vin = (tx0.get("vin") or [{}])[0]
+    text = ascii_from_hex(vin.get("coinbase") or "")
+    vouts = tx0.get("vout") or []
+    if SOLO_TAG in text:
+        record_solo_block(height, h, blk, tx0, text)
+        return True
+    if COINBASE_TAG not in text:
+        return True
+    # The tag is a string anyone can put in a coinbase. On its own it let whoever mined a
+    # block make this site announce it as the pool's: a row in the found table and the
+    # luck figures, the round closed and its work deleted, the operator emailed, and with
+    # one output a public "the pool kept a whole block". A block is the pool's if primed
+    # recorded the share that found it.
+    #
+    # primed does not always record it first. A gateway hands a block to its own node as well
+    # as to primed, so the block can be at this node's tip seconds before the log has the
+    # hash. Skipping it here for good is how 975444 went missing: it is held and asked about
+    # again on later passes.
+    if _prime_knows_block(h) is False:
+        db(
+            "INSERT OR REPLACE INTO scan_pending(height,hash,first_tip) VALUES(?,?,?)",
+            (height, h, int(tip)),
+            write=True,
+        )
+        print("tagged_block_not_in_prime_log", height, h, "pending", flush=True)
+        return True
+    _book_found_block(height, h, blk, vouts, text)
+    return True
+
+
+def recheck_pending_blocks(tip):
+    """Second and later looks at tagged blocks primed's log did not have when first scanned."""
+    for row in db("SELECT height, hash FROM scan_pending ORDER BY height") or []:
+        height, h = int(row["height"]), row["hash"]
+        cur = rpc("getblockhash", [height])
+        if not cur:
+            continue  # the node did not answer: this pass learns nothing about the block
+        if cur != h:
+            # Reorged out. The block that replaced it has never been scanned, so it gets the
+            # look any new block does; that re-holds the height under the new hash if need be.
+            print("pending_block_reorged_out", height, h, "now", cur, flush=True)
+            if _scan_block(height, tip):
+                db("DELETE FROM scan_pending WHERE height=? AND hash=?", (height, h), write=True)
+            continue
+        if _prime_knows_block(h):
+            blk = rpc("getblock", [h, 2])
+            if not blk:
+                continue
+            tx0 = (blk.get("tx") or [None])[0] or {}
+            text = ascii_from_hex(((tx0.get("vin") or [{}])[0]).get("coinbase") or "")
+            _book_found_block(height, h, blk, tx0.get("vout") or [], text)
+            db("DELETE FROM scan_pending WHERE height=? AND hash=?", (height, h), write=True)
+            print("pending_block_booked", height, h, flush=True)
+        elif int(tip) >= height + SCAN_PENDING_BLOCKS:
+            db("DELETE FROM scan_pending WHERE height=? AND hash=?", (height, h), write=True)
+            print(
+                "ERROR tagged_block_never_in_prime_log", height, h,
+                f"gave up after {SCAN_PENDING_BLOCKS} blocks: a forged tag, or a pool block primed never"
+                " recorded (check the coinbase; pool/tools/backfill_found_blocks.py --also books it)",
+                flush=True,
+            )
+
+
 def scan_found_blocks():
+    if NO_WRITE:  # read-only replicas share the writer's database; do not spend RPC on it
+        return
     tip = rpc("getblockcount")
     if not tip:
         return
-    db(
-        "CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)",
-        write=True,
-    )
+    recheck_pending_blocks(tip)
     row = db("SELECT value FROM meta WHERE key='scan_height'", one=True)
     if row and row["value"]:
         start = int(row["value"]) + 1
@@ -3071,53 +3212,9 @@ def scan_found_blocks():
     end = min(int(tip), start + 39)
     last_ok = start - 1
     for height in range(start, end + 1):
-        h = rpc("getblockhash", [height])
-        if not h:
-            break
-        blk = rpc("getblock", [h, 2])
-        if not blk:
+        if not _scan_block(height, tip):
             break
         last_ok = height
-        tx0 = (blk.get("tx") or [None])[0] or {}
-        vin = (tx0.get("vin") or [{}])[0]
-        cb = vin.get("coinbase") or ""
-        text = ascii_from_hex(cb)
-        vouts = tx0.get("vout") or []
-        if SOLO_TAG in text:
-            record_solo_block(height, h, blk, tx0, text)
-            continue
-        if COINBASE_TAG not in text:
-            continue
-        # The tag is a string anyone can put in a coinbase. On its own it let whoever mined a
-        # block make this site announce it as the pool's: a row in the found table and the
-        # luck figures, the round closed and its work deleted, the operator emailed, and with
-        # one output a public "the pool kept a whole block". A block is the pool's if primed
-        # recorded the share that found it, which it does before the block reaches any node.
-        known = _prime_knows_block(h)
-        if known is False:
-            print("tagged_block_not_in_prime_log", height, h, "ignored", flush=True)
-            continue
-        reward = sum(float(v.get("value") or 0) for v in vouts)
-        addrs = []
-        for v in vouts:
-            spk = v.get("scriptPubKey") or {}
-            a = spk.get("address") or (spk.get("addresses") or [None])[0]
-            if a:
-                addrs.append(a)
-        miner_btc = reward * (1 - POOL_FEE / 100.0)
-        fee_btc = reward * (POOL_FEE / 100.0)
-        finder = addrs[0] if addrs else ""
-        existed = db("SELECT height FROM found_blocks WHERE height=?", (height,), one=True)
-        db(
-            "INSERT OR REPLACE INTO found_blocks(height,hash,ts,reward_btc,finder,pool_fee_btc,miner_btc,coinbase) VALUES(?,?,?,?,?,?,?,?)",
-            (height, h, blk.get("time"), reward, finder, fee_btc, miner_btc, text[:200]),
-            write=True,
-        )
-        split = value_output_count(vouts) >= 2
-        if not existed and split:
-            close_round_for_block(height, h, reward, fee_btc, miner_btc, vouts)
-        elif not split:
-            print("unsplit_template", height, "keeping_round_work", flush=True)
     if last_ok >= start:
         db("INSERT OR REPLACE INTO meta(key,value) VALUES('scan_height',?)", (str(last_ok),), write=True)
 
