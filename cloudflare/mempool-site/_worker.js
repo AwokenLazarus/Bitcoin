@@ -1,7 +1,10 @@
 // Pages worker for the mempool explorer: the routing nginx-mempool.conf does on the node.
 //
 //   /api/*, /ws     proxied to ORIGIN_URL (websocket upgrades included); the node's own nginx
-//                   keeps deciding which backend answers which path. Visitor cookies never go
+//                   keeps deciding which backend answers which path. When that node cannot
+//                   answer and FALLBACK_ORIGIN_URL (the standby's tunnel hostname) is set, a
+//                   request with no body is asked there instead, and its answer is marked
+//                   X-Lazarus-Origin: fallback. Visitor cookies never go
 //                   up, origin cookies never come down, and a few read-only GETs are held in
 //                   the edge cache for seconds so a busy page does not hammer a home server
 //   /api/v1/services/*  answered here with []: the node would relay it to mempool.space, which
@@ -131,9 +134,29 @@ function postFork(doc) {
   return doc;
 }
 
+// Whether a node failed to answer. A 3xx is Access sending the service token to its login page
+// (304 is a real answer).
+function down(res) {
+  return !res || (res.status >= 300 && res.status < 400 && res.status !== 304) || res.status === 502 || res.status === 503 || res.status >= 520;
+}
+
+// One request to a node, with that node's Access service token; null when it cannot be reached.
+async function ask(origin, id, secret, request, url, headers) {
+  const h = new Headers(headers);
+  // The origin hostname sits behind Cloudflare Access; this service token is the only way in.
+  if (id) {
+    h.set("CF-Access-Client-Id", id);
+    h.set("CF-Access-Client-Secret", secret);
+  }
+  try {
+    return await fetch(new Request(origin.replace(/\/$/, "") + url.pathname + url.search, { method: request.method, headers: h, body: request.body, redirect: "manual" }));
+  } catch {
+    return null;
+  }
+}
+
 async function proxy(request, env, ctx, url) {
   if (!env.ORIGIN_URL) return new Response("origin not configured", { status: 500 });
-  const target = env.ORIGIN_URL.replace(/\/$/, "") + url.pathname + url.search;
   const headers = new Headers(request.headers);
   // The API is public and stateless. A visitor's cookies are none of the origin's business, and
   // without them every visitor's GET is the same request, which is what makes it cacheable.
@@ -153,21 +176,27 @@ async function proxy(request, env, ctx, url) {
     headers.delete("If-None-Match");
     headers.delete("If-Modified-Since");
   }
-  // The origin hostname sits behind Cloudflare Access; this service token is the only way in.
-  if (env.ACCESS_CLIENT_ID) {
-    headers.set("CF-Access-Client-Id", env.ACCESS_CLIENT_ID);
-    headers.set("CF-Access-Client-Secret", env.ACCESS_CLIENT_SECRET);
+  let res = await ask(env.ORIGIN_URL, env.ACCESS_CLIENT_ID, env.ACCESS_CLIENT_SECRET, request, url, headers);
+  let fallback = false;
+  // A body is a stream the first attempt has already consumed, so only bodiless requests
+  // (every read, and the websocket handshake) can be asked again.
+  if (down(res) && env.FALLBACK_ORIGIN_URL && !request.body) {
+    res = await ask(
+      env.FALLBACK_ORIGIN_URL,
+      env.FALLBACK_ACCESS_CLIENT_ID || env.ACCESS_CLIENT_ID,
+      env.FALLBACK_ACCESS_CLIENT_SECRET || env.ACCESS_CLIENT_SECRET,
+      request,
+      url,
+      headers,
+    );
+    fallback = true;
+    // Access refusing the token at the standby is not an answer from the explorer.
+    if (res && (res.status === 401 || res.status === 403)) return unavailable();
   }
-  let res;
-  try {
-    res = await fetch(new Request(target, { method: request.method, headers, body: request.body, redirect: "manual" }));
-  } catch {
-    return unavailable();
-  }
+  if (!res) return unavailable();
   // A websocket handshake has to go back exactly as it came.
   if (res.status === 101 || res.webSocket) return res;
-  // A 3xx here is Access sending the service token to its login page (304 is a real answer).
-  if ((res.status >= 300 && res.status < 400 && res.status !== 304) || res.status === 502 || res.status === 503 || res.status >= 520) return unavailable();
+  if (down(res)) return unavailable();
 
   let out = new Response(res.body, res);
   if (res.status === 200 && request.method === "GET" && HASHRATE_HISTORY.test(url.pathname)) {
@@ -186,6 +215,7 @@ async function proxy(request, env, ctx, url) {
   // visitor a session for the origin.
   out.headers.delete("Set-Cookie");
   out.headers.delete("X-Powered-By");
+  if (fallback) out.headers.set("X-Lazarus-Origin", "fallback");
   if (rule && res.status === 200 && !out.headers.has("Set-Cookie")) {
     out.headers.set("Cache-Control", `public, max-age=5, s-maxage=${rule[1]}`);
     ctx.waitUntil(caches.default.put(key, out.clone()));
