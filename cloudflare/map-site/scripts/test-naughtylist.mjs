@@ -331,6 +331,7 @@ await test("an address behind another pool's gateway on Lazarus is confirmed, an
   assert(addressPays(state, B, []).every((p) => p.via === null), "an honest address's payouts were marked");
   const view = buildView(state, miners, gateways, now);
   const html = renderList(view);
+  assert(/Fake pool: a stratum front for another pool(&#39;|&#x27;|')s window/.test(html), "ctrlpool is not marked as a front");
   assert(/Hashing on CTRL(&#39;|&#x27;|')s stratum/.test(html) && html.includes("gateway 097b7017ccfd7669"), "the list does not say what the row rests on");
   const page = renderAddress({ address: A, listed: view.naughty.find((r) => r.address === A), stored: [], asked: [], pays, unspentCount: 1, unspentSats: 800 });
   assert(page.includes("Confirmed on stratum at CTRL") && page.includes("Earned on CTRL's stratum, behind its gateway on Lazarus"), "the address page does not mark the outputs");

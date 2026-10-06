@@ -9,6 +9,7 @@ const STRATUM = {
   only: ["empire", "Stratum only"],
   closed: ["rim", "Closed"],
   hosted: ["empire", "Yes: behind gateways the pool runs"],
+  front: ["empire", "Fake pool: a stratum front for another pool's window"],
   no: ["rim", "None: DATUM only"],
   unknown: ["", "Not known"],
 };
