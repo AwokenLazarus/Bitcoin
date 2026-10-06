@@ -28,7 +28,9 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+pub mod grace;
 pub mod split;
+pub use grace::{GraceBook, GraceParams};
 pub use split::{Payee, Split, SplitParams, Unpaid, UnpaidReason};
 
 /// Work that arrived before dual-fee tagging. Split as DATUM (the lower fee).
@@ -37,6 +39,9 @@ pub const SOURCE_UNKNOWN: u8 = 0;
 pub const SOURCE_STRATUM: u8 = 1;
 /// External DATUM / Prime gateway.
 pub const SOURCE_DATUM: u8 = 2;
+/// Public house stratum inside the address's grace (see [`grace`]): charged the grace fee.
+/// A build from before the tag reads such a row as untagged, that is as DATUM work.
+pub const SOURCE_STRATUM_GRACE: u8 = 3;
 
 /// One accepted unit of work, possibly several coalesced shares.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -80,8 +85,12 @@ impl Credit {
 pub struct MinerStat {
     pub identity: String,
     pub work: u64,
-    /// Work tagged `SOURCE_STRATUM`. The rest of `work` is DATUM (or untagged).
+    /// Work done on the house stratum (`SOURCE_STRATUM` and `SOURCE_STRATUM_GRACE`). The rest
+    /// of `work` is DATUM (or untagged).
     pub stratum_work: u64,
+    /// The part of `stratum_work` tagged `SOURCE_STRATUM_GRACE`: charged the grace fee.
+    #[serde(default)]
+    pub grace_work: u64,
     pub credits: u64,
     pub last_ts: u32,
     /// Sats earned in earlier blocks that no coinbase has placed yet (under the payout
@@ -323,10 +332,14 @@ impl Window {
     /// Per-identity totals, largest first. Identities with carry but no work left in the
     /// window are included (work 0) so their carry can still be paid.
     pub fn miners(&self) -> Vec<MinerStat> {
-        let mut stratum: HashMap<u32, u64> = HashMap::new();
+        let mut stratum: HashMap<u32, (u64, u64)> = HashMap::new();
         for c in &self.credits {
-            if c.source == SOURCE_STRATUM {
-                *stratum.entry(c.ident).or_insert(0) += c.work;
+            if c.source == SOURCE_STRATUM || c.source == SOURCE_STRATUM_GRACE {
+                let s = stratum.entry(c.ident).or_insert((0, 0));
+                s.0 += c.work;
+                if c.source == SOURCE_STRATUM_GRACE {
+                    s.1 += c.work;
+                }
             }
         }
         let mut v: Vec<MinerStat> = self
@@ -335,7 +348,8 @@ impl Window {
             .map(|(&i, &(work, credits, last_ts))| MinerStat {
                 identity: self.idents[i as usize].clone(),
                 work,
-                stratum_work: stratum.get(&i).copied().unwrap_or(0).min(work),
+                stratum_work: stratum.get(&i).map_or(0, |s| s.0).min(work),
+                grace_work: stratum.get(&i).map_or(0, |s| s.1).min(work),
                 credits,
                 last_ts,
                 carry: self.carry.get(&i).copied().unwrap_or(0),
@@ -347,6 +361,7 @@ impl Window {
                     identity: self.idents[i as usize].clone(),
                     work: 0,
                     stratum_work: 0,
+                    grace_work: 0,
                     credits: 0,
                     last_ts: self.last_seen.get(&i).copied().unwrap_or(0),
                     carry,
@@ -481,7 +496,6 @@ pub struct HoldSkip {
     pub reason: &'static str,
 }
 
-
 /// Persisted window state.
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct Meta {
@@ -512,12 +526,18 @@ pub struct Ledger {
     idents_out: BufWriter<File>,
     rows_on_disk: u64,
     dirty: bool,
+    /// Stratum grace clocks ([`grace`]). Kept in its own file: it is not money, and a build
+    /// from before it must still be able to read `window.json`.
+    pub grace: GraceBook,
+    /// Whether `grace` was read from disk. A book that was not is built from the window.
+    grace_loaded: bool,
 }
 
 impl Ledger {
     const CREDITS: &'static str = "credits.bin";
     const IDENTS: &'static str = "identities.txt";
     const META: &'static str = "window.json";
+    const GRACE: &'static str = "grace.json";
 
     /// Open (or create) the ledger in `dir` and replay it.
     pub fn open(dir: impl AsRef<Path>) -> io::Result<Self> {
@@ -593,7 +613,8 @@ impl Ledger {
 
         let credits_out = BufWriter::new(OpenOptions::new().create(true).append(true).open(&credits_path)?);
         let idents_out = BufWriter::new(OpenOptions::new().create(true).append(true).open(&idents_path)?);
-        let mut l = Ledger { dir, window, credits_out, idents_out, rows_on_disk, dirty: false };
+        let (grace, grace_loaded) = load_grace(&dir.join(Self::GRACE));
+        let mut l = Ledger { dir, window, credits_out, idents_out, rows_on_disk, dirty: false, grace, grace_loaded };
         for identity in new_idents {
             l.idents_out.write_all(identity.as_bytes())?;
             l.idents_out.write_all(b"\n")?;
@@ -762,9 +783,7 @@ impl Ledger {
                 }
             };
             match reason {
-                Some(reason) => {
-                    skipped.push(HoldSkip { identity: identity.clone(), requested: *sats, carry, reason })
-                }
+                Some(reason) => skipped.push(HoldSkip { identity: identity.clone(), requested: *sats, carry, reason }),
                 None => {
                     self.window.adjust_carry(identity, -(*sats as i64));
                     held.push((identity.clone(), *sats));
@@ -847,6 +866,48 @@ impl Ledger {
         Ok(())
     }
 
+    /// The tag for work about to be credited to `identity`: DATUM, house stratum, or house
+    /// stratum inside the address's grace. Moves the grace clocks. With grace off this is the
+    /// two-way choice it always was and the book is not touched.
+    pub fn source_for(&mut self, identity: &str, ts: u32, house_stratum: bool, p: &GraceParams) -> u8 {
+        if !p.enabled() {
+            return if house_stratum { SOURCE_STRATUM } else { SOURCE_DATUM };
+        }
+        if !house_stratum {
+            self.grace.note_datum(identity, ts);
+            return SOURCE_DATUM;
+        }
+        if self.grace.note_stratum(identity, ts, p) {
+            SOURCE_STRATUM_GRACE
+        } else {
+            SOURCE_STRATUM
+        }
+    }
+
+    /// Build the grace book from the window if there was none on disk. Call once after
+    /// opening, before any work is credited. Returns how many addresses were given a clock.
+    pub fn seed_grace(&mut self, p: &GraceParams) -> Option<usize> {
+        if !p.enabled() || self.grace_loaded {
+            return None;
+        }
+        self.grace_loaded = true;
+        let w = &self.window;
+        let rows = w.credits.iter().map(|c| {
+            let stratum = c.source == SOURCE_STRATUM || c.source == SOURCE_STRATUM_GRACE;
+            (c.ts, w.idents[c.ident as usize].as_str(), stratum, c.source == SOURCE_DATUM)
+        });
+        self.grace.seed(rows, p);
+        self.dirty = true;
+        Some(self.grace.stratum.len())
+    }
+
+    /// Drop grace records that can no longer change an answer. Call now and then.
+    pub fn prune_grace(&mut self, now: u32, p: &GraceParams) {
+        if p.enabled() {
+            self.grace.prune(now, p);
+        }
+    }
+
     pub fn set_target(&mut self, target_work: u64) {
         if self.window.target_work() != target_work {
             self.window.set_target(target_work);
@@ -858,6 +919,14 @@ impl Ledger {
     pub fn flush(&mut self) -> io::Result<()> {
         if !self.dirty {
             return Ok(());
+        }
+        if self.grace.is_dirty() {
+            // not money and not worth failing a flush of what is: a write that fails is
+            // retried by the next flush
+            match write_atomic(&self.dir.join(Self::GRACE), &serde_json::to_vec(&self.grace)?) {
+                Ok(()) => self.grace.clear_dirty(),
+                Err(e) => log::error!("{}: {e}", self.dir.join(Self::GRACE).display()),
+            }
         }
         self.idents_out.flush()?;
         self.credits_out.flush()?;
@@ -988,6 +1057,27 @@ fn write_atomic(path: &Path, data: &[u8]) -> io::Result<()> {
         File::open(dir)?.sync_all()?;
     }
     Ok(())
+}
+
+/// Read `grace.json`. Returns the book and whether one was read. A file that does not parse is
+/// logged and treated as absent: the book is rebuilt from the window, which restarts clocks
+/// (in the miners' favour) but stops nothing.
+fn load_grace(path: &Path) -> (GraceBook, bool) {
+    match fs::read(path) {
+        Ok(b) => match serde_json::from_slice(&b) {
+            Ok(book) => (book, true),
+            Err(e) => {
+                log::error!("{}: {e}; rebuilding the grace clocks from the window", path.display());
+                (GraceBook::default(), false)
+            }
+        },
+        Err(e) => {
+            if e.kind() != io::ErrorKind::NotFound {
+                log::error!("{}: {e}; rebuilding the grace clocks from the window", path.display());
+            }
+            (GraceBook::default(), false)
+        }
+    }
 }
 
 /// Read `window.json`, which holds what the pool owes: every miner's carry and the rebate
@@ -1763,10 +1853,11 @@ mod tests {
             l.credit("active", 1, 2, now - 5 + (i % 5), SOURCE_DATUM).unwrap();
         }
         l.set_carry("active", 50_000);
-        let ask: Vec<(String, u64)> = [("s1", 300_000), ("s2", 19_999), ("small", 5_000), ("active", 50_000), ("s1", 300_000)]
-            .iter()
-            .map(|(i, s)| (i.to_string(), *s as u64))
-            .collect();
+        let ask: Vec<(String, u64)> =
+            [("s1", 300_000), ("s2", 19_999), ("small", 5_000), ("active", 50_000), ("s1", 300_000)]
+                .iter()
+                .map(|(i, s)| (i.to_string(), *s as u64))
+                .collect();
         let (held, skipped) = l.hold_carry("b1", &ask, now, week, 10_000, 500, 504).unwrap();
         assert_eq!(held, vec![("s1".to_string(), 300_000)]);
         let why: Vec<(&str, &str)> = skipped.iter().map(|s| (s.identity.as_str(), s.reason)).collect();
@@ -1777,7 +1868,8 @@ mod tests {
         assert_eq!((l.window.carry_of("s1"), l.window.total_held()), (0, 300_000));
         assert!(l.hold_carry("b1", &ask, now, week, 10_000, 500, 504).is_err(), "ids are used once");
         // held money is in no split
-        let p = SplitParams { min_payout: 500_000, stale_after: week, stale_min_payout: 10_000, ..SplitParams::default() };
+        let p =
+            SplitParams { min_payout: 500_000, stale_after: week, stale_min_payout: 10_000, ..SplitParams::default() };
         let s = l.window.split(100_000_000, &p, now, |i| Some(i.as_bytes().to_vec()));
         assert!(s.payees.iter().all(|x| x.identity != "s1"));
         // and it survives a restart
@@ -1820,7 +1912,11 @@ mod tests {
         let mut books = Books::new(0, 0);
         l.book_debits(&delta, &mut books);
         assert_eq!(books.debited, vec![("s1".to_string(), 100_000)]);
-        assert_eq!(l.window.holds()["b"].entries, vec![("s2".to_string(), 100_000)], "s1 is paid; only s2 is still held");
+        assert_eq!(
+            l.window.holds()["b"].entries,
+            vec![("s2".to_string(), 100_000)],
+            "s1 is paid; only s2 is still held"
+        );
         assert_eq!(l.window.carry_of("s1"), 0);
         // orphaned: the block paid nobody after all, and s1 is owed again (as carry)
         l.unbook(&mut books);
@@ -1833,4 +1929,63 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
+    #[test]
+    fn grace_tags_are_stored_with_the_row_and_the_clocks_survive_a_restart() {
+        let dir = std::env::temp_dir().join(format!("tides-test-{}-{}", std::process::id(), line!()));
+        let _ = fs::remove_dir_all(&dir);
+        let p = GraceParams { secs: 24 * 3600, datum_secs: 96 * 3600, rearm_secs: 0, epoch: 0 };
+        let off = GraceParams::default();
+        let t0 = 1_800_000_000u32;
+        {
+            let mut l = Ledger::open(&dir).unwrap();
+            // grace off: the two-way tag, and no book
+            assert_eq!(l.source_for("old", t0, true, &off), SOURCE_STRATUM);
+            assert_eq!(l.source_for("gw", t0, false, &off), SOURCE_DATUM);
+            assert_eq!(l.seed_grace(&off), None);
+            l.credit("old", 100, 1, t0, SOURCE_STRATUM).unwrap();
+            l.credit("gw", 300, 1, t0, SOURCE_DATUM).unwrap();
+            l.sync().unwrap();
+            assert!(!dir.join("grace.json").exists());
+        }
+        {
+            // grace switched on: those in the window are given their clocks
+            let mut l = Ledger::open(&dir).unwrap();
+            let seeded = GraceParams { epoch: t0 - 23 * 3600, ..p };
+            assert_eq!(l.seed_grace(&seeded), Some(1));
+            assert_eq!(l.seed_grace(&seeded), None, "once");
+            let ts = t0 + 3600;
+            for (who, house, want) in [
+                ("old", true, SOURCE_STRATUM), // 24 h after the epoch
+                ("new", true, SOURCE_STRATUM_GRACE),
+                ("gw", true, SOURCE_STRATUM_GRACE),
+                ("gw", false, SOURCE_DATUM),
+            ] {
+                let source = l.source_for(who, ts, house, &seeded);
+                assert_eq!(source, want, "{who}");
+                l.credit(who, 100, 1, ts, source).unwrap();
+            }
+            let m: HashMap<String, MinerStat> =
+                l.window.miners().into_iter().map(|m| (m.identity.clone(), m)).collect();
+            assert_eq!((m["old"].work, m["old"].stratum_work, m["old"].grace_work), (200, 200, 0));
+            assert_eq!((m["new"].work, m["new"].stratum_work, m["new"].grace_work), (100, 100, 100));
+            assert_eq!((m["gw"].work, m["gw"].stratum_work, m["gw"].grace_work), (500, 100, 100));
+            l.persist_window().unwrap();
+            assert!(dir.join("grace.json").exists());
+        }
+        let mut l = Ledger::open(&dir).unwrap();
+        assert_eq!(l.seed_grace(&p), None, "read from disk, not rebuilt");
+        let m: HashMap<String, MinerStat> = l.window.miners().into_iter().map(|m| (m.identity.clone(), m)).collect();
+        assert_eq!((m["gw"].stratum_work, m["gw"].grace_work), (100, 100), "the tag is in the row");
+        assert_eq!(l.grace.until("new", &p), Some(t0 + 3600 + 24 * 3600));
+        assert_eq!(l.grace.until("gw", &p), Some(t0 + 3600 + 96 * 3600), "seen on DATUM");
+        assert_eq!(l.source_for("new", t0 + 25 * 3600, true, &p), SOURCE_STRATUM);
+        assert_eq!(l.source_for("gw", t0 + 25 * 3600, true, &p), SOURCE_STRATUM_GRACE);
+
+        // a book that does not parse is rebuilt from the window instead of stopping the pool
+        drop(l);
+        fs::write(dir.join("grace.json"), b"{ not json").unwrap();
+        let mut l = Ledger::open(&dir).unwrap();
+        assert_eq!(l.seed_grace(&p), Some(3));
+        let _ = fs::remove_dir_all(&dir);
+    }
 }

@@ -80,6 +80,30 @@ pub struct Config {
     /// stratum work's value (750 = 7.5 points of a 15% stratum fee). 0 (default) disables it.
     #[serde(default)]
     pub datum_rebate_bps: u32,
+    /// Grace for an address that starts on the house stratum (`tides::grace`): for this many
+    /// hours from its first stratum share its stratum work pays `stratum-grace-fee-bps`
+    /// instead of `stratum-fee-bps`. 0 (default): no grace.
+    #[serde(default)]
+    pub stratum_grace_hours: u32,
+    /// The same, for an address that has had DATUM work credited here: someone whose own
+    /// gateway is down, not someone mining on ours. 0 (default): same as `stratum-grace-hours`.
+    #[serde(default)]
+    pub stratum_grace_datum_hours: u32,
+    /// Fee on house-stratum work inside its grace. Required when grace is on, and no higher
+    /// than `stratum-fee-bps`.
+    #[serde(default)]
+    pub stratum_grace_fee_bps: Option<u32>,
+    /// Share of the grace fee handed to DATUM work, basis points of the grace work's value.
+    #[serde(default)]
+    pub stratum_grace_rebate_bps: u32,
+    /// Hours off the house stratum after which an address's next stratum share starts a new
+    /// grace. 0 (default): one grace per address.
+    #[serde(default)]
+    pub stratum_grace_rearm_hours: u32,
+    /// Unix time the grace is taken to have started for addresses already on the house
+    /// stratum when grace is first switched on. 0 (default): their oldest share in the window.
+    #[serde(default)]
+    pub stratum_grace_epoch: u32,
     /// Share of a solo block's reward owed to DATUM work when a `solo-coinbase-tag` block
     /// paying the pool script lands on chain, basis points of the block's coinbase value.
     /// Paid down out of the pool's kept fee in later splits. 0 (default) disables it.
@@ -273,6 +297,17 @@ impl Config {
         self.stale_after_days.saturating_mul(86_400)
     }
 
+    /// The stratum grace clocks' settings. Not enabled unless `stratum-grace-hours` is set.
+    pub fn grace(&self) -> tides::GraceParams {
+        let secs = self.stratum_grace_hours.saturating_mul(3_600);
+        tides::GraceParams {
+            secs,
+            datum_secs: self.stratum_grace_datum_hours.saturating_mul(3_600).max(secs),
+            rearm_secs: self.stratum_grace_rearm_hours.saturating_mul(3_600),
+            epoch: self.stratum_grace_epoch,
+        }
+    }
+
     pub fn load(path: &Path) -> Result<Self, String> {
         let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
         let mut c: Config = toml::from_str(&text).map_err(|e| format!("{}: {e}", path.display()))?;
@@ -305,6 +340,33 @@ impl Config {
         }
         if c.solo_rebate_bps > 10_000 {
             return Err("solo-rebate-bps cannot exceed 10000".into());
+        }
+        if c.stratum_grace_hours > 8_760 || c.stratum_grace_datum_hours > 8_760 || c.stratum_grace_rearm_hours > 87_600
+        {
+            return Err("stratum-grace-*-hours are in hours (a year at most; ten for the re-arm)".into());
+        }
+        if c.grace().enabled() {
+            let Some(fee) = c.stratum_grace_fee_bps else {
+                return Err("stratum-grace-fee-bps must be set when stratum-grace-hours is (0 is a free grace)".into());
+            };
+            if fee > c.stratum_fee_bps {
+                return Err("stratum-grace-fee-bps cannot exceed stratum-fee-bps (a grace is not a penalty)".into());
+            }
+            if c.stratum_grace_rebate_bps > fee {
+                return Err(
+                    "stratum-grace-rebate-bps cannot exceed stratum-grace-fee-bps (the rebate comes out of that fee)"
+                        .into(),
+                );
+            }
+            if c.stratum_grace_datum_hours != 0 && c.stratum_grace_datum_hours < c.stratum_grace_hours {
+                return Err("stratum-grace-datum-hours cannot be shorter than stratum-grace-hours".into());
+            }
+        } else if c.stratum_grace_fee_bps.is_some()
+            || c.stratum_grace_rebate_bps != 0
+            || c.stratum_grace_rearm_hours != 0
+            || c.stratum_grace_epoch != 0
+        {
+            return Err("stratum-grace-* keys are set but stratum-grace-hours is 0: set it, or remove them".into());
         }
         if c.solo_coinbase_tag.is_empty() || c.solo_coinbase_tag.len() > 32 {
             return Err("solo-coinbase-tag must be 1..=32 bytes".into());
@@ -443,6 +505,48 @@ require-split-gateway = true
         // a rebate larger than the fee it comes out of is a config error, not a silent clamp
         std::fs::write(&p, format!("{base}\nstratum-fee-bps = 1000\ndatum-rebate-bps = 1001\n")).unwrap();
         assert!(Config::load(&p).unwrap_err().contains("datum-rebate-bps"));
+
+        // stratum grace: off unless asked for
+        std::fs::write(&p, &base).unwrap();
+        assert!(!Config::load(&p).unwrap().grace().enabled());
+        // the donation endpoint with its grace, and the same grace before the fee is raised
+        let grace = "stratum-grace-hours = 24\nstratum-grace-datum-hours = 96\nstratum-grace-fee-bps = 2500\n\
+                     stratum-grace-rebate-bps = 1250\nstratum-grace-epoch = 1791303300\n";
+        for (stratum, rebate) in [(10_000, 5_000), (2_500, 1_250)] {
+            std::fs::write(&p, format!("{base}\nstratum-fee-bps = {stratum}\ndatum-rebate-bps = {rebate}\n{grace}"))
+                .unwrap();
+            let c = Config::load(&p).unwrap();
+            let g = c.grace();
+            assert!(g.enabled());
+            assert_eq!((g.secs, g.datum_secs, g.rearm_secs, g.epoch), (86_400, 345_600, 0, 1_791_303_300));
+            assert_eq!((c.stratum_grace_fee_bps, c.stratum_grace_rebate_bps), (Some(2_500), 1_250));
+        }
+        // datum hours default to the plain grace
+        std::fs::write(
+            &p,
+            format!("{base}\nstratum-fee-bps = 1000\nstratum-grace-hours = 24\nstratum-grace-fee-bps = 0\n"),
+        )
+        .unwrap();
+        assert_eq!(Config::load(&p).unwrap().grace().datum_secs, 86_400);
+        // each of these is a mistake, and none is silently repaired
+        for (keys, names) in [
+            ("stratum-grace-hours = 24\n", "stratum-grace-fee-bps must be set"),
+            ("stratum-grace-hours = 24\nstratum-grace-fee-bps = 1001\n", "cannot exceed stratum-fee-bps"),
+            (
+                "stratum-grace-hours = 24\nstratum-grace-fee-bps = 500\nstratum-grace-rebate-bps = 501\n",
+                "stratum-grace-rebate-bps",
+            ),
+            (
+                "stratum-grace-hours = 24\nstratum-grace-datum-hours = 12\nstratum-grace-fee-bps = 500\n",
+                "cannot be shorter",
+            ),
+            ("stratum-grace-fee-bps = 500\n", "stratum-grace-hours is 0"),
+            ("stratum-grace-epoch = 5\n", "stratum-grace-hours is 0"),
+        ] {
+            std::fs::write(&p, format!("{base}\nstratum-fee-bps = 1000\n{keys}")).unwrap();
+            let e = Config::load(&p).unwrap_err();
+            assert!(e.contains(names), "{keys:?}: {e}");
+        }
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

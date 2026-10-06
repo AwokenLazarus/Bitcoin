@@ -19,7 +19,7 @@ use datum_wire::mining::{self, ClientMsg, JobValidationReply, PowSubmit, Validat
 use datum_wire::verify::{self, CoinbaseKind, JobSlot, Policy, VerifiedShare};
 use datum_wire::{cmd, MAX_CMD_LEN};
 use rand_core::{OsRng, RngCore};
-use tides::{BlockRecord, Payee, SOURCE_DATUM, SOURCE_STRATUM};
+use tides::{BlockRecord, Payee};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::time::{interval, MissedTickBehavior};
@@ -1293,10 +1293,12 @@ impl Session {
             if refused {
                 false
             } else {
-                let source = if self.is_house_stratum() { SOURCE_STRATUM } else { SOURCE_DATUM };
                 // nothing to write for a share credited by its hash alone that earned nothing
                 // this time (`Policy::uncommitted_pot`); it is accepted like any other
                 if v.work > 0 {
+                    // DATUM, house stratum, or house stratum inside the address's grace
+                    let source =
+                        ledger.source_for(&identity, ts as u32, self.is_house_stratum(), &self.shared.cfg.grace());
                     if let Err(e) = ledger.credit(&identity, v.work, v.height, ts as u32, source) {
                         log::error!("ledger write failed: {e}");
                     }
