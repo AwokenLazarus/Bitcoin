@@ -194,6 +194,8 @@ async fn handle(shared: &Shared, id: &str, req: Request) -> Value {
             if let Err(e) = ledger.persist_window() {
                 log::error!("payout {id}: ledger persist failed: {e}");
             }
+            // the snapshot lock is taken before the ledger's everywhere else: let go first
+            drop(ledger);
             shared.drop_coinbaser_base();
             answer
         }
@@ -237,6 +239,7 @@ async fn handle(shared: &Shared, id: &str, req: Request) -> Value {
                     if let Err(e) = ledger.persist_window() {
                         log::error!("payout {id}: ledger persist failed: {e}");
                     }
+                    drop(ledger);
                     shared.drop_coinbaser_base();
                     json!({"id": id, "ok": true, "ts": ts, "status": "released",
                            "released_sats": entries.iter().map(|e| e.1).sum::<u64>(), "entries": entries})
