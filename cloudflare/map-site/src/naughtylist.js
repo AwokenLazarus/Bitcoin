@@ -603,10 +603,13 @@ export function addressPays(state, address, utxos) {
   const unspent = new Set((utxos || []).map((u) => `${u.txid}:${u.vout}`));
   // Lazarus outputs earned while the address sat behind another pool's gateway on Lazarus.
   const v = state.via && state.via.addrs && state.via.addrs[address];
+  // From when that pool's gateway first connected to us, not from when this address was first
+  // noticed behind it: the watcher sees one address per pass, the gateway carried them all along.
+  const since = v ? Math.min(v.first || Infinity, ...Object.values((state.via && state.via.gateways) || {}).filter((g) => g && g.pool === v.pool).map((g) => g.first || Infinity)) : 0;
   const pays = (a && a.pays ? a.pays : []).map((p) => ({
     height: p.h, ts: p.t, txid: p.tx, vout: p.v, sats: p.sats, pool: p.pool,
     kind: p.k === "d" ? "datum-block" : p.k === "c" ? "custodial" : "stratum",
-    via: v && p.pool === "Lazarus" && (p.t || 0) >= (v.first || 0) ? v.pool : null,
+    via: v && p.pool === "Lazarus" && (p.t || 0) >= since ? v.pool : null,
     unspent: !!(p.tx && unspent.has(`${p.tx}:${p.v}`)),
   }));
   pays.sort((x, y) => y.height - x.height);

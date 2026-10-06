@@ -324,6 +324,10 @@ await test("an address behind another pool's gateway on Lazarus is confirmed, an
   assert(![...lists.naughty, ...lists.suspects, ...lists.nice].some((r) => r.address === B), "an honest gateway owner was listed");
   const pays = addressPays(state, A, [{ txid: "t11", vout: 0 }]);
   assert(pays[0].height === 11 && pays[0].via === "CTRL" && pays[0].unspent && pays[1].via === null, JSON.stringify(pays));
+  // the gateway was connected before this address was first noticed behind it
+  state.via.gateways["097b7017ccfd7669"].first = first - 1000;
+  assert(addressPays(state, A, []).every((p) => p.via === "CTRL"), "an output paid after the gateway connected was not marked");
+  state.via.gateways["097b7017ccfd7669"].first = first;
   assert(addressPays(state, B, []).every((p) => p.via === null), "an honest address's payouts were marked");
   const view = buildView(state, miners, gateways, now);
   const html = renderList(view);
