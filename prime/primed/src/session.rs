@@ -188,17 +188,30 @@ fn template_left_room(kept: usize, txn_total_weight: u32) -> bool {
 /// template of its own, is the class. A gateway asks every ten seconds or so, so learning costs
 /// well under a minute of Partial work.
 const CLASS_BUDGET_SIGHTINGS: usize = 3;
-/// Payee bytes below which a Partial share is not a CONVOY size class.
+/// The least room for miner outputs in class 1, the smallest CONVOY class that keeps a payee.
 ///
 /// `COINBASE_TYPE_SMALL` is 500 bytes (`datum_stratum.h:55` at b9ea7dc).
 /// `datum_stratum_coinbase_fit_to_template` returns `max_sz - fixed_bytes` of that for
-/// miner outputs (`datum_coinbaser.c:342`). `fixed_bytes` for that class is
-/// `119 + pool_script_len + cb_input_sz` when the extranonce fits in the coinbase
+/// miner outputs (`datum_coinbaser.c:342`, called with 500 at `:713`). `fixed_bytes` for that
+/// class is `119 + pool_script_len + cb_input_sz` when the extranonce fits in the coinbase
 /// (`datum_coinbaser.c:708`), and the extranonce fits only while `cb_input_sz <= 85`
-/// (`datum_coinbaser.c:380`). A 22-byte pool script then leaves
-/// `500 - (119 + 22 + 85) = 274` bytes. A sighting under that cannot be class 1, the
-/// smallest class that keeps a payee.
-const CLASS_BUDGET_MIN_BYTES: usize = 500 - (119 + 22 + 85);
+/// (`datum_coinbaser.c:563`). A 22-byte pool script then leaves
+/// `500 - (119 + 22 + 85) = 274` bytes.
+const CLASS_ROOM_MIN_BYTES: usize = 500 - (119 + 22 + 85);
+/// The largest payee output a coinbaser lists, measured as CONVOY measures one: the script and
+/// 9 bytes (`datum_coinbaser.c:211`). No payee script is over [`address::RDTS_MAX_OUTPUT_SCRIPT`]
+/// (34 bytes, P2WSH and P2TR): `address::to_script` gives no other.
+const PAYEE_OUTPUT_MAX_BYTES: usize = 8 + 1 + address::RDTS_MAX_OUTPUT_SCRIPT;
+/// Payee bytes below which a Partial share is not a CONVOY size class.
+///
+/// What a section kept is not its room. The class places the list first-fit and skips an
+/// output only when it is larger than what is left (`datum_coinbaser.c:211`, and it stops once
+/// under 30 bytes are left, `:222`), so a list it cut leaves less than one output of its room
+/// unused. A real class 1 therefore keeps more than [`CLASS_ROOM_MIN_BYTES`] less one largest
+/// output, `274 - 43 = 231` bytes, and a sighting under that cannot be one. Held to the room
+/// itself, a class 1 that kept 246 bytes of 274 (five P2TR payees and a P2WPKH one, the next
+/// output too large for the 28 left) was refused for ever.
+const CLASS_BUDGET_MIN_BYTES: usize = CLASS_ROOM_MIN_BYTES - PAYEE_OUTPUT_MAX_BYTES;
 /// Payee byte counts one section keeps a tally of at once, the oldest dropped first.
 const CLASS_BUDGET_TALLY: usize = 8;
 /// How long a class budget stands after it was last set before it, and every sighting it was
@@ -3252,6 +3265,65 @@ mod tests {
             assert!(!b.observe(3, id as u8, CLASS_BUDGET_MIN_BYTES + n, t));
         }
         assert_eq!(b.seen[&3].len(), CLASS_BUDGET_TALLY);
+    }
+
+    /// CONVOY's placement of a list into `room` bytes (`datum_coinbaser.c:210-224` at b9ea7dc,
+    /// the value test aside): the payee bytes kept, and whether any output was left out.
+    fn convoy_first_fit(room: usize, needs: &[usize]) -> (usize, bool) {
+        let (mut left, mut placed) = (room, 0usize);
+        for need in needs {
+            if *need <= left {
+                left -= need;
+                placed += 1;
+                if left < 30 {
+                    break;
+                }
+            }
+        }
+        (room - left, placed < needs.len())
+    }
+
+    /// The floor is under what any class 1 keeps of a list it cut, whatever the payees' scripts,
+    /// and a sighting just under it is still refused.
+    #[test]
+    fn the_class_budget_floor_is_under_what_the_smallest_class_keeps_of_a_cut_list() {
+        assert_eq!((CLASS_ROOM_MIN_BYTES, PAYEE_OUTPUT_MAX_BYTES, CLASS_BUDGET_MIN_BYTES), (274, 43, 231));
+        // P2WPKH, P2SH, P2PKH, P2WSH/P2TR: every script `address::to_script` returns
+        let needs = [8 + 1 + 22, 8 + 1 + 23, 8 + 1 + 25, 8 + 1 + 34];
+        let mut seed = 0x2545_F491_4F6C_DD1Du64;
+        let mut next = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        let mut least = usize::MAX;
+        for _ in 0..200_000 {
+            let list: Vec<usize> = (0..1 + next() % 24).map(|_| needs[next() as usize % needs.len()]).collect();
+            // a scriptSig shorter than the longest leaves class 1 more room, never less
+            let room = CLASS_ROOM_MIN_BYTES + next() as usize % 60;
+            let (kept, cut) = convoy_first_fit(room, &list);
+            if cut {
+                assert!(kept >= CLASS_BUDGET_MIN_BYTES, "{room} bytes of room kept {kept} of {list:?}");
+                least = least.min(kept);
+            }
+        }
+        assert!(least < CLASS_ROOM_MIN_BYTES, "a cut list does keep less than the room: {least}");
+
+        // the review's case, a real class 1 keeping less than its room: five P2TR payees and
+        // a P2WPKH one are 246 bytes of 274, and nothing fits the 28 left
+        assert_eq!(convoy_first_fit(274, &[43, 43, 43, 43, 43, 31, 31, 43]), (246, true));
+        let (mut b, t) = (ClassBudget::default(), Instant::now());
+        assert!(!b.observe(1, 1, 246, t) && !b.observe(1, 2, 246, t) && b.observe(1, 3, 246, t));
+        assert_eq!(b.bytes, Some(246));
+        // and under the floor nothing is learned, however often it is seen
+        let mut b = ClassBudget::default();
+        for id in 0..10 {
+            assert!(!b.observe(1, id, CLASS_BUDGET_MIN_BYTES - 1, t));
+        }
+        assert_eq!(b.bytes, None);
+        assert!(!b.observe(1, 1, CLASS_BUDGET_MIN_BYTES, t) && !b.observe(1, 2, CLASS_BUDGET_MIN_BYTES, t));
+        assert!(b.observe(1, 3, CLASS_BUDGET_MIN_BYTES, t));
     }
 
     /// The review's NiceHash case. One class-1 miner sets the budget to its ~310 bytes, and
