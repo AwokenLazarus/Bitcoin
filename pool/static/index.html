@@ -64,7 +64,7 @@
 <link rel="preload" as="style" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;1,400&family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,500;1,6..72,400;1,6..72,500&display=swap">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;1,400&family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,500;1,6..72,400;1,6..72,500&display=swap" media="print" onload="this.media='all'">
 <noscript><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;1,400&family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,500;1,6..72,400;1,6..72,500&display=swap"></noscript>
-<link rel="stylesheet" href="/static/pool.css?v=seo1">
+<link rel="stylesheet" href="/static/pool.css?v=cd1">
 <link rel="stylesheet" href="/static/app.css?v=ask2">
 <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
 <link rel="icon" href="/static/favicon-48.png" sizes="48x48" type="image/png">
@@ -130,6 +130,10 @@
   <aside class="softfork urgent" id="stratumnotice" role="alert" aria-labelledby="stratumnotice-title">
     <div class="softfork-row">
       <p class="kicker" id="stratumnotice-title" data-i18n="stratumnotice.kicker">Urgent · stratum miners: move to your own DATUM gateway</p>
+      <p class="softfork-countdown" id="stratumnotice-countdown" aria-live="polite">
+        <span id="stratumnotice-count-live"><span data-i18n="stratumnotice.countdownLead">Donation endpoint in</span> <b id="stratumnotice-remain">—</b></span>
+        <span id="stratumnotice-count-done" data-i18n="stratumnotice.countdownDone" hidden>The donation endpoint is now in effect.</span>
+      </p>
       <p class="softfork-text" data-i18n-html="stratumnotice.text">Starting <b>7 October 2026</b>, this pool's public stratum endpoint becomes a <b>donation endpoint</b> and takes a <b>100% fee</b>. That 100% fee is both a <b>pool donation</b> and a <b>DATUM subsidy</b>: half to the pool address, half to DATUM gateways. The network nodes will not tolerate stratum hashing. During the current 45-day coinbase maturity window, <b>all rewards from stratum hashing on any pool will be 100% invalidated</b>. Moving to another pool will not change that. The only way to be paid is to build your own templates with your own Bitcoin Knots node and a DATUM gateway (<a href="#connect">guides for every supported gateway</a>). On your own gateway the fee is 0%, and work already accepted comes with you when you switch.</p>
       <p class="softfork-links"><a href="#connect" data-i18n="stratumnotice.setup">Set up a DATUM gateway</a> · <a href="https://github.com/bitcoinknots/bitcoin/pull/419" target="_blank" rel="noreferrer" data-i18n="stratumnotice.plan">The Knots plan (long coinbase maturity, part 1 of 3)</a></p>
       <button type="button" class="promo-dismiss" id="stratumnotice-dismiss" data-i18n-aria="stratumnotice.dismiss" data-i18n-title="stratumnotice.dismiss" aria-label="Dismiss notice">×</button>
@@ -939,12 +943,12 @@
 </nav>
 
 <script src="/static/i18n.js?v=seo1"></script>
-<script src="/static/i18n/en.js?v=ask2"></script>
-<script src="/static/i18n/zh-CN.js?v=ask2"></script>
+<script src="/static/i18n/en.js?v=cd1"></script>
+<script src="/static/i18n/zh-CN.js?v=cd1"></script>
 <script>LZ_I18N.boot();</script>
 <script src="/static/shared.js?v=seo1"></script>
 <script src="/static/app.js?v=ask2"></script>
-<script src="/static/pool.js?v=seo1"></script>
+<script src="/static/pool.js?v=cd1"></script>
 <script src="/static/chart.js?v=app4"></script>
 </body>
 </html>
