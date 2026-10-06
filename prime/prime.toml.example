@@ -91,6 +91,21 @@ stratum-fee-bps = 1000
 # a gateway too small for a given coinbase is credited just the same. Must not exceed
 # stratum-fee-bps. 0 turns it off.
 datum-rebate-bps = 500
+
+# Grace for an address that starts on the public stratum, so a miner whose own gateway is down
+# is not charged a donation-level stratum-fee-bps while it fails over. For this many hours from
+# the address's first stratum share, its stratum work pays stratum-grace-fee-bps (and
+# stratum-grace-rebate-bps of it goes to DATUM work) instead. An address that has had DATUM work
+# here gets stratum-grace-datum-hours. After stratum-grace-rearm-hours off the public stratum the
+# next share starts a new grace (0: one grace per address). stratum-grace-epoch (unix time) is when
+# the clock is taken to have started for addresses already on stratum when this is first switched on.
+# Off unless stratum-grace-hours is set.
+# stratum-grace-hours = 24
+# stratum-grace-datum-hours = 96
+# stratum-grace-fee-bps = 2500
+# stratum-grace-rebate-bps = 1250
+# stratum-grace-rearm-hours = 168
+# stratum-grace-epoch = 0
 # Same, out of each dedicated-solo block's reward: when a block whose coinbase is tagged
 # solo-coinbase-tag and pays the pool script lands on chain, this share of its value is
 # credited to the DATUM miners then in the window. Off: dedicated solo keeps its own 5% fee

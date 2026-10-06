@@ -83,6 +83,7 @@ pub fn build(shared: &Shared) -> Value {
 
     // the split a block would pay right now: how the UI shows each miner's expected payout
     let sample_value = 312_500_000u64;
+    let grace = shared.cfg.grace();
     let split = w.split(sample_value, &shared.split_params, ts as u32, |i| address::to_script(i, shared.network));
     let payouts: std::collections::HashMap<&str, u64> =
         split.payees.iter().map(|p| (p.identity.as_str(), p.sats)).collect();
@@ -100,6 +101,10 @@ pub fn build(shared: &Shared) -> Value {
                 "identity": m.identity,
                 "work": m.work,
                 "stratum_work": m.stratum_work,
+                // the part of stratum_work done inside the address's grace, and when its
+                // current grace ends (absent: never on the house stratum, or grace is off)
+                "grace_work": m.grace_work,
+                "stratum_grace_until": grace.enabled().then(|| ledger.grace.until(&m.identity, &grace)).flatten(),
                 "fee_path": if m.stratum_work * 2 > m.work { "stratum" } else { "datum" },
                 "credits": m.credits,
                 "share_percent": if w.total_work() > 0 { 100.0 * m.work as f64 / w.total_work() as f64 } else { 0.0 },
@@ -210,6 +215,13 @@ pub fn build(shared: &Shared) -> Value {
             "stratum_fee_bps": shared.cfg.stratum_fee_bps,
             // share of the stratum fee rebated to DATUM work, and of solo rewards owed to it
             "datum_rebate_bps": shared.cfg.datum_rebate_bps,
+            // grace for an address that starts on the house stratum; hours 0 means none
+            "stratum_grace_hours": shared.cfg.stratum_grace_hours,
+            "stratum_grace_datum_hours": grace.datum_secs / 3_600,
+            "stratum_grace_fee_bps": shared.cfg.stratum_grace_fee_bps,
+            "stratum_grace_rebate_bps": shared.cfg.stratum_grace_rebate_bps,
+            "stratum_grace_rearm_hours": shared.cfg.stratum_grace_rearm_hours,
+            "stratum_grace_epoch": grace.epoch,
             "solo_rebate_bps": shared.cfg.solo_rebate_bps,
             "window_multiple": shared.cfg.window,
             "min_payout": shared.cfg.min_payout,
@@ -433,6 +445,7 @@ pub async fn housekeeping(shared: Arc<Shared>) {
             // Every 5s flush; every 60s fsync; every 5 min rewrite credits.bin to the live window
             // so a crash or restart reloads the same shares the UI was showing.
             let r = if n.is_multiple_of(60) {
+                ledger.prune_grace(crate::state::now() as u32, &shared.cfg.grace());
                 ledger.persist_window()
             } else if n.is_multiple_of(12) {
                 ledger.sync()

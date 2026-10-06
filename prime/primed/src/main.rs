@@ -242,6 +242,32 @@ fn run(cfg: Config) -> i32 {
         ledger.window.lifetime_shares
     );
     warn_if_window_cliff(&cfg.data_dir, &ledger);
+    let grace = cfg.grace();
+    if grace.enabled() {
+        log::info!(
+            "stratum grace: {} h from an address's first stratum share ({} h if it has been on DATUM here), \
+             at {} bps with {} bps to DATUM; re-arm {} h; epoch {}",
+            cfg.stratum_grace_hours,
+            grace.datum_secs / 3_600,
+            cfg.stratum_grace_fee_bps.unwrap_or(0),
+            cfg.stratum_grace_rebate_bps,
+            cfg.stratum_grace_rearm_hours,
+            grace.epoch
+        );
+        if let Some(n) = ledger.seed_grace(&grace) {
+            log::info!(
+                "stratum grace: no grace.json; clocks built from the window for {n} addresses already on stratum \
+                 ({} seen on DATUM)",
+                ledger.grace.datum_seen.len()
+            );
+        } else {
+            log::info!(
+                "stratum grace: grace.json has {} stratum clocks, {} addresses seen on DATUM",
+                ledger.grace.stratum.len(),
+                ledger.grace.datum_seen.len()
+            );
+        }
+    }
     let block_log = BlockLog::open(&cfg.data_dir);
     let blocks = match block_log.read_all() {
         Ok(b) => b,
@@ -269,6 +295,8 @@ fn run(cfg: Config) -> i32 {
             fee_bps: cfg.fee_bps,
             stratum_fee_bps: cfg.stratum_fee_bps,
             datum_rebate_bps: cfg.datum_rebate_bps,
+            grace_fee_bps: cfg.stratum_grace_fee_bps.unwrap_or(0),
+            grace_rebate_bps: cfg.stratum_grace_rebate_bps,
             min_payout: cfg.min_payout,
             // The gateway accepts at most 512 coinbaser entries; one is the pool's own
             // output appended after the payees. The byte budget leaves room for it too.
