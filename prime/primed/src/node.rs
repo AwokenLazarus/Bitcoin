@@ -233,6 +233,9 @@ fn settle_confirmed(shared: &Shared, hash: &str) {
     let mut legacy_reapply = Vec::new();
     let mut legacy_rebate = 0i64;
     let mut booked = None;
+    // Snapshot before the ledger, the order `coinbaser_base` uses, so the two cannot deadlock.
+    // Cleared before either lock is released.
+    let mut slot = shared.coinbaser_base.lock().unwrap_or_else(|e| e.into_inner());
     // the ledger before the block log, the same order everywhere (`stats::build` holds the
     // ledger while it reads the blocks)
     let mut ledger = shared.ledger.lock().unwrap();
@@ -275,6 +278,9 @@ fn settle_confirmed(shared: &Shared, hash: &str) {
     if let Err(e) = ledger.sync() {
         log::error!("ledger sync after settling {hash} failed: {e}");
     }
+    // Carry and rebate just moved; a coinbaser snapshot from before must not be served.
+    drop(ledger);
+    *slot = None;
 }
 
 /// Whether a `submitblock` result proves the block the miner hashed is invalid.
@@ -300,6 +306,20 @@ pub fn says_invalid(outcome: &str) -> bool {
     )
 }
 
+/// Whether a `submitblock` verdict means the gateway's node built a template its own chain
+/// would not accept — an outdated node, not a race or a Prime assembly slip.
+///
+/// Kept to rules a current node could not have broken by accident. `bad-txns-premature-spend-of-
+/// coinbase` is the Knots #419 long coinbase maturity: a node that knows the rule will not put
+/// such a spend in a template, so seeing one says the gateway is behind. The block is lost to
+/// everyone in the window, not only to the gateway that found it, which is why the gateway is
+/// then refused rather than warned.
+pub fn says_outdated_node(outcome: &str) -> bool {
+    // The node answers with the reject reason alone, but a build that appends its detail
+    // ("…, tried to spend coinbase at depth 102") must read the same.
+    outcome.trim().starts_with("bad-txns-premature-spend-of-coinbase")
+}
+
 /// Label a recorded block as orphaned, once. Orphans stay unsettled so `confirm_blocks` keeps
 /// re-checking them for a while; this must not stack a prefix per pass.
 pub fn mark_orphan(shared: &Shared, hash: &str, height: u32, why: &str) {
@@ -318,6 +338,7 @@ pub fn mark_orphan(shared: &Shared, hash: &str, height: u32, why: &str) {
     let mut reverse = Vec::new();
     let mut rebate = 0i64;
     let mut unbooked = None;
+    let mut slot = shared.coinbaser_base.lock().unwrap_or_else(|e| e.into_inner());
     let mut ledger = shared.ledger.lock().unwrap();
     shared.update_block(hash, |r| {
         r.kind = format!("orphan:{}", r.kind);
@@ -356,6 +377,9 @@ pub fn mark_orphan(shared: &Shared, hash: &str, height: u32, why: &str) {
     if let Err(e) = ledger.sync() {
         log::error!("ledger sync after orphaning {hash} failed: {e}");
     }
+    // The carry the orphan had paid is owed again; the next coinbaser must see it.
+    drop(ledger);
+    *slot = None;
 }
 
 #[cfg(test)]
@@ -409,5 +433,48 @@ mod difficulty_tests {
     fn prefers_the_classic_field_and_defaults_to_zero() {
         assert_eq!(node_difficulty(&json!({"difficulty": 5.0, "difficulty_blake2b": 1e19})), 5.0);
         assert_eq!(node_difficulty(&json!({"blocks": 1})), 0.0);
+    }
+}
+
+#[cfg(test)]
+mod outdated_tests {
+    use super::{says_invalid, says_outdated_node};
+
+    #[test]
+    fn premature_coinbase_spend_indicts_the_gateways_node() {
+        // Knots #419: only a node that does not know the rule builds this.
+        assert!(says_outdated_node("bad-txns-premature-spend-of-coinbase"));
+        assert!(says_outdated_node("bad-txns-premature-spend-of-coinbase, tried to spend coinbase at depth 102"));
+        assert!(says_outdated_node("  bad-txns-premature-spend-of-coinbase  "));
+    }
+
+    #[test]
+    fn races_and_prime_side_slips_do_not() {
+        // A tip that moved, a list Prime assembled, or a failure to ask: none of these say the
+        // gateway's node is behind, and refusing an honest gateway is the worse mistake.
+        for o in [
+            "accepted",
+            "duplicate",
+            "inconclusive",
+            "prev-blk-not-found",
+            "bad-prevblk",
+            "bad-txnmrklroot",
+            "bad-txns-inputs-missingorspent",
+            "high-hash",
+            "rejected: connection refused",
+            "",
+        ] {
+            assert!(!says_outdated_node(o), "{o:?} must not quarantine a gateway");
+        }
+    }
+
+    #[test]
+    fn outdated_and_invalid_are_different_verdicts() {
+        // The two fns sit next to each other; swapping their bodies with their docs would
+        // orphan a real block or quarantine an honest gateway.
+        assert!(says_outdated_node("bad-txns-premature-spend-of-coinbase"));
+        assert!(!says_invalid("bad-txns-premature-spend-of-coinbase"));
+        assert!(says_invalid("high-hash"));
+        assert!(!says_outdated_node("high-hash"));
     }
 }

@@ -29,6 +29,11 @@
 //! credited the same way when such a block lands on chain. `rebate_owed` holds rebate with
 //! nobody to credit yet (a window with no payable DATUM work); it is handed out with the next
 //! block that has one.
+//!
+//! **Stratum grace.** House-stratum work done inside an address's grace (see [`crate::grace`])
+//! is `grace_work`: it is charged `grace_fee_bps` in place of the stratum fee, and
+//! `grace_rebate_bps` of its value is rebated to DATUM work in the same way. It is still
+//! stratum work: it earns no DATUM rebate itself.
 
 use serde::Serialize;
 
@@ -43,6 +48,12 @@ pub struct SplitParams {
     /// Share of the house-stratum fee (basis points of stratum work's value) redistributed
     /// to DATUM work. 0 disables the rebate. Clamped to the stratum fee.
     pub datum_rebate_bps: u32,
+    /// Fee on house-stratum work done inside its address's grace, basis points. Only read
+    /// when the window has such work.
+    pub grace_fee_bps: u32,
+    /// Share of the grace fee (basis points of grace work's value) redistributed to DATUM
+    /// work. Clamped to the grace fee.
+    pub grace_rebate_bps: u32,
     /// Smallest output the split will emit, in sats.
     pub min_payout: u64,
     /// Cap on the number of outputs (the protocol allows 512).
@@ -83,6 +94,8 @@ impl Default for SplitParams {
             fee_bps: 0,
             stratum_fee_bps: 0,
             datum_rebate_bps: 0,
+            grace_fee_bps: 0,
+            grace_rebate_bps: 0,
             min_payout: 546,
             max_outputs: 512,
             output_budget_bytes: 14_000,
@@ -257,13 +270,22 @@ pub fn fee_for(value: u64, fee_bps: u32) -> u64 {
     ((u128::from(value) * u128::from(fee_bps)) / 10_000) as u64
 }
 
-/// This block's DATUM rebate out of the stratum fee: `datum_rebate_bps` of stratum work's
-/// share of `value`. Closed-form on the window totals.
+/// This block's DATUM rebate out of the stratum fee: `rebate_bps` of that stratum work's
+/// share of `value`. Closed-form on the window totals; called once for full-fee stratum work
+/// and once for grace work.
 fn stratum_rebate(value: u64, total_work: u64, total_sw: u64, rebate_bps: u32) -> u64 {
     if total_work == 0 || rebate_bps == 0 {
         return 0;
     }
     (u128::from(value) * u128::from(total_sw) * u128::from(rebate_bps) / u128::from(total_work) / 10_000) as u64
+}
+
+/// A miner's window work by fee class: house stratum at the full stratum fee, house stratum
+/// inside its grace, and DATUM (or untagged). The three sum to `work`.
+fn classes(m: &MinerStat) -> (u64, u64, u64) {
+    let stratum = m.stratum_work.min(m.work);
+    let gw = m.grace_work.min(stratum);
+    (stratum - gw, gw, m.work - stratum)
 }
 
 pub fn compute(
@@ -277,19 +299,30 @@ pub fn compute(
 ) -> Split {
     let stratum_bps = if p.stratum_fee_bps == 0 { p.fee_bps } else { p.stratum_fee_bps };
     let rebate_bps = p.datum_rebate_bps.min(stratum_bps);
+    let grace_bps = p.grace_fee_bps.min(10_000);
+    let grace_rebate_bps = p.grace_rebate_bps.min(grace_bps);
 
+    // `total_sw` is the stratum work charged the full stratum fee; `total_gw` the grace work.
     let mut total_sw = 0u64;
+    let mut total_gw = 0u64;
     let mut scripts: Vec<Option<Vec<u8>>> = Vec::with_capacity(miners.len());
     for m in &miners {
-        total_sw = total_sw.saturating_add(m.stratum_work.min(m.work));
+        let (sw, gw, _) = classes(m);
+        total_sw = total_sw.saturating_add(sw);
+        total_gw = total_gw.saturating_add(gw);
         scripts.push(if m.work > 0 || m.carry > 0 { script_for(&m.identity) } else { None });
     }
 
     // The rebate is not an output of this coinbase: it is what the pool will owe the DATUM
     // miners in the window once the block is found, credited as carry. Any `rebate_owed`
     // from earlier blocks with nobody to credit rides along.
-    let from_fee = stratum_rebate(value, total_work, total_sw, rebate_bps);
-    let (rebate_credits, undistributed) = if rebate_bps > 0 {
+    let from_fee = stratum_rebate(value, total_work, total_sw, rebate_bps).saturating_add(stratum_rebate(
+        value,
+        total_work,
+        total_gw,
+        grace_rebate_bps,
+    ));
+    let (rebate_credits, undistributed) = if rebate_bps > 0 || (total_gw > 0 && grace_rebate_bps > 0) {
         let by_index: std::collections::HashMap<&str, usize> =
             miners.iter().enumerate().map(|(i, m)| (m.identity.as_str(), i)).collect();
         rebate_credits(&miners, from_fee.saturating_add(rebate_owed), |id| {
@@ -314,13 +347,15 @@ pub fn compute(
     let mut shares: Vec<u64> = Vec::with_capacity(miners.len());
     for (m, script) in miners.iter().zip(&scripts) {
         let (earned, fee) = if total_work > 0 && m.work > 0 {
-            let sw = m.stratum_work.min(m.work);
-            let dw = m.work - sw;
-            let keep =
-                u128::from(sw) * u128::from(10_000 - stratum_bps) + u128::from(dw) * u128::from(10_000 - p.fee_bps);
+            let (sw, gw, dw) = classes(m);
+            let keep = u128::from(sw) * u128::from(10_000 - stratum_bps)
+                + u128::from(gw) * u128::from(10_000 - grace_bps)
+                + u128::from(dw) * u128::from(10_000 - p.fee_bps);
             let earned = (u128::from(value) * keep / u128::from(total_work) / 10_000) as u64;
             let fee = (u128::from(value)
-                * (u128::from(sw) * u128::from(stratum_bps) + u128::from(dw) * u128::from(p.fee_bps))
+                * (u128::from(sw) * u128::from(stratum_bps)
+                    + u128::from(gw) * u128::from(grace_bps)
+                    + u128::from(dw) * u128::from(p.fee_bps))
                 / u128::from(total_work)
                 / 10_000) as u64;
             (earned, fee)
@@ -439,15 +474,15 @@ mod tests {
     use super::*;
 
     fn miner(id: &str, work: u64) -> MinerStat {
-        MinerStat { identity: id.into(), work, stratum_work: 0, credits: 1, last_ts: 0, carry: 0 }
+        MinerStat { identity: id.into(), work, stratum_work: 0, grace_work: 0, credits: 1, last_ts: 0, carry: 0 }
     }
 
     fn miner_stratum(id: &str, work: u64) -> MinerStat {
-        MinerStat { identity: id.into(), work, stratum_work: work, credits: 1, last_ts: 0, carry: 0 }
+        MinerStat { identity: id.into(), work, stratum_work: work, grace_work: 0, credits: 1, last_ts: 0, carry: 0 }
     }
 
     fn miner_carry(id: &str, work: u64, carry: u64) -> MinerStat {
-        MinerStat { identity: id.into(), work, stratum_work: 0, credits: 1, last_ts: 0, carry }
+        MinerStat { identity: id.into(), work, stratum_work: 0, grace_work: 0, credits: 1, last_ts: 0, carry }
     }
 
     fn script(id: &str) -> Option<Vec<u8>> {
@@ -512,7 +547,8 @@ mod tests {
         // block 2: same work, now carrying 3 960 → 7 920 total clears the floor. The pool's
         // remainder this block is only its 1 000 fee, so that is how much carry it can pay
         // down now; the rest stays owed.
-        let s2 = compute(vec![miner("big", 9_600), miner_carry("small", 400, 3_960)], 10_000, 100_000, &p, 0, 0, script);
+        let s2 =
+            compute(vec![miner("big", 9_600), miner_carry("small", 400, 3_960)], 10_000, 100_000, &p, 0, 0, script);
         assert_eq!(s2.payees.len(), 2);
         let small = s2.payees.iter().find(|x| x.identity == "small").unwrap();
         assert_eq!((small.sats, small.carry), (4_960, 1_000));
@@ -857,6 +893,7 @@ mod tests {
                     identity: id,
                     work,
                     stratum_work: sw,
+                    grace_work: 0,
                     credits: 1,
                     last_ts: 0,
                     carry: rnd(50_000),
@@ -944,7 +981,7 @@ mod tests {
     }
 
     fn gone(id: &str, carry: u64, last_ts: u32) -> MinerStat {
-        MinerStat { identity: id.into(), work: 0, stratum_work: 0, credits: 0, last_ts, carry }
+        MinerStat { identity: id.into(), work: 0, stratum_work: 0, grace_work: 0, credits: 0, last_ts, carry }
     }
 
     /// A miner who left with less than the floor is paid once it has been gone long enough.
@@ -982,7 +1019,15 @@ mod tests {
         let old = now - 30 * 86_400;
         let miners = vec![
             miner("a", 99),
-            MinerStat { identity: "slow".into(), work: 1, stratum_work: 0, credits: 1, last_ts: old, carry: 20_000 },
+            MinerStat {
+                identity: "slow".into(),
+                work: 1,
+                stratum_work: 0,
+                grace_work: 0,
+                credits: 1,
+                last_ts: old,
+                carry: 20_000,
+            },
             gone("crumb", 9_999, old),
             gone("bad-name", 50_000, old),
         ];
@@ -1032,4 +1077,178 @@ mod tests {
         assert_eq!(s.payees.iter().map(|x| x.identity.as_str()).collect::<Vec<_>>(), ["a"]);
     }
 
+    fn miner_grace(id: &str, work: u64, stratum: u64, grace: u64) -> MinerStat {
+        MinerStat {
+            identity: id.into(),
+            work,
+            stratum_work: stratum,
+            grace_work: grace,
+            credits: 1,
+            last_ts: 0,
+            carry: 0,
+        }
+    }
+
+    /// The donation endpoint: stratum work is taken whole, grace work pays the old fee, and
+    /// both feed the DATUM rebate at their own rate.
+    #[test]
+    fn grace_work_is_charged_the_grace_fee_not_the_stratum_fee() {
+        let p = SplitParams {
+            fee_bps: 0,
+            stratum_fee_bps: 10_000,
+            datum_rebate_bps: 5_000,
+            grace_fee_bps: 2_500,
+            grace_rebate_bps: 1_250,
+            min_payout: 1,
+            ..SplitParams::default()
+        };
+        let miners = vec![
+            miner_grace("datum", 600, 0, 0),
+            miner_grace("donor", 200, 200, 0),
+            miner_grace("failover", 200, 200, 200),
+        ];
+        let s = compute(miners, 1_000, 1_000_000, &p, 0, 0, script);
+        let paid = |id: &str| s.payees.iter().find(|x| x.identity == id).map(|x| x.sats);
+        assert_eq!(paid("datum"), Some(600_000));
+        assert_eq!(paid("failover"), Some(150_000), "200k of work value less 25%");
+        assert_eq!(paid("donor"), None, "all of it is the fee");
+        assert!(s.unpaid.is_empty(), "nothing earned is nothing to defer");
+        assert_eq!(s.fee_sats, 200_000 + 50_000);
+        assert_eq!(s.pool_sats, 250_000);
+        // 50 points of the donor's 200k and 12.5 points of the failover's, all to DATUM work
+        assert_eq!(s.rebate_credits, vec![("datum".to_string(), 125_000)]);
+        assert_eq!((s.rebate_sats, s.rebate_deferred), (125_000, 0));
+    }
+
+    /// A miner part-way through: some of its stratum work was done in grace, some after.
+    #[test]
+    fn one_miner_can_hold_all_three_classes() {
+        let p = SplitParams {
+            fee_bps: 0,
+            stratum_fee_bps: 10_000,
+            datum_rebate_bps: 5_000,
+            grace_fee_bps: 2_500,
+            grace_rebate_bps: 1_250,
+            min_payout: 1,
+            ..SplitParams::default()
+        };
+        // 100 DATUM, 400 stratum of which 300 in grace
+        let s =
+            compute(vec![miner_grace("mixed", 500, 400, 300), miner("datum", 500)], 1_000, 1_000_000, &p, 0, 0, script);
+        let paid = |id: &str| s.payees.iter().find(|x| x.identity == id).unwrap().sats;
+        assert_eq!(paid("mixed"), 100_000 + 225_000);
+        assert_eq!(paid("datum"), 500_000);
+        assert_eq!(s.fee_sats, 100_000 + 75_000);
+        // rebate pot 50_000 + 37_500, over 600 DATUM work
+        assert_eq!(s.rebate_sats, 87_499, "each credit is floored; the odd sat stays with the pool");
+        let credit = |id: &str| s.rebate_credits.iter().find(|c| c.0 == id).unwrap().1;
+        assert_eq!((credit("mixed"), credit("datum")), (14_583, 72_916));
+        assert_eq!(s.pool_sats + s.paid_sats(), 1_000_000);
+    }
+
+    /// Before the stratum fee is raised the grace fee equals it, and tagging work as grace
+    /// must change nobody's output: the build can go in ahead of the fee change.
+    #[test]
+    fn a_grace_fee_equal_to_the_stratum_fee_changes_nothing() {
+        let p = SplitParams {
+            fee_bps: 0,
+            stratum_fee_bps: 2_500,
+            datum_rebate_bps: 1_250,
+            grace_fee_bps: 2_500,
+            grace_rebate_bps: 1_250,
+            min_payout: 1,
+            ..SplitParams::default()
+        };
+        let tagged = vec![miner_grace("a", 700, 300, 300), miner_grace("b", 200, 200, 50), miner("c", 100)];
+        let plain: Vec<MinerStat> = tagged.iter().cloned().map(|m| MinerStat { grace_work: 0, ..m }).collect();
+        let (mut x, y) = (
+            compute(tagged, 1_000, 312_500_000, &p, 7_777, 0, script),
+            compute(plain, 1_000, 312_500_000, &p, 7_777, 0, script),
+        );
+        // the two rebate terms are floored separately, so the pot may differ by one sat
+        assert!(y.rebate_sats.abs_diff(x.rebate_sats) <= 1 + x.rebate_credits.len() as u64, "{x:?}\n{y:?}");
+        x.rebate_credits = y.rebate_credits.clone();
+        x.rebate_sats = y.rebate_sats;
+        assert_eq!(x, y);
+    }
+
+    /// With no grace work in the window the grace knobs are not read at all.
+    #[test]
+    fn grace_knobs_are_inert_without_grace_work() {
+        let base = SplitParams {
+            fee_bps: 0,
+            stratum_fee_bps: 10_000,
+            datum_rebate_bps: 0,
+            min_payout: 1,
+            ..SplitParams::default()
+        };
+        let with = SplitParams { grace_fee_bps: 2_500, grace_rebate_bps: 1_250, ..base.clone() };
+        let miners = vec![miner_stratum("s", 300), miner("d", 700)];
+        assert_eq!(
+            compute(miners.clone(), 1_000, 312_500_000, &base, 5_000, 0, script),
+            compute(miners, 1_000, 312_500_000, &with, 5_000, 0, script)
+        );
+    }
+
+    /// Any mix of classes and fees up to 100%: outputs never exceed the value, no stratum
+    /// work is paid more than its fee class allows, and the rebate goes only to DATUM work.
+    #[test]
+    fn grace_conservation_fuzz() {
+        let mut seed = 0x243f_6a88_85a3_08d3u64;
+        let mut rnd = |n: u64| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed % n
+        };
+        for _ in 0..3_000 {
+            let n = 1 + rnd(30) as usize;
+            let mut miners = Vec::new();
+            for i in 0..n {
+                let work = 1 + rnd(1_000_000);
+                let sw = match rnd(3) {
+                    0 => 0,
+                    1 => work,
+                    _ => rnd(work + 1),
+                };
+                let gw = match rnd(3) {
+                    0 => 0,
+                    1 => sw,
+                    _ => rnd(sw + 1),
+                };
+                miners.push(miner_grace(&format!("m{i}"), work, sw, gw));
+            }
+            let total: u64 = miners.iter().map(|m| m.work).sum();
+            let value = 100_000 + rnd(400_000_000);
+            let stratum = if rnd(3) == 0 { 10_000 } else { 1 + rnd(10_000) as u32 };
+            let grace = rnd(u64::from(stratum) + 1) as u32;
+            let p = SplitParams {
+                fee_bps: 0,
+                stratum_fee_bps: stratum,
+                datum_rebate_bps: rnd(u64::from(stratum) + 1) as u32,
+                grace_fee_bps: grace,
+                grace_rebate_bps: rnd(u64::from(grace) + 1) as u32,
+                min_payout: 1,
+                ..SplitParams::default()
+            };
+            let dbg = format!("{miners:?} total={total} value={value} p={p:?}");
+            let s = compute(miners.clone(), total, value, &p, 0, 0, script);
+            assert_eq!(s.pool_sats + s.paid_sats(), value, "{dbg}\n{s:?}");
+            assert!(s.rebate_sats <= s.fee_sats + n as u64, "the rebate comes out of the fee: {dbg}\n{s:?}");
+            for m in &miners {
+                let paid = s.payees.iter().find(|x| x.identity == m.identity).map_or(0, |x| x.sats);
+                let (sw, gw, dw) = classes(m);
+                assert_eq!(sw + gw + dw, m.work);
+                let most = u128::from(value)
+                    * (u128::from(sw) * u128::from(10_000 - stratum)
+                        + u128::from(gw) * u128::from(10_000 - grace)
+                        + u128::from(dw) * 10_000)
+                    / u128::from(total)
+                    / 10_000;
+                assert_eq!(u128::from(paid), most, "{dbg}\n{s:?}");
+                let credited = s.rebate_credits.iter().any(|c| c.0 == m.identity);
+                assert!(!credited || dw > 0, "stratum work, in grace or not, earns no DATUM rebate: {dbg}");
+            }
+        }
+    }
 }

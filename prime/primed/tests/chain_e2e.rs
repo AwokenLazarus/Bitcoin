@@ -303,7 +303,6 @@ fn a_found_block_is_booked_when_seen_and_settled_when_the_node_has_it() {
     assert_eq!(st["window"]["carry_total_sats"], 0, "{st}");
 }
 
-
 /// Wait for the Prime to answer a payout request; returns the answer once `done` accepts it.
 fn payout_answer(p: &Primed, id: &str, done: impl Fn(&serde_json::Value) -> bool) -> serde_json::Value {
     let path = p.dir.join("payouts").join(format!("{id}.json"));
@@ -366,7 +365,8 @@ fn a_stale_balance_is_paid_by_the_coinbase_or_by_hand_and_never_twice() {
     let st = settled_stats(&primed);
     let stale = &st["window"]["stale"];
     assert_eq!(stale["after_days"], 7, "{stale}");
-    let ids: Vec<&str> = stale["balances"].as_array().unwrap().iter().map(|b| b["identity"].as_str().unwrap()).collect();
+    let ids: Vec<&str> =
+        stale["balances"].as_array().unwrap().iter().map(|b| b["identity"].as_str().unwrap()).collect();
     assert_eq!(ids, [left, "not-an-address"], "{stale}");
     assert_eq!(stale["balances"][0]["payable"], true);
     assert_eq!(stale["balances"][1]["payable"], false);
@@ -425,7 +425,10 @@ fn a_stale_balance_is_paid_by_the_coinbase_or_by_hand_and_never_twice() {
     let released = payout_answer(&primed, "batch-1", |v| v["status"] == "released");
     assert_eq!(released["released_sats"], 499_226);
     let st = settled_stats(&primed);
-    assert_eq!((st["window"]["stale"]["held_sats"].as_u64(), st["window"]["carry_total_sats"].as_u64()), (Some(0), Some(949_226)));
+    assert_eq!(
+        (st["window"]["stale"]["held_sats"].as_u64(), st["window"]["carry_total_sats"].as_u64()),
+        (Some(0), Some(949_226))
+    );
 
     // held again and really paid: off the books for good
     payout_request(&primed, "batch-2", serde_json::json!({"action": "hold", "entries": [[left, 499_226]]}));
@@ -436,11 +439,15 @@ fn a_stale_balance_is_paid_by_the_coinbase_or_by_hand_and_never_twice() {
     let paid = payout_answer(&primed, "batch-2", |v| v["status"] == "paid");
     assert_eq!(paid["paid_sats"], 499_226, "{paid}");
     let st = settled_stats(&primed);
-    assert_eq!((st["window"]["stale"]["held_sats"].as_u64(), st["window"]["carry_total_sats"].as_u64()), (Some(0), Some(450_000)));
+    assert_eq!(
+        (st["window"]["stale"]["held_sats"].as_u64(), st["window"]["carry_total_sats"].as_u64()),
+        (Some(0), Some(450_000))
+    );
     let log = std::fs::read_to_string(primed.dir.join("payouts/payouts.jsonl")).unwrap();
     assert!(log.lines().count() >= 4, "every change is on the record:\n{log}");
     // and it survives a restart: window.json has no carry for it and no hold
-    let meta: serde_json::Value = serde_json::from_slice(&std::fs::read(primed.dir.join("window.json")).unwrap()).unwrap();
+    let meta: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(primed.dir.join("window.json")).unwrap()).unwrap();
     assert!(meta["carry"].get(left).is_none(), "{meta}");
     assert!(meta.get("holds").is_none(), "{meta}");
 }

@@ -8,6 +8,36 @@
 # Refuse stock empty-first / size-class gateways. Hello UA must be lazarus-gateway*
 # or contain lazarus-split. Lazarus production sets this true.
 # require-split-gateway = false
+#
+# Gateway builds, by git-hash prefix (7 to 40 hex digits), that hand every miner coinbase
+# section 0 (the whole reward to the one script they were configured with) whatever split
+# they hold, so every block they find owes the window the whole reward. A session whose hello
+# (v0.4.1-beta/<hash>) names one is configured with the gateway's own payout script once its
+# first 16 shares all name that one payout, and left there while no other payout mines on it:
+# its work becomes its own solo work, accepted but not credited in the window, and a find owes
+# nobody. A second payout on the session puts it back on the pool for the rest of the session.
+# Its operator loses TIDES credit and takes solo variance; the pool stops owing make-goods.
+# A build with local changes (<hash>+), a lazarus-split UA and the house gateway
+# are never matched; an entry that is not 7-40 hex digits matches nothing. Empty (default):
+# nothing is held. The builds known to do this are CONVOY commits from c61c2e7 up to, not
+# including, 155b6bf. The ones seen live (beb9461 is not in the published history):
+# held-split-builds = ["e894b8a", "f74c22a", "2fea7e5", "57f1aee", "beb9461"]
+#
+# Hold a class-limited CONVOY gateway's coinbasers to the payee bytes its smallest size class
+# keeps, learned per session from its own Partial shares (the same bytes on 3 coinbasers) and
+# learned again six hours after it was last set. The class then keeps the whole list, a block
+# found on it is a full split, and the payees that did not fit wait in carry instead of a
+# make-good. Only CONVOY-generation C gateways; never lazarus-gateway, lazarus-split, ratum, the
+# house gateway or a held-split build. Off (default): every reply is what it always was.
+# BEFORE TURNING IT ON the fee wallet must hold back the carry these blocks record in
+# carry_reserved_sats, or it sweeps miners' money as fee: see README, "Class budgets". Once it
+# does, say so with class-budget-fee-wallet-reserves = true; class-budget without that is
+# ignored, with a warning at startup.
+# class-budget = false
+# class-budget-fee-wallet-reserves = false
+# No reply is held to a class budget while carry on the books is at or over this many sats;
+# they are again once it is back under three quarters of it. Default 5 XBT.
+# class-budget-carry-ceiling = 500000000
 
 # DATUM listener gateways connect to.
 listen = "0.0.0.0:28915"
@@ -61,6 +91,28 @@ stratum-fee-bps = 1000
 # a gateway too small for a given coinbase is credited just the same. Must not exceed
 # stratum-fee-bps. 0 turns it off.
 datum-rebate-bps = 500
+
+# Grace for an address that starts on the public stratum, so a miner whose own gateway is down
+# is not charged a donation-level stratum-fee-bps while it fails over. For this many hours from
+# the address's first stratum share, its stratum work pays stratum-grace-fee-bps (and
+# stratum-grace-rebate-bps of it goes to DATUM work) instead. An address that has had DATUM work
+# here gets stratum-grace-datum-hours. After stratum-grace-rearm-hours off the public stratum the
+# next share starts a new grace (0: one grace per address). stratum-grace-epoch (unix time) is when
+# the clock is taken to have started for addresses already on stratum when this is first switched on.
+# Off unless stratum-grace-hours is set.
+# stratum-grace-hours = 24
+# stratum-grace-datum-hours = 96
+# stratum-grace-fee-bps = 2500
+# stratum-grace-rebate-bps = 1250
+# stratum-grace-rearm-hours = 168
+# stratum-grace-epoch = 0
+
+# Another pool's stratum front: a gateway that pool runs to relay its own stratum hashers here as
+# if they were DATUM miners. Its work is charged stratum-fee-bps with no grace, and earns none of
+# the DATUM rebate. By gateway key (16 or more hex digits, as blocked-gateways) or by the address
+# it connects from.
+# stratum-front-gateways = []
+# stratum-front-ips = []
 # Same, out of each dedicated-solo block's reward: when a block whose coinbase is tagged
 # solo-coinbase-tag and pays the pool script lands on chain, this share of its value is
 # credited to the DATUM miners then in the window. Off: dedicated solo keeps its own 5% fee

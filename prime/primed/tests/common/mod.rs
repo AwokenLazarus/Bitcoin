@@ -54,7 +54,16 @@ pub fn start_primed_seeded(pool: &Identity, node: &str, seed: impl FnOnce(&std::
     seed(&dir);
     std::fs::write(dir.join("prime.key"), format!("{}\n", hex::encode(pool.secret_bytes()))).unwrap();
     let listen = free_port();
-    let stats = free_port();
+    // Asked for one after the other, the kernel can hand out the port it just freed: the stats
+    // listener then fails to bind and a stats request lands on the DATUM listener, which resets it.
+    let stats = loop {
+        let p = free_port();
+        if p != listen {
+            break p;
+        }
+    };
+    // a test that sets its own floor says so in `node`; TOML refuses a key given twice
+    let min_diff = if node.contains("min-diff") { "" } else { "min-diff = 1" };
     let cfg = format!(
         r#"
 listen = "127.0.0.1:{listen}"
@@ -62,7 +71,7 @@ stats-listen = "127.0.0.1:{stats}"
 data-dir = "{dir}"
 payout-address = "{POOL_ADDRESS}"
 fee-bps = 50
-min-diff = 1
+{min_diff}
 {node}
 "#,
         dir = dir.display()
@@ -124,12 +133,25 @@ pub struct Gateway {
 
 impl Gateway {
     pub fn connect(port: u16, pool: &Identity, identity: &Identity) -> Gateway {
+        Gateway::connect_as(port, pool, identity, "replay-test/0.1").0
+    }
+
+    /// A session whose hello says `ua`, and the configure the Prime opened it with.
+    pub fn connect_as(port: u16, pool: &Identity, identity: &Identity, ua: &str) -> (Gateway, Vec<u8>) {
+        Gateway::connect_with(port, pool, identity, ua, &[0u8; 16])
+    }
+
+    /// [`Gateway::connect_as`] with a CONVOY-generation hello (the resume marker, no token).
+    pub fn connect_convoy_as(port: u16, pool: &Identity, identity: &Identity, ua: &str) -> (Gateway, Vec<u8>) {
+        Gateway::connect_with(port, pool, identity, ua, &handshake::convoy_hello_extension(None))
+    }
+
+    fn connect_with(port: u16, pool: &Identity, identity: &Identity, ua: &str, pad: &[u8]) -> (Gateway, Vec<u8>) {
         let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
         stream.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
         let session = Identity::generate();
         let seed = 0x0badc0deu32;
-        let hello =
-            handshake::build_client_hello(&pool.box_pk(), identity, &session, "replay-test/0.1", seed, &[0u8; 16]);
+        let hello = handshake::build_client_hello(&pool.box_pk(), identity, &session, ua, seed, pad);
         let mut initial = KeyStream(CLIENT_INITIAL_KEY);
         let mut h = Header::new(cmd::HELLO, hello.len());
         h.sealed = true;
@@ -154,7 +176,7 @@ impl Gateway {
         // configure arrives first; consume it so the channel nonces stay in step
         let cfg = g.next_mining();
         assert_eq!(cfg[0], mining::SUB_CONFIGURE, "first mining message is the configure");
-        g
+        (g, cfg)
     }
 
     pub fn send_mining(&mut self, plain: &[u8]) {
@@ -204,7 +226,11 @@ impl Gateway {
     }
 
     /// [`Gateway::request_coinbaser`], returning the outputs the Prime issued as well.
-    pub fn request_coinbaser_outputs(&mut self, value: u64, prev_hash: &Hash) -> (u8, Vec<datum_wire::coinbaser::Output>) {
+    pub fn request_coinbaser_outputs(
+        &mut self,
+        value: u64,
+        prev_hash: &Hash,
+    ) -> (u8, Vec<datum_wire::coinbaser::Output>) {
         let mut m = vec![mining::SUB_COINBASER_REQUEST];
         m.extend_from_slice(&value.to_le_bytes());
         m.extend_from_slice(prev_hash);
@@ -217,6 +243,30 @@ impl Gateway {
                 let len = u32::from_le_bytes(m[9..13].try_into().unwrap()) as usize;
                 return datum_wire::coinbaser::decode_v2(&m[13..13 + len]).unwrap();
             }
+        }
+    }
+
+    /// [`Gateway::request_coinbaser_outputs`], with every mining message the Prime sent ahead of
+    /// the reply (a configure, say).
+    pub fn request_coinbaser_seeing(
+        &mut self,
+        value: u64,
+        prev_hash: &Hash,
+    ) -> (Vec<Vec<u8>>, u8, Vec<datum_wire::coinbaser::Output>) {
+        let mut m = vec![mining::SUB_COINBASER_REQUEST];
+        m.extend_from_slice(&value.to_le_bytes());
+        m.extend_from_slice(prev_hash);
+        m.push(mining::END);
+        self.send_mining(&m);
+        let mut before = Vec::new();
+        loop {
+            let m = self.next_mining();
+            if m[0] == mining::SUB_COINBASER_REPLY {
+                let len = u32::from_le_bytes(m[9..13].try_into().unwrap()) as usize;
+                let (id, outputs) = datum_wire::coinbaser::decode_v2(&m[13..13 + len]).unwrap();
+                return (before, id, outputs);
+            }
+            before.push(m);
         }
     }
 

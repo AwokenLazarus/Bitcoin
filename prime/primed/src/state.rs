@@ -2,7 +2,7 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::net::IpAddr;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -184,6 +184,27 @@ pub struct ClientInfo {
     /// Accepted shares on a full job paying only the gateway. Not in the window.
     pub solo_full_shares: u64,
     pub solo_full_work: u64,
+    /// Shares refused because the block they build on is one our node rejected or never saw.
+    pub dead_parent_shares: u64,
+    /// Shares refused because this gateway's template was found invalid (`template_fault`).
+    pub faulted_shares: u64,
+    /// Why this gateway's work is not being credited, while that lasts.
+    pub template_fault: Option<String>,
+    /// The gateway's build is in `held-split-builds`: once its shares show one payout it is left
+    /// paying itself while no other mines on it, and its full jobs count in `solo_full_shares`,
+    /// not the window. Left out of the row when false, so a Prime without the key writes the
+    /// rows it always has.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub held_split: bool,
+    /// The payee bytes `class-budget` holds this session's coinbasers to, and null until its
+    /// shares have shown one (see `session::ClassBudget`). Both fields are left out of the row
+    /// for a session the key does not apply to, so a Prime without it writes the rows it always
+    /// has.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub class_budget_bytes: Option<Option<usize>>,
+    /// Coinbasers issued to this session held to that budget.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub class_budget_replies: Option<u64>,
 }
 
 #[derive(Default)]
@@ -227,6 +248,18 @@ pub struct Totals {
     pub solo_full_work: AtomicU64,
     /// Sats a split coinbase sent to the gateway script instead of the pool remainder.
     pub remainder_to_gateway_sats: AtomicU64,
+    /// Shares refused because they build on a block our node rejected or never saw.
+    pub dead_parent_shares: AtomicU64,
+    /// Shares refused because their gateway's template was found invalid.
+    pub faulted_shares: AtomicU64,
+    /// Gateway templates checked with our node (`getblocktemplate` proposal), and how many failed.
+    pub template_checks: AtomicU64,
+    pub template_checks_failed: AtomicU64,
+    /// Coinbasers held to a session's class budget (`class-budget`).
+    pub class_budget_replies: AtomicU64,
+    /// Coinbasers a session's class budget would have held, issued at the pool's budget instead
+    /// because carry was over `class-budget-carry-ceiling`.
+    pub class_budget_ceiling_replies: AtomicU64,
 }
 
 impl Totals {
@@ -261,6 +294,27 @@ pub struct CoinbaserBase {
 impl CoinbaserBase {
     pub fn script_for(&self, identity: &str) -> Option<Vec<u8>> {
         self.scripts.get(identity).cloned()
+    }
+
+    /// All the carry on the books at snapshot time: `miners` holds every identity with any.
+    pub fn total_carry(&self) -> u64 {
+        self.miners.iter().fold(0u64, |a, m| a.saturating_add(m.carry))
+    }
+}
+
+/// Whether class budgets are held off, given whether they were and the carry on the books.
+///
+/// They stop at the ceiling and start again only under three quarters of it. A capped block adds
+/// about a quarter of a coinbase to carry (0.8 XBT), a quarter of the 5 XBT default is more than
+/// that, and so one block's tail landing or being paid out does not turn them back and forth.
+/// A ceiling of 0 holds them off for good.
+pub fn class_budget_held_off(held_off: bool, carry: u64, ceiling: u64) -> bool {
+    if ceiling == 0 {
+        true
+    } else if held_off {
+        carry > ceiling - ceiling / 4
+    } else {
+        carry >= ceiling
     }
 }
 
@@ -394,6 +448,19 @@ impl Connections {
     }
 }
 
+/// Why a gateway is being refused, until when (unix seconds), and how many rejected blocks it
+/// has now cost the window. The entry outlives the refusal: an expired one is what lets the
+/// gateway back in while still remembering that it was here before.
+#[derive(Clone, Debug)]
+pub struct Quarantine {
+    pub until: u64,
+    pub reason: String,
+    pub height: u32,
+    pub strikes: u32,
+    /// When the last rejected block arrived, for forgetting old strikes.
+    pub last: u64,
+}
+
 pub struct Shared {
     pub cfg: Config,
     pub pool: Identity,
@@ -404,6 +471,10 @@ pub struct Shared {
     pub blocks: Mutex<Vec<BlockRecord>>,
     pub block_log: BlockLog,
     pub clients: Mutex<HashMap<u64, ClientInfo>>,
+    /// Gateway identity key (full hex) -> when its refusal lapses, and why. Kept in memory:
+    /// a Prime restart gives a gateway another chance, which is the right way round — the
+    /// operator may have upgraded in between, and one lost block buys the next 24 hours.
+    pub quarantine: Mutex<HashMap<String, Quarantine>>,
     pub seen: Mutex<SeenShares>,
     pub connections: Mutex<Connections>,
     pub tip_tx: watch::Sender<Option<Tip>>,
@@ -425,6 +496,13 @@ pub struct Shared {
     /// Last known payout script per gateway signing key (64 hex chars). Survives reconnect
     /// so the first empty job of a returning gateway already pays them.
     pub gateway_payouts: Mutex<HashMap<String, GatewayPayout>>,
+    /// Parents gateways build on that are not our tip, as our node judges them.
+    pub parents: crate::validity::ParentBook,
+    /// Gateways whose templates our node found invalid; their shares earn nothing until one passes.
+    pub faults: crate::validity::Faults,
+    /// Carry reached `class-budget-carry-ceiling` and has not yet fallen back far enough: no
+    /// reply is held to a class budget. See [`Shared::class_budget_open`].
+    pub class_budget_held_off: AtomicBool,
 }
 
 /// What Prime last learned as a gateway's own payout, persisted in `gateway-scripts.json`.
@@ -482,14 +560,139 @@ impl Shared {
         base
     }
 
-    /// Forget the shared coinbaser snapshot: balances were moved by hand, and the next
-    /// coinbaser must not be priced off what they were.
+    /// Forget the shared coinbaser snapshot: balances moved (a block paid carry, a confirmation
+    /// or an orphan booked it, or they were moved by hand), and the next coinbaser must not be
+    /// priced off what they were. Call it after the ledger lock is released: `coinbaser_base`
+    /// takes this lock and then the ledger's, so holding them the other way round can deadlock.
     pub fn drop_coinbaser_base(&self) {
         *self.coinbaser_base.lock().unwrap_or_else(|e| e.into_inner()) = None;
     }
 
+    /// Take a found block's paid carry and drawn rebate off the books, and stop the coinbaser
+    /// snapshot from offering them again.
+    ///
+    /// The snapshot lives up to [`COINBASER_BASE_TTL`], and every gateway asks for a coinbaser
+    /// the moment the tip moves, which is exactly when a found block has just been booked. A
+    /// reply priced off the snapshot from before the debit would hand the same carry out a second
+    /// time, out of the pool's remainder, in whatever block that split is mined into.
+    /// Returns the pool's carry total and the number of holders after the debit.
+    pub fn book_block_debits(
+        &self,
+        hash: &str,
+        carry_delta: &[(String, i64)],
+        books: &mut tides::Books,
+    ) -> (u64, usize) {
+        // The snapshot lock before the ledger, the same order as `coinbaser_base`, and the
+        // slot cleared before either is released: a reply must not be priced off the pre-debit
+        // snapshot in the gap between the two.
+        let mut slot = self.coinbaser_base.lock().unwrap_or_else(|e| e.into_inner());
+        let after = {
+            let mut ledger = self.ledger.lock().unwrap_or_else(|e| e.into_inner());
+            ledger.book_debits(carry_delta, books);
+            ledger.note_debit_applied(hash);
+            if let Err(e) = ledger.sync() {
+                log::error!("ledger sync after booking block {hash} failed: {e}");
+            }
+            (ledger.window.total_carry(), ledger.window.carries().len())
+        };
+        *slot = None;
+        after
+    }
+
+    /// Whether a coinbaser may be held to a session's class budget with `carry` sats of carry on
+    /// the books. The carry a capped block defers goes on the books when the block confirms, so
+    /// this lags the blocks found by that many.
+    pub fn class_budget_open(&self, carry: u64) -> bool {
+        let ceiling = self.cfg.class_budget_carry_ceiling;
+        let was = self.class_budget_held_off.load(Ordering::Relaxed);
+        let now = class_budget_held_off(was, carry, ceiling);
+        if now != was
+            && self.class_budget_held_off.compare_exchange(was, now, Ordering::Relaxed, Ordering::Relaxed).is_ok()
+        {
+            if now {
+                log::warn!(
+                    "class-budget: carry on the books is {carry} sats, at or over class-budget-carry-ceiling \
+                     ({ceiling}): coinbasers go out at the pool's budget, and blocks found on a class-limited \
+                     gateway are Partial and owe, until carry is back under {}",
+                    ceiling - ceiling / 4
+                );
+            } else {
+                log::info!("class-budget: carry on the books is down to {carry} sats; class budgets apply again");
+            }
+        }
+        !now
+    }
+
     pub fn gateway_scripts_path(&self) -> std::path::PathBuf {
         self.cfg.data_dir.join("gateway-scripts.json")
+    }
+
+    /// The live refusal for this gateway, if any. Expired entries are dropped as they are read.
+    pub fn quarantined(&self, key_hex: &str) -> Option<Quarantine> {
+        // Matched as a prefix from 16 hex digits (the 8 bytes the logs and stats.json show as
+        // `gateway=`), because that is the only form an operator ever sees. Unlike
+        // `house-gateways` a wrong guess here costs a gateway its connection, not the pool its
+        // money, and the operator picked the entry.
+        let blocked = self.cfg.blocked_gateways.iter().any(|k| {
+            let k = k.trim();
+            k.len() >= 16 && key_hex.len() >= k.len() && key_hex[..k.len()].eq_ignore_ascii_case(k)
+        });
+        if blocked {
+            return Some(Quarantine {
+                until: u64::MAX,
+                reason: "listed in blocked-gateways".into(),
+                height: 0,
+                strikes: 0,
+                last: now(),
+            });
+        }
+        let key = key_hex.to_ascii_lowercase();
+        let q = self.quarantine.lock().unwrap_or_else(|e| e.into_inner());
+        // An expired entry is left where it is: the gateway is admitted again (it may well have
+        // upgraded in the meantime, which is the only way back in that Prime can offer), and
+        // what it leaves behind is the strike count for the next one.
+        q.get(&key).filter(|entry| entry.until > now()).cloned()
+    }
+
+    /// True when this key has a stored quarantine whose window has run out. The gateway is
+    /// admitted again; a leftover template fault from the same incident should be dropped.
+    pub fn quarantine_lapsed(&self, key_hex: &str) -> bool {
+        let key = key_hex.to_ascii_lowercase();
+        let q = self.quarantine.lock().unwrap_or_else(|e| e.into_inner());
+        q.get(&key).is_some_and(|e| crate::validity::quarantine_has_lapsed(e.until, now()))
+    }
+
+    /// Refuse this gateway: `quarantine_minutes` doubled per strike, capped at
+    /// `quarantine_max_hours`. Returns the seconds it is refused for, or None when the feature
+    /// is off.
+    pub fn quarantine_gateway(&self, key_hex: &str, height: u32, reason: &str) -> Option<u64> {
+        let first = self.cfg.quarantine_minutes.checked_mul(60)?;
+        if first == 0 {
+            return None;
+        }
+        let cap = self.cfg.quarantine_max_hours.saturating_mul(3600).max(first);
+        let forget = self.cfg.quarantine_forget_hours.saturating_mul(3600);
+        let ts = now();
+        let key = key_hex.to_ascii_lowercase();
+        let mut q = self.quarantine.lock().unwrap_or_else(|e| e.into_inner());
+        q.retain(|_, e| ts.saturating_sub(e.last) < forget.max(3600));
+        let strikes = q
+            .get(&key)
+            .filter(|e| ts.saturating_sub(e.last) < forget.max(3600))
+            .map_or(1, |e| e.strikes.saturating_add(1));
+        let span = first.saturating_mul(1u64 << (strikes - 1).min(20)).min(cap);
+        q.insert(key, Quarantine { until: ts + span, reason: reason.to_string(), height, strikes, last: ts });
+        Some(span)
+    }
+
+    /// Every gateway currently refused, for stats.json.
+    pub fn quarantine_list(&self) -> Vec<(String, Quarantine)> {
+        let ts = now();
+        let q = self.quarantine.lock().unwrap_or_else(|e| e.into_inner());
+        let mut out: Vec<(String, Quarantine)> =
+            q.iter().filter(|(_, e)| e.until > ts).map(|(k, e)| (k.clone(), e.clone())).collect();
+        out.sort_by_key(|(k, _)| k.clone());
+        out
     }
 
     pub fn lookup_gateway_script(&self, key_hex: &str) -> Option<Vec<u8>> {
@@ -561,6 +764,119 @@ impl Shared {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A real `Shared` over a temporary data dir, for tests of what sessions and the node poller
+    /// do to it. Nothing here opens a socket: the RPC client only connects when called.
+    fn test_shared(tag: &str) -> (Arc<Shared>, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!("primed-state-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let toml = dir.join("prime.toml");
+        std::fs::write(
+            &toml,
+            format!(
+                "listen = \"127.0.0.1:0\"\nstats-listen = \"127.0.0.1:0\"\ndata-dir = \"{}\"\n\
+                 payout-address = \"bc1qk3kxstl02hqnhynwtx0zws7merw6ynut52vtzs\"\nprime-id = 1\n\
+                 network = \"mainnet\"\nrpc = \"http://127.0.0.1:1\"\nrpc-user = \"u\"\nrpc-password = \"p\"\n",
+                dir.display()
+            ),
+        )
+        .unwrap();
+        let cfg = Config::load(&toml).unwrap();
+        let (tip_tx, tip) = watch::channel(None);
+        let (notify, _) = broadcast::channel(4);
+        let shared = Arc::new(Shared {
+            split_params: SplitParams {
+                fee_bps: 0,
+                stratum_fee_bps: 0,
+                datum_rebate_bps: 0,
+                grace_fee_bps: 0,
+                grace_rebate_bps: 0,
+                min_payout: 546,
+                max_outputs: 511,
+                output_budget_bytes: 13_927,
+                stale_after: 0,
+                stale_min_payout: 10_000,
+                stale_max_outputs: 25,
+            },
+            pool_script: address::to_script(&cfg.payout_address, Network::Mainnet).unwrap(),
+            pool: Identity::generate(),
+            network: Network::Mainnet,
+            ledger: Mutex::new(Ledger::open(dir.join("ledger")).unwrap()),
+            blocks: Mutex::new(Vec::new()),
+            block_log: BlockLog::open(&dir),
+            clients: Mutex::new(Default::default()),
+            quarantine: Default::default(),
+            seen: Mutex::new(Default::default()),
+            connections: Mutex::new(Default::default()),
+            tip_tx,
+            tip,
+            notify,
+            rpc: Rpc::new("http://127.0.0.1:1", None, Some("u"), Some("p")).unwrap(),
+            refresh: Default::default(),
+            totals: Totals::default(),
+            started: Instant::now(),
+            started_ts: 0,
+            next_client_id: AtomicU64::new(1),
+            coinbaser_base: Mutex::new(None),
+            gateway_payouts: Mutex::new(Default::default()),
+            parents: Default::default(),
+            faults: crate::validity::Faults::with_ttl(cfg.quarantine_max_hours.saturating_mul(3600)),
+            class_budget_held_off: AtomicBool::new(false),
+            cfg,
+        });
+        (shared, dir)
+    }
+
+    fn carry_in(base: &CoinbaserBase, who: &str) -> u64 {
+        base.miners.iter().find(|m| m.identity == who).map_or(0, |m| m.carry)
+    }
+
+    /// Every gateway asks for a coinbaser as the tip moves, which is the second a found block is
+    /// booked. A snapshot from before the block's debits would offer the carry it just paid a
+    /// second time, out of the pool's remainder.
+    #[test]
+    fn carry_a_block_paid_is_not_offered_again_by_the_coinbaser_snapshot() {
+        let (shared, dir) = test_shared("carry");
+        let who = "bc1qpxcy2pgedcfccfpw0p9xpzm3edkgajmjl5xe02";
+        {
+            let mut ledger = shared.ledger.lock().unwrap();
+            ledger.credit(who, 1_000, 1, 100, tides::SOURCE_DATUM).unwrap();
+            ledger.book_credits(&[(who.to_string(), 40_000)], &mut tides::Books::new(0, 0));
+        }
+        let before = shared.coinbaser_base();
+        assert_eq!(carry_in(&before, who), 40_000);
+        // a found block paid it out, well inside the snapshot's lifetime
+        let (total, _) = shared.book_block_debits("test", &[(who.to_string(), -40_000)], &mut tides::Books::new(0, 0));
+        assert_eq!(total, 0);
+        let after = shared.coinbaser_base();
+        assert_eq!(carry_in(&after, who), 0, "the snapshot still offers carry the block already paid");
+        assert!(!Arc::ptr_eq(&before, &after));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Class budgets stop at the carry ceiling and start again only a quarter of it lower, so one
+    /// block's tail going onto the books or being paid off them does not turn them on and off.
+    #[test]
+    fn class_budgets_stop_at_the_carry_ceiling_and_resume_a_quarter_below_it() {
+        let c = 500_000_000u64;
+        assert!(!class_budget_held_off(false, c - 1, c));
+        assert!(class_budget_held_off(false, c, c));
+        assert!(class_budget_held_off(true, c - 1, c), "under the ceiling is not yet far enough");
+        assert!(class_budget_held_off(true, 375_000_001, c));
+        assert!(!class_budget_held_off(true, 375_000_000, c));
+        for (was, carry) in [(false, 0), (true, 0), (false, u64::MAX)] {
+            assert!(class_budget_held_off(was, carry, 0), "a ceiling of 0 holds them off for good");
+        }
+
+        let (shared, dir) = test_shared("ceiling");
+        assert!(shared.class_budget_open(0) && shared.class_budget_open(c - 1));
+        assert!(!shared.class_budget_open(c));
+        assert!(!shared.class_budget_open(400_000_000), "held off until well under it");
+        assert!(shared.class_budget_open(375_000_000));
+        assert!(shared.class_budget_open(c - 1));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     fn h(n: u64) -> Hash {
         let mut a = [0u8; 32];
@@ -784,5 +1100,69 @@ mod tests {
         assert!(c.admit(house, 16, 8).is_ok());
         assert!(c.admit(house, 16, 8).is_ok());
         assert_eq!(c.admit(house, 16, 8), Err("connection limit reached"));
+    }
+}
+
+#[cfg(test)]
+mod quarantine_tests {
+    /// The prefix rule `quarantined()` applies to `blocked-gateways`, on its own so it can be
+    /// checked without building a whole Shared.
+    fn blocked_by(entries: &[&str], key_hex: &str) -> bool {
+        entries.iter().any(|k| {
+            let k = k.trim();
+            k.len() >= 16 && key_hex.len() >= k.len() && key_hex[..k.len()].eq_ignore_ascii_case(k)
+        })
+    }
+
+    const KEY: &str = "1dbd27517242d90d3c4a5b6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f8091a2";
+
+    #[test]
+    fn the_sixteen_hex_an_operator_can_see_is_enough() {
+        assert!(blocked_by(&["1dbd27517242d90d"], KEY));
+        assert!(blocked_by(&["1DBD27517242D90D"], KEY), "case must not matter");
+        assert!(blocked_by(&[" 1dbd27517242d90d "], KEY), "a pasted line may carry spaces");
+        assert!(blocked_by(&[KEY], KEY), "the whole key still works");
+    }
+
+    #[test]
+    fn short_or_wrong_entries_block_nobody() {
+        assert!(!blocked_by(&["1dbd2751"], KEY), "8 hex is too little to name a gateway");
+        assert!(!blocked_by(&[""], KEY));
+        assert!(!blocked_by(&["157afbbef61a6cf4"], KEY), "a different gateway keeps mining");
+        assert!(!blocked_by(&[], KEY));
+    }
+}
+
+#[cfg(test)]
+mod quarantine_backoff_tests {
+    /// The doubling `quarantine_gateway` applies, separated from Shared so it can be checked
+    /// on its own: first_secs doubled per strike, capped.
+    fn span(first_secs: u64, cap_secs: u64, strikes: u32) -> u64 {
+        first_secs.saturating_mul(1u64 << (strikes - 1).min(20)).min(cap_secs.max(first_secs))
+    }
+
+    #[test]
+    fn an_upgraded_gateway_is_back_within_the_hour() {
+        // One rejected block, the operator upgrades: 60 minutes and it reconnects normally.
+        assert_eq!(span(3600, 86400, 1), 3600);
+    }
+
+    #[test]
+    fn a_gateway_that_was_not_upgraded_is_refused_for_longer_each_time() {
+        assert_eq!(span(3600, 86400, 2), 7200);
+        assert_eq!(span(3600, 86400, 3), 14400);
+        assert_eq!(span(3600, 86400, 5), 57600);
+    }
+
+    #[test]
+    fn the_refusal_stops_growing_at_the_cap_and_never_becomes_a_ban() {
+        assert_eq!(span(3600, 86400, 6), 86400);
+        assert_eq!(span(3600, 86400, 40), 86400, "no overflow, no permanent ban");
+        assert!(span(3600, 86400, 40) < u64::MAX);
+    }
+
+    #[test]
+    fn a_cap_below_the_first_refusal_does_not_shorten_it() {
+        assert_eq!(span(3600, 600, 1), 3600);
     }
 }

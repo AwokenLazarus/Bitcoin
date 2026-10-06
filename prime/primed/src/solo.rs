@@ -182,6 +182,9 @@ pub async fn scan(shared: &Shared, tip_height: u32) {
                 // then pays DATUM miners out of its own remainder.
                 let rebate = rebate_for(facts.value_sats, bps).min(facts.pool_sats);
                 let net = shared.network;
+                // Snapshot before the ledger, then clear it before releasing either: a reply
+                // must not still carry the rebate this solo block just paid out.
+                let mut slot = shared.coinbaser_base.lock().unwrap_or_else(|e| e.into_inner());
                 let (credits, after) = {
                     let mut ledger = shared.ledger.lock().unwrap();
                     // whatever was waiting for a DATUM miner goes out with this one
@@ -202,6 +205,8 @@ pub async fn scan(shared: &Shared, tip_height: u32) {
                     };
                     (credits, after)
                 };
+                *slot = None;
+                drop(slot);
                 let rec = SoloRebate {
                     ts: now(),
                     height,

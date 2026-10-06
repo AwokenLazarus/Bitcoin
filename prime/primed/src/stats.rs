@@ -83,6 +83,7 @@ pub fn build(shared: &Shared) -> Value {
 
     // the split a block would pay right now: how the UI shows each miner's expected payout
     let sample_value = 312_500_000u64;
+    let grace = shared.cfg.grace();
     let split = w.split(sample_value, &shared.split_params, ts as u32, |i| address::to_script(i, shared.network));
     let payouts: std::collections::HashMap<&str, u64> =
         split.payees.iter().map(|p| (p.identity.as_str(), p.sats)).collect();
@@ -100,6 +101,10 @@ pub fn build(shared: &Shared) -> Value {
                 "identity": m.identity,
                 "work": m.work,
                 "stratum_work": m.stratum_work,
+                // the part of stratum_work done inside the address's grace, and when its
+                // current grace ends (absent: never on the house stratum, or grace is off)
+                "grace_work": m.grace_work,
+                "stratum_grace_until": grace.enabled().then(|| ledger.grace.until(&m.identity, &grace)).flatten(),
                 "fee_path": if m.stratum_work * 2 > m.work { "stratum" } else { "datum" },
                 "credits": m.credits,
                 "share_percent": if w.total_work() > 0 { 100.0 * m.work as f64 / w.total_work() as f64 } else { 0.0 },
@@ -116,13 +121,15 @@ pub fn build(shared: &Shared) -> Value {
         })
         .collect();
 
-    let (blocks, finds, owed) = {
+    let (blocks, finds, owed, carry_reserved) = {
         let b = shared.blocks.lock().unwrap();
         let finds = tides::gateway_finds(&b);
         let blocks: Vec<Value> =
             b.iter().rev().take(100).map(|r| serde_json::to_value(r).unwrap_or(Value::Null)).collect();
         let owed: u64 = b.iter().filter(|r| !r.kind.starts_with("orphan")).map(|r| r.owed_sats).sum();
-        (blocks, finds, owed)
+        let carry_reserved: u64 =
+            b.iter().filter(|r| !r.kind.starts_with("orphan")).map(|r| r.carry_reserved_sats).sum();
+        (blocks, finds, owed, carry_reserved)
     };
     let found_total: u64 = finds.values().map(|f| f.found).sum();
     let clients: Vec<Value> = {
@@ -192,7 +199,7 @@ pub fn build(shared: &Shared) -> Value {
         .map(|(h, p)| (h.to_string(), p.parse::<u16>().unwrap_or(shared.cfg.listen.port())))
         .unwrap_or_else(|| (shared.cfg.advertise_address.clone(), shared.cfg.listen.port()));
 
-    json!({
+    let mut doc = json!({
         "ts": ts,
         "build": { "name": "primed", "version": env!("CARGO_PKG_VERSION") },
         "uptime_s": shared.started.elapsed().as_secs(),
@@ -208,6 +215,15 @@ pub fn build(shared: &Shared) -> Value {
             "stratum_fee_bps": shared.cfg.stratum_fee_bps,
             // share of the stratum fee rebated to DATUM work, and of solo rewards owed to it
             "datum_rebate_bps": shared.cfg.datum_rebate_bps,
+            // grace for an address that starts on the house stratum; hours 0 means none
+            "stratum_grace_hours": shared.cfg.stratum_grace_hours,
+            "stratum_grace_datum_hours": grace.datum_secs / 3_600,
+            "stratum_grace_fee_bps": shared.cfg.stratum_grace_fee_bps,
+            "stratum_grace_rebate_bps": shared.cfg.stratum_grace_rebate_bps,
+            "stratum_grace_rearm_hours": shared.cfg.stratum_grace_rearm_hours,
+            "stratum_grace_epoch": grace.epoch,
+            // how many gateways and addresses are listed as another pool's stratum front
+            "stratum_fronts": shared.cfg.stratum_front_gateways.len() + shared.cfg.stratum_front_ips.len(),
             "solo_rebate_bps": shared.cfg.solo_rebate_bps,
             "window_multiple": shared.cfg.window,
             "min_payout": shared.cfg.min_payout,
@@ -216,6 +232,17 @@ pub fn build(shared: &Shared) -> Value {
             "advertise": shared.cfg.advertise_address,
             "datum": { "host": host, "port": port, "pubkey": shared.pool.public_hex() },
         },
+        // Gateways currently refused because their own node built a block the chain rejected.
+        // Published so an operator can see why its gateway cannot connect, and when that lifts.
+        "refused_gateways": shared.quarantine_list().iter().map(|(key, q)| json!({
+            "gateway": &key[..key.len().min(16)],
+            "reason": q.reason,
+            "block": q.height,
+            "strikes": q.strikes,
+            "until_ts": q.until,
+            "minutes_left": q.until.saturating_sub(ts) / 60,
+            "fix": "upgrade Bitcoin Knots to 29.4.2 or later and reconnect",
+        })).collect::<Vec<_>>(),
         "node": tip.as_ref().map(|t| json!({
             "height": t.height, "tip": t.hash, "difficulty": t.difficulty, "tip_age_s": ts.saturating_sub(t.seen_ts),
         })).unwrap_or(Value::Null),
@@ -245,6 +272,9 @@ pub fn build(shared: &Shared) -> Value {
             // everything the pool is holding for miners under the floor, and for whom
             "carry_total_sats": w.total_carry(),
             "carry_holders": w.carries().len(),
+            // carry a coinbase paid twice, still to collect from later earnings
+            "carry_debt_sats": w.total_debt(),
+            "carry_debt_holders": w.debts().len(),
             // balances whose owners have stopped mining (`stale-after-days`), and carry set
             // aside for payments made by hand (`payouts/`): what the payout tool reads
             "stale": stale_doc(shared, w, ts),
@@ -276,6 +306,13 @@ pub fn build(shared: &Shared) -> Value {
             "solo_full_shares": t.solo_full_shares.load(Ordering::Relaxed),
             "solo_full_work": t.solo_full_work.load(Ordering::Relaxed),
             "remainder_to_gateway_sats": t.remainder_to_gateway_sats.load(Ordering::Relaxed),
+            // Work that could never have been a block, refused rather than credited
+            // (`validity.rs`): on a parent our node rejected or never saw, or from a gateway
+            // whose template our node found invalid.
+            "dead_parent_shares": t.dead_parent_shares.load(Ordering::Relaxed),
+            "faulted_shares": t.faulted_shares.load(Ordering::Relaxed),
+            "template_checks": t.template_checks.load(Ordering::Relaxed),
+            "template_checks_failed": t.template_checks_failed.load(Ordering::Relaxed),
             "block_candidates": found_total,
             "blocks_submitted": t.blocks_submitted.load(Ordering::Relaxed),
             "connections": t.connections.load(Ordering::Relaxed),
@@ -288,8 +325,28 @@ pub fn build(shared: &Shared) -> Value {
         "gateways": clients.len(),
         "connections_open": shared.connections.lock().unwrap().total(),
         "owed": owed,
+        "template_faults": shared.faults.all().into_iter().map(|(k, f)| serde_json::json!({"gateway": &k[..16.min(k.len())], "fault": f})).collect::<Vec<_>>(),
         "blocks": blocks,
-    })
+    });
+    // Only with `class-budget`, or once a block carries a class-budget reserve, so a Prime that
+    // has never had the key writes the document it always has.
+    if shared.cfg.class_budget || carry_reserved > 0 {
+        if let Some(o) = doc["totals"].as_object_mut() {
+            // coinbasers held to a session's class budget, and ones a budget would have held
+            // but for carry being over `class-budget-carry-ceiling` (`class_budget_held_off`)
+            o.insert("class_budget_replies".into(), json!(t.class_budget_replies.load(Ordering::Relaxed)));
+            o.insert(
+                "class_budget_ceiling_replies".into(),
+                json!(t.class_budget_ceiling_replies.load(Ordering::Relaxed)),
+            );
+            o.insert("class_budget_held_off".into(), json!(shared.class_budget_held_off.load(Ordering::Relaxed)));
+        }
+        // Earnings class-capped blocks left in the pool's output for their earners' carry, over
+        // the blocks in memory (`carry_reserved_sats`). What the fee wallet holds back is the
+        // smaller of this and `window.carry_total_sats`; see the README.
+        doc["carry_reserved"] = json!(carry_reserved);
+    }
+    doc
 }
 
 /// The legacy `ledger.json` shape (`{"credits":[{ts,identity,work}], ...}`) for the last hour.
@@ -390,6 +447,7 @@ pub async fn housekeeping(shared: Arc<Shared>) {
             // Every 5s flush; every 60s fsync; every 5 min rewrite credits.bin to the live window
             // so a crash or restart reloads the same shares the UI was showing.
             let r = if n.is_multiple_of(60) {
+                ledger.prune_grace(crate::state::now() as u32, &shared.cfg.grace());
                 ledger.persist_window()
             } else if n.is_multiple_of(12) {
                 ledger.sync()

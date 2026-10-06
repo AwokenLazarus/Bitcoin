@@ -69,6 +69,42 @@ pub struct Config {
     /// become gateway-solo with no debt.
     #[serde(default = "d_owe")]
     pub stock_full_pool_only: String,
+    /// Gateway builds, by git-hash prefix (7 to 40 hex digits), that hand every miner the
+    /// coinbase section paying one configured script whatever split they hold. CONVOY-lineage
+    /// commits from `c61c2e7` up to, not including, `155b6bf` select section 0 for every BLAKE2b
+    /// job and commit the work to it, so no coinbaser reply ever reaches their miners: under
+    /// `owe` every block they find is pool-only and owes the window the whole reward. Matched
+    /// against the hash in the hello's user agent (`v0.4.1-beta/<hash>`). Once such a session's
+    /// first shares all name one payout it is configured with that payout's script and left on
+    /// it while no other payout mines on it, so what it mines is its own solo work: accepted, not
+    /// credited in the window, and a find owes nobody. Empty (default): no build is held.
+    #[serde(default)]
+    pub held_split_builds: Vec<String>,
+    /// Hold a class-limited gateway's coinbaser to the payee bytes its smallest coinbase class
+    /// actually keeps, so that class keeps the whole list and a block found on it is a full
+    /// split, and defer whoever does not fit to carry. A CONVOY `b9ea7dc`-lineage gateway hands
+    /// most miners a size class with room for about 17 outputs of whatever list it is given, and
+    /// every block found on one is Partial(17), owing the rest to the window through a make-good.
+    /// The size is learned per session from its own accepted shares (`session::ClassBudget`),
+    /// only for CONVOY-generation hellos that are not lazarus-gateway, lazarus-split or ratum,
+    /// learned again six hours after it was last set, and forgotten when the session ends. Off
+    /// (default): every reply is what it always was. Ignored, and said so at startup, unless
+    /// `class-budget-fee-wallet-reserves` is set too.
+    #[serde(default)]
+    pub class_budget: bool,
+    /// The fee wallet holds back what class-capped blocks record in `carry_reserved_sats` before
+    /// it sweeps the pool's outputs as fee (README, "Class budgets"). Such a block is a split
+    /// owing nothing, and its pool output holds the earnings its budget deferred to carry: a
+    /// wallet that sweeps every split's pool output pays that out as fee while Prime still owes
+    /// it to miners, about a quarter of each Partial(17) coinbase. Setting this says the wallet
+    /// has been changed; nothing else here can know it has, so `class-budget` waits for it.
+    #[serde(default)]
+    pub class_budget_fee_wallet_reserves: bool,
+    /// Carry on the books, in sats, at or above which no reply is held to a class budget; they
+    /// are held to it again once carry is back under three quarters of this. Blocks mined
+    /// meanwhile are Partial and owe as they do without `class-budget`. Default 5 XBT.
+    #[serde(default = "d_class_budget_carry_ceiling")]
+    pub class_budget_carry_ceiling: u64,
     /// Test hook: sleep this long before answering a coinbaser, so a stock gateway's
     /// 5 s fetch times out. 0 (default) is production.
     #[serde(default)]
@@ -80,6 +116,30 @@ pub struct Config {
     /// stratum work's value (750 = 7.5 points of a 15% stratum fee). 0 (default) disables it.
     #[serde(default)]
     pub datum_rebate_bps: u32,
+    /// Grace for an address that starts on the house stratum (`tides::grace`): for this many
+    /// hours from its first stratum share its stratum work pays `stratum-grace-fee-bps`
+    /// instead of `stratum-fee-bps`. 0 (default): no grace.
+    #[serde(default)]
+    pub stratum_grace_hours: u32,
+    /// The same, for an address that has had DATUM work credited here: someone whose own
+    /// gateway is down, not someone mining on ours. 0 (default): same as `stratum-grace-hours`.
+    #[serde(default)]
+    pub stratum_grace_datum_hours: u32,
+    /// Fee on house-stratum work inside its grace. Required when grace is on, and no higher
+    /// than `stratum-fee-bps`.
+    #[serde(default)]
+    pub stratum_grace_fee_bps: Option<u32>,
+    /// Share of the grace fee handed to DATUM work, basis points of the grace work's value.
+    #[serde(default)]
+    pub stratum_grace_rebate_bps: u32,
+    /// Hours off the house stratum after which an address's next stratum share starts a new
+    /// grace. 0 (default): one grace per address.
+    #[serde(default)]
+    pub stratum_grace_rearm_hours: u32,
+    /// Unix time the grace is taken to have started for addresses already on the house
+    /// stratum when grace is first switched on. 0 (default): their oldest share in the window.
+    #[serde(default)]
+    pub stratum_grace_epoch: u32,
     /// Share of a solo block's reward owed to DATUM work when a `solo-coinbase-tag` block
     /// paying the pool script lands on chain, basis points of the block's coinbase value.
     /// Paid down out of the pool's kept fee in later splits. 0 (default) disables it.
@@ -141,6 +201,37 @@ pub struct Config {
     /// Most sessions from one remote address. A gateway is one connection; a farm is a few.
     #[serde(default = "d_max_connections_per_ip")]
     pub max_connections_per_ip: u32,
+    /// How long a gateway is refused the first time its own node hands Prime a block the chain
+    /// rejects (see `node::says_outdated_node`). The gateway builds its own template, so a
+    /// consensus rule its node does not know is a block the whole window loses. Short on
+    /// purpose: Prime cannot see a node's version, so the way back in is to upgrade and
+    /// reconnect, and an operator who did that should not be kept waiting. 0 turns this off.
+    #[serde(default = "d_quarantine_minutes")]
+    pub quarantine_minutes: u64,
+    /// The refusal doubles with each further rejected block and stops growing here. A gateway
+    /// that was upgraded never reaches the second strike; one that was not is refused for
+    /// longer and longer without ever being banned outright.
+    #[serde(default = "d_quarantine_max_hours")]
+    pub quarantine_max_hours: u64,
+    /// Strikes are forgotten after this long without another rejected block, so an operator who
+    /// upgrades months later starts clean.
+    #[serde(default = "d_quarantine_forget_hours")]
+    pub quarantine_forget_hours: u64,
+    /// Gateway identity keys refused outright, whatever they submit. The 16-hex `gateway=`
+    /// from the logs is enough; a longer prefix or the whole key also works.
+    #[serde(default)]
+    pub blocked_gateways: Vec<String>,
+    /// Gateways that are another pool's stratum front: that pool's hashers point at its stratum
+    /// port, and its own gateway and node relay them here as if they were DATUM miners. Their
+    /// work is stratum work: charged `stratum-fee-bps`, with no grace (a grace is for a miner
+    /// whose own gateway is down), and it is not a sighting on DATUM. Nothing else about the
+    /// session changes: it gets none of the trust the pool's own gateway has. Matched like
+    /// `blocked-gateways`, on 16 or more hex digits of the gateway key.
+    #[serde(default)]
+    pub stratum_front_gateways: Vec<String>,
+    /// The same, by the address the gateway connects from: a front changes its key at will.
+    #[serde(default)]
+    pub stratum_front_ips: Vec<std::net::IpAddr>,
     /// Coinbase section bytes one session may have Prime hold across all of its job slots.
     /// A stock gateway's eight slots of seven ~16 KiB coinbase classes is under 1 MiB; the
     /// sixteen live slots Prime keeps at eight 20 000-byte sections each is 2.5 MiB.
@@ -160,6 +251,9 @@ pub struct Config {
     activation_height: Option<u32>,
     #[serde(default)]
     verify_shares: Option<String>,
+    /// `class-budget = true` without `class-budget-fee-wallet-reserves`, turned off by `load`.
+    #[serde(skip)]
+    class_budget_unreserved: bool,
 }
 
 fn d_listen() -> SocketAddr {
@@ -222,6 +316,18 @@ fn d_max_connections() -> u32 {
 fn d_max_connections_per_ip() -> u32 {
     8
 }
+
+fn d_quarantine_minutes() -> u64 {
+    60
+}
+
+fn d_quarantine_max_hours() -> u64 {
+    24
+}
+
+fn d_quarantine_forget_hours() -> u64 {
+    168
+}
 fn d_session_coinbase_budget() -> usize {
     4 << 20
 }
@@ -234,11 +340,35 @@ fn d_owe() -> String {
 fn d_solo_tag() -> String {
     "Lazarus/solo".into()
 }
+/// The under-floor carry the pool holds anyway (0.79 XBT on 2026-09-28) plus the 3.7-4.1 XBT a
+/// simulation of a 17-output cap put the added float at: a guard at the level it was expected
+/// to settle, so that a float that keeps growing (CONVOY hashrate leaving, the pool shrinking)
+/// stops growing there, not one that trims the expected case.
+fn d_class_budget_carry_ceiling() -> u64 {
+    500_000_000
+}
+
+/// Whether `s` can name a commit in `held-split-builds`: git's shortest default abbreviation
+/// up to the whole hash, in lowercase hex.
+pub fn git_hash_prefix(s: &str) -> bool {
+    (7..=40).contains(&s.len()) && s.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
 
 impl Config {
     /// `stale-after-days` in seconds; 0 when the rule is off.
     pub fn stale_after_secs(&self) -> u32 {
         self.stale_after_days.saturating_mul(86_400)
+    }
+
+    /// The stratum grace clocks' settings. Not enabled unless `stratum-grace-hours` is set.
+    pub fn grace(&self) -> tides::GraceParams {
+        let secs = self.stratum_grace_hours.saturating_mul(3_600);
+        tides::GraceParams {
+            secs,
+            datum_secs: self.stratum_grace_datum_hours.saturating_mul(3_600).max(secs),
+            rearm_secs: self.stratum_grace_rearm_hours.saturating_mul(3_600),
+            epoch: self.stratum_grace_epoch,
+        }
     }
 
     pub fn load(path: &Path) -> Result<Self, String> {
@@ -274,11 +404,47 @@ impl Config {
         if c.solo_rebate_bps > 10_000 {
             return Err("solo-rebate-bps cannot exceed 10000".into());
         }
+        if c.stratum_grace_hours > 8_760 || c.stratum_grace_datum_hours > 8_760 || c.stratum_grace_rearm_hours > 87_600
+        {
+            return Err("stratum-grace-*-hours are in hours (a year at most; ten for the re-arm)".into());
+        }
+        if c.grace().enabled() {
+            let Some(fee) = c.stratum_grace_fee_bps else {
+                return Err("stratum-grace-fee-bps must be set when stratum-grace-hours is (0 is a free grace)".into());
+            };
+            if fee > c.stratum_fee_bps {
+                return Err("stratum-grace-fee-bps cannot exceed stratum-fee-bps (a grace is not a penalty)".into());
+            }
+            if c.stratum_grace_rebate_bps > fee {
+                return Err(
+                    "stratum-grace-rebate-bps cannot exceed stratum-grace-fee-bps (the rebate comes out of that fee)"
+                        .into(),
+                );
+            }
+            if c.stratum_grace_datum_hours != 0 && c.stratum_grace_datum_hours < c.stratum_grace_hours {
+                return Err("stratum-grace-datum-hours cannot be shorter than stratum-grace-hours".into());
+            }
+        } else if c.stratum_grace_fee_bps.is_some()
+            || c.stratum_grace_rebate_bps != 0
+            || c.stratum_grace_rearm_hours != 0
+            || c.stratum_grace_epoch != 0
+        {
+            return Err("stratum-grace-* keys are set but stratum-grace-hours is 0: set it, or remove them".into());
+        }
         if c.solo_coinbase_tag.is_empty() || c.solo_coinbase_tag.len() > 32 {
             return Err("solo-coinbase-tag must be 1..=32 bytes".into());
         }
         for g in &mut c.house_gateways {
             *g = g.to_ascii_lowercase();
+        }
+        for b in &mut c.held_split_builds {
+            *b = b.to_ascii_lowercase();
+        }
+        for g in &mut c.stratum_front_gateways {
+            *g = g.trim().to_ascii_lowercase();
+            if g.len() < 16 || !g.bytes().all(|b| b.is_ascii_hexdigit()) {
+                return Err(format!("stratum-front-gateways: {g:?} is not 16 or more hex digits of a gateway key"));
+            }
         }
         if c.uncommitted_pot > 63 {
             return Err("uncommitted-pot is a power-of-two exponent, 63 at most".into());
@@ -298,6 +464,13 @@ impl Config {
         match c.stock_full_pool_only.as_str() {
             "owe" | "gateway-solo" => {}
             other => return Err(format!("stock-full-pool-only must be owe or gateway-solo, not {other:?}")),
+        }
+        // Off rather than refused (see `legacy_notes`): a Prime that will not start takes every
+        // gateway down, and one that caps blocks for a wallet that sweeps their tail pays
+        // miners' carry out as fee.
+        if c.class_budget && !c.class_budget_fee_wallet_reserves {
+            c.class_budget = false;
+            c.class_budget_unreserved = true;
         }
         if c.key_file.is_none() {
             // A data dir left by lazarus-prime keeps its identity: same key file, same pubkey.
@@ -321,6 +494,24 @@ impl Config {
                     g.len()
                 ));
             }
+        }
+        // Said, not enforced, here too. An entry that cannot name a commit matches nothing rather
+        // than something: the shorter the prefix, the more builds it would take off the window.
+        for b in &self.held_split_builds {
+            if !git_hash_prefix(b) {
+                v.push(format!(
+                    "held-split-builds entry {b:?} is not 7 to 40 hex digits of a git commit hash and matches nothing"
+                ));
+            }
+        }
+        if self.class_budget_unreserved {
+            v.push(
+                "class-budget = true is ignored until class-budget-fee-wallet-reserves = true says the fee wallet \
+                 holds back carry_reserved_sats: a class-capped block is a split owing nothing whose pool output \
+                 holds the earnings its budget deferred to carry, and a wallet that sweeps it pays them out as fee \
+                 while Prime still owes them (README, \"Class budgets\")"
+                    .into(),
+            );
         }
         if self.activation_height.is_some() {
             v.push("activation-height is ignored: every share is verified as BLAKE2b header v2; SHA256d shares are rejected as bad-version".into());
@@ -411,6 +602,70 @@ require-split-gateway = true
         // a rebate larger than the fee it comes out of is a config error, not a silent clamp
         std::fs::write(&p, format!("{base}\nstratum-fee-bps = 1000\ndatum-rebate-bps = 1001\n")).unwrap();
         assert!(Config::load(&p).unwrap_err().contains("datum-rebate-bps"));
+
+        // stratum grace: off unless asked for
+        std::fs::write(&p, &base).unwrap();
+        assert!(!Config::load(&p).unwrap().grace().enabled());
+        // the donation endpoint with its grace, and the same grace before the fee is raised
+        let grace = "stratum-grace-hours = 24\nstratum-grace-datum-hours = 96\nstratum-grace-fee-bps = 2500\n\
+                     stratum-grace-rebate-bps = 1250\nstratum-grace-rearm-hours = 168\nstratum-grace-epoch = 1791262800\n";
+        for (stratum, rebate) in [(10_000, 5_000), (2_500, 1_250)] {
+            std::fs::write(&p, format!("{base}\nstratum-fee-bps = {stratum}\ndatum-rebate-bps = {rebate}\n{grace}"))
+                .unwrap();
+            let c = Config::load(&p).unwrap();
+            let g = c.grace();
+            assert!(g.enabled());
+            assert_eq!((g.secs, g.datum_secs, g.rearm_secs, g.epoch), (86_400, 345_600, 604_800, 1_791_262_800));
+            assert_eq!((c.stratum_grace_fee_bps, c.stratum_grace_rebate_bps), (Some(2_500), 1_250));
+        }
+        // datum hours default to the plain grace
+        std::fs::write(
+            &p,
+            format!("{base}\nstratum-fee-bps = 1000\nstratum-grace-hours = 24\nstratum-grace-fee-bps = 0\n"),
+        )
+        .unwrap();
+        assert_eq!(Config::load(&p).unwrap().grace().datum_secs, 86_400);
+        // another pool's stratum front, by key and by address
+        std::fs::write(
+            &p,
+            format!(
+                "{base}\nstratum-front-gateways = [\"097B7017CCFD7669\"]\nstratum-front-ips = [\"207.244.247.51\"]\n"
+            ),
+        )
+        .unwrap();
+        let c = Config::load(&p).unwrap();
+        assert_eq!(c.stratum_front_gateways, vec!["097b7017ccfd7669".to_string()]);
+        assert_eq!(c.stratum_front_ips, vec!["207.244.247.51".parse::<std::net::IpAddr>().unwrap()]);
+        std::fs::write(&p, &base).unwrap();
+        let c = Config::load(&p).unwrap();
+        assert!(c.stratum_front_gateways.is_empty() && c.stratum_front_ips.is_empty());
+        for bad in [
+            "stratum-front-gateways = [\"097b7017\"]",
+            "stratum-front-gateways = [\"not-a-key-not-a-key\"]",
+            "stratum-front-ips = [\"ctrlpool.com\"]",
+        ] {
+            std::fs::write(&p, format!("{base}\n{bad}\n")).unwrap();
+            assert!(Config::load(&p).is_err(), "{bad}");
+        }
+        // each of these is a mistake, and none is silently repaired
+        for (keys, names) in [
+            ("stratum-grace-hours = 24\n", "stratum-grace-fee-bps must be set"),
+            ("stratum-grace-hours = 24\nstratum-grace-fee-bps = 1001\n", "cannot exceed stratum-fee-bps"),
+            (
+                "stratum-grace-hours = 24\nstratum-grace-fee-bps = 500\nstratum-grace-rebate-bps = 501\n",
+                "stratum-grace-rebate-bps",
+            ),
+            (
+                "stratum-grace-hours = 24\nstratum-grace-datum-hours = 12\nstratum-grace-fee-bps = 500\n",
+                "cannot be shorter",
+            ),
+            ("stratum-grace-fee-bps = 500\n", "stratum-grace-hours is 0"),
+            ("stratum-grace-epoch = 5\n", "stratum-grace-hours is 0"),
+        ] {
+            std::fs::write(&p, format!("{base}\nstratum-fee-bps = 1000\n{keys}")).unwrap();
+            let e = Config::load(&p).unwrap_err();
+            assert!(e.contains(names), "{keys:?}: {e}");
+        }
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -446,6 +701,95 @@ require-split-gateway = true
             assert_eq!(notes(&load(weak)), 1, "{weak:?}");
         }
         assert_eq!(load(&full).uncommitted_pot, 20);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// No build is held unless listed. An entry that cannot name a commit is said at startup and
+    /// matches nothing: a short prefix would take more builds off the window than meant.
+    #[test]
+    fn held_split_builds_are_off_by_default_and_a_bad_entry_matches_nothing() {
+        let dir = std::env::temp_dir().join(format!("primed-cfg-hs-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("prime.toml");
+        let base = LEGACY.replace("/home/umbrel/blake2b/lazarus-prime", dir.to_str().unwrap());
+        std::fs::write(&p, &base).unwrap();
+        let c = Config::load(&p).unwrap();
+        assert!(c.held_split_builds.is_empty());
+        assert!(!c.legacy_notes().iter().any(|n| n.contains("held-split-builds")));
+
+        let full = "f74c22aa1f048cef5bf0440b89f86427e658fb89";
+        std::fs::write(
+            &p,
+            format!(
+                "{base}held-split-builds = [\"E894B8A\", \"{full}\", \"e894b8\", \"UNKNOWN_GIT_HASH\", \"{full}0\"]\n"
+            ),
+        )
+        .unwrap();
+        let c = Config::load(&p).unwrap();
+        assert_eq!(&c.held_split_builds[..2], ["e894b8a", full]);
+        let notes: Vec<String> = c.legacy_notes().into_iter().filter(|n| n.contains("held-split-builds")).collect();
+        assert_eq!(notes.len(), 3, "{notes:?}");
+        assert!(git_hash_prefix("e894b8a") && git_hash_prefix(full));
+        assert!(!git_hash_prefix("e894b8") && !git_hash_prefix("e894b8g") && !git_hash_prefix(&format!("{full}0")));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A config that does not name `class-budget` has it off, and its ceiling at 5 XBT for when
+    /// it is turned on.
+    #[test]
+    fn class_budget_is_off_by_default_with_a_five_xbt_carry_ceiling() {
+        let dir = std::env::temp_dir().join(format!("primed-cfg-cb-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("prime.toml");
+        let base = LEGACY.replace("/home/umbrel/blake2b/lazarus-prime", dir.to_str().unwrap());
+        std::fs::write(&p, &base).unwrap();
+        let c = Config::load(&p).unwrap();
+        assert_eq!((c.class_budget, c.class_budget_carry_ceiling), (false, 500_000_000));
+        std::fs::write(
+            &p,
+            format!(
+                "{base}class-budget = true\nclass-budget-fee-wallet-reserves = true\nclass-budget-carry-ceiling = 200000000\n"
+            ),
+        )
+        .unwrap();
+        let c = Config::load(&p).unwrap();
+        assert_eq!((c.class_budget, c.class_budget_carry_ceiling), (true, 200_000_000));
+        assert!(!c.legacy_notes().iter().any(|n| n.contains("class-budget")));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The review's custody finding. A class-capped block is a split owing nothing, and a fee
+    /// wallet that does not hold back its `carry_reserved_sats` sweeps the tail's earnings as fee.
+    /// So `class-budget` alone is off, said so at startup, and does not stop the Prime starting;
+    /// the wallet's own key alone turns nothing on.
+    #[test]
+    fn class_budget_is_off_until_the_fee_wallet_is_said_to_hold_back_its_carry() {
+        let dir = std::env::temp_dir().join(format!("primed-cfg-cbw-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("prime.toml");
+        let base = LEGACY.replace("/home/umbrel/blake2b/lazarus-prime", dir.to_str().unwrap());
+        let load = |extra: &str| {
+            std::fs::write(&p, format!("{base}{extra}")).unwrap();
+            Config::load(&p).expect("starts either way")
+        };
+        let notes = |c: &Config| -> Vec<String> {
+            c.legacy_notes().into_iter().filter(|n| n.contains("class-budget")).collect()
+        };
+        let c = load("class-budget = true\n");
+        assert!(!c.class_budget);
+        let said = notes(&c);
+        assert_eq!(said.len(), 1, "{said:?}");
+        assert!(said[0].contains("class-budget-fee-wallet-reserves") && said[0].contains("carry_reserved_sats"));
+        assert_eq!(c.legacy_notes().len(), 3, "the legacy file's two, and this");
+
+        let c = load("class-budget = true\nclass-budget-fee-wallet-reserves = false\n");
+        assert!(!c.class_budget && notes(&c).len() == 1);
+        let c = load("class-budget-fee-wallet-reserves = true\n");
+        assert!(!c.class_budget && notes(&c).is_empty());
+        let c = load("class-budget = false\n");
+        assert!(!c.class_budget && notes(&c).is_empty());
+        let c = load("class-budget-fee-wallet-reserves = true\nclass-budget = true\n");
+        assert!(c.class_budget && notes(&c).is_empty());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

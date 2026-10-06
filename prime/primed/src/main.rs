@@ -13,9 +13,10 @@ mod session;
 mod solo;
 mod state;
 mod stats;
+mod validity;
 
 use std::path::PathBuf;
-use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -241,8 +242,50 @@ fn run(cfg: Config) -> i32 {
         ledger.window.lifetime_shares
     );
     warn_if_window_cliff(&cfg.data_dir, &ledger);
+    let grace = cfg.grace();
+    if grace.enabled() {
+        log::info!(
+            "stratum grace: {} h from an address's first stratum share ({} h if it has been on DATUM here), \
+             at {} bps with {} bps to DATUM; re-arm {} h; epoch {}",
+            cfg.stratum_grace_hours,
+            grace.datum_secs / 3_600,
+            cfg.stratum_grace_fee_bps.unwrap_or(0),
+            cfg.stratum_grace_rebate_bps,
+            cfg.stratum_grace_rearm_hours,
+            grace.epoch
+        );
+        if let Some(n) = ledger.seed_grace(&grace) {
+            log::info!(
+                "stratum grace: no grace.json; clocks built from the window for {n} addresses already on stratum \
+                 ({} seen on DATUM)",
+                ledger.grace.datum_seen.len()
+            );
+        } else {
+            log::info!(
+                "stratum grace: grace.json has {} stratum clocks, {} addresses seen on DATUM",
+                ledger.grace.stratum.len(),
+                ledger.grace.datum_seen.len()
+            );
+        }
+    }
     let block_log = BlockLog::open(&cfg.data_dir);
-    let blocks = block_log.read_all().unwrap_or_default();
+    let blocks = match block_log.read_all() {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("blocks.jsonl: {e}");
+            eprintln!("this file is the pool's block record, so an unreadable one stops startup rather than being taken as no blocks");
+            return 1;
+        }
+    };
+    if ledger.debits_tracked() {
+        ledger.reconcile_debits(&blocks);
+    } else {
+        ledger.adopt_legacy_debits(&blocks);
+    }
+    if let Err(e) = ledger.sync() {
+        eprintln!("ledger: could not record which block debits are in the window: {e}");
+        return 1;
+    }
     backfill_last_seen(&mut ledger, &blocks);
 
     let (tip_tx, tip) = watch::channel(None);
@@ -252,6 +295,10 @@ fn run(cfg: Config) -> i32 {
             fee_bps: cfg.fee_bps,
             stratum_fee_bps: cfg.stratum_fee_bps,
             datum_rebate_bps: cfg.datum_rebate_bps,
+            // With the grace switched off, grace rows an earlier run left in the window are
+            // plain stratum work again; they are never work that pays no fee.
+            grace_fee_bps: cfg.stratum_grace_fee_bps.unwrap_or(cfg.stratum_fee_bps),
+            grace_rebate_bps: if cfg.grace().enabled() { cfg.stratum_grace_rebate_bps } else { cfg.datum_rebate_bps },
             min_payout: cfg.min_payout,
             // The gateway accepts at most 512 coinbaser entries; one is the pool's own
             // output appended after the payees. The byte budget leaves room for it too.
@@ -268,6 +315,7 @@ fn run(cfg: Config) -> i32 {
         blocks: Mutex::new(blocks),
         block_log,
         clients: Mutex::new(Default::default()),
+        quarantine: Default::default(),
         seen: Mutex::new(Default::default()),
         connections: Mutex::new(Default::default()),
         tip_tx,
@@ -281,6 +329,9 @@ fn run(cfg: Config) -> i32 {
         next_client_id: AtomicU64::new(1),
         coinbaser_base: Mutex::new(None),
         gateway_payouts: Mutex::new(Shared::load_gateway_payouts(&cfg.data_dir)),
+        parents: Default::default(),
+        faults: crate::validity::Faults::with_ttl(cfg.quarantine_max_hours.saturating_mul(3600)),
+        class_budget_held_off: AtomicBool::new(false),
         cfg,
     });
     log::info!("pool pubkey {}", shared.pool.public_hex());
@@ -397,7 +448,8 @@ fn backfill_last_seen(ledger: &mut tides::Ledger, blocks: &[tides::BlockRecord])
     }
     let mut found: std::collections::HashMap<&str, u64> = std::collections::HashMap::new();
     for b in blocks.iter().filter(|b| !b.kind.starts_with("orphan")) {
-        let named = b.split.iter().map(|s| s.0.as_str()).chain(b.carry_delta.iter().filter(|d| d.1 > 0).map(|d| d.0.as_str()));
+        let named =
+            b.split.iter().map(|s| s.0.as_str()).chain(b.carry_delta.iter().filter(|d| d.1 > 0).map(|d| d.0.as_str()));
         for id in named.filter(|id| unknown.contains(*id)) {
             let e = found.entry(id).or_insert(0);
             *e = (*e).max(b.ts);
