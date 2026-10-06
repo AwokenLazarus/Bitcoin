@@ -263,8 +263,10 @@ fn a_debt_is_collected_from_a_payee_whose_every_block_clears_the_floor() {
     l.credit("big", 1_000, 1, 1, SOURCE_STRATUM).unwrap();
     l.credit("other", 1_000, 1, 1, SOURCE_STRATUM).unwrap();
     l.set_carry("big", 250_000);
-    let p = SplitParams { min_payout: 546, ..SplitParams::default() };
+    // a 30% fee: carry is paid out of the pool's remainder, and that is the room for it
+    let p = SplitParams { fee_bps: 3_000, min_payout: 546, ..SplitParams::default() };
     let old = l.window.split(1_000_000, &p, 10, script);
+    assert_eq!(old.payees.iter().find(|x| x.identity == "big").unwrap().carry, 250_000);
     // paid once, and again by a block on the same coinbaser
     let mut a = find(&mut l, &old);
     confirm(&mut l, &mut a);
