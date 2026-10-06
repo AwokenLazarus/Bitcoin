@@ -83,7 +83,8 @@ fn a_window_from_before_the_grace_is_given_its_clocks_and_split_by_class() {
     // the clocks: already on stratum means the epoch, and DATUM work makes it 96 hours
     assert_eq!(miner(&st, OLD)["stratum_grace_until"], epoch + 86_400);
     assert_eq!(miner(&st, FAILOVER)["stratum_grace_until"], epoch + 96 * 3_600);
-    assert_eq!(miner(&st, NEW)["stratum_grace_until"], epoch + 86_400);
+    // only grace rows: its clock came from this build, and a rebuilt book keeps it
+    assert_eq!(miner(&st, NEW)["stratum_grace_until"], t + 86_400);
     assert!(miner(&st, DATUM)["stratum_grace_until"].is_null());
     for (id, work, stratum, grace) in [
         (DATUM, 400_000, 0, 0),
