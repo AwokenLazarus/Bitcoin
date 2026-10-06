@@ -2,7 +2,7 @@
 // DATUM payee must not stay on the naughty list, and a live stratum worker must.
 //
 //   node scripts/test-naughtylist.mjs
-import { buildLists, classifyCoinbase, emptyState, migrate, noteBlock, observeLive, outputsOf, poolVerdict, rememberStratum, validAddress } from "../src/naughtylist.js";
+import { applyHosted, blocksMissingKey, buildLists, classifyCoinbase, emptyState, gatewayKey, hostedWindows, setGatewayKey, migrate, noteBlock, observeLive, outputsOf, poolVerdict, rememberStratum, validAddress } from "../src/naughtylist.js";
 import { buildView, refreshPools } from "../src/pools.js";
 import { renderAddress, renderList } from "../src/naughtypage.js";
 
@@ -241,6 +241,70 @@ await test("the page is whole without a script, and escapes what pools and coinb
   const page = renderAddress({ address: A1, listed: view.naughty.find((r) => r.address === A1), stored: [], asked: [{ pool: "dxpool", hrGhs: 0, paidXbt: 1.5 }], pays: [{ height: 5, ts: NOW, sats: 1e8, pool: evil, kind: "stratum", unspent: true }], unspentSats: 1e8, unspentCount: 1, explorer: "https://mempool.lazarus-xbt.xyz/address/" + A1 });
   assert(page.includes("Confirmed on stratum at RIPTIDE") && page.includes("1 XBT") && !page.includes("<img src=x"), "address page");
 });
+
+// A pool that runs the gateways itself: the tag says DATUM, the watcher's proof says otherwise.
+const gw = (pool, name) => hex([0x03, 0x01, 0x00, 0x00, ...push([...ascii(pool), 0x0f, ...ascii(name), 0x00])]);
+const HOSTED = { v: 1, tags: { [gatewayKey("AlphaPool", "Soggy Waffle")]: { n: 3 } }, blocks: { 950: gatewayKey("AlphaPool", "DATUM User") } };
+
+await test("a block under a gateway name proved to be the pool's own is the pool's stratum", async () => {
+  const soggy = gw("AlphaPool", "Soggy Waffle"), own = gw("AlphaPool", "nine009"), generic = gw("AlphaPool", "DATUM User");
+  assert(classifyCoinbase(soggy, 160).kind === "datum", "with nothing proved a gateway tag is DATUM");
+  const c = classifyCoinbase(soggy, 160, "", HOSTED, 900);
+  assert(c.kind === "stratum" && c.hosted && c.pool === "AlphaPool", "a proved name was still DATUM");
+  assert(classifyCoinbase(own, 160, "", HOSTED, 901).kind === "datum", "another gateway on the same pool was swept up");
+  assert(classifyCoinbase(gw("Lazarus", "Soggy Waffle"), 100, "", HOSTED, 902).kind === "datum", "the same name on another pool was swept up");
+  // a stock name proves the block it was seen on and nothing about the name
+  assert(classifyCoinbase(generic, 160, "", HOSTED, 950).hosted === true, "a proved block was not listed");
+  assert(classifyCoinbase(generic, 160, "", HOSTED, 951).kind === "datum", "a stock name was treated as proved");
+});
+
+await test("payees of pool-run gateway blocks are suspects once those are most of the pool's gateway blocks", async () => {
+  const now = 2_000_000_000, state = emptyState();
+  const soggy = gw("AlphaPool", "Soggy Waffle"), own = gw("AlphaPool", "nine009");
+  for (let h = 1; h <= 6; h++) noteBlock(state, { h, t: now - 1000 + h, id: "s" + h, txid: "t" + h, script: soggy, outputs: [...outs(5, "hasher"), { address: "poolwallet", vout: 9, sats: 5 }] }, HOSTED);
+  for (let h = 7; h <= 8; h++) noteBlock(state, { h, t: now - 500 + h, id: "o" + h, txid: "t" + h, script: own, outputs: outs(2, "hasher") }, HOSTED);
+  const w = hostedWindows(state, now).AlphaPool;
+  assert(w.hostedBlocks === 6 && w.otherGatewayBlocks === 2 && w.share === 75 && w.names[0] === "Soggy Waffle", JSON.stringify(w));
+  const lists = buildLists(state, [], now, []);
+  const row = lists.suspects.find((r) => r.address === "hasher3");
+  assert(row && row.why === "hosted-gateway" && row.pool === "AlphaPool" && row.paidBlocks === 6, JSON.stringify(row));
+  assert(!lists.naughty.some((r) => r.pool === "AlphaPool"), "a split payee is not proof of anything");
+  assert(!lists.nice.some((r) => r.address === "hasher3"), "a pool-run gateway block made someone nice");
+  const html = renderList(buildView(state, [], [], now));
+  assert(html.includes("built on gateways the pool runs itself (Soggy Waffle)") && html.includes("6 of 8"), "the page does not say what the row rests on");
+  assert(html.includes("6 of its 8 gateway blocks (75%) were built on gateways it runs itself, under the names Soggy Waffle."), "the pool's own row does not say what was proved");
+});
+
+await test("a name proved later re-judges the blocks already noted, once", async () => {
+  const now = 2_000_000_000, state = emptyState();
+  const soggy = gw("AlphaPool", "Soggy Waffle"), own = gw("AlphaPool", "nine009");
+  for (let h = 1; h <= 6; h++) noteBlock(state, { h, t: now - 1000 + h, id: "s" + h, txid: "t" + h, script: soggy, outputs: outs(5, "hasher") });
+  noteBlock(state, { h: 7, t: now - 100, id: "o7", txid: "t7", script: own, outputs: [{ address: "hasher0", vout: 0, sats: 1 }, { address: "owner", vout: 1, sats: 1 }] });
+  assert(state.pools.AlphaPool.d === 7 && state.addrs.hasher1.dn === 6 && state.addrs.hasher1.sn === 0, "setup");
+  assert(!buildLists(state, [], now, []).suspects.length, "nothing is proved yet");
+  assert(applyHosted(state, HOSTED) === 6, "six blocks should move");
+  assert(applyHosted(state, HOSTED) === 0, "and only once");
+  assert(state.pools.AlphaPool.d === 1 && state.pools.AlphaPool.s === 6, JSON.stringify(state.pools));
+  const a = state.addrs.hasher1;
+  assert(a.dn === 0 && a.sn === 6 && a.dh === 0 && a.sh === 6 && a.ps.AlphaPool === 6 && a.pays.every((p) => p.k === "s" && p.g === 1), JSON.stringify(a));
+  // paid by a real gateway's block too: that payout is still its newest DATUM one
+  assert(state.addrs.hasher0.dh === 7 && state.addrs.hasher0.dn === 1, JSON.stringify(state.addrs.hasher0));
+  assert(state.addrs.owner.dn === 1 && !state.addrs.owner.sn, "the owner of a real gateway was touched");
+  assert(buildLists(state, [], now, []).suspects.some((r) => r.address === "hasher1" && r.why === "hosted-gateway"), "the re-judged payees are not listed");
+});
+
+await test("blocks noted before the gateway name was kept are read again", async () => {
+  const now = 2_000_000_000, state = emptyState();
+  const soggy = gw("AlphaPool", "Soggy Waffle");
+  for (let h = 1; h <= 3; h++) noteBlock(state, { h, t: now - 100, id: "id" + h, txid: "t" + h, script: soggy, outputs: outs(5, "hasher") });
+  for (const e of Object.values(state.blk)) e.length = 4; // as an older Worker stored them
+  assert(applyHosted(state, HOSTED) === 0, "a block with no name on file cannot be judged");
+  const todo = blocksMissingKey(state, 2);
+  assert(todo.length === 2 && todo[0][0] === 3 && todo[0][1] === "id3", JSON.stringify(todo));
+  for (const [h] of blocksMissingKey(state, 9)) setGatewayKey(state, h, soggy);
+  assert(!blocksMissingKey(state, 9).length && applyHosted(state, HOSTED) === 3, "the names were not kept");
+});
+
 
 console.log(failures ? `\n${failures} failing` : "\nall passing");
 process.exit(failures ? 1 : 0);

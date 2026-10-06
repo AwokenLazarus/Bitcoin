@@ -4,7 +4,7 @@
 //   blocks  compact record of every block since the fork (see galaxy.js blockRecord)
 //   galaxy  the built model the page draws
 import { blockRecord, buildGalaxy, FORK_HEIGHT } from "./galaxy.js";
-import { addressPays, emptyState, migrate, noteBlock, observeLive, outputsOf, prune, rememberStratum, validAddress } from "./naughtylist.js";
+import { addressPays, applyHosted, blocksMissingKey, emptyState, migrate, noteBlock, observeLive, outputsOf, prune, rememberStratum, setGatewayKey, validAddress } from "./naughtylist.js";
 import { askPools, buildView, refreshPools, storedEvidence } from "./pools.js";
 import { renderAddress, renderList } from "./naughtypage.js";
 import { fillHub, renderMapTable } from "./hubfill.js";
@@ -117,7 +117,7 @@ export async function refresh(env) {
 const INGEST_BLOCKS = 48;
 const INGEST_WINDOW_SEC = 14 * 86400;
 
-async function noteExplorerBlock(state, b) {
+async function noteExplorerBlock(state, b, hosted) {
   const id = b.id;
   if (state.ingested && state.ingested[b.height] === id) return false;
   let outputs = [];
@@ -142,9 +142,12 @@ async function noteExplorerBlock(state, b) {
     script: (b.extras && b.extras.coinbaseRaw) || "",
     explorerPool: (b.extras && b.extras.pool && b.extras.pool.name) || "",
     outputs,
-  });
+  }, hosted);
   return true;
 }
+
+// Coinbases one cron reads again to learn an older block's gateway name.
+const REKEY_BLOCKS = 20;
 
 // Requests one cron may spend on the pools' own APIs, shared by the readers that ask per address.
 const POOL_BUDGET = 16;
@@ -157,6 +160,8 @@ const POOL_BUDGET = 16;
 export async function ingestNaughty(env, tip) {
   const now = Math.floor(Date.now() / 1000);
   const state = migrate((await env.GALAXY.get("naughtylist", "json")) || emptyState());
+  // Gateway names proved to be a pool's own (scripts/hosted-watch.py). Absent: nothing is proved.
+  const hosted = await env.GALAXY.get("hostedgateways", "json").catch(() => null);
   let noted = 0;
   let pages = 0;
   // The chain grew: read the tip page so a block found since the last cron is not skipped.
@@ -167,7 +172,7 @@ export async function ingestNaughty(env, tip) {
       for (const b of page) {
         if (!b || b.height < FORK_HEIGHT || noted >= INGEST_BLOCKS) break;
         if (b.timestamp && now - b.timestamp > INGEST_WINDOW_SEC) { state.windowDone = true; break; }
-        if (await noteExplorerBlock(state, b)) noted++;
+        if (await noteExplorerBlock(state, b, hosted)) noted++;
       }
       if (state.scannedTo == null) state.scannedTo = page[page.length - 1].height;
     }
@@ -180,7 +185,7 @@ export async function ingestNaughty(env, tip) {
     for (const b of page) {
       if (!b || b.height < FORK_HEIGHT || noted >= INGEST_BLOCKS) break;
       if (b.timestamp && now - b.timestamp > INGEST_WINDOW_SEC) { aged = true; break; }
-      if (await noteExplorerBlock(state, b)) noted++;
+      if (await noteExplorerBlock(state, b, hosted)) noted++;
     }
     state.scannedTo = page[page.length - 1].height;
     if (aged) state.windowDone = true;
@@ -192,6 +197,18 @@ export async function ingestNaughty(env, tip) {
     getJSON(`${POOL}/api/miners`).catch(() => null),
     getJSON(`${POOL}/api/gateways`).catch(() => null),
   ]);
+  // Gateway blocks noted before entries kept their gateway name: read a few coinbases again each
+  // run, then re-judge every noted block against what has been proved since.
+  let rekeyed = 0;
+  if (hosted && noted <= 8) {
+    for (const [h, id] of blocksMissingKey(state, REKEY_BLOCKS)) {
+      const b = await getJSON(`${EXPLORER}/api/v1/block/${id}`).catch(() => null);
+      if (!b || !b.extras) break;
+      setGatewayKey(state, h, b.extras.coinbaseRaw || "");
+      rekeyed++;
+    }
+  }
+  const rejudged = applyHosted(state, hosted);
   const online = (miners && miners.online) || [];
   observeLive(state, online, now);
   rememberStratum(state, now);
@@ -204,7 +221,7 @@ export async function ingestNaughty(env, tip) {
     env.GALAXY.put("naughtylist", JSON.stringify(state)),
     keepOld ? null : env.GALAXY.put("naughtyview", JSON.stringify(view)),
   ]);
-  return { noted, scannedTo: state.scannedTo, windowDone: !!state.windowDone, naughty: view.naughty.length, suspects: view.suspects.length, nice: view.nice.length, pools, viewKept: keepOld };
+  return { noted, rekeyed, rejudged, scannedTo: state.scannedTo, windowDone: !!state.windowDone, naughty: view.naughty.length, suspects: view.suspects.length, nice: view.nice.length, pools, viewKept: keepOld };
 }
 
 async function naughtyView(env) {

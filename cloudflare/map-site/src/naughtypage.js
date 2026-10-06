@@ -8,6 +8,7 @@ const STRATUM = {
   yes: ["empire", "Open"],
   only: ["empire", "Stratum only"],
   closed: ["rim", "Closed"],
+  hosted: ["empire", "Yes: behind gateways the pool runs"],
   no: ["rim", "None: DATUM only"],
   unknown: ["", "Not known"],
 };
@@ -20,6 +21,7 @@ export function evidence(r) {
     case "pool-stratum-block": return `The pool names it the finder of block ${n(r.evidenceHeight)}, which the pool built`;
     case "custodial-block": return "Paid by a block the pool built and paid out alone";
     case "split-payee": return `Paid by ${plural(r.paidBlocks, "split block", "split blocks")}. The pool built ${r.share}% of its blocks itself (${n(r.stratumBlocks)} of ${n(r.stratumBlocks + r.gatewayBlocks)}, by its own block list)`;
+    case "hosted-gateway": return `Paid by ${plural(r.paidBlocks, "block", "blocks")} built on gateways the pool runs itself${r.gatewayNames && r.gatewayNames.length ? ` (${r.gatewayNames.join(", ")})` : ""}: ${r.share}% of its gateway blocks (${n(r.hostedBlocks)} of ${n(r.hostedBlocks + r.otherGatewayBlocks)}), each tied to a job its public stratum port handed out`;
     case "no-gateway-tag": return "On the pool's miner list with no gateway tag";
     default: return r.list === "nice" ? "Was on stratum. Now on its own node" : "";
   }
@@ -77,7 +79,7 @@ export function renderList(view, { pool = "" } = {}) {
   const suspectRows = suspects.map((r) => `<tr>${addrCell(r.address)}${poolCell(r.pool)}<td>${esc(evidence(r))}</td><td class="num">${r.lastStratumHeight ? n(r.lastStratumHeight) : "—"}</td></tr>`);
   const niceRows = nice.map((r) => `<tr>${addrCell(r.address)}${poolCell(r.pool)}<td>${esc(evidence(r))}</td><td class="num">${hr(r.hrGhs)}</td></tr>`);
   const finderRows = finders.map((f) => `<tr><td class="num">${n(f.h)}</td><td class="num">${when(f.t)}</td><td class="addr">${esc(f.name)}</td></tr>`);
-  const how = pools.filter((p) => p.reads).map((p) => `<dt>${p.site ? `<a href="${safeUrl(p.site)}" rel="noopener nofollow external">${esc(p.pool)}</a>` : esc(p.pool)}</dt><dd>${esc(p.reads)}</dd>`).join("\n");
+  const how = pools.filter((p) => p.reads).map((p) => `<dt>${p.site ? `<a href="${safeUrl(p.site)}" rel="noopener nofollow external">${esc(p.pool)}</a>` : esc(p.pool)}</dt><dd>${esc(p.reads)}${p.hosted ? ` Proved so far, last 14 days: ${n(p.hosted.hostedBlocks)} of its ${n(p.hosted.hostedBlocks + p.hosted.otherGatewayBlocks)} gateway blocks (${p.hosted.share}%) were built on gateways it runs itself, under the names ${esc(p.hosted.names.join(", "))}.` : ""}</dd>`).join("\n");
 
   return `${HEAD(title, description, "https://lazarus-xbt.xyz/naughtylist/", "/naughtylist/", "/assets/naughty.css?v=1")}
     <p class="kicker">Bitcoin BLAKE2b · every pool</p>

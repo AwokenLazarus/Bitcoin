@@ -234,8 +234,8 @@ export const POOLS = [
     reads: "The found-block list names the solver and whether the block came through DATUM. Only the finder of a non-DATUM block is confirmed; nothing separates the other payees." },
   { pool: "Bitcoin Xor", site: "https://www.xorpool.com", stratum: "yes", every: 900, run: xor,
     reads: "The miner page shows a gateway tag beside an address that comes through a tagged gateway. An address with no tag is a suspect: an untagged gateway looks the same." },
-  { pool: "AlphaPool", site: "https://xbt.alphapool.tech", stratum: "no",
-    reads: "Its stratum pool stopped at block 973964. What is left is DATUM only. Its API does not tie an address to a gateway, so many addresses behind one hosted gateway cannot be told apart." },
+  { pool: "AlphaPool", site: "https://xbt.alphapool.tech", stratum: "hosted",
+    reads: "Its stratum pool stopped paying out alone at block 973964, but its public stratum ports (5555, 7333, 7777 on four hosts) still hand out work: they now sit in front of DATUM gateways the pool runs itself, so those blocks carry a gateway tag while the pool's node builds them. A block is tied to those ports by the job they handed out, which proves the gateway name is the pool's. Its API does not tie an address to a gateway, so the payees of those blocks are suspects, not confirmed." },
   { pool: "Omega Pool", site: "https://omegapool.tech", stratum: "no",
     reads: "DATUM only: its connect page says a miner pointed at the pool's port does not work. Most of its blocks carry no gateway tag because RATUM gateways do not write one." },
   { pool: "Rabid Pool", site: "https://pool.rabidmining.com", stratum: "no",
@@ -328,6 +328,7 @@ export function buildView(state, miners, gateways, now) {
       blocks: w.blocks, s: w.s, d: w.d, c: w.c,
       own: x && x.w ? x.w : x && x.stratumBlocks != null ? { s: x.stratumBlocks, d: null } : null,
       confirmed: confirmed[name] || 0, suspects: suspected[name] || 0,
+      hosted: lists.hosted[name] || null,
       ok: name === "Lazarus" ? (miners && miners.length ? now : null) : (x && x.ok) || null,
       err: (x && x.err) || "",
     };
