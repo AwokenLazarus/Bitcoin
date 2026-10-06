@@ -59,7 +59,7 @@ window.LZ_I18N_DICTS["zh-CN"] = {
   },
   "stratumnotice": {
     "kicker": "紧急 · stratum 矿工：请尽快改用自己的 DATUM 网关",
-    "text": "自 <b>2026 年 10 月 7 日</b>起，本矿池的公共 stratum 端点将改为<b>捐赠端点</b>，费率为 <b>100%</b>。网络节点不会容忍 stratum 出算力。在当前 45 天 coinbase 成熟窗口内，<b>任何矿池上通过 stratum 出算力所得的全部奖励都将被 100% 判为无效</b>。换到别的矿池也改变不了结果。唯一能拿到付款的办法是用自己的 Bitcoin Knots 节点和 DATUM 网关（<a href=\"#connect\">各受支持网关的指南</a>）自己组块。自建网关费率为 0%，已被接受的工作量会在切换时随你保留。",
+    "text": "自 <b>2026 年 10 月 7 日</b>起，本矿池的公共 stratum 端点将改为<b>捐赠端点</b>，费率为 <b>100%</b>。这 100% 的费用同时是<b>矿池捐赠</b>和 <b>DATUM 补贴</b>：一半归矿池地址，一半给 DATUM 网关。网络节点不会容忍 stratum 出算力。在当前 45 天 coinbase 成熟窗口内，<b>任何矿池上通过 stratum 出算力所得的全部奖励都将被 100% 判为无效</b>。换到别的矿池也改变不了结果。唯一能拿到付款的办法是用自己的 Bitcoin Knots 节点和 DATUM 网关（<a href=\"#connect\">各受支持网关的指南</a>）自己组块。自建网关费率为 0%，已被接受的工作量会在切换时随你保留。",
     "setup": "搭建 DATUM 网关",
     "plan": "Knots 计划（长 coinbase 成熟期，三部分之一）",
     "dismiss": "关闭公告"

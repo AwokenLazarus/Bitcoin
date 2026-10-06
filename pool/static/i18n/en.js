@@ -59,7 +59,7 @@ window.LZ_I18N_DICTS["en"] = {
   },
   "stratumnotice": {
     "kicker": "Urgent · stratum miners: move to your own DATUM gateway",
-    "text": "Starting <b>7 October 2026</b>, this pool's public stratum endpoint becomes a <b>donation endpoint</b> and takes a <b>100% fee</b>. The network nodes will not tolerate stratum hashing. During the current 45-day coinbase maturity window, <b>all rewards from stratum hashing on any pool will be 100% invalidated</b>. Moving to another pool will not change that. The only way to be paid is to build your own templates with your own Bitcoin Knots node and a DATUM gateway (<a href=\"#connect\">guides for every supported gateway</a>). On your own gateway the fee is 0%, and work already accepted comes with you when you switch.",
+    "text": "Starting <b>7 October 2026</b>, this pool's public stratum endpoint becomes a <b>donation endpoint</b> and takes a <b>100% fee</b>. That 100% fee is both a <b>pool donation</b> and a <b>DATUM subsidy</b>: half to the pool address, half to DATUM gateways. The network nodes will not tolerate stratum hashing. During the current 45-day coinbase maturity window, <b>all rewards from stratum hashing on any pool will be 100% invalidated</b>. Moving to another pool will not change that. The only way to be paid is to build your own templates with your own Bitcoin Knots node and a DATUM gateway (<a href=\"#connect\">guides for every supported gateway</a>). On your own gateway the fee is 0%, and work already accepted comes with you when you switch.",
     "setup": "Set up a DATUM gateway",
     "plan": "The Knots plan (long coinbase maturity, part 1 of 3)",
     "dismiss": "Dismiss notice"
