@@ -42,6 +42,16 @@ fn house_stratum(cfg: &Config, remote: SocketAddr, gateway_key: &str) -> bool {
     cfg.house_gateways.iter().any(|h| !h.is_empty() && g.starts_with(h.as_str()))
 }
 
+/// Another pool's stratum front (`stratum-front-gateways`, `stratum-front-ips`): its work is
+/// charged as stratum work. Never the pool's own gateway, which has its own rules.
+fn stratum_front(cfg: &Config, remote: SocketAddr, gateway_key: &str) -> bool {
+    if house_stratum(cfg, remote, gateway_key) {
+        return false;
+    }
+    let g = gateway_key.to_ascii_lowercase();
+    cfg.stratum_front_ips.contains(&remote.ip()) || cfg.stratum_front_gateways.iter().any(|k| g.starts_with(k.as_str()))
+}
+
 /// The `held-split-builds` entry a gateway's hello names, if any.
 ///
 /// A C gateway's user agent is `v0.4.1-beta[+flavor]/<hash>` (the hello in `datum_protocol.c`):
@@ -852,11 +862,13 @@ pub async fn run(shared: Arc<Shared>, mut stream: TcpStream, remote: SocketAddr)
     }
     let known_script = shared.lookup_gateway_script(&gateway_key);
     let house = house_stratum(&shared.cfg, remote, &gateway_key);
-    let fee_path = if house { "stratum" } else { "datum" };
+    let front = stratum_front(&shared.cfg, remote, &gateway_key);
+    let fee_path = if front || house { "stratum" } else { "datum" };
     log::info!(
-        "[{id}] {remote} hello ua={:?} gateway={gateway_hex} gen={:?} fee={fee_path}{}",
+        "[{id}] {remote} hello ua={:?} gateway={gateway_hex} gen={:?} fee={fee_path}{}{}",
         hello.user_agent,
         hello.generation,
+        if front { " (another pool's stratum front)" } else { "" },
         if hello.resume_token.is_some() { " (asked to resume; declined)" } else { "" }
     );
     // The pool's own gateway carries every stratum miner, and is never left paying itself.
@@ -979,6 +991,10 @@ impl Session {
 
     fn is_house_stratum(&self) -> bool {
         house_stratum(&self.shared.cfg, self.remote, &self.gateway_key_hex())
+    }
+
+    fn is_stratum_front(&self) -> bool {
+        stratum_front(&self.shared.cfg, self.remote, &self.gateway_key_hex())
     }
 
     async fn serve(&mut self) -> Result<(), SessionError> {
@@ -1796,9 +1812,14 @@ impl Session {
                 // nothing to write for a share credited by its hash alone that earned nothing
                 // this time (`Policy::uncommitted_pot`); it is accepted like any other
                 if v.work > 0 {
-                    // DATUM, house stratum, or house stratum inside the address's grace
-                    let source =
-                        ledger.source_for(&identity, ts as u32, self.is_house_stratum(), &self.shared.cfg.grace());
+                    // DATUM, house stratum, or house stratum inside the address's grace. Work
+                    // relayed by another pool's stratum front is stratum work with no grace,
+                    // and leaves no trace in the grace book: it is not a sighting on DATUM.
+                    let source = if self.is_stratum_front() {
+                        tides::SOURCE_STRATUM
+                    } else {
+                        ledger.source_for(&identity, ts as u32, self.is_house_stratum(), &self.shared.cfg.grace())
+                    };
                     if let Err(e) = ledger.credit(&identity, v.work, v.height, ts as u32, source) {
                         log::error!("ledger write failed: {e}");
                     }

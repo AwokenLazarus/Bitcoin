@@ -106,6 +106,13 @@ datum-rebate-bps = 500
 # stratum-grace-rebate-bps = 1250
 # stratum-grace-rearm-hours = 168
 # stratum-grace-epoch = 0
+
+# Another pool's stratum front: a gateway that pool runs to relay its own stratum hashers here as
+# if they were DATUM miners. Its work is charged stratum-fee-bps with no grace, and earns none of
+# the DATUM rebate. By gateway key (16 or more hex digits, as blocked-gateways) or by the address
+# it connects from.
+# stratum-front-gateways = []
+# stratum-front-ips = []
 # Same, out of each dedicated-solo block's reward: when a block whose coinbase is tagged
 # solo-coinbase-tag and pays the pool script lands on chain, this share of its value is
 # credited to the DATUM miners then in the window. Off: dedicated solo keeps its own 5% fee
