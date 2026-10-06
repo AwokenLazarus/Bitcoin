@@ -34,8 +34,35 @@ aliases, software default tags, pool types) and says why each exists.
 | `public/assets/hub.css`, `public/assets/hub.js` | the hub's styles and its live figures |
 | `scripts/backfill.mjs` | one-off: fetch every block since the fork into `data/blocks.json` |
 
-KV namespace `lazarus-map-galaxy` holds two keys: `blocks` (compact record of every block since
+KV namespace `lazarus-map-galaxy` holds the map's two keys: `blocks` (compact record of every block since
 block 961,640) and `galaxy` (the built model the page draws).
+
+## Naughty list (`/naughtylist/`)
+
+Addresses hashing on a pool's stratum endpoint, for every pool, rendered by the Worker as plain
+HTML (`src/naughtypage.js`): no script is needed to read it, filter by pool (`?pool=`) or look up
+an address (`?a=`). JSON is at `/api/naughtylist`.
+
+- `src/naughtylist.js`: the coinbase walk (14 days) and the rules. The chain alone classifies
+  nothing but a block paid to a pool alone: a split pays stratum hashers and gateway operators
+  alike, and RATUM gateways write no tag.
+- `src/pools.js`: one reader per pool API (Lazarus, B2Pool, dxpool, RIPTIDE, PaperclipPool,
+  Blockvase, PyBLOCK, CONVOY, Bitcoin Xor) and the table of what each pool publishes. To add a
+  pool, add a reader that fills `state.ext[pool].m[address]` and a `POOLS` row. A pool with no row
+  still appears on the page from its blocks, marked not checked.
+- KV: `naughtylist` is the working document, `naughtyview` the small one the page reads. The cron
+  writes both. B2Pool and dxpool answer per address, so they are read a few addresses per run
+  (`POOL_BUDGET`); B2Pool drops a client that sends a few hundred requests in a burst.
+- `node scripts/naughty-pools.mjs state.json` runs every reader over a saved document and prints
+  the lists. `npm test` covers the rules and that the page carries no inline script.
+
+## Without JavaScript
+
+Every hub page reads with scripts off. `assets/js.js` sets `.js` on `<html>`; styles that hide
+content until a script reveals it, and the mobile menu drawer, apply only under `.js`. The Worker
+fills the live figures, pool directory and latest blocks into `/` and `/ecosystem/`
+(`src/hubfill.js`, `run_worker_first` in `wrangler.jsonc`). The map itself needs WebGL;
+`/map/table/` is the same data as tables.
 
 ## Deploy
 

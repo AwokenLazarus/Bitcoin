@@ -167,7 +167,9 @@ button { font: inherit; color: inherit; }
 .warp-core { width: 26px; height: 120px; border-radius: 13px; background: linear-gradient(var(--rebel-2), var(--lcars-lilac), var(--rebel-2)); background-size: 100% 300%; animation: core 1.4s linear infinite; box-shadow: 0 0 30px var(--rebel-2); }
 @keyframes core { to { background-position: 0 300%; } }
 .error { position: fixed; left: 50%; top: 40%; transform: translate(-50%, -50%); z-index: 16; background: var(--panel); border-left: 8px solid var(--lcars-red); border-radius: 20px 6px 6px 20px; padding: 16px 20px; max-width: 90vw; font: 14px var(--mono); }
-.noscript { position: fixed; inset: auto 16px 60px; z-index: 30; }
+/* With no script nothing behind this can work, so it covers the dead intro and its buttons. */
+.noscript { position: fixed; inset: 0; z-index: 200; margin: 0; padding: 35vh 24px 0; background: #000; color: #e8e6df; font: 18px/1.6 system-ui, sans-serif; text-align: center; }
+.noscript a { color: #ffd166; }
 
 /* ---------- narrow screens ---------- */
 @media (max-width: 820px) {

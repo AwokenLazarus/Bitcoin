@@ -6,7 +6,8 @@
   "workers_dev": false,
   "preview_urls": false,
   "routes": [{ "pattern": "lazarus-xbt.xyz", "custom_domain": true }],
-  "assets": { "directory": "./public", "binding": "ASSETS", "not_found_handling": "none", "run_worker_first": false },
+  // The Worker runs first only for the two pages it fills with live figures (src/hubfill.js).
+  "assets": { "directory": "./public", "binding": "ASSETS", "not_found_handling": "none", "run_worker_first": ["/", "/ecosystem/"] },
   "kv_namespaces": [{ "binding": "GALAXY", "id": "8242de880afd41f79e03b586eb16e227" }],
   // Lazarus Key app builds: too large for Workers assets, so they are served from R2.
   "r2_buckets": [{ "binding": "DOWNLOADS", "bucket_name": "lazarus-key-downloads" }],

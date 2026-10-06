@@ -14,6 +14,8 @@ Key facts:
 - [FAQ](https://lazarus-xbt.xyz/faq/): short answers on the chain, safety, mining and practical questions
 - [Ecosystem](https://lazarus-xbt.xyz/ecosystem/): pool directory, open-source software, public endpoints, community
 - [XBT Galaxy map](https://lazarus-xbt.xyz/map/): every pool and DATUM gateway, built from coinbase tags
+- [Naughty list](https://lazarus-xbt.xyz/naughtylist/): addresses hashing on any XBT pool's stratum endpoint, from each pool's own public data; confirmed and suspected kept apart; plain HTML, JSON at /api/naughtylist
+- [Galaxy map as a table](https://lazarus-xbt.xyz/map/table/): every pool, gateway and solo miner in plain HTML tables
 - [Lazarus Key](https://lazarus-xbt.xyz/key/): a hardware-signed XBT wallet forked from Block's Bitkey app (Android)
 
 ## Mine

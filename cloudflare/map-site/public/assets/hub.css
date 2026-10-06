@@ -106,21 +106,26 @@ hr { border: 0; border-top: 1px solid var(--line); margin: 3rem 0; }
 .nav-toggle { display: none; }
 
 @media (max-width: 62rem) {
-  .nav-toggle {
+  /* With no script the menu button cannot open anything, so the links sit under the wordmark. */
+  html:not(.js) .topbar { flex-wrap: wrap; height: auto; padding-block: 0.7rem; row-gap: 0.4rem; }
+  html:not(.js) .site-nav { flex-wrap: wrap; margin-left: 0; width: 100%; gap: 0.2rem 1.1rem; }
+  html:not(.js) .site-header { position: static; }
+  .js .nav-toggle {
     display: inline-flex; align-items: center; gap: 0.5rem; margin-left: auto;
     background: none; border: 1px solid var(--line-strong); color: var(--ink);
     border-radius: var(--r-sm); padding: 0.45rem 0.7rem; font: 500 0.9rem var(--sans); cursor: pointer;
   }
-  .site-nav {
+  .js .site-nav {
     position: fixed; inset: var(--header-h) 0 auto; flex-direction: column; align-items: stretch;
     gap: 0; padding: 0.6rem var(--gutter) 1.2rem; margin: 0;
     background: var(--bg-inset); border-bottom: 1px solid var(--line);
     box-shadow: 0 18px 40px oklch(0% 0 0 / 0.55);
     transform: translateY(-120%); transition: transform 0.28s var(--ease); max-height: calc(100dvh - var(--header-h)); overflow: auto;
   }
-  .site-nav[data-open="true"] { transform: none; }
-  .site-nav a { padding: 0.7rem 0; border-bottom: 1px solid var(--line); font-size: 1.02rem; }
-  .site-nav .btn { margin-top: 0.8rem; text-align: center; }
+  .js .site-nav[data-open="true"] { transform: none; }
+  .js .site-nav a { padding: 0.7rem 0; border-bottom: 1px solid var(--line); font-size: 1.02rem; }
+  .js .site-nav .btn { margin-top: 0.8rem; text-align: center; }
+}
 }
 
 /* ---------- buttons ---------- */
@@ -269,6 +274,7 @@ p.mono small, .card p.mono small { display: block; margin-top: 0.3rem; font-fami
 .prose dt { font-weight: 600; margin-top: 1rem; }
 .prose dd { margin: 0.2rem 0 0; color: var(--muted); }
 
-[data-reveal] { opacity: 0; transform: translateY(12px); }
-[data-reveal].in { opacity: 1; transform: none; transition: opacity 0.5s var(--ease), transform 0.5s var(--ease); }
-@media (prefers-reduced-motion: reduce) { [data-reveal] { opacity: 1; transform: none; } .btn:hover, a.card:hover { transform: none; } }
+/* Hidden-until-revealed only when a script is there to reveal it (js.js sets .js on <html>). */
+.js [data-reveal] { opacity: 0; transform: translateY(12px); }
+.js [data-reveal].in { opacity: 1; transform: none; transition: opacity 0.5s var(--ease), transform 0.5s var(--ease); }
+@media (prefers-reduced-motion: reduce) { .js [data-reveal] { opacity: 1; transform: none; } .btn:hover, a.card:hover { transform: none; } }
