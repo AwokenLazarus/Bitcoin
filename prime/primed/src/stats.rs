@@ -220,6 +220,8 @@ pub fn build(shared: &Shared) -> Value {
             "stratum_grace_rebate_bps": shared.cfg.stratum_grace_rebate_bps,
             "stratum_grace_rearm_hours": shared.cfg.stratum_grace_rearm_hours,
             "stratum_grace_epoch": grace.epoch,
+            // how many gateways and addresses are listed as another pool's stratum front
+            "stratum_fronts": shared.cfg.stratum_front_gateways.len() + shared.cfg.stratum_front_ips.len(),
             "solo_rebate_bps": shared.cfg.solo_rebate_bps,
             "window_multiple": shared.cfg.window,
             "min_payout": shared.cfg.min_payout,

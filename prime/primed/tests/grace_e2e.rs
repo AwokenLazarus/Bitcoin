@@ -172,3 +172,50 @@ fn a_share_on_the_house_stratum_is_tagged_by_its_address_s_clock() {
     assert!(near(&m["stratum_grace_until"], done + 96 * 3_600), "{m}");
     eprintln!("NEW {}\nOLD {}\nFAILOVER {}", miner(&st, NEW), miner(&st, OLD), miner(&st, FAILOVER));
 }
+
+/// Another pool points a gateway of its own at us and relays its stratum hashers through it.
+/// Listed as a stratum front, that work is stratum work at the full fee: no grace, no DATUM
+/// rebate, and no sighting on DATUM that could later buy the address the longer grace.
+#[test]
+#[ignore]
+fn work_relayed_by_another_pool_s_stratum_front_is_stratum_work_with_no_grace() {
+    let pool = Identity::generate();
+    let now = unix_now();
+    let t = now - 600;
+    let cfg =
+        format!("{}\nhouse-loopback = false\nstratum-front-ips = [\"127.0.0.1\"]", donation_config(now - 86_400 - 60));
+    let (primed, port) = start_primed_seeded(&pool, &cfg, |dir| {
+        let mut l = Ledger::open(dir).unwrap();
+        l.credit(DATUM, 400_000, HEIGHT, t, SOURCE_DATUM).unwrap();
+        l.persist_window().unwrap();
+    });
+    let mut gw = Gateway::connect(port, &pool, &Identity::generate());
+    let mut share = pool_only_share(3, HEIGHT, [0x75; 32], 0x193c_2d40, 0, unix_now());
+    share.username = format!("{NEW}.rig");
+    grind_diff1(&mut share);
+    let (status, code) = gw.submit(&share);
+    assert!(
+        status == mining::ACCEPTED || status == mining::ACCEPTED_TENTATIVELY,
+        "share accepted (status 0x{status:02x}, code {code})"
+    );
+    let st = settled_stats(&primed);
+    assert_eq!(st["pool"]["stratum_fronts"], 1);
+    let m = miner(&st, NEW);
+    assert_eq!((&m["work"], &m["stratum_work"], &m["grace_work"]), (&1.into(), &1.into(), &0.into()), "{m}");
+    assert_eq!(m["fee_path"], "stratum");
+    assert!(m["stratum_grace_until"].is_null(), "a front's work starts no grace clock: {m}");
+    assert_eq!(m["payout_sats"], 0, "the stratum fee is 100%");
+    assert_eq!(m["rebate_sats"], 0);
+    let client = st["clients"].as_array().unwrap().iter().find(|c| c["accepted"] == 1).expect("the session is listed");
+    assert_eq!(client["fee_path"], "stratum");
+    // the DATUM miner beside it is untouched, and collects the rebate from the front's work
+    let d = miner(&st, DATUM);
+    assert_eq!((&d["stratum_work"], &d["fee_path"]), (&0.into(), &"datum".into()));
+    assert!(d["rebate_sats"].as_u64().unwrap() > 0);
+    // nothing in the grace book says this address was ever on DATUM, or on our own stratum
+    std::thread::sleep(Duration::from_secs(7));
+    if let Ok(b) = std::fs::read(primed.dir.join("grace.json")) {
+        let book: serde_json::Value = serde_json::from_slice(&b).unwrap();
+        assert!(book["datum_seen"][NEW].is_null() && book["stratum"][NEW].is_null(), "{book}");
+    }
+}

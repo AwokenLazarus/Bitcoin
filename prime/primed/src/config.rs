@@ -185,6 +185,17 @@ pub struct Config {
     /// from the logs is enough; a longer prefix or the whole key also works.
     #[serde(default)]
     pub blocked_gateways: Vec<String>,
+    /// Gateways that are another pool's stratum front: that pool's hashers point at its stratum
+    /// port, and its own gateway and node relay them here as if they were DATUM miners. Their
+    /// work is stratum work: charged `stratum-fee-bps`, with no grace (a grace is for a miner
+    /// whose own gateway is down), and it is not a sighting on DATUM. Nothing else about the
+    /// session changes: it gets none of the trust the pool's own gateway has. Matched like
+    /// `blocked-gateways`, on 16 or more hex digits of the gateway key.
+    #[serde(default)]
+    pub stratum_front_gateways: Vec<String>,
+    /// The same, by the address the gateway connects from: a front changes its key at will.
+    #[serde(default)]
+    pub stratum_front_ips: Vec<std::net::IpAddr>,
     /// Coinbase section bytes one session may have Prime hold across all of its job slots.
     /// A stock gateway's eight slots of seven ~16 KiB coinbase classes is under 1 MiB; the
     /// sixteen live slots Prime keeps at eight 20 000-byte sections each is 2.5 MiB.
@@ -374,6 +385,12 @@ impl Config {
         for g in &mut c.house_gateways {
             *g = g.to_ascii_lowercase();
         }
+        for g in &mut c.stratum_front_gateways {
+            *g = g.trim().to_ascii_lowercase();
+            if g.len() < 16 || !g.bytes().all(|b| b.is_ascii_hexdigit()) {
+                return Err(format!("stratum-front-gateways: {g:?} is not 16 or more hex digits of a gateway key"));
+            }
+        }
         if c.uncommitted_pot > 63 {
             return Err("uncommitted-pot is a power-of-two exponent, 63 at most".into());
         }
@@ -528,6 +545,28 @@ require-split-gateway = true
         )
         .unwrap();
         assert_eq!(Config::load(&p).unwrap().grace().datum_secs, 86_400);
+        // another pool's stratum front, by key and by address
+        std::fs::write(
+            &p,
+            format!(
+                "{base}\nstratum-front-gateways = [\"097B7017CCFD7669\"]\nstratum-front-ips = [\"207.244.247.51\"]\n"
+            ),
+        )
+        .unwrap();
+        let c = Config::load(&p).unwrap();
+        assert_eq!(c.stratum_front_gateways, vec!["097b7017ccfd7669".to_string()]);
+        assert_eq!(c.stratum_front_ips, vec!["207.244.247.51".parse::<std::net::IpAddr>().unwrap()]);
+        std::fs::write(&p, &base).unwrap();
+        let c = Config::load(&p).unwrap();
+        assert!(c.stratum_front_gateways.is_empty() && c.stratum_front_ips.is_empty());
+        for bad in [
+            "stratum-front-gateways = [\"097b7017\"]",
+            "stratum-front-gateways = [\"not-a-key-not-a-key\"]",
+            "stratum-front-ips = [\"ctrlpool.com\"]",
+        ] {
+            std::fs::write(&p, format!("{base}\n{bad}\n")).unwrap();
+            assert!(Config::load(&p).is_err(), "{bad}");
+        }
         // each of these is a mistake, and none is silently repaired
         for (keys, names) in [
             ("stratum-grace-hours = 24\n", "stratum-grace-fee-bps must be set"),
