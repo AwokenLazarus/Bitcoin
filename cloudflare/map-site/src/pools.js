@@ -243,7 +243,7 @@ export const POOLS = [
   { pool: "Mining-Dutch", site: "https://www.mining-dutch.nl/", stratum: "only",
     reads: "Stratum only, with accounts and wallet payouts. Its API has pool totals and no addresses, so only the pool's own coinbase address can be listed." },
   { pool: "CTRL", site: "https://ctrlpool.com", stratum: "yes",
-    reads: "ctrlpool, formerly xbtpool. It mines through another pool's DATUM window, hides its miner list, and answers for one address at a time with no protocol field." },
+    reads: "ctrlpool, formerly xbtpool. Its own DATUM pool found its last block at 974658. Since then its XBT stratum port (4333) sits in front of a gateway ctrlpool runs itself, pointed at another pool's DATUM window: its site says so and does not say whose. Since 2 October 2026 the server behind that port is connected to Lazarus as a gateway, so ctrlpool's hashers are paid by Lazarus's coinbase while ctrlpool's node builds their blocks. It hides its miner list; the addresses listed are the ones seen behind that gateway." },
   { pool: "Pow.re", site: "https://pow.re", stratum: "unknown",
     reads: "A hashrate desk with no pool pages or API. Its blocks pay one or two outputs." },
 ];

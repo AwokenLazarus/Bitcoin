@@ -209,6 +209,8 @@ export async function ingestNaughty(env, tip) {
     }
   }
   const rejudged = applyHosted(state, hosted);
+  // Addresses behind another pool's gateway on our own DATUM port, as the watcher last saw them.
+  if (hosted && hosted.lazarus) state.via = hosted.lazarus;
   const online = (miners && miners.online) || [];
   observeLive(state, online, now);
   rememberStratum(state, now);

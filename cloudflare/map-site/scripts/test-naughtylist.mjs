@@ -2,7 +2,7 @@
 // DATUM payee must not stay on the naughty list, and a live stratum worker must.
 //
 //   node scripts/test-naughtylist.mjs
-import { applyHosted, blocksMissingKey, buildLists, classifyCoinbase, emptyState, gatewayKey, hostedWindows, setGatewayKey, migrate, noteBlock, observeLive, outputsOf, poolVerdict, rememberStratum, validAddress } from "../src/naughtylist.js";
+import { addressPays, applyHosted, blocksMissingKey, buildLists, classifyCoinbase, emptyState, gatewayKey, hostedWindows, setGatewayKey, migrate, noteBlock, observeLive, outputsOf, poolVerdict, rememberStratum, validAddress } from "../src/naughtylist.js";
 import { buildView, refreshPools } from "../src/pools.js";
 import { renderAddress, renderList } from "../src/naughtypage.js";
 
@@ -305,6 +305,32 @@ await test("blocks noted before the gateway name was kept are read again", async
   assert(!blocksMissingKey(state, 9).length && applyHosted(state, HOSTED) === 3, "the names were not kept");
 });
 
+
+await test("an address behind another pool's gateway on Lazarus is confirmed, and its Lazarus payouts are marked", async () => {
+  const now = 2_000_000_000, state = emptyState();
+  const A = "bc1qbehindctrl", B = "bc1qhonest";
+  const first = now - 5000;
+  noteBlock(state, { h: 10, t: first - 100, id: "b10", txid: "t10", script: datumScript, outputs: [{ address: A, vout: 0, sats: 700 }, { address: B, vout: 1, sats: 900 }] });
+  noteBlock(state, { h: 11, t: now - 600, id: "b11", txid: "t11", script: datumScript, outputs: [{ address: A, vout: 0, sats: 800 }, { address: B, vout: 1, sats: 900 }] });
+  state.via = { gateways: { "097b7017ccfd7669": { pool: "CTRL" } }, addrs: { [A]: { pool: "CTRL", gateway: "097b7017ccfd7669", first, last: now - 60 }, bc1qneverpaid: { pool: "CTRL", gateway: "097b7017ccfd7669", first, last: now - 60 }, bc1qlonggone: { pool: "CTRL", gateway: "x", first: 1, last: now - 20 * 86400 } } };
+  // our own pool shows both as DATUM miners on a gateway, which is exactly the disguise
+  const miners = [A, B].map((address) => ({ address, online: true, fee_path: "datum", via: "prime", hr_ghs: 500 }));
+  const gateways = [{ identity: A, gateway: "097b7017ccfd7669", fee_path: "datum" }, { identity: B, gateway: "aa", fee_path: "datum" }];
+  const lists = buildLists(state, miners, now, gateways);
+  const row = lists.naughty.find((r) => r.address === A);
+  assert(row && row.pool === "CTRL" && row.why === "behind-pool-gateway" && row.live === "stratum" && row.hrGhs === 500, JSON.stringify(row));
+  assert(lists.naughty.some((r) => r.address === "bc1qneverpaid" && r.pool === "CTRL"), "an address with no payout yet was left off");
+  assert(!lists.naughty.some((r) => r.address === "bc1qlonggone"), "an address last seen weeks ago is still listed");
+  assert(![...lists.naughty, ...lists.suspects, ...lists.nice].some((r) => r.address === B), "an honest gateway owner was listed");
+  const pays = addressPays(state, A, [{ txid: "t11", vout: 0 }]);
+  assert(pays[0].height === 11 && pays[0].via === "CTRL" && pays[0].unspent && pays[1].via === null, JSON.stringify(pays));
+  assert(addressPays(state, B, []).every((p) => p.via === null), "an honest address's payouts were marked");
+  const view = buildView(state, miners, gateways, now);
+  const html = renderList(view);
+  assert(/Hashing on CTRL(&#39;|&#x27;|')s stratum/.test(html) && html.includes("gateway 097b7017ccfd7669"), "the list does not say what the row rests on");
+  const page = renderAddress({ address: A, listed: view.naughty.find((r) => r.address === A), stored: [], asked: [], pays, unspentCount: 1, unspentSats: 800 });
+  assert(page.includes("Confirmed on stratum at CTRL") && page.includes("Earned on CTRL's stratum, behind its gateway on Lazarus"), "the address page does not mark the outputs");
+});
 
 console.log(failures ? `\n${failures} failing` : "\nall passing");
 process.exit(failures ? 1 : 0);

@@ -28,6 +28,15 @@ SEED += [f"{h}.ctrlpool.com:4333" for h in ("stratum", "us.stratum", "asia.strat
 # block and nothing about the name.
 GENERIC = {"", "datum user", "datum gateway", "gateway", "datum"}
 JOB_MEMORY = 3 * 3600
+# Another pool's gateway inside our own window: its stratum hashers reach Lazarus as DATUM miners
+# while that pool's node builds their blocks. Found by address: a gateway connected to our DATUM
+# port from the same IP that serves another pool's public stratum port. Keys seen that way are
+# remembered here so a quiet spell does not forget them.
+HUB = "lazarus-hub"
+HUB_READ = ("curl -s -m 5 http://127.0.0.1:28916/stats.json | python3 -c 'import json,sys; "
+            "print(json.dumps([[c.get(\"gateway\"),c.get(\"remote\"),c.get(\"identity\"),c.get(\"offline\"),c.get(\"fee_path\")] for c in json.load(sys.stdin)[\"clients\"]]))'")
+KNOWN_ON_LAZARUS = {"097b7017ccfd7669": {"pool": "CTRL", "ip": "207.244.247.51", "first": 1790958000}}  # 2 Oct 2026, first hello in our journal
+REPUBLISH = 1800
 STATE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "hosted.json") if "--state" not in sys.argv else sys.argv[sys.argv.index("--state") + 1]
 UA = {"User-Agent": "lazarus-hosted-watch/0.1 (+https://lazarus-xbt.xyz/naughtylist/)"}
 USER = "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4.watch"
@@ -125,6 +134,40 @@ def directory_endpoints():
     return out
 
 
+def hub_gateways():
+    """[gateway key, remote ip, identity, offline, fee path] for every session on our DATUM port."""
+    r = subprocess.run(["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", HUB, HUB_READ], capture_output=True, text=True, timeout=40)
+    if r.returncode != 0: raise RuntimeError((r.stderr or "ssh failed")[-120:])
+    return [[g, (remote or "").rsplit(":", 1)[0], ident, off, path] for g, remote, ident, off, path in json.loads(r.stdout)]
+
+
+def note_lazarus(state, eps, now):
+    """Gateways on our pool that are another pool's stratum front, and the addresses behind them.
+    Returns True when a gateway or an address is new."""
+    lz = state.setdefault("lazarus", {"gateways": {}, "addrs": {}})
+    for key, g in KNOWN_ON_LAZARUS.items(): lz["gateways"].setdefault(key, dict(g, last=g["first"]))
+    # the IP each other pool's public stratum port answered from
+    theirs = {s["ip"]: eps.get(e, "") for e, s in listening.items() if s.get("ip") and eps.get(e) and eps.get(e) != "Lazarus"}
+    new = False
+    for key, ip, ident, offline, path in hub_gateways():
+        if not key or offline or path == "stratum": continue
+        g = lz["gateways"].get(key)
+        if not g and ip in theirs:
+            g = lz["gateways"][key] = {"pool": theirs[ip], "ip": ip, "first": now}
+            new = True
+            log(f"gateway {key} on our DATUM port comes from {ip}, which serves {theirs[ip]}'s public stratum")
+        if not g: continue
+        g["last"] = now; g["ip"] = ip
+        if not ident: continue
+        a = lz["addrs"].get(ident)
+        if not a:
+            a = lz["addrs"][ident] = {"pool": g["pool"], "gateway": key, "first": now}
+            new = True
+            log(f"address {ident} is behind {g['pool']}'s gateway {key}")
+        a["last"] = now
+    return new
+
+
 def load():
     try: return json.load(open(STATE))
     except (OSError, ValueError): return {"v": 1, "asOf": 0, "scanned": 0, "tags": {}, "blocks": {}, "endpoints": {}}
@@ -192,6 +235,12 @@ def main():
             state["scanned"] = max(state.get("scanned", 0), page[0]["height"])
         except Exception as e:
             log("blocks:", e)
+        try:
+            if note_lazarus(state, state.get("endpointPools", {}), now): changed = True
+        except Exception as e:
+            log("hub:", e)
+        # `last` moves on every pass: send it now and then so the site knows who is still there
+        if now - state.get("sent", 0) > REPUBLISH: changed = True
         with lock:
             for k in [k for k, v in jobs.items() if now - v[0] > JOB_MEMORY]: del jobs[k]
         state["asOf"] = now
@@ -199,6 +248,7 @@ def main():
         if len(state["blocks"]) > 4000:
             for h in sorted(state["blocks"], key=int)[:-4000]: del state["blocks"][h]
         if changed or unsent:
+            state["sent"] = now
             try: unsent = not publish(state, kv)
             except Exception as e: unsent = True; log("publish:", e)
         stop.wait(45)

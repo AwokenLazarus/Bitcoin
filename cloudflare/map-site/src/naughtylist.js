@@ -15,6 +15,12 @@
 // cannot show that. `hosted` can: scripts/hosted-watch.py listens on the pools' public stratum
 // ports and ties a found block to the job a port handed out, and so proves which gateway names
 // are the pool's own. A block under such a name is the pool's stratum, whatever its tag says.
+//
+// The same trick is played on us: a stratum pool points a gateway of its own at Lazarus's DATUM
+// port, so its hashers arrive here as DATUM miners while that pool's node builds their blocks.
+// The watcher finds such a gateway by where it connects from (the IP that serves the other
+// pool's public stratum port) and records the addresses behind it in `state.via`. Those are
+// confirmed: they are hashing on that pool's stratum, and Lazarus's coinbase is what pays them.
 
 import { coinbaseTags, poolName, POOL_LINKS } from "./galaxy.js";
 
@@ -349,6 +355,9 @@ export function poolWindows(state, now) {
 
 // What a pool said is trusted for this long after we last read it.
 export const FRESH_SEC = 6 * 3600;
+// An address behind another pool's gateway counts as hashing there now for this long after the
+// watcher last saw it (it republishes every half hour).
+export const VIA_LIVE_SEC = 3600;
 // Under this share of an address's work in a pool's window, stratum work is a test, not a habit.
 export const STRATUM_WORK_SHARE = 0.05;
 
@@ -378,8 +387,9 @@ export function poolVerdict(e, now) {
 
 /**
  * Three lists.
- * Naughty (confirmed): a live Lazarus stratum session; an address a pool's own API shows on
- *   stratum; or any output of a custodial pool block.
+ * Naughty (confirmed): a live Lazarus stratum session; an address behind another pool's gateway
+ *   on Lazarus (`state.via`); an address a pool's own API shows on stratum; or any output of a
+ *   custodial pool block.
  * Suspects: an address a pool lists with no gateway tag; a payee of a split from a pool whose
  *   own block list says most of its blocks were found over stratum; or a payee of blocks built
  *   on gateways the pool runs itself, where those are at least SUSPECT_SHARE of the pool's
@@ -413,6 +423,25 @@ export function buildLists(state, miners, now, gateways) {
   for (const [pool, p] of Object.entries(hostedWindows(state, now))) {
     if (p.hostedBlocks >= SUSPECT_MIN_BLOCKS && p.share >= SUSPECT_SHARE * 100) hostedOdds[pool] = p;
   }
+  // Behind another pool's gateway on our own DATUM port, seen within the active window.
+  const via = (state.via && state.via.addrs) || {};
+  const behind = (address) => {
+    const v = via[address];
+    return v && v.pool && now - (v.last || 0) <= ACTIVE_SEC ? v : null;
+  };
+  const behindRow = (address, a, L, v) => {
+    const item = row(address, a, L, "naughty");
+    item.pool = v.pool;
+    item.why = "behind-pool-gateway";
+    item.host = "Lazarus";
+    item.gatewayKey = v.gateway || "";
+    item.firstSeen = v.first || null;
+    item.lastSeen = v.last || null;
+    // on our pool it shows as DATUM; what it is doing is hashing on the other pool's stratum
+    item.live = now - (v.last || 0) <= VIA_LIVE_SEC ? "stratum" : null;
+    if (!item.live) item.hrGhs = null;
+    return item;
+  };
   const fromPools = (address) => {
     let confirmed = null, untagged = null, moved = null;
     const cleared = new Set();
@@ -446,6 +475,8 @@ export function buildLists(state, miners, now, gateways) {
   for (const [address, a] of Object.entries(state.addrs || {})) {
     seen.add(address);
     const L = live.get(address);
+    const v = behind(address);
+    if (v) { naughty.push(behindRow(address, a, L, v)); continue; }
     const hashingStratum = !!(L && L.stratum);
     const onOwnNode = ownNode.has(address);
     const custodial = (a.pays || []).find((p) => p.k === "c" && recent(p));
@@ -517,6 +548,12 @@ export function buildLists(state, miners, now, gateways) {
       });
     }
   }
+  for (const address of Object.keys(via)) {
+    const v = behind(address);
+    if (seen.has(address) || !v) continue;
+    seen.add(address);
+    naughty.push(behindRow(address, blank(), live.get(address) || null, v));
+  }
   for (const [address, L] of live) {
     if (seen.has(address) || !L.stratum) continue;
     seen.add(address);
@@ -564,9 +601,12 @@ export function validAddress(s) {
 export function addressPays(state, address, utxos) {
   const a = state.addrs && state.addrs[address];
   const unspent = new Set((utxos || []).map((u) => `${u.txid}:${u.vout}`));
+  // Lazarus outputs earned while the address sat behind another pool's gateway on Lazarus.
+  const v = state.via && state.via.addrs && state.via.addrs[address];
   const pays = (a && a.pays ? a.pays : []).map((p) => ({
     height: p.h, ts: p.t, txid: p.tx, vout: p.v, sats: p.sats, pool: p.pool,
     kind: p.k === "d" ? "datum-block" : p.k === "c" ? "custodial" : "stratum",
+    via: v && p.pool === "Lazarus" && (p.t || 0) >= (v.first || 0) ? v.pool : null,
     unspent: !!(p.tx && unspent.has(`${p.tx}:${p.v}`)),
   }));
   pays.sort((x, y) => y.height - x.height);

@@ -21,6 +21,7 @@ export function evidence(r) {
     case "pool-stratum-block": return `The pool names it the finder of block ${n(r.evidenceHeight)}, which the pool built`;
     case "custodial-block": return "Paid by a block the pool built and paid out alone";
     case "split-payee": return `Paid by ${plural(r.paidBlocks, "split block", "split blocks")}. The pool built ${r.share}% of its blocks itself (${n(r.stratumBlocks)} of ${n(r.stratumBlocks + r.gatewayBlocks)}, by its own block list)`;
+    case "behind-pool-gateway": return `Hashing on ${r.pool}'s stratum. ${r.pool} runs a gateway of its own into ${r.host || "Lazarus"}'s DATUM window${r.gatewayKey ? ` (gateway ${r.gatewayKey})` : ""}, connected from the server behind its public stratum port, so ${r.pool}'s node builds this address's blocks and ${r.host || "Lazarus"}'s coinbase pays it. Seen behind that gateway ${r.firstSeen ? `since ${when(r.firstSeen)}` : ""}${r.lastSeen ? `, last ${when(r.lastSeen)}` : ""}`;
     case "hosted-gateway": return `Paid by ${plural(r.paidBlocks, "block", "blocks")} built on gateways the pool runs itself${r.gatewayNames && r.gatewayNames.length ? ` (${r.gatewayNames.join(", ")})` : ""}: ${r.share}% of its gateway blocks (${n(r.hostedBlocks)} of ${n(r.hostedBlocks + r.otherGatewayBlocks)}), each tied to a job its public stratum port handed out`;
     case "no-gateway-tag": return "On the pool's miner list with no gateway tag";
     default: return r.list === "nice" ? "Was on stratum. Now on its own node" : "";
@@ -158,8 +159,8 @@ ${FOOT}`;
     says.push(`<li><strong>${esc(a.pool)}, asked just now.</strong> ${esc(bits.join(". "))}.</li>`);
   }
   const payRows = (d.pays || []).map((p) => {
-    const label = p.kind === "datum-block" ? "Gateway-tagged block" : p.kind === "custodial" ? "Block paid to the pool alone" : "Split with no gateway tag";
-    return `<tr><td class="num">${n(p.height)}</td><td class="num">${when(p.ts)}</td><td class="num">${xbt(p.sats)}</td><td>${esc(p.pool || "—")}</td><td class="${p.kind === "datum-block" ? "kind-d" : "kind-s"}">${label}</td><td>${p.unspent ? "unspent" : "spent"}</td></tr>`;
+    const label = p.via ? `Earned on ${esc(p.via)}'s stratum, behind its gateway on ${esc(p.pool)}` : p.kind === "datum-block" ? "Gateway-tagged block" : p.kind === "custodial" ? "Block paid to the pool alone" : "Split with no gateway tag";
+    return `<tr><td class="num">${n(p.height)}</td><td class="num">${when(p.ts)}</td><td class="num">${xbt(p.sats)}</td><td>${esc(p.pool || "—")}</td><td class="${p.kind === "datum-block" && !p.via ? "kind-d" : "kind-s"}">${label}</td><td>${p.unspent ? "unspent" : "spent"}</td></tr>`;
   });
   return `${head}
     <p class="kicker">Naughty list · one address</p>
