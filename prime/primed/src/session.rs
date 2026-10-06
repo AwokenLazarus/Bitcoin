@@ -446,6 +446,9 @@ struct Settlement {
     /// Carry the coinbase itself handed out; 0 when it placed no payee.
     carry_paid: u64,
     carry_delta: Vec<(String, i64)>,
+    /// The rebate credits inside `carry_delta`, as they are there (moved with the reward when
+    /// the block was priced for it), and their sum.
+    rebate_credits: Vec<(String, u64)>,
     rebate_credited: u64,
     rebate_delta: i64,
     /// Of `carry_delta`, what a class-capped coinbaser deferred for room: the earnings its
@@ -476,6 +479,7 @@ fn settle(
         split: vec![],
         carry_paid: 0,
         carry_delta: vec![],
+        rebate_credits: vec![],
         rebate_credited: 0,
         rebate_delta: 0,
         carry_reserved: 0,
@@ -523,6 +527,7 @@ fn settle(
             split: cb.payees.iter().map(|p| (p.identity.clone(), p.sats)).collect(),
             carry_paid: cb.payees.iter().filter(|p| full_split || placed(p)).map(|p| p.carry).sum(),
             carry_delta,
+            rebate_credits: cb.rebate_credits.to_vec(),
             rebate_credited: cb.rebate_credits.iter().map(|r| r.1).sum(),
             rebate_delta,
             carry_reserved: reserved(&|e| e),
@@ -550,6 +555,7 @@ fn settle(
             .into_iter()
             .map(|(i, d)| if d > 0 { (i, rescale(d as u64).min(i64::MAX as u64) as i64) } else { (i, d) })
             .collect(),
+        rebate_credits: cb.rebate_credits.iter().map(|(i, s)| (i.clone(), rescale(*s))).collect(),
         rebate_credited: cb.rebate_credits.iter().map(|r| rescale(r.1)).sum(),
         rebate_delta,
         carry_reserved: reserved(&|e| rescale(e).min(i64::MAX as u64)),
@@ -2238,6 +2244,7 @@ impl Session {
             split,
             mut carry_paid,
             mut carry_delta,
+            rebate_credits,
             mut rebate_credited,
             rebate_delta,
             carry_reserved,
@@ -2271,7 +2278,14 @@ impl Session {
             carry_paid = booked;
             if let Some(c) = issued {
                 if c.rebate_owed_credited > books.rebate_debited {
-                    let left = tides::cap_rebate_credits(&mut carry_delta, &c.rebate_credits, books.rebate_debited);
+                    // Only the owed rebate an earlier block drew comes off. The rest of these
+                    // credits is the rebate this block's own stratum fee paid the pool.
+                    let left = tides::cap_rebate_to_owed_drawn(
+                        &mut carry_delta,
+                        &rebate_credits,
+                        c.rebate_owed_credited,
+                        books.rebate_debited,
+                    );
                     log::error!(
                         "[{}] block {hash_hex} coinbaser credited {} sats of owed DATUM rebate but only {} was still \
                          owed; {} sats of that credit are not put on",

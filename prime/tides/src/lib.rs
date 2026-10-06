@@ -1510,6 +1510,23 @@ pub fn cap_rebate_credits(delta: &mut Vec<(String, i64)>, planned: &[(String, u6
     planned_sum - (planned_sum - allowed - cut)
 }
 
+/// Take out of the rebate credits inside `delta` the owed DATUM rebate an earlier block drew.
+///
+/// A coinbaser's rebate credits (`planned`) are its own block's stratum-fee rebate plus the
+/// whole owed balance of the moment it was issued, `owed_credited`. A block found on it after
+/// another block drew that balance finds only `owed_drawn` of it still there. The difference
+/// has been credited once and comes off; the rebate this block's own fee paid for stays.
+/// Returns the rebate credit still in `delta`.
+pub fn cap_rebate_to_owed_drawn(
+    delta: &mut Vec<(String, i64)>,
+    planned: &[(String, u64)],
+    owed_credited: u64,
+    owed_drawn: u64,
+) -> u64 {
+    let planned_sum: u64 = planned.iter().map(|(_, s)| *s).sum();
+    cap_rebate_credits(delta, planned, planned_sum.saturating_sub(owed_credited.saturating_sub(owed_drawn)))
+}
+
 /// Lifetime non-orphan finds per gateway signing-key prefix, recovered from the block log.
 ///
 /// Session counters reset when primed restarts; this is what the UI should show.
@@ -1911,8 +1928,34 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
+    /// A coinbaser from before the last find credits the owed rebate that find already drew.
+    /// Only that comes off: the rebate the block's own fee paid for is credited whatever the
+    /// owed balance has become.
     #[test]
-    fn a_rebate_credit_is_capped_to_the_owed_balance_that_was_still_there() {
+    fn a_rebate_credit_loses_only_the_owed_balance_an_earlier_block_drew() {
+        // 30 of the block's own rebate and 20 that was owed; the 20 was drawn before this block
+        let mut delta = vec![("m".into(), 50i64)];
+        assert_eq!(cap_rebate_to_owed_drawn(&mut delta, &[("m".into(), 50)], 20, 0), 30);
+        assert_eq!(delta, vec![("m".into(), 30i64)]);
+        // half of it was still owed
+        let mut delta = vec![("m".into(), 50i64)];
+        assert_eq!(cap_rebate_to_owed_drawn(&mut delta, &[("m".into(), 50)], 20, 10), 40);
+        assert_eq!(delta, vec![("m".into(), 40i64)]);
+        // all of it was: nothing comes off
+        let mut delta = vec![("m".into(), 50i64), ("n".into(), 50i64)];
+        assert_eq!(cap_rebate_to_owed_drawn(&mut delta, &[("m".into(), 50), ("n".into(), 50)], 20, 20), 100);
+        assert_eq!(delta.iter().map(|d| d.1).sum::<i64>(), 100);
+        // nothing was owed when the coinbaser was issued: the credits are all the block's own
+        let mut delta = vec![("m".into(), 50i64)];
+        assert_eq!(cap_rebate_to_owed_drawn(&mut delta, &[("m".into(), 50)], 0, 0), 50);
+        // a deferred earning of the same identity is not a rebate credit and is left alone
+        let mut delta = vec![("m".into(), 7i64), ("m".into(), 50i64), ("n".into(), 50i64)];
+        assert_eq!(cap_rebate_to_owed_drawn(&mut delta, &[("m".into(), 50), ("n".into(), 50)], 60, 0), 40);
+        assert_eq!(delta, vec![("m".into(), 7i64), ("m".into(), 40i64)]);
+    }
+
+    #[test]
+    fn rebate_credits_are_cut_from_the_end_down_to_what_is_allowed() {
         let mut delta = vec![("m".into(), 50i64)];
         assert_eq!(cap_rebate_credits(&mut delta, &[("m".into(), 50)], 0), 0);
         assert!(delta.is_empty());
