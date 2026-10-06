@@ -384,7 +384,6 @@ fn bench_applied_debits_sync() {
 /// the miner sent) is not valid UTF-8, `read_all` fails on it, and the release refuses to start
 /// until someone trims the file by hand.
 #[test]
-#[ignore]
 fn a_block_log_torn_inside_a_character_is_a_bad_line_not_an_unreadable_file() {
     let d = dir("torn");
     fs::create_dir_all(&d).unwrap();

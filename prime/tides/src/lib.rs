@@ -1471,8 +1471,11 @@ impl BlockLog {
     /// All records in first-seen order. A hash appearing more than once (status updates are
     /// appended, never rewritten) yields only its latest line.
     pub fn read_all(&self) -> io::Result<Vec<BlockRecord>> {
-        let f = match File::open(&self.path) {
-            Ok(f) => f,
+        // Bytes, not `BufRead::lines`: a line torn inside a multi-byte character (a kill or a
+        // power cut mid-append; a finder's username is whatever UTF-8 the miner sent) is not
+        // valid UTF-8, and that must be one bad line, not a file that cannot be read.
+        let bytes = match fs::read(&self.path) {
+            Ok(bytes) => bytes,
             Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(vec![]),
             Err(e) => return Err(e),
         };
@@ -1480,13 +1483,12 @@ impl BlockLog {
         let mut index: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
         let mut bad = 0u64;
         let mut n = 0u64;
-        for line in BufReader::new(f).lines() {
+        for line in bytes.split(|b| *b == b'\n') {
             n += 1;
-            let line = line?;
-            if line.trim().is_empty() {
+            if line.iter().all(u8::is_ascii_whitespace) {
                 continue;
             }
-            match serde_json::from_str::<BlockRecord>(&line) {
+            match serde_json::from_slice::<BlockRecord>(line) {
                 Ok(r) => match index.get(&r.hash) {
                     Some(&i) => out[i] = r,
                     None => {
@@ -2051,6 +2053,70 @@ mod tests {
         let mut delta = vec![("m".into(), 50i64), ("n".into(), 50i64)];
         assert_eq!(cap_rebate_credits(&mut delta, &[("m".into(), 50), ("n".into(), 50)], 50), 50);
         assert_eq!(delta.iter().map(|d| d.1).sum::<i64>(), 50);
+    }
+
+    /// Whatever bytes a block log holds, reading it never fails and never panics, and every
+    /// whole record in it is read: garbage between records costs only the lines it is on.
+    #[test]
+    fn a_block_log_reads_its_whole_records_whatever_else_is_in_it() {
+        let dir = std::env::temp_dir().join(format!("tides-badbytes-{}-{}", std::process::id(), line!()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let log = BlockLog::open(&dir);
+        let good = |h: &str| {
+            let mut line = serde_json::to_vec(&rec(h, "gw", "split", 1, "min\u{e9}r \u{1f980}")).unwrap();
+            line.push(b'\n');
+            line
+        };
+        let mut seed = 0x9E37_79B9_7F4A_7C15u64;
+        let mut next = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        for round in 0..500 {
+            let mut bytes = Vec::new();
+            let mut want = Vec::new();
+            for i in 0..(next() % 6) {
+                let h = format!("{round}-{i}");
+                match next() % 4 {
+                    // a whole record
+                    0 | 1 => {
+                        bytes.extend_from_slice(&good(&h));
+                        want.push(h);
+                    }
+                    // a record cut anywhere, mid-character included, and the line ended
+                    2 => {
+                        let line = good(&h);
+                        let cut = next() as usize % (line.len() - 1);
+                        bytes.extend_from_slice(&line[..cut]);
+                        bytes.push(b'\n');
+                    }
+                    // bytes that are nothing at all
+                    _ => {
+                        bytes.extend((0..next() % 40).map(|_| next() as u8).filter(|b| *b != b'\n'));
+                        bytes.push(b'\n');
+                    }
+                }
+            }
+            // and a last line torn off without its newline
+            if next() % 2 == 0 {
+                let line = good("torn");
+                bytes.extend_from_slice(&line[..next() as usize % (line.len() - 1)]);
+            }
+            fs::write(dir.join("blocks.jsonl"), &bytes).unwrap();
+            let got: Vec<String> = log.read_all().unwrap().into_iter().map(|r| r.hash).collect();
+            assert_eq!(got, want, "round {round}: {:?}", String::from_utf8_lossy(&bytes));
+        }
+        // CRLF line ends and blank lines are still not bad lines
+        let mut bytes = good("a");
+        bytes.pop();
+        bytes.extend_from_slice(b"\r\n\n  \n");
+        bytes.extend_from_slice(&good("b"));
+        fs::write(dir.join("blocks.jsonl"), &bytes).unwrap();
+        assert_eq!(log.read_all().unwrap().len(), 2);
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
