@@ -1454,7 +1454,7 @@
   }
   // Tab clicks inside the card switch panels and update the URL without a reload.
   $("miner")?.addEventListener("click", (e) => {
-    const t = e.target.closest(".mtab[data-mtab]");
+    const t = e.target.closest("[data-mtab]");
     if (!t) return;
     e.preventDefault();
     minerTab = showMinerTab($("miner"), t.getAttribute("data-mtab")) || "overview";

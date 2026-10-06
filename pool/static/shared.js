@@ -628,6 +628,20 @@
       const lm = m.makegood_long_maturity ? `<br>${t("miner.mgLongMaturity", { start: num(m.long_maturity_start), release: num(m.long_maturity_release) })}` : "";
       return `<div><dt>${t("miner.makegood")}</dt><dd title="${amtExact(mgPendBtc)}">${amt(mgPendBtc)}${money(mgPendBtc)}<small>${sub}${lm}</small></dd></div>`;
     };
+    // Earned in the last 24 hours: coinbase outputs and make-goods from blocks found in that
+    // time, in sats from the server. Refreshed with every poll. No figure (null, or a server
+    // that does not send one) reads "unavailable": a zero here would be read as "earned nothing".
+    const payoutsHref = ctx.href ? ctx.href("payouts") : ctx.full ? "#payouts" : `/miner/${encodeURIComponent(m.address)}#payouts`;
+    const earnedCell = () => {
+      const e = m.earned_24h;
+      if (!e || !Number.isFinite(Number(e.total_sats))) {
+        return `<div><dt>${t("miner.earned24")}</dt><dd>${t("miner.earned24Unavailable")}<small>${t("miner.earned24UnavailableSub")}</small></dd></div>`;
+      }
+      const total = Number(e.total_sats) / 1e8;
+      const failed = Number(e.makegood_failed_sats) > 0 ? t("miner.earned24Failed", { amt: satsExact(e.makegood_failed_sats) }) : "";
+      const note = t("miner.earned24Note", { need: num(m.maturity_confs || 100), a: `<a data-mtab="payouts" href="${esc(payoutsHref)}">`, enda: "</a>" });
+      return `<div><dt>${t("miner.earned24")}</dt><dd title="${esc(t("miner.earned24Since", { amt: amtExact(total), when: when(e.since_ts) }))}">${amt(total)}${money(total)}<small>${t("miner.earned24Split", { n: Number(e.blocks) || 0, blocks: amtSats(e.block_sats), mg: amtSats(e.makegood_sats) })}${failed}<br>${note}</small></dd></div>`;
+    };
     // The DATUM bonus for this address. On the gateway path it is money already accruing, so
     // it gets a ticker cell; on the stratum path it is money being left on the table, so it
     // gets a callout with what switching would pay. Both vanish when the rebate is off.
@@ -679,6 +693,7 @@
           <div><dt>${t("miner.dtPayoutWin")}</dt><dd>${pctSmart(wp)}<small>${t("miner.winPay", { n: num(m.window_work) })}</small></dd></div>
           <div><dt>${t("miner.dtEst")}</dt><dd title="${amtExact(estDay)}">${amt(estDay)}${money(estDay)}<small>${estDayNote}</small></dd></div>
           ${bonusCell}
+          ${earnedCell()}
           <div><dt>${t("miner.dtNext")}</dt><dd title="${amtExact(m.block_payout_btc)}">${amt(m.block_payout_btc)}${money(m.block_payout_btc)}<small>${nextBlockNote(m)}</small></dd></div>
           ${carryCell(m)}
           ${makegoodCell()}
@@ -696,7 +711,8 @@
 
     const payoutsPanel = `
       <div class="mpanel" data-mpanel="payouts" ${tab === "payouts" ? "" : "hidden"}>
-        <dl class="ticker slim ${mgAll.length ? "five" : "four"}">
+        <dl class="ticker slim ${mgAll.length ? "" : "five"}">
+          ${earnedCell()}
           <div><dt>${t("miner.dtPending")}</dt><dd title="${amtExact(m.immature_btc)}">${amt(m.immature_btc)}${money(m.immature_btc)}<small>${nPending ? t("miner.pendingIn", { n: nPending, need: num(m.maturity_confs || 100) }) : t("miner.pendingNoneOut")}</small></dd></div>
           ${makegoodCell()}
           <div><dt>${t("miner.dtPaid")}</dt><dd title="${amtExact(m.paid_btc)}">${amt(m.paid_btc)}${money(m.paid_btc)}<small>${t("miner.paidMatured", { n: nPaid })}</small></dd></div>

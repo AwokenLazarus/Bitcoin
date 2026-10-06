@@ -783,7 +783,7 @@
   @container (min-width: 40rem) { .miner-card .ticker { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
   .miner-card .ticker > * { background: var(--bg-inset); box-shadow: none; }
   @container (min-width: 52rem) { .miner-card .ticker.four { grid-template-columns: repeat(4, minmax(0, 1fr)); } }
-  /* The payouts strip grows a fifth cell while a make-good is pending for the address. */
+  /* The payouts strip has five cells; a sixth (make-good) drops it back to two rows of three. */
   @container (min-width: 52rem) { .miner-card .ticker.five { grid-template-columns: repeat(5, minmax(0, 1fr)); } }
 
   /* ---- Charts. */
