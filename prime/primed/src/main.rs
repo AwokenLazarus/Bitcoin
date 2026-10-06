@@ -279,8 +279,10 @@ fn run(cfg: Config) -> i32 {
             fee_bps: cfg.fee_bps,
             stratum_fee_bps: cfg.stratum_fee_bps,
             datum_rebate_bps: cfg.datum_rebate_bps,
-            grace_fee_bps: cfg.stratum_grace_fee_bps.unwrap_or(0),
-            grace_rebate_bps: cfg.stratum_grace_rebate_bps,
+            // With the grace switched off, grace rows an earlier run left in the window are
+            // plain stratum work again; they are never work that pays no fee.
+            grace_fee_bps: cfg.stratum_grace_fee_bps.unwrap_or(cfg.stratum_fee_bps),
+            grace_rebate_bps: if cfg.grace().enabled() { cfg.stratum_grace_rebate_bps } else { cfg.datum_rebate_bps },
             min_payout: cfg.min_payout,
             // The gateway accepts at most 512 coinbaser entries; one is the pool's own
             // output appended after the payees. The byte budget leaves room for it too.

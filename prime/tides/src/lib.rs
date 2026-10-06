@@ -893,8 +893,13 @@ impl Ledger {
         self.grace_loaded = true;
         let w = &self.window;
         let rows = w.credits.iter().map(|c| {
-            let stratum = c.source == SOURCE_STRATUM || c.source == SOURCE_STRATUM_GRACE;
-            (c.ts, w.idents[c.ident as usize].as_str(), stratum, c.source == SOURCE_DATUM)
+            let class = match c.source {
+                SOURCE_STRATUM => grace::Seen::Stratum,
+                SOURCE_STRATUM_GRACE => grace::Seen::StratumGrace,
+                SOURCE_DATUM => grace::Seen::Datum,
+                _ => grace::Seen::Other,
+            };
+            (c.ts, w.idents[c.ident as usize].as_str(), class)
         });
         self.grace.seed(rows, p);
         self.dirty = true;
@@ -1060,8 +1065,9 @@ fn write_atomic(path: &Path, data: &[u8]) -> io::Result<()> {
 }
 
 /// Read `grace.json`. Returns the book and whether one was read. A file that does not parse is
-/// logged and treated as absent: the book is rebuilt from the window, which restarts clocks
-/// (in the miners' favour) but stops nothing.
+/// logged and treated as absent: the book is rebuilt from the window ([`GraceBook::seed`]),
+/// which stops nothing. An address whose grace had run out and which has no work left in the
+/// window is then unknown, and gets a new clock with its next stratum share.
 fn load_grace(path: &Path) -> (GraceBook, bool) {
     match fs::read(path) {
         Ok(b) => match serde_json::from_slice(&b) {

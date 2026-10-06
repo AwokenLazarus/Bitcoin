@@ -511,14 +511,14 @@ require-split-gateway = true
         assert!(!Config::load(&p).unwrap().grace().enabled());
         // the donation endpoint with its grace, and the same grace before the fee is raised
         let grace = "stratum-grace-hours = 24\nstratum-grace-datum-hours = 96\nstratum-grace-fee-bps = 2500\n\
-                     stratum-grace-rebate-bps = 1250\nstratum-grace-epoch = 1791303300\n";
+                     stratum-grace-rebate-bps = 1250\nstratum-grace-rearm-hours = 168\nstratum-grace-epoch = 1791262800\n";
         for (stratum, rebate) in [(10_000, 5_000), (2_500, 1_250)] {
             std::fs::write(&p, format!("{base}\nstratum-fee-bps = {stratum}\ndatum-rebate-bps = {rebate}\n{grace}"))
                 .unwrap();
             let c = Config::load(&p).unwrap();
             let g = c.grace();
             assert!(g.enabled());
-            assert_eq!((g.secs, g.datum_secs, g.rearm_secs, g.epoch), (86_400, 345_600, 0, 1_791_303_300));
+            assert_eq!((g.secs, g.datum_secs, g.rearm_secs, g.epoch), (86_400, 345_600, 604_800, 1_791_262_800));
             assert_eq!((c.stratum_grace_fee_bps, c.stratum_grace_rebate_bps), (Some(2_500), 1_250));
         }
         // datum hours default to the plain grace

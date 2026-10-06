@@ -7,8 +7,10 @@
 //! and charged the grace fee instead of the stratum fee.
 //!
 //! * The clock runs from the address's first house-stratum share, for `secs`.
-//! * An address that has had DATUM work credited here (its own gateway, on this pool) within
-//!   [`DATUM_LOOKBACK`] of that start gets `datum_secs` instead.
+//! * An address that had DATUM work credited here (its own gateway, on this pool) within
+//!   [`DATUM_LOOKBACK`] before that start gets `datum_secs` instead. That is settled when the
+//!   clock starts: DATUM work that first shows up afterwards does not reopen or lengthen it,
+//!   or one share through anybody's gateway would buy an address the longer grace.
 //! * An address that stays off the house stratum for `rearm_secs` starts a new clock when it
 //!   comes back. 0: one clock per address, ever.
 //!
@@ -45,6 +47,17 @@ impl GraceParams {
     }
 }
 
+/// What a window row is, to [`GraceBook::seed`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Seen {
+    /// House stratum at the full fee.
+    Stratum,
+    /// House stratum inside a grace.
+    StratumGrace,
+    Datum,
+    Other,
+}
+
 /// One run of house-stratum mining by an address.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Episode {
@@ -52,6 +65,9 @@ pub struct Episode {
     pub start: u32,
     /// The latest house-stratum share (to within [`COARSE`]).
     pub last: u32,
+    /// The address was a DATUM user when the clock started: it has the longer grace.
+    #[serde(default)]
+    pub datum: bool,
 }
 
 /// Who started on the house stratum when, and who has been seen on DATUM. Not money: losing
@@ -94,10 +110,11 @@ impl GraceBook {
 
     /// House-stratum work is being credited to `identity` at `ts`: is it inside the grace?
     pub fn note_stratum(&mut self, identity: &str, ts: u32, p: &GraceParams) -> bool {
+        let datum = self.on_datum(identity, ts);
         match self.stratum.get_mut(identity) {
             Some(e) => {
                 if p.rearm_secs > 0 && ts >= e.last.saturating_add(p.rearm_secs) {
-                    *e = Episode { start: ts, last: ts };
+                    *e = Episode { start: ts, last: ts, datum };
                     self.dirty = true;
                 } else if ts >= e.last.saturating_add(COARSE) {
                     e.last = ts;
@@ -105,43 +122,60 @@ impl GraceBook {
                 }
             }
             None => {
-                self.stratum.insert(identity.to_owned(), Episode { start: ts, last: ts });
+                self.stratum.insert(identity.to_owned(), Episode { start: ts, last: ts, datum });
                 self.dirty = true;
             }
         }
         self.until(identity, p).is_some_and(|until| ts < until)
     }
 
-    /// Whether `identity` counts as a DATUM user for a clock that started at `start`.
+    /// Whether `identity` counts as a DATUM user for a clock starting at `start`: it had
+    /// DATUM work no later than that, and no longer than [`DATUM_LOOKBACK`] before.
     fn on_datum(&self, identity: &str, start: u32) -> bool {
-        self.datum_seen.get(identity).is_some_and(|&seen| seen.saturating_add(DATUM_LOOKBACK) >= start)
+        self.datum_seen.get(identity).is_some_and(|&seen| seen <= start && seen.saturating_add(DATUM_LOOKBACK) >= start)
     }
 
     /// When the grace of `identity`'s current clock ends. `None`: it has never been on the
     /// house stratum.
     pub fn until(&self, identity: &str, p: &GraceParams) -> Option<u32> {
         let e = self.stratum.get(identity)?;
-        let len = if self.on_datum(identity, e.start) { p.datum_secs.max(p.secs) } else { p.secs };
+        let len = if e.datum { p.datum_secs.max(p.secs) } else { p.secs };
         Some(e.start.saturating_add(len))
     }
 
-    /// Build the book from the window's rows, the first time grace is switched on:
-    /// `(ts, identity, is house stratum, is DATUM)` per row. An address with house-stratum work
-    /// in the window was already mining there, so its clock is taken to have started at
-    /// `p.epoch` (or at its oldest row when no epoch is given), not now.
-    pub fn seed<'a>(&mut self, rows: impl Iterator<Item = (u32, &'a str, bool, bool)>, p: &GraceParams) {
-        for (ts, identity, stratum, datum) in rows {
-            if stratum {
-                let e = self.stratum.entry(identity.to_owned()).or_insert(Episode { start: ts, last: ts });
-                e.start = e.start.min(ts);
-                e.last = e.last.max(ts);
-            } else if datum {
-                let seen = self.datum_seen.entry(identity.to_owned()).or_insert(ts);
-                *seen = (*seen).max(ts);
+    /// Build the book from the window's rows when there is none on disk: per row
+    /// `(ts, identity, class)`. An address with full-fee house-stratum work in the window was
+    /// mining there before its grace, or before there was one: its clock is taken to have
+    /// started at `p.epoch` (or at its oldest row when no epoch is given), not now. An address
+    /// whose stratum rows are all grace rows got its clock from this build, and keeps the time
+    /// of its oldest row: a lost book must not cost a newcomer the rest of its grace. Any DATUM
+    /// work in the window makes an address a DATUM user.
+    pub fn seed<'a>(&mut self, rows: impl Iterator<Item = (u32, &'a str, Seen)>, p: &GraceParams) {
+        let mut full_fee = std::collections::BTreeSet::new();
+        for (ts, identity, class) in rows {
+            match class {
+                Seen::Stratum | Seen::StratumGrace => {
+                    let e = self.stratum.entry(identity.to_owned()).or_insert(Episode {
+                        start: ts,
+                        last: ts,
+                        datum: false,
+                    });
+                    e.start = e.start.min(ts);
+                    e.last = e.last.max(ts);
+                    if class == Seen::Stratum {
+                        full_fee.insert(identity.to_owned());
+                    }
+                }
+                Seen::Datum => {
+                    let seen = self.datum_seen.entry(identity.to_owned()).or_insert(ts);
+                    *seen = (*seen).max(ts);
+                }
+                Seen::Other => {}
             }
         }
-        if p.epoch > 0 {
-            for e in self.stratum.values_mut() {
+        for (identity, e) in self.stratum.iter_mut() {
+            e.datum = self.datum_seen.contains_key(identity);
+            if p.epoch > 0 && full_fee.contains(identity) {
                 e.start = p.epoch;
                 e.last = e.last.max(p.epoch);
             }
@@ -202,13 +236,23 @@ mod tests {
     }
 
     #[test]
-    fn datum_work_during_the_grace_extends_it_and_old_datum_work_does_not_count() {
+    fn datum_work_after_the_clock_started_buys_nothing_and_old_datum_work_does_not_count() {
+        // one share through anybody's gateway must not reopen a grace that has run out,
+        // nor lengthen one that is running
         let mut b = GraceBook::default();
         assert!(b.note_stratum("a", T0, &p()));
+        b.note_datum("a", T0 + 2 * H);
         assert_eq!(b.until("a", &p()), Some(T0 + 24 * H));
         b.note_datum("a", T0 + 30 * H);
-        assert_eq!(b.until("a", &p()), Some(T0 + 96 * H), "its gateway came up: it is a DATUM user");
-        assert!(b.note_stratum("a", T0 + 40 * H, &p()));
+        assert!(!b.note_stratum("a", T0 + 40 * H, &p()));
+        assert_eq!(b.until("a", &p()), Some(T0 + 24 * H));
+        // and a DATUM miner that keeps mining on its gateway while it fails over keeps its 96
+        let mut b = GraceBook::default();
+        b.note_datum("g", T0 - H);
+        assert!(b.note_stratum("g", T0, &p()));
+        b.note_datum("g", T0 + 50 * H);
+        assert!(b.note_stratum("g", T0 + 95 * H, &p()));
+        assert!(!b.note_stratum("g", T0 + 96 * H, &p()));
 
         let mut b = GraceBook::default();
         b.note_datum("old", T0 - DATUM_LOOKBACK - 1);
@@ -247,15 +291,15 @@ mod tests {
         let epoch = T0 - 10 * H;
         let p = GraceParams { epoch, ..p() };
         let rows = vec![
-            (T0 - 4 * H, "old-stratum", true, false),
-            (T0 - H, "old-stratum", true, false),
-            (T0 - 3 * H, "failover", false, true),
-            (T0 - 2 * H, "failover", true, false),
-            (T0 - H, "datum-only", false, true),
-            (T0 - H, "untagged", false, false),
+            (T0 - 4 * H, "old-stratum", Seen::Stratum),
+            (T0 - H, "old-stratum", Seen::Stratum),
+            (T0 - 3 * H, "failover", Seen::Datum),
+            (T0 - 2 * H, "failover", Seen::Stratum),
+            (T0 - H, "datum-only", Seen::Datum),
+            (T0 - H, "untagged", Seen::Other),
         ];
         let mut b = GraceBook::default();
-        b.seed(rows.iter().map(|r| (r.0, r.1, r.2, r.3)), &p);
+        b.seed(rows.iter().copied(), &p);
         assert!(b.is_dirty());
         assert_eq!(b.until("old-stratum", &p), Some(epoch + 24 * H));
         assert_eq!(b.until("failover", &p), Some(epoch + 96 * H));
@@ -269,15 +313,36 @@ mod tests {
 
         // no epoch: the oldest row in the window
         let mut b = GraceBook::default();
-        b.seed(rows.iter().map(|r| (r.0, r.1, r.2, r.3)), &GraceParams { epoch: 0, ..p });
+        b.seed(rows.iter().copied(), &GraceParams { epoch: 0, ..p });
         assert_eq!(b.until("old-stratum", &p), Some(T0 - 4 * H + 24 * H));
+    }
+
+    /// The book is lost a day and more after the epoch. Whoever is inside a grace keeps it,
+    /// from its oldest row; whoever has run out of one is not handed another.
+    #[test]
+    fn a_rebuilt_book_does_not_take_a_newcomer_s_grace_or_renew_a_spent_one() {
+        let epoch = T0 - 30 * H;
+        let p = GraceParams { epoch, ..p() };
+        let rows = vec![
+            (T0 - 2 * H, "newcomer", Seen::StratumGrace),
+            (T0 - H, "newcomer", Seen::StratumGrace),
+            (T0 - 4 * H, "spent", Seen::StratumGrace),
+            (T0 - H, "spent", Seen::Stratum),
+            (T0 - 3 * H, "donor", Seen::Stratum),
+        ];
+        let mut b = GraceBook::default();
+        b.seed(rows.iter().copied(), &p);
+        assert_eq!(b.until("newcomer", &p), Some(T0 - 2 * H + 24 * H));
+        assert!(b.note_stratum("newcomer", T0, &p));
+        assert!(!b.note_stratum("spent", T0, &p));
+        assert!(!b.note_stratum("donor", T0, &p));
     }
 
     #[test]
     fn an_epoch_a_day_before_leaves_those_already_there_no_grace() {
         let p = GraceParams { epoch: T0 - 24 * H, ..p() };
         let mut b = GraceBook::default();
-        b.seed([(T0 - H, "old", true, false)].into_iter(), &p);
+        b.seed([(T0 - H, "old", Seen::Stratum)].into_iter(), &p);
         assert!(!b.note_stratum("old", T0, &p));
     }
 
