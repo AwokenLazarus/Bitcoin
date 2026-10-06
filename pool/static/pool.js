@@ -80,11 +80,6 @@
     try { localStorage.setItem("lazarus.stratum25.v2.dismissed", "1"); } catch (e) { /* private mode */ }
     const el = $("stratumnotice"); if (el) el.hidden = true;
   });
-  try { if (localStorage.getItem("lazarus.softfork419.v2.dismissed") === "1") { const el = $("softfork"); if (el) el.hidden = true; } } catch (e) { /* private mode */ }
-  $("softfork-dismiss")?.addEventListener("click", () => {
-    try { localStorage.setItem("lazarus.softfork419.v2.dismissed", "1"); } catch (e) { /* private mode */ }
-    const el = $("softfork"); if (el) el.hidden = true;
-  });
   $("promo-dismiss")?.addEventListener("click", () => {
     try { localStorage.setItem(PROMO_DISMISS_KEY, "1"); } catch (e) { /* private mode */ }
     const el = $("datum-promo");

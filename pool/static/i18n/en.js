@@ -64,13 +64,6 @@ window.LZ_I18N_DICTS["en"] = {
     "plan": "The Knots plan (long coinbase maturity, part 1 of 3)",
     "dismiss": "Dismiss notice"
   },
-  "softfork": {
-    "kicker": "Network notice · Knots 29.4.2 long coinbase maturity is in force",
-    "text": "Since block <b>973,440</b> (22 Sep) and until block <b>979,920</b> (~5 Nov), every newly mined coinbase must wait <b>6,480 blocks</b> (about 45 days) before it can be spent, instead of 100. It is temporary, and it exists to make hit-and-run mining unprofitable and give miners who stay an edge. Payouts, shares and the split do not change; an output from block N unlocks once it has 6,481 confirmations, at about block N + 6,480 (make-goods too). <b>DATUM gateway operators: your own node must run Knots 29.4.2 or later.</b> A block built on an older node is rejected by the network, and the whole window loses it.",
-    "pr": "The rule (Knots #419)",
-    "dl": "Knots 29.4.2 downloads",
-    "dismiss": "Dismiss notice"
-  },
   "hero": {
     "eyebrow": "Bitcoin (XBT / BTCB2) · BLAKE2b · DATUM · TIDES · ",
     "title": "The Bitcoin mining pool for Sia ASICs.<br><em>Get paid in the block itself.</em><br>Earn extra for Decentralizing the network.",
