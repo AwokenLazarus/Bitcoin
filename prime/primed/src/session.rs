@@ -445,6 +445,8 @@ struct Settlement {
     split: Vec<(String, u64)>,
     /// Carry the coinbase itself handed out; 0 when it placed no payee.
     carry_paid: u64,
+    /// `carry_paid` by payee.
+    carry_placed: Vec<(String, u64)>,
     carry_delta: Vec<(String, i64)>,
     /// The rebate credits inside `carry_delta`, as they are there (moved with the reward when
     /// the block was priced for it), and their sum.
@@ -478,6 +480,7 @@ fn settle(
         owed: 0,
         split: vec![],
         carry_paid: 0,
+        carry_placed: vec![],
         carry_delta: vec![],
         rebate_credits: vec![],
         rebate_credited: 0,
@@ -521,11 +524,18 @@ fn settle(
     // A pool-only coinbase paid nobody and owes every figure, so it is always priced for
     // the reward it carried.
     if !pool_only && reward_matches(coinbase_value, cb.value) {
+        let carry_placed: Vec<(String, u64)> = cb
+            .payees
+            .iter()
+            .filter(|p| p.carry > 0 && (full_split || placed(p)))
+            .map(|p| (p.identity.clone(), p.carry))
+            .collect();
         return Settlement {
             kind: name,
             owed: if full_split { 0 } else { cb.payees.iter().filter(|p| !placed(p)).map(|p| p.sats).sum() },
             split: cb.payees.iter().map(|p| (p.identity.clone(), p.sats)).collect(),
-            carry_paid: cb.payees.iter().filter(|p| full_split || placed(p)).map(|p| p.carry).sum(),
+            carry_paid: carry_placed.iter().map(|c| c.1).sum(),
+            carry_placed,
             carry_delta,
             rebate_credits: cb.rebate_credits.to_vec(),
             rebate_credited: cb.rebate_credits.iter().map(|r| r.1).sum(),
@@ -546,11 +556,18 @@ fn settle(
     let rescale = |sats: u64| scale(sats, coinbase_value, cb.value);
     let entitled = |p: &Payee| rescale(p.sats.saturating_sub(p.carry)).saturating_add(p.carry);
     let paid = |p: &Payee| if pool_only { 0 } else { paid_to(&p.script).min(entitled(p)) };
+    let carry_placed: Vec<(String, u64)> = cb
+        .payees
+        .iter()
+        .filter(|p| p.carry > 0 && placed(p))
+        .map(|p| (p.identity.clone(), p.carry.min(paid(p))))
+        .collect();
     Settlement {
         kind: name,
         owed: cb.payees.iter().map(|p| entitled(p) - paid(p)).sum(),
         split: cb.payees.iter().map(|p| (p.identity.clone(), entitled(p))).collect(),
-        carry_paid: cb.payees.iter().filter(|p| placed(p)).map(|p| p.carry.min(paid(p))).sum(),
+        carry_paid: carry_placed.iter().map(|c| c.1).sum(),
+        carry_placed,
         carry_delta: carry_delta
             .into_iter()
             .map(|(i, d)| if d > 0 { (i, rescale(d as u64).min(i64::MAX as u64) as i64) } else { (i, d) })
@@ -560,6 +577,19 @@ fn settle(
         rebate_delta,
         carry_reserved: reserved(&|e| rescale(e).min(i64::MAX as u64)),
     }
+}
+
+/// The carry figures of a block's record once its debits are booked: `carry_paid`, the carry
+/// the coinbase handed out that was on the books, and `carry_shortfall_sats`, the carry the
+/// coinbaser listed that was not.
+///
+/// The first counts only payees the coinbase placed (`Settlement::carry_placed`). The second
+/// counts every payee, placed or dropped: a dropped payee's whole output is in `owed_sats`, so
+/// the make-good pays its carry, and that is a second payment too if the books had none.
+fn carry_on_record(carry_placed: &[(String, u64)], books: &tides::Books) -> (u64, u64) {
+    let short_of = |identity: &str| books.shortfall.iter().filter(|s| s.0 == identity).map(|s| s.1).sum::<u64>();
+    let paid = carry_placed.iter().map(|(identity, carry)| carry.saturating_sub(short_of(identity))).sum();
+    (paid, books.shortfall.iter().map(|s| s.1).sum())
 }
 
 /// Whether a coinbase worth `actual` is the template a coinbaser issued for `issued` was asked
@@ -2243,6 +2273,7 @@ impl Session {
             owed,
             split,
             mut carry_paid,
+            carry_placed,
             mut carry_delta,
             rebate_credits,
             mut rebate_credited,
@@ -2263,19 +2294,22 @@ impl Session {
         let mut carry_shortfall_sats = 0u64;
         if settles {
             let (total, holders) = self.shared.book_block_debits(&hash_hex, &carry_delta, &mut books);
-            // carry_paid is what left the books, not what an old coinbaser still listed. The
-            // difference was paid again out of the pool's remainder and is a debt.
+            // carry_paid is what the coinbase paid of carry the books held, not what an old
+            // coinbaser still listed. What they did not hold was paid a second time and is a debt.
             let booked: u64 = books.debited.iter().map(|d| d.1).sum();
-            carry_shortfall_sats = carry_paid.saturating_sub(booked);
+            let listed = carry_paid;
+            (carry_paid, carry_shortfall_sats) = carry_on_record(&carry_placed, &books);
             if carry_shortfall_sats > 0 {
                 log::error!(
-                    "[{}] block {hash_hex} coinbase paid {carry_paid} sats of carry but only {booked} was on the books; \
-                     {carry_shortfall_sats} sats were paid again out of the pool's remainder and are a debt against \
-                     those payees' future earnings",
-                    self.id
+                    "[{}] block {hash_hex} was mined on a coinbaser listing carry the books no longer held for {} \
+                     payee(s): its coinbase paid {listed} sats of carry, {carry_paid} of it on the books, and \
+                     {carry_shortfall_sats} sats in all were paid a second time (by this coinbase out of the pool's \
+                     remainder, or by the make-good for an output it dropped) and are a debt against those payees' \
+                     future earnings",
+                    self.id,
+                    books.shortfall.len(),
                 );
             }
-            carry_paid = booked;
             if let Some(c) = issued {
                 if c.rebate_owed_credited > books.rebate_debited {
                     // Only the owed rebate an earlier block drew comes off. The rest of these
@@ -2299,7 +2333,7 @@ impl Session {
             }
             let waiting: i64 = carry_delta.iter().map(|d| d.1.max(0)).sum();
             log::info!(
-                "[{}] block {hash_hex} carry: {carry_paid} sats of carry paid in {} outputs and {} sats of owed DATUM rebate drawn, off the books now; {waiting} sats of deferred earnings and rebate credits ({} entries) and {rebate_deferred} sats of undistributed rebate go on when the node confirms it; pool now holds {total} sats of carry for {holders} miners",
+                "[{}] block {hash_hex} carry: {booked} sats of carry for {} payees ({carry_paid} of it paid in this coinbase) and {} sats of owed DATUM rebate drawn, off the books now; {waiting} sats of deferred earnings and rebate credits ({} entries) and {rebate_deferred} sats of undistributed rebate go on when the node confirms it; pool now holds {total} sats of carry for {holders} miners",
                 self.id,
                 books.debited.len(),
                 books.rebate_debited,
@@ -2679,6 +2713,55 @@ mod tests {
         assert_eq!(d.get("A"), Some(&-400_000), "placed payee's carry was handed out");
         assert_eq!(d.get("B"), Some(&-300_000), "dropped payee's carry is paid by the make-good, so it must come off");
         assert_eq!(d.get("C"), None, "C carried nothing to discharge");
+    }
+
+    /// The review's R5. A Partial block on a coinbaser from before the last find: A's output
+    /// was placed, but its carry had been paid already; B's was dropped and its carry was
+    /// still on the books. B's debit is not A's payment: the record says the coinbase paid no
+    /// carry the books held, and that all of A's was paid a second time.
+    #[test]
+    fn a_partial_on_an_old_coinbaser_records_the_placed_payee_s_shortfall() {
+        let dir = std::env::temp_dir().join(format!("primed-r5-{}-{}", std::process::id(), line!()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut ledger = tides::Ledger::open(&dir).unwrap();
+        ledger.set_carry("A", 400_000);
+        ledger.set_carry("B", 300_000);
+        let payees =
+            vec![payee("A", 1_000_000, 400_000, 1), payee("B", 800_000, 300_000, 2), payee("C", 600_000, 0, 3)];
+        let only_a = |script: &[u8]| if script == [0x00, 0x14, 1] { 1_000_000 } else { 0 };
+        let partial = || settle(&CoinbaseKind::Partial(1), Some(coinbaser(312_500_000, &payees)), 312_500_000, only_a);
+
+        // on the books as the coinbaser saw them: the figures are the settlement's own
+        let s = partial();
+        let mut first = tides::Books::new(0, 0);
+        ledger.book_debits(&s.carry_delta, &mut first);
+        assert_eq!(s.carry_placed, vec![("A".to_string(), 400_000)]);
+        assert_eq!(carry_on_record(&s.carry_placed, &first), (400_000, 0), "B's carry left the books unpaid by it");
+
+        // B earns 300 000 again; a second block is then found on the same coinbaser
+        ledger.set_carry("B", 300_000);
+        let s = partial();
+        let mut second = tides::Books::new(0, 0);
+        ledger.book_debits(&s.carry_delta, &mut second);
+        assert_eq!(second.debited, vec![("B".to_string(), 300_000)]);
+        assert_eq!(second.shortfall, vec![("A".to_string(), 400_000)]);
+        assert_eq!(carry_on_record(&s.carry_placed, &second), (0, 400_000));
+        assert_eq!(ledger.window.debt_of("A"), 400_000);
+
+        // a dropped payee's carry the books did not hold is a second payment as well: the
+        // make-good pays its whole output
+        let s = partial();
+        let mut third = tides::Books::new(0, 0);
+        ledger.book_debits(&s.carry_delta, &mut third);
+        assert_eq!(carry_on_record(&s.carry_placed, &third), (0, 700_000));
+
+        // part of a placed payee's carry on the books
+        ledger.set_carry("A", 150_000);
+        let s = partial();
+        let mut fourth = tides::Books::new(0, 0);
+        ledger.book_debits(&s.carry_delta, &mut fourth);
+        assert_eq!(carry_on_record(&s.carry_placed, &fourth), (150_000, 250_000 + 300_000));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A pool-only coinbase places nobody, so the make-good owes the whole split — scaled to the
