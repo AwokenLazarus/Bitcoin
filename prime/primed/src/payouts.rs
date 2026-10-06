@@ -203,6 +203,7 @@ async fn handle(shared: &Shared, id: &str, req: Request) -> Value {
             let (mut credited, mut debited) = (0u64, 0u64);
             for (identity, delta) in &entries {
                 let before = ledger.window.carry_of(identity);
+                let debt = ledger.window.debt_of(identity);
                 let after = ledger.settle_carry(std::slice::from_ref(&(identity.clone(), *delta)))
                     .first()
                     .map(|c| c.1)
@@ -212,7 +213,13 @@ async fn handle(shared: &Shared, id: &str, req: Request) -> Value {
                 } else {
                     debited += before - after;
                 }
-                moved.push(json!({"identity": identity, "requested": delta, "before": before, "after": after}));
+                let mut entry = json!({"identity": identity, "requested": delta, "before": before, "after": after});
+                // a credit to an identity a coinbase paid twice settles that first
+                let debt_paid = debt.saturating_sub(ledger.window.debt_of(identity));
+                if debt_paid > 0 {
+                    entry["debt_paid"] = json!(debt_paid);
+                }
+                moved.push(entry);
             }
             // money moved: on disk before anyone is told it did
             if let Err(e) = ledger.persist_window() {

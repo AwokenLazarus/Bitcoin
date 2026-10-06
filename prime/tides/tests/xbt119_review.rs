@@ -225,7 +225,6 @@ fn every_payee_s_books_add_up_when_a_confirmed_block_is_reorganised_away() {
 /// the sum is right, but the balance is one the next coinbaser pays out, a third coinbase output
 /// for one balance, and the debt it leaves is collected only from earnings a later block defers.
 #[test]
-#[ignore]
 fn an_orphaned_first_payment_is_set_against_the_debt_not_handed_out_again() {
     let d = dir("orphan-first");
     let mut l = Ledger::open(&d).unwrap();

@@ -382,6 +382,17 @@ impl Window {
         }
     }
 
+    /// Put `sats` back on an identity's books: a double-pay debt is paid down first and only the
+    /// rest is carry. Otherwise the same sats stand as a debt and as a balance at once, and the
+    /// next coinbaser pays the balance out while the debt waits. Returns the new carry.
+    fn restore_carry(&mut self, identity: &str, sats: u64) -> u64 {
+        let rest = sats - self.reduce_debt(identity, sats);
+        if rest == 0 {
+            return self.carry_of(identity);
+        }
+        self.adjust_carry(identity, rest.min(i64::MAX as u64) as i64)
+    }
+
     /// Move an identity's carry by `delta` sats, saturating at zero. Returns the new carry.
     /// Deltas (not assignments) are what a found block applies, so two blocks found off
     /// snapshots that both predate the other's settlement still add up correctly.
@@ -735,7 +746,8 @@ impl Ledger {
     }
 
     /// Apply a found block's carry adjustments (see [`Split::carry_delta`]) and schedule a
-    /// flush. Returns the identities touched with their new carry.
+    /// flush. A credit pays the identity's double-pay debt down before it is carry
+    /// ([`Window::debt_of`]). Returns the identities touched with their new carry.
     pub fn settle_carry(&mut self, delta: &[(String, i64)]) -> Vec<(String, u64)> {
         let mut out = Vec::with_capacity(delta.len());
         for (identity, d) in delta {
@@ -743,7 +755,11 @@ impl Ledger {
                 continue;
             }
             let known = self.window.ident_index.contains_key(identity);
-            let new = self.window.adjust_carry(identity, *d);
+            let new = if *d > 0 {
+                self.window.restore_carry(identity, d.unsigned_abs())
+            } else {
+                self.window.adjust_carry(identity, *d)
+            };
             if !known {
                 // adjust_carry interned it; keep the identity file in step
                 let _ = self.idents_out.write_all(format!("{identity}\n").as_bytes());
@@ -856,8 +872,11 @@ impl Ledger {
             books.credits_live = false;
         }
         if books.debits_live {
+            // A later block on a coinbaser from before this one may have paid the same carry
+            // again and left it as a debt. That payment stands, so what comes back settles the
+            // debt before any of it is a balance to pay out a third time.
             for (identity, sats) in std::mem::take(&mut books.debited) {
-                self.window.adjust_carry(&identity, sats.min(i64::MAX as u64) as i64);
+                self.window.restore_carry(&identity, sats);
             }
             for (identity, sats) in std::mem::take(&mut books.shortfall) {
                 self.window.forgive_debt(&identity, sats);
@@ -924,11 +943,12 @@ impl Ledger {
         Ok((held, skipped))
     }
 
-    /// The payment was abandoned: the held balances are carry again. Returns them.
+    /// The payment was abandoned: the held balances are carry again, less any double-pay debt
+    /// their owner has run up since ([`Window::debt_of`]). Returns what was held.
     pub fn release_hold(&mut self, batch: &str) -> Option<Vec<(String, u64)>> {
         let hold = self.window.holds.remove(batch)?;
         for (identity, sats) in &hold.entries {
-            self.window.adjust_carry(identity, (*sats).min(i64::MAX as u64) as i64);
+            self.window.restore_carry(identity, *sats);
         }
         self.dirty = true;
         Some(hold.entries)
@@ -1952,6 +1972,75 @@ mod tests {
         let mut delta = vec![("m".into(), 7i64), ("m".into(), 50i64), ("n".into(), 50i64)];
         assert_eq!(cap_rebate_to_owed_drawn(&mut delta, &[("m".into(), 50), ("n".into(), 50)], 60, 0), 40);
         assert_eq!(delta, vec![("m".into(), 7i64), ("m".into(), 40i64)]);
+    }
+
+    /// The review's case with a block of its own on top: the orphaned block had paid part of
+    /// the balance and booked the rest as a debt, and another block's debt is outstanding too.
+    /// Undoing it takes exactly its payment back, debt first.
+    #[test]
+    fn an_orphan_s_debit_pays_down_debt_before_it_is_carry_again() {
+        let dir = std::env::temp_dir().join(format!("tides-debt-{}-{}", std::process::id(), line!()));
+        let _ = fs::remove_dir_all(&dir);
+        let mut l = Ledger::open(&dir).unwrap();
+        l.set_carry("m", 100);
+        let (mut first, mut second, mut third) = (Books::new(0, 0), Books::new(0, 0), Books::new(0, 0));
+        l.book_debits(&[("m".into(), -100)], &mut first);
+        l.book_debits(&[("m".into(), -30)], &mut second);
+        assert_eq!((l.window.carry_of("m"), l.window.debt_of("m")), (0, 30));
+        // 60 more is earned and confirmed, then a third coinbase pays 100 of which 30 is there
+        l.book_credits(&[("m".into(), 60)], &mut Books::new(0, 0));
+        assert_eq!((l.window.carry_of("m"), l.window.debt_of("m")), (30, 0));
+        l.book_debits(&[("m".into(), -100)], &mut third);
+        assert_eq!((l.window.carry_of("m"), l.window.debt_of("m")), (0, 70));
+        assert_eq!((third.debited.clone(), third.shortfall.clone()), (vec![("m".into(), 30)], vec![("m".into(), 70)]));
+        // owed 100 + 60, paid 100 + 30 + 100: 70 over. Without the first block, 30 is still owed.
+        l.unbook(&mut first);
+        assert_eq!((l.window.carry_of("m"), l.window.debt_of("m")), (30, 0));
+        // and without the third either, 130
+        l.unbook(&mut third);
+        assert_eq!((l.window.carry_of("m"), l.window.debt_of("m")), (130, 0));
+        // the first block comes back: its payment is on the books again
+        l.book_debits(&[("m".into(), -100)], &mut first);
+        assert_eq!((l.window.carry_of("m"), l.window.debt_of("m")), (30, 0));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A released hold and a credit made outside the two-step books (a solo block's rebate, a
+    /// record from before `Books`, the operator's) meet a debt the same way.
+    #[test]
+    fn a_released_hold_and_a_settled_credit_pay_down_debt_first() {
+        let dir = std::env::temp_dir().join(format!("tides-debt-{}-{}", std::process::id(), line!()));
+        let _ = fs::remove_dir_all(&dir);
+        let week = 7 * 86_400u32;
+        let now = 10 + week;
+        let mut l = Ledger::open(&dir).unwrap();
+        l.set_target(100);
+        l.credit("m", 1, 1, 10, SOURCE_DATUM).unwrap();
+        for i in 0..200 {
+            l.credit("active", 1, 2, now - 5 + (i % 5), SOURCE_DATUM).unwrap();
+        }
+        l.set_carry("m", 100_000);
+        l.book_debits(&[("m".into(), -100_000)], &mut Books::new(0, 0));
+        l.book_debits(&[("m".into(), -100_000)], &mut Books::new(0, 0));
+        assert_eq!((l.window.carry_of("m"), l.window.debt_of("m")), (0, 100_000));
+
+        assert_eq!(l.settle_carry(&[("m".into(), 30_000)]), vec![("m".to_string(), 0)]);
+        assert_eq!((l.window.carry_of("m"), l.window.debt_of("m")), (0, 70_000));
+        // a debit is a debit, as before
+        l.settle_carry(&[("m".into(), -5)]);
+        assert_eq!((l.window.carry_of("m"), l.window.debt_of("m")), (0, 70_000));
+
+        // a balance set by hand beside the debt, held for a payment that is then abandoned
+        l.set_carry("m", 50_000);
+        let (held, _) = l.hold_carry("b1", &[("m".into(), 50_000)], now, week, 10_000, 500, 504).unwrap();
+        assert_eq!(held, vec![("m".to_string(), 50_000)]);
+        assert_eq!(l.release_hold("b1").unwrap(), vec![("m".to_string(), 50_000)]);
+        assert_eq!((l.window.carry_of("m"), l.window.debt_of("m"), l.window.total_held()), (0, 20_000, 0));
+
+        // more than the debt: the rest is carry
+        assert_eq!(l.settle_carry(&[("m".into(), 25_000)]), vec![("m".to_string(), 5_000)]);
+        assert_eq!((l.window.carry_of("m"), l.window.debt_of("m")), (5_000, 0));
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
