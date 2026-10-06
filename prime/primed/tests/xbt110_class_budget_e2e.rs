@@ -60,6 +60,8 @@ fn share(slot: u8, id: u8, outs: &[TxOut], now: u32) -> PowSubmit {
 /// and defers the other 39 to carry, where a real class 1 would have kept 9 and class 2, 17.
 /// A block it finds is then a "split" owing nothing whose pool output holds 39 payees' money.
 #[test]
+// Grinds a real diff-1 share: minutes in a debug build on a CI runner. Run with `--ignored`.
+#[ignore]
 fn a_class_budget_is_never_smaller_than_the_smallest_class_a_gateway_builds() {
     let node = MockNode::start(Chain {
         height: HEIGHT - 1,

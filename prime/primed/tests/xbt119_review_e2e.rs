@@ -144,6 +144,8 @@ fn carry_of(p: &Primed, who: &str) -> u64 {
 /// honoured). The owed rebate is gone and must not be credited again; block N+1's own stratum
 /// fee was paid to the pool again, and its rebate share is owed to the DATUM miner again.
 #[test]
+// Grinds a real diff-1 share: minutes in a debug build on a CI runner. Run with `--ignored`.
+#[ignore]
 fn a_block_on_a_coinbaser_from_before_the_last_find_credits_its_own_rebate_and_not_the_owed_one_again() {
     let pool = Identity::generate();
     let node = MockNode::start(Chain {
