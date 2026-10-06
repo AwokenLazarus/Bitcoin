@@ -191,10 +191,7 @@ fn class_cut(list: &[Output], room: usize) -> Vec<TxOut> {
     outs
 }
 
-/// A share on job slot `slot`, citing coinbaser `id`, whose coinbase section 2 pays `outs`. Its
-/// claimed difficulty, 1, is under this Prime's floor of 2, so it is accepted and credited by its
-/// hash alone: nothing, almost surely. That keeps it out of the duplicate set, so the one ground
-/// share can be sent on three jobs citing three coinbasers, as three templates' shares would be.
+/// A share on job slot `slot`, citing coinbaser `id`, whose coinbase section 2 pays `outs`.
 fn share(slot: u8, id: u8, outs: &[TxOut], now: u32) -> PowSubmit {
     let mut s = pool_only_share(slot, HEIGHT, TIP, TIP_BITS, 0, now);
     let (cb, tidx, split_at) = coinbase::build(HEIGHT, b"Lazarus", outs, 0);
@@ -210,13 +207,6 @@ fn share(slot: u8, id: u8, outs: &[TxOut], now: u32) -> PowSubmit {
     s
 }
 
-fn on_job(s: &PowSubmit, slot: u8, id: u8) -> PowSubmit {
-    let mut s = s.clone();
-    s.job_id = slot;
-    s.job.as_mut().unwrap().coinbaser_id = id;
-    s
-}
-
 /// A b9ea7dc class 2 keeps 16 of the 40 payees: Partial. Seen on three coinbasers, that is the
 /// session's budget, the next list names only the 16 that fit, and the class keeps all of it:
 /// a share on it is a full split.
@@ -226,7 +216,7 @@ fn a_class_limited_session_learns_its_budget_and_its_next_list_is_mined_whole() 
     let node = node();
     let gw = Identity::generate();
     let pool = Identity::generate();
-    let (primed, port) = start(&node, &pool, &format!("{ON}\nmin-diff = 2"));
+    let (primed, port) = start(&node, &pool, &format!("{ON}\nmin-diff = 1"));
     let room = 16 * 31 + 20;
 
     let (mut g, _) = Gateway::connect_convoy_as(port, &pool, &gw, CONVOY_UA);
@@ -241,10 +231,13 @@ fn a_class_limited_session_learns_its_budget_and_its_next_list_is_mined_whole() 
     let partial = class_cut(&list, room);
     assert_eq!(partial.len(), 17, "16 payees, then the rest to the pool");
 
-    let mut s1 = share(3, 1, &partial, unix_now());
-    grind_diff1(&mut s1);
-    for (slot, id) in [(3, 1), (4, 2), (5, 3)] {
-        assert_eq!(g.submit(&on_job(&s1, slot, id)), (mining::ACCEPTED_TENTATIVELY, 0), "Partial, on coinbaser {id}");
+    // Only a share that earns work is a sighting, and one that earns is in the duplicate set:
+    // three shares are ground, one per coinbaser, as three templates' shares would be.
+    let now = unix_now();
+    for (k, (slot, id)) in [(3u8, 1u8), (4, 2), (5, 3)].into_iter().enumerate() {
+        let mut s1 = share(slot, id, &partial, now + k as u32);
+        grind_diff1(&mut s1);
+        assert_eq!(g.submit(&s1), (mining::ACCEPTED_TENTATIVELY, 0), "Partial, on coinbaser {id}");
     }
     let st = settled_stats(&primed);
     assert_eq!(row(&st, &gw)["class_budget_bytes"], 16 * 31, "{}", row(&st, &gw));

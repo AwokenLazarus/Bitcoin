@@ -576,13 +576,26 @@ impl Shared {
     /// reply priced off the snapshot from before the debit would hand the same carry out a second
     /// time, out of the pool's remainder, in whatever block that split is mined into.
     /// Returns the pool's carry total and the number of holders after the debit.
-    pub fn book_block_debits(&self, carry_delta: &[(String, i64)], books: &mut tides::Books) -> (u64, usize) {
+    pub fn book_block_debits(
+        &self,
+        hash: &str,
+        carry_delta: &[(String, i64)],
+        books: &mut tides::Books,
+    ) -> (u64, usize) {
+        // The snapshot lock before the ledger, the same order as `coinbaser_base`, and the
+        // slot cleared before either is released: a reply must not be priced off the pre-debit
+        // snapshot in the gap between the two.
+        let mut slot = self.coinbaser_base.lock().unwrap_or_else(|e| e.into_inner());
         let after = {
             let mut ledger = self.ledger.lock().unwrap_or_else(|e| e.into_inner());
             ledger.book_debits(carry_delta, books);
+            ledger.note_debit_applied(hash);
+            if let Err(e) = ledger.sync() {
+                log::error!("ledger sync after booking block {hash} failed: {e}");
+            }
             (ledger.window.total_carry(), ledger.window.carries().len())
         };
-        self.drop_coinbaser_base();
+        *slot = None;
         after
     }
 
@@ -668,10 +681,7 @@ impl Shared {
             .filter(|e| ts.saturating_sub(e.last) < forget.max(3600))
             .map_or(1, |e| e.strikes.saturating_add(1));
         let span = first.saturating_mul(1u64 << (strikes - 1).min(20)).min(cap);
-        q.insert(
-            key,
-            Quarantine { until: ts + span, reason: reason.to_string(), height, strikes, last: ts },
-        );
+        q.insert(key, Quarantine { until: ts + span, reason: reason.to_string(), height, strikes, last: ts });
         Some(span)
     }
 
@@ -835,7 +845,7 @@ mod tests {
         let before = shared.coinbaser_base();
         assert_eq!(carry_in(&before, who), 40_000);
         // a found block paid it out, well inside the snapshot's lifetime
-        let (total, _) = shared.book_block_debits(&[(who.to_string(), -40_000)], &mut tides::Books::new(0, 0));
+        let (total, _) = shared.book_block_debits("test", &[(who.to_string(), -40_000)], &mut tides::Books::new(0, 0));
         assert_eq!(total, 0);
         let after = shared.coinbaser_base();
         assert_eq!(carry_in(&after, who), 0, "the snapshot still offers carry the block already paid");

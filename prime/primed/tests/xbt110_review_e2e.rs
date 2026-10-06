@@ -121,7 +121,6 @@ fn carry_total(p: &Primed) -> u64 {
 /// that carry a second time, out of the pool's remainder, there is nothing left on the books to
 /// take it from, and nothing says so.
 #[test]
-#[ignore]
 fn a_block_on_a_coinbaser_from_before_the_last_find_does_not_pay_its_carry_again() {
     let (first, h1) = first_block().clone();
     // the next block, on top of the first, paying the very same list
@@ -206,7 +205,6 @@ fn a_block_on_a_coinbaser_from_before_the_last_find_does_not_pay_its_carry_again
 /// instant leaves behind. (If a housekeeping tick lands in those few milliseconds the copy is
 /// from after the flush and the test passes: about one run in a thousand.)
 #[test]
-#[ignore]
 fn a_prime_killed_just_after_a_find_does_not_offer_the_paid_carry_again() {
     let (first, _) = first_block().clone();
     let pool = Identity::generate();

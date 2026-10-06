@@ -188,6 +188,17 @@ fn template_left_room(kept: usize, txn_total_weight: u32) -> bool {
 /// template of its own, is the class. A gateway asks every ten seconds or so, so learning costs
 /// well under a minute of Partial work.
 const CLASS_BUDGET_SIGHTINGS: usize = 3;
+/// Payee bytes below which a Partial share is not a CONVOY size class.
+///
+/// `COINBASE_TYPE_SMALL` is 500 bytes (`datum_stratum.h:55` at b9ea7dc).
+/// `datum_stratum_coinbase_fit_to_template` returns `max_sz - fixed_bytes` of that for
+/// miner outputs (`datum_coinbaser.c:342`). `fixed_bytes` for that class is
+/// `119 + pool_script_len + cb_input_sz` when the extranonce fits in the coinbase
+/// (`datum_coinbaser.c:708`), and the extranonce fits only while `cb_input_sz <= 85`
+/// (`datum_coinbaser.c:380`). A 22-byte pool script then leaves
+/// `500 - (119 + 22 + 85) = 274` bytes. A sighting under that cannot be class 1, the
+/// smallest class that keeps a payee.
+const CLASS_BUDGET_MIN_BYTES: usize = 500 - (119 + 22 + 85);
 /// Payee byte counts one section keeps a tally of at once, the oldest dropped first.
 const CLASS_BUDGET_TALLY: usize = 8;
 /// How long a class budget stands after it was last set before it, and every sighting it was
@@ -218,8 +229,8 @@ const CLASS_BUDGET_TTL: Duration = Duration::from_secs(6 * 3600);
 #[derive(Debug, Default)]
 struct ClassBudget {
     /// Per section (the gateway's `cbselect`): payee bytes kept, and the coinbaser ids they were
-    /// kept on, up to [`CLASS_BUDGET_SIGHTINGS`].
-    seen: HashMap<u8, Vec<(usize, Vec<u8>)>>,
+    /// kept on, up to [`CLASS_BUDGET_SIGHTINGS`], each with when it was seen.
+    seen: HashMap<u8, Vec<(usize, Vec<(u8, Instant)>)>>,
     bytes: Option<usize>,
     /// When `bytes` was last set.
     set_at: Option<Instant>,
@@ -229,6 +240,7 @@ impl ClassBudget {
     /// Forget the budget and everything it was learned from once it is [`CLASS_BUDGET_TTL`] old;
     /// true if it did.
     fn expire(&mut self, now: Instant) -> bool {
+        self.drop_old_sightings(now);
         if !self.set_at.is_some_and(|t| now.saturating_duration_since(t) >= CLASS_BUDGET_TTL) {
             return false;
         }
@@ -236,8 +248,24 @@ impl ClassBudget {
         true
     }
 
+    /// Sightings age out on the same TTL as a budget, including before one is set: two
+    /// sightings from hours ago do not still count toward the three.
+    fn drop_old_sightings(&mut self, now: Instant) {
+        for tally in self.seen.values_mut() {
+            for (_, ids) in tally.iter_mut() {
+                ids.retain(|(_, t)| now.saturating_duration_since(*t) < CLASS_BUDGET_TTL);
+            }
+            tally.retain(|(_, ids)| !ids.is_empty());
+        }
+        self.seen.retain(|_, tally| !tally.is_empty());
+    }
+
     /// Count one sighting at `now`; true if it changed the budget.
     fn observe(&mut self, section: u8, coinbaser_id: u8, kept: usize, now: Instant) -> bool {
+        if kept < CLASS_BUDGET_MIN_BYTES {
+            return false;
+        }
+        self.drop_old_sightings(now);
         let tally = self.seen.entry(section).or_default();
         let at = match tally.iter().position(|t| t.0 == kept) {
             Some(i) => i,
@@ -250,8 +278,8 @@ impl ClassBudget {
             }
         };
         let ids = &mut tally[at].1;
-        if ids.len() < CLASS_BUDGET_SIGHTINGS && !ids.contains(&coinbaser_id) {
-            ids.push(coinbaser_id);
+        if ids.len() < CLASS_BUDGET_SIGHTINGS && !ids.iter().any(|(id, _)| *id == coinbaser_id) {
+            ids.push((coinbaser_id, now));
         }
         if ids.len() < CLASS_BUDGET_SIGHTINGS || self.bytes.is_some_and(|b| b <= kept) {
             return false;
@@ -1778,7 +1806,8 @@ impl Session {
                 }
             }
         });
-        if matches!(v.coinbase_kind, CoinbaseKind::Partial(_)) {
+        // A share under min-diff earns nothing. Counting it would let one ground hash teach a budget.
+        if matches!(v.coinbase_kind, CoinbaseKind::Partial(_)) && v.work > 0 {
             let job = PartialJob { section: s.coinbase_id, coinbaser_id, txn_total_weight };
             self.note_partial_share(job, issued_outputs.as_deref(), &v.coinbase);
         }
@@ -1800,7 +1829,6 @@ impl Session {
                 payees,
             });
         }
-        self.send_mining(&mining::share_receipt(status, 0, s.nonce32, s.target_pot, s.job_id), false).await?;
         self.maybe_check_template(chain_check, &prev_hash, &s, &v).await?;
 
         if !v.target_committed {
@@ -1808,6 +1836,10 @@ impl Session {
         } else if v.target_pot < self.shared.cfg.min_pot() {
             self.shared.totals.add(&self.shared.totals.below_floor_shares, 1);
         }
+        // Book a found block before the receipt. The receipt is what a gateway treats as
+        // "this share is in", and a kill in the moment after it is what the books must already
+        // show: the carry taken off, and the block record on disk.
+        let receipt = mining::share_receipt(status, 0, s.nonce32, s.target_pot, s.job_id);
         if v.is_block_candidate {
             if held_to_chain {
                 self.on_block_candidate(s, v, identity).await?;
@@ -1822,6 +1854,7 @@ impl Session {
                 );
             }
         }
+        self.send_mining(&receipt, false).await?;
         Ok(())
     }
 
@@ -2197,8 +2230,16 @@ impl Session {
         };
         let (rebate_owed_credited, rebate_deferred) =
             cb.as_ref().map_or((0, 0), |c| (c.rebate_owed_credited, c.rebate_deferred));
-        let Settlement { kind, owed, split, carry_paid, carry_delta, rebate_credited, rebate_delta, carry_reserved } =
-            settle(&v.coinbase_kind, cb, v.coinbase_value, |script| v.coinbase.paid_to(script));
+        let Settlement {
+            kind,
+            owed,
+            split,
+            mut carry_paid,
+            mut carry_delta,
+            mut rebate_credited,
+            rebate_delta,
+            carry_reserved,
+        } = settle(&v.coinbase_kind, cb, v.coinbase_value, |script| v.coinbase.paid_to(script));
         let _ = fee;
         // Booked in two steps (`tides::Books`). Now: what this coinbase took off the books, so
         // that the coinbaser computed a few seconds from now cannot hand the same carry out
@@ -2210,8 +2251,36 @@ impl Session {
             if settles { rebate_owed_credited } else { 0 },
             if settles { rebate_deferred } else { 0 },
         );
+        let mut carry_shortfall_sats = 0u64;
         if settles {
-            let (total, holders) = self.shared.book_block_debits(&carry_delta, &mut books);
+            let (total, holders) = self.shared.book_block_debits(&hash_hex, &carry_delta, &mut books);
+            // carry_paid is what left the books, not what an old coinbaser still listed. The
+            // difference was paid again out of the pool's remainder and is a debt.
+            let booked: u64 = books.debited.iter().map(|d| d.1).sum();
+            carry_shortfall_sats = carry_paid.saturating_sub(booked);
+            if carry_shortfall_sats > 0 {
+                log::error!(
+                    "[{}] block {hash_hex} coinbase paid {carry_paid} sats of carry but only {booked} was on the books; \
+                     {carry_shortfall_sats} sats were paid again out of the pool's remainder and are a debt against \
+                     those payees' future earnings",
+                    self.id
+                );
+            }
+            carry_paid = booked;
+            if let Some(c) = issued {
+                if c.rebate_owed_credited > books.rebate_debited {
+                    let left = tides::cap_rebate_credits(&mut carry_delta, &c.rebate_credits, books.rebate_debited);
+                    log::error!(
+                        "[{}] block {hash_hex} coinbaser credited {} sats of owed DATUM rebate but only {} was still \
+                         owed; {} sats of that credit are not put on",
+                        self.id,
+                        c.rebate_owed_credited,
+                        books.rebate_debited,
+                        c.rebate_owed_credited - books.rebate_debited,
+                    );
+                    rebate_credited = left;
+                }
+            }
             let waiting: i64 = carry_delta.iter().map(|d| d.1.max(0)).sum();
             log::info!(
                 "[{}] block {hash_hex} carry: {carry_paid} sats of carry paid in {} outputs and {} sats of owed DATUM rebate drawn, off the books now; {waiting} sats of deferred earnings and rebate credits ({} entries) and {rebate_deferred} sats of undistributed rebate go on when the node confirms it; pool now holds {total} sats of carry for {holders} miners",
@@ -2247,6 +2316,7 @@ impl Session {
             submit: "pending".into(),
             gateway: self.gateway_hex.clone(),
             books: Some(books),
+            carry_shortfall_sats,
             carry_reserved_sats: carry_reserved,
         };
         self.shared.record_block(record);
@@ -3076,8 +3146,8 @@ mod tests {
         assert!(b.observe(1, 12, 310, t));
         assert_eq!(b.bytes, Some(310));
         // a section's tally is bounded
-        for (id, kept) in (100..200usize).enumerate() {
-            assert!(!b.observe(3, id as u8, kept, t));
+        for (id, n) in (0..100usize).enumerate() {
+            assert!(!b.observe(3, id as u8, CLASS_BUDGET_MIN_BYTES + n, t));
         }
         assert_eq!(b.seen[&3].len(), CLASS_BUDGET_TALLY);
     }
@@ -3092,8 +3162,8 @@ mod tests {
         let mut b = ClassBudget::default();
         assert!(!b.expire(t + CLASS_BUDGET_TTL * 10), "nothing to forget before a budget is set");
         assert!(!b.observe(2, 1, 527, t) && !b.observe(2, 2, 527, t));
-        assert!(!b.expire(t + CLASS_BUDGET_TTL * 10), "nor while sightings are still being gathered");
-        assert_eq!(b.seen[&2][0].1.len(), 2, "which are kept");
+        assert!(!b.expire(t + CLASS_BUDGET_TTL * 10), "a budget that was never set is not a budget forgotten");
+        assert!(b.seen.get(&2).is_none(), "sightings older than the TTL are forgotten before a budget exists");
         assert!(!b.observe(1, 3, 310, t) && !b.observe(1, 4, 310, t) && b.observe(1, 5, 310, t));
         assert_eq!(b.bytes, Some(310));
 

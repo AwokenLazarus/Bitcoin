@@ -233,6 +233,9 @@ fn settle_confirmed(shared: &Shared, hash: &str) {
     let mut legacy_reapply = Vec::new();
     let mut legacy_rebate = 0i64;
     let mut booked = None;
+    // Snapshot before the ledger, the order `coinbaser_base` uses, so the two cannot deadlock.
+    // Cleared before either lock is released.
+    let mut slot = shared.coinbaser_base.lock().unwrap_or_else(|e| e.into_inner());
     // the ledger before the block log, the same order everywhere (`stats::build` holds the
     // ledger while it reads the blocks)
     let mut ledger = shared.ledger.lock().unwrap();
@@ -277,7 +280,7 @@ fn settle_confirmed(shared: &Shared, hash: &str) {
     }
     // Carry and rebate just moved; a coinbaser snapshot from before must not be served.
     drop(ledger);
-    shared.drop_coinbaser_base();
+    *slot = None;
 }
 
 /// Whether a `submitblock` result proves the block the miner hashed is invalid.
@@ -335,6 +338,7 @@ pub fn mark_orphan(shared: &Shared, hash: &str, height: u32, why: &str) {
     let mut reverse = Vec::new();
     let mut rebate = 0i64;
     let mut unbooked = None;
+    let mut slot = shared.coinbaser_base.lock().unwrap_or_else(|e| e.into_inner());
     let mut ledger = shared.ledger.lock().unwrap();
     shared.update_block(hash, |r| {
         r.kind = format!("orphan:{}", r.kind);
@@ -375,7 +379,7 @@ pub fn mark_orphan(shared: &Shared, hash: &str, height: u32, why: &str) {
     }
     // The carry the orphan had paid is owed again; the next coinbaser must see it.
     drop(ledger);
-    shared.drop_coinbaser_base();
+    *slot = None;
 }
 
 #[cfg(test)]

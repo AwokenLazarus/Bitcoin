@@ -111,6 +111,9 @@ pub struct Window {
     last_seen: HashMap<u32, u32>,
     /// Carry set aside for a payout made outside the coinbase; see [`Hold`]. By batch id.
     holds: std::collections::BTreeMap<String, Hold>,
+    /// Carry a coinbase paid that was not on the books: a block mined on a coinbaser issued
+    /// before that carry was paid. Collected from this identity's later earnings.
+    debt: HashMap<u32, u64>,
     pub lifetime_shares: u64,
     pub lifetime_work: u64,
 }
@@ -305,6 +308,71 @@ impl Window {
         }
     }
 
+    /// Carry a coinbase paid twice, still to be collected from later earnings.
+    pub fn debt_of(&self, identity: &str) -> u64 {
+        self.ident_index.get(identity).and_then(|i| self.debt.get(i)).copied().unwrap_or(0)
+    }
+
+    /// Sum of [`Window::debt_of`].
+    pub fn total_debt(&self) -> u64 {
+        self.debt.values().fold(0u64, |a, &b| a.saturating_add(b))
+    }
+
+    /// Every identity with a double-pay debt, largest first.
+    pub fn debts(&self) -> Vec<(String, u64)> {
+        let mut v: Vec<(String, u64)> = self.debt.iter().map(|(&i, &s)| (self.idents[i as usize].clone(), s)).collect();
+        v.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        v
+    }
+
+    /// Record that `identity`'s coinbase was paid `sats` of carry the books did not hold.
+    fn accrue_debt(&mut self, identity: &str, sats: u64) {
+        if sats == 0 {
+            return;
+        }
+        let i = self.intern(identity);
+        let new = self.debt.get(&i).copied().unwrap_or(0).saturating_add(sats);
+        self.debt.insert(i, new);
+    }
+
+    /// Collect up to `sats` of debt. Returns what was collected.
+    fn reduce_debt(&mut self, identity: &str, sats: u64) -> u64 {
+        let Some(&i) = self.ident_index.get(identity) else { return 0 };
+        let cur = self.debt.get(&i).copied().unwrap_or(0);
+        let take = cur.min(sats);
+        let left = cur - take;
+        if left == 0 {
+            self.debt.remove(&i);
+        } else {
+            self.debt.insert(i, left);
+        }
+        take
+    }
+
+    /// Put a debt back after the block that paid it down is orphaned. Taken from carry
+    /// first, so a reorg cannot leave the same sats as both a debt and a balance.
+    fn restore_debt(&mut self, identity: &str, sats: u64) {
+        if sats == 0 {
+            return;
+        }
+        let have = self.carry_of(identity);
+        let from_carry = have.min(sats);
+        if from_carry > 0 {
+            self.adjust_carry(identity, -(from_carry.min(i64::MAX as u64) as i64));
+        }
+        self.accrue_debt(identity, sats - from_carry);
+    }
+
+    /// The coinbase payment this debt was for is undone. Debt still outstanding comes off;
+    /// debt already collected from later earnings goes back on as carry.
+    fn forgive_debt(&mut self, identity: &str, sats: u64) {
+        let from_debt = self.reduce_debt(identity, sats);
+        let back = sats - from_debt;
+        if back > 0 {
+            self.adjust_carry(identity, back.min(i64::MAX as u64) as i64);
+        }
+    }
+
     /// Move an identity's carry by `delta` sats, saturating at zero. Returns the new carry.
     /// Deltas (not assignments) are what a found block applies, so two blocks found off
     /// snapshots that both predate the other's settlement still add up correctly.
@@ -481,7 +549,6 @@ pub struct HoldSkip {
     pub reason: &'static str,
 }
 
-
 /// Persisted window state.
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct Meta {
@@ -502,6 +569,17 @@ struct Meta {
     /// Carry set aside for payouts made outside the coinbase. Money, like `carry`.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     holds: std::collections::BTreeMap<String, Hold>,
+    /// Double-paid carry still to collect. See [`Window::debt_of`].
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    debt: std::collections::BTreeMap<String, u64>,
+    /// Block hashes whose debits are already in this window. Absent on a ledger written
+    /// before that was recorded: those debits are already in the balances, and are not applied again.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    applied_debits: Vec<String>,
+    /// True once this file records [`Self::applied_debits`]. A file from before that field
+    /// deserialises this as false.
+    #[serde(default)]
+    applied_debits_tracked: bool,
 }
 
 /// Durable [`Window`]: identities, credit rows, and a small meta file on disk.
@@ -512,6 +590,10 @@ pub struct Ledger {
     idents_out: BufWriter<File>,
     rows_on_disk: u64,
     dirty: bool,
+    /// Block hashes whose debits this window already includes.
+    applied_debits: std::collections::HashSet<String>,
+    /// False on a ledger written before applied debits were recorded.
+    debits_tracked: bool,
 }
 
 impl Ledger {
@@ -559,6 +641,12 @@ impl Ledger {
             }
             window.set_carry(identity, *sats);
         }
+        for (identity, sats) in &meta.debt {
+            if !window.ident_index.contains_key(identity) {
+                new_idents.push(identity.clone());
+            }
+            window.accrue_debt(identity, *sats);
+        }
         for (identity, ts) in &meta.last_seen {
             if window.ident_index.contains_key(identity) {
                 window.set_last_seen(identity, *ts);
@@ -593,7 +681,16 @@ impl Ledger {
 
         let credits_out = BufWriter::new(OpenOptions::new().create(true).append(true).open(&credits_path)?);
         let idents_out = BufWriter::new(OpenOptions::new().create(true).append(true).open(&idents_path)?);
-        let mut l = Ledger { dir, window, credits_out, idents_out, rows_on_disk, dirty: false };
+        let mut l = Ledger {
+            dir,
+            window,
+            credits_out,
+            idents_out,
+            rows_on_disk,
+            dirty: false,
+            applied_debits: meta.applied_debits.into_iter().collect(),
+            debits_tracked: meta.applied_debits_tracked,
+        };
         for identity in new_idents {
             l.idents_out.write_all(identity.as_bytes())?;
             l.idents_out.write_all(b"\n")?;
@@ -650,6 +747,7 @@ impl Ledger {
             return;
         }
         books.debited.clear();
+        books.shortfall.clear();
         for (identity, d) in carry_delta.iter().filter(|d| d.1 < 0) {
             let before = self.window.carry_of(identity);
             let after = self.window.adjust_carry(identity, *d);
@@ -664,6 +762,13 @@ impl Ledger {
             }
             if moved > 0 {
                 books.debited.push((identity.clone(), moved));
+            }
+            // The coinbase paid carry this window no longer holds: a coinbaser issued before
+            // the last find. The payee has the sats already; they come back out of later earnings.
+            let overpaid = d.unsigned_abs().saturating_sub(moved);
+            if overpaid > 0 {
+                self.window.accrue_debt(identity, overpaid);
+                books.shortfall.push((identity.clone(), overpaid));
             }
         }
         let before = self.window.rebate_owed();
@@ -680,10 +785,19 @@ impl Ledger {
             return;
         }
         books.credited.clear();
+        books.debt_paid.clear();
         for (identity, d) in carry_delta.iter().filter(|d| d.1 > 0) {
+            let earn = d.unsigned_abs();
             let known = self.window.ident_index.contains_key(identity);
+            // A double-paid carry is collected before any of this earning becomes a new balance.
+            let paid_down = self.window.reduce_debt(identity, earn);
+            if paid_down > 0 {
+                books.debt_paid.push((identity.clone(), paid_down));
+            }
+            let onto = earn - paid_down;
             let before = self.window.carry_of(identity);
-            let after = self.window.adjust_carry(identity, *d);
+            let after =
+                if onto > 0 { self.window.adjust_carry(identity, onto.min(i64::MAX as u64) as i64) } else { before };
             if !known {
                 let _ = self.idents_out.write_all(format!("{identity}\n").as_bytes());
             }
@@ -709,6 +823,10 @@ impl Ledger {
                 let after = self.window.adjust_carry(&identity, -(sats.min(i64::MAX as u64) as i64));
                 short = short.saturating_add(sats - (before - after));
             }
+            // Earnings that had paid a double-pay debt down: that payment is undone with them.
+            for (identity, sats) in std::mem::take(&mut books.debt_paid) {
+                self.window.restore_debt(&identity, sats);
+            }
             self.window.adjust_rebate_owed(-(books.rebate_added.min(i64::MAX as u64) as i64));
             books.rebate_added = 0;
             books.credits_live = false;
@@ -716,6 +834,9 @@ impl Ledger {
         if books.debits_live {
             for (identity, sats) in std::mem::take(&mut books.debited) {
                 self.window.adjust_carry(&identity, sats.min(i64::MAX as u64) as i64);
+            }
+            for (identity, sats) in std::mem::take(&mut books.shortfall) {
+                self.window.forgive_debt(&identity, sats);
             }
             self.window.adjust_rebate_owed(books.rebate_debited.min(i64::MAX as u64) as i64);
             books.rebate_debited = 0;
@@ -762,9 +883,7 @@ impl Ledger {
                 }
             };
             match reason {
-                Some(reason) => {
-                    skipped.push(HoldSkip { identity: identity.clone(), requested: *sats, carry, reason })
-                }
+                Some(reason) => skipped.push(HoldSkip { identity: identity.clone(), requested: *sats, carry, reason }),
                 None => {
                     self.window.adjust_carry(identity, -(*sats as i64));
                     held.push((identity.clone(), *sats));
@@ -880,6 +999,13 @@ impl Ledger {
                 })
                 .collect(),
             holds: self.window.holds.clone(),
+            debt: self.window.debts().into_iter().collect(),
+            applied_debits: {
+                let mut v: Vec<String> = self.applied_debits.iter().cloned().collect();
+                v.sort();
+                v
+            },
+            applied_debits_tracked: self.debits_tracked,
         };
         write_atomic(&self.dir.join(Self::META), &serde_json::to_vec_pretty(&meta)?)?;
         self.dirty = false;
@@ -897,6 +1023,65 @@ impl Ledger {
         self.flush()?;
         self.credits_out.get_ref().sync_data()?;
         self.idents_out.get_ref().sync_data()
+    }
+
+    /// Whether `window.json` already records which block debits it includes.
+    pub fn debits_tracked(&self) -> bool {
+        self.debits_tracked
+    }
+
+    /// The debits of `hash` are in this window. Written with the next flush.
+    pub fn note_debit_applied(&mut self, hash: &str) {
+        if self.applied_debits.insert(hash.to_string()) || !self.debits_tracked {
+            self.debits_tracked = true;
+            self.dirty = true;
+        }
+    }
+
+    /// A ledger from before debits were tracked: every debit already on the block log is
+    /// already in the balances. Mark them applied and do not take them off again.
+    pub fn adopt_legacy_debits(&mut self, blocks: &[BlockRecord]) {
+        if self.debits_tracked {
+            return;
+        }
+        for b in blocks {
+            if b.books.as_ref().is_some_and(|k| k.debits_live) {
+                self.applied_debits.insert(b.hash.clone());
+            }
+        }
+        self.debits_tracked = true;
+        self.dirty = true;
+    }
+
+    /// Re-apply debits that are on the block log but not in this window: a kill in the
+    /// moment after the block record was appended and before `window.json` was flushed.
+    /// No-op until [`Ledger::note_debit_applied`] has been used, so a first start of this
+    /// code does not debit history that housekeeping already flushed.
+    pub fn reconcile_debits(&mut self, blocks: &[BlockRecord]) {
+        if !self.debits_tracked {
+            return;
+        }
+        for b in blocks {
+            let Some(books) = b.books.as_ref() else { continue };
+            if !books.debits_live || self.applied_debits.contains(&b.hash) {
+                continue;
+            }
+            log::error!(
+                "block {} paid carry that window.json does not show as paid; taking {} debit(s) and {} shortfall(s) off the books now",
+                b.hash,
+                books.debited.len(),
+                books.shortfall.len()
+            );
+            for (identity, sats) in &books.debited {
+                self.window.adjust_carry(identity, -(*sats.min(&(i64::MAX as u64)) as i64));
+            }
+            self.window.adjust_rebate_owed(-(books.rebate_debited.min(i64::MAX as u64) as i64));
+            for (identity, sats) in &books.shortfall {
+                self.window.accrue_debt(identity, *sats);
+            }
+            self.applied_debits.insert(b.hash.clone());
+            self.dirty = true;
+        }
     }
 
     /// Make the on-disk ledger identical to the in-memory window, then fsync.
@@ -1076,6 +1261,10 @@ pub struct BlockRecord {
     /// `rebate_delta` went on when the candidate was seen and come off as one on an orphan.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub books: Option<Books>,
+    /// Carry the coinbase paid that was not on the books (`Books::shortfall`). 0 when the
+    /// coinbase paid only carry the window held.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub carry_shortfall_sats: u64,
     /// Earnings this block's coinbase left in the pool's output because its coinbaser was held
     /// to the gateway's class budget (primed `class-budget`): what every identity the budget
     /// had no room for earned in this block, which `carry_delta` also credits to them. A block
@@ -1125,6 +1314,13 @@ pub struct Books {
     pub credited: Vec<(String, u64)>,
     #[serde(default)]
     pub rebate_added: u64,
+    /// Carry the coinbase paid that was not on the books. A debt against those payees until
+    /// later earnings collect it. Undone with the debits if the block is orphaned.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub shortfall: Vec<(String, u64)>,
+    /// Of this block's credits, what paid a double-pay debt down instead of becoming carry.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub debt_paid: Vec<(String, u64)>,
 }
 
 impl Books {
@@ -1161,23 +1357,56 @@ impl BlockLog {
         };
         let mut out: Vec<BlockRecord> = Vec::new();
         let mut index: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+        let mut bad = 0u64;
+        let mut n = 0u64;
         for line in BufReader::new(f).lines() {
+            n += 1;
             let line = line?;
             if line.trim().is_empty() {
                 continue;
             }
-            if let Ok(r) = serde_json::from_str::<BlockRecord>(&line) {
-                match index.get(&r.hash) {
+            match serde_json::from_str::<BlockRecord>(&line) {
+                Ok(r) => match index.get(&r.hash) {
                     Some(&i) => out[i] = r,
                     None => {
                         index.insert(r.hash.clone(), out.len());
                         out.push(r);
                     }
+                },
+                Err(e) => {
+                    bad += 1;
+                    log::error!("blocks.jsonl: line {n} does not parse and is not a block record: {e}");
                 }
             }
         }
+        if bad > 0 {
+            log::error!("blocks.jsonl: {bad} line(s) skipped; they are not in the block log");
+        }
         Ok(out)
     }
+}
+
+/// Hold the rebate credits inside `delta` to `allowed` sats.
+///
+/// [`split::carry_delta`] appends those credits after everything else, so they are matched
+/// from the end. Returns the rebate credit still in `delta`.
+pub fn cap_rebate_credits(delta: &mut Vec<(String, i64)>, planned: &[(String, u64)], allowed: u64) -> u64 {
+    let planned_sum: u64 = planned.iter().map(|(_, s)| *s).sum();
+    if planned_sum <= allowed {
+        return planned_sum;
+    }
+    let mut cut = planned_sum - allowed;
+    for (identity, sats) in planned.iter().rev() {
+        if cut == 0 {
+            break;
+        }
+        let Some(entry) = delta.iter_mut().rev().find(|e| e.0 == *identity && e.1 > 0) else { continue };
+        let drop_n = (*sats).min(cut).min(entry.1 as u64);
+        entry.1 -= drop_n as i64;
+        cut -= drop_n;
+    }
+    delta.retain(|e| e.1 != 0);
+    planned_sum - (planned_sum - allowed - cut)
 }
 
 /// Lifetime non-orphan finds per gateway signing-key prefix, recovered from the block log.
@@ -1544,6 +1773,7 @@ mod tests {
             submit: "accepted".into(),
             gateway: "ab".into(),
             books: None,
+            carry_shortfall_sats: 0,
             carry_reserved_sats: 0,
         };
         log.append(&r).unwrap();
@@ -1552,6 +1782,52 @@ mod tests {
         r2.submit = "duplicate".into();
         log.append(&r2).unwrap();
         assert_eq!(log.read_all().unwrap(), vec![r2]);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A coinbase that pays carry the window no longer holds books a debt, and later earnings
+    /// collect it. Orphaning that block forgives whatever debt is still outstanding.
+    #[test]
+    fn carry_paid_twice_is_a_debt_collected_from_later_earnings() {
+        let dir = std::env::temp_dir().join(format!("tides-debt-{}-{}", std::process::id(), line!()));
+        let _ = fs::remove_dir_all(&dir);
+        let mut l = Ledger::open(&dir).unwrap();
+        l.set_carry("m", 100);
+        let mut first = Books::new(0, 0);
+        l.book_debits(&[("m".into(), -100)], &mut first);
+        assert_eq!((l.window.carry_of("m"), l.window.debt_of("m"), first.debited.len()), (0, 0, 1));
+        let mut second = Books::new(0, 0);
+        l.book_debits(&[("m".into(), -100)], &mut second);
+        assert_eq!(second.debited, Vec::<(String, u64)>::new());
+        assert_eq!(second.shortfall, vec![("m".into(), 100)]);
+        assert_eq!(l.window.debt_of("m"), 100);
+        let mut earned = Books::new(0, 0);
+        l.book_credits(&[("m".into(), 40)], &mut earned);
+        assert_eq!((l.window.debt_of("m"), l.window.carry_of("m")), (60, 0));
+        assert_eq!(earned.debt_paid, vec![("m".into(), 40)]);
+        l.unbook(&mut second);
+        assert_eq!((l.window.debt_of("m"), l.window.carry_of("m")), (0, 40));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_rebate_credit_is_capped_to_the_owed_balance_that_was_still_there() {
+        let mut delta = vec![("m".into(), 50i64)];
+        assert_eq!(cap_rebate_credits(&mut delta, &[("m".into(), 50)], 0), 0);
+        assert!(delta.is_empty());
+        let mut delta = vec![("m".into(), 50i64), ("n".into(), 50i64)];
+        assert_eq!(cap_rebate_credits(&mut delta, &[("m".into(), 50), ("n".into(), 50)], 50), 50);
+        assert_eq!(delta.iter().map(|d| d.1).sum::<i64>(), 50);
+    }
+
+    #[test]
+    fn a_bad_block_log_line_is_logged_and_not_taken_as_a_block() {
+        let dir = std::env::temp_dir().join(format!("tides-badline-{}-{}", std::process::id(), line!()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let log = BlockLog::open(&dir);
+        fs::write(dir.join("blocks.jsonl"), "{\"hash\":\"ab\",\"nope\":true}\n").unwrap();
+        assert!(log.read_all().unwrap().is_empty());
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -1598,6 +1874,7 @@ mod tests {
             submit: "accepted".into(),
             gateway: gw.into(),
             books: None,
+            carry_shortfall_sats: 0,
             carry_reserved_sats: 0,
         }
     }
@@ -1802,10 +2079,11 @@ mod tests {
             l.credit("active", 1, 2, now - 5 + (i % 5), SOURCE_DATUM).unwrap();
         }
         l.set_carry("active", 50_000);
-        let ask: Vec<(String, u64)> = [("s1", 300_000), ("s2", 19_999), ("small", 5_000), ("active", 50_000), ("s1", 300_000)]
-            .iter()
-            .map(|(i, s)| (i.to_string(), *s as u64))
-            .collect();
+        let ask: Vec<(String, u64)> =
+            [("s1", 300_000), ("s2", 19_999), ("small", 5_000), ("active", 50_000), ("s1", 300_000)]
+                .iter()
+                .map(|(i, s)| (i.to_string(), *s as u64))
+                .collect();
         let (held, skipped) = l.hold_carry("b1", &ask, now, week, 10_000, 500, 504).unwrap();
         assert_eq!(held, vec![("s1".to_string(), 300_000)]);
         let why: Vec<(&str, &str)> = skipped.iter().map(|s| (s.identity.as_str(), s.reason)).collect();
@@ -1816,7 +2094,8 @@ mod tests {
         assert_eq!((l.window.carry_of("s1"), l.window.total_held()), (0, 300_000));
         assert!(l.hold_carry("b1", &ask, now, week, 10_000, 500, 504).is_err(), "ids are used once");
         // held money is in no split
-        let p = SplitParams { min_payout: 500_000, stale_after: week, stale_min_payout: 10_000, ..SplitParams::default() };
+        let p =
+            SplitParams { min_payout: 500_000, stale_after: week, stale_min_payout: 10_000, ..SplitParams::default() };
         let s = l.window.split(100_000_000, &p, now, |i| Some(i.as_bytes().to_vec()));
         assert!(s.payees.iter().all(|x| x.identity != "s1"));
         // and it survives a restart
@@ -1859,7 +2138,11 @@ mod tests {
         let mut books = Books::new(0, 0);
         l.book_debits(&delta, &mut books);
         assert_eq!(books.debited, vec![("s1".to_string(), 100_000)]);
-        assert_eq!(l.window.holds()["b"].entries, vec![("s2".to_string(), 100_000)], "s1 is paid; only s2 is still held");
+        assert_eq!(
+            l.window.holds()["b"].entries,
+            vec![("s2".to_string(), 100_000)],
+            "s1 is paid; only s2 is still held"
+        );
         assert_eq!(l.window.carry_of("s1"), 0);
         // orphaned: the block paid nobody after all, and s1 is owed again (as carry)
         l.unbook(&mut books);
@@ -1871,5 +2154,4 @@ mod tests {
         assert!(l.window.holds().is_empty());
         let _ = fs::remove_dir_all(&dir);
     }
-
 }

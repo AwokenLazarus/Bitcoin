@@ -243,7 +243,23 @@ fn run(cfg: Config) -> i32 {
     );
     warn_if_window_cliff(&cfg.data_dir, &ledger);
     let block_log = BlockLog::open(&cfg.data_dir);
-    let blocks = block_log.read_all().unwrap_or_default();
+    let blocks = match block_log.read_all() {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("blocks.jsonl: {e}");
+            eprintln!("this file is the pool's block record, so an unreadable one stops startup rather than being taken as no blocks");
+            return 1;
+        }
+    };
+    if ledger.debits_tracked() {
+        ledger.reconcile_debits(&blocks);
+    } else {
+        ledger.adopt_legacy_debits(&blocks);
+    }
+    if let Err(e) = ledger.sync() {
+        eprintln!("ledger: could not record which block debits are in the window: {e}");
+        return 1;
+    }
     backfill_last_seen(&mut ledger, &blocks);
 
     let (tip_tx, tip) = watch::channel(None);

@@ -258,6 +258,9 @@ pub fn build(shared: &Shared) -> Value {
             // everything the pool is holding for miners under the floor, and for whom
             "carry_total_sats": w.total_carry(),
             "carry_holders": w.carries().len(),
+            // carry a coinbase paid twice, still to collect from later earnings
+            "carry_debt_sats": w.total_debt(),
+            "carry_debt_holders": w.debts().len(),
             // balances whose owners have stopped mining (`stale-after-days`), and carry set
             // aside for payments made by hand (`payouts/`): what the payout tool reads
             "stale": stale_doc(shared, w, ts),

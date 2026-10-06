@@ -226,7 +226,11 @@ impl Gateway {
     }
 
     /// [`Gateway::request_coinbaser`], returning the outputs the Prime issued as well.
-    pub fn request_coinbaser_outputs(&mut self, value: u64, prev_hash: &Hash) -> (u8, Vec<datum_wire::coinbaser::Output>) {
+    pub fn request_coinbaser_outputs(
+        &mut self,
+        value: u64,
+        prev_hash: &Hash,
+    ) -> (u8, Vec<datum_wire::coinbaser::Output>) {
         let mut m = vec![mining::SUB_COINBASER_REQUEST];
         m.extend_from_slice(&value.to_le_bytes());
         m.extend_from_slice(prev_hash);
