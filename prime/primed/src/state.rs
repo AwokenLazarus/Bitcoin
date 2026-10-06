@@ -790,6 +790,8 @@ mod tests {
                 fee_bps: 0,
                 stratum_fee_bps: 0,
                 datum_rebate_bps: 0,
+                grace_fee_bps: 0,
+                grace_rebate_bps: 0,
                 min_payout: 546,
                 max_outputs: 511,
                 output_budget_bytes: 13_927,
