@@ -21,6 +21,9 @@ EXPLORER = "https://mempool.lazarus-xbt.xyz/api"
 DIRECTORY = "https://reorg.watch/pools.json"
 KV_NAMESPACE = "8242de880afd41f79e03b586eb16e227"
 SEED = [f"{h}.alphapool.tech:{p}" for h in ("us1", "us2", "eu1", "sg1") for p in (7333, 5555)] + ["us1.alphapool.tech:7777"]
+# ctrlpool's XBT port: a stock datum_gateway that mines through another pool's window (its own
+# site says so, not which pool). On 6 Oct 2026 its US server was a gateway on Lazarus.
+SEED += [f"{h}.ctrlpool.com:4333" for h in ("stratum", "us.stratum", "asia.stratum")]
 # Names a stock gateway ships with: many unrelated operators carry them, so a match proves the
 # block and nothing about the name.
 GENERIC = {"", "datum user", "datum gateway", "gateway", "datum"}
@@ -173,7 +176,7 @@ def main():
     while until is None or time.time() < until:
         now = int(time.time())
         if now >= next_dir:
-            eps = {e: "AlphaPool" for e in SEED}; eps.update(directory_endpoints()); next_dir = now + 3600
+            eps = {e: ("CTRL" if "ctrlpool" in e else "AlphaPool") for e in SEED}; eps.update(directory_endpoints()); next_dir = now + 3600
             for e in eps:
                 if e not in threads:
                     threads[e] = threading.Thread(target=listen, args=(e, stop), daemon=True); threads[e].start()
