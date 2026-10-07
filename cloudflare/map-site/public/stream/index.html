@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>Stream: Pay As It Arrives — An XBT Whitepaper | Lazarus</title>
+<title>Stream: Pay As It Arrives — An XBT Whitepaper | Bitcoin Stream</title>
 <meta name="description" content="Stream lets people and AI agents pay for a service piece by piece as it arrives, over XBT payment channels: one signature per piece, no watchtower, stop any time and the rest is never paid.">
 <link rel="canonical" href="https://lazarus-xbt.xyz/stream/">
 <meta property="og:type" content="article">
@@ -42,7 +42,7 @@
  "datePublished": "2026-10-07",
  "dateModified": "2026-10-07",
  "inLanguage": "en",
- "author": { "@type": "Person", "name": "Lazarus", "alternateName": "Awoken Lazarus", "url": "https://x.com/Awoken_Lazarus" },
+ "author": { "@type": "Organization", "name": "Bitcoin Stream", "url": "https://github.com/AwokenLazarus/Bitcoin-Stream" },
  "publisher": { "@id": "https://lazarus-xbt.xyz/#org" },
  "isPartOf": { "@id": "https://lazarus-xbt.xyz/#website" },
  "about": ["payment channels", "x402", "AI agents", "streaming payments", "XBT"]
@@ -66,10 +66,10 @@
 <section class="hero wrap">
   <h1><span class="kicker">Whitepaper · XBT Stream</span>Stream: pay as it <em>arrives</em></h1>
   <p class="lede">A way for people and AI agents to pay for a service piece by piece, while it is being delivered: an answer token by token, a file chunk by chunk, an API call by call. Each piece costs one signature. Stop at any moment and nothing more is owed.</p>
-  <p class="note">Draft 1 · 7 October 2026 · Lazarus. Working on test networks; not yet on XBT mainnet.</p>
+  <p class="note">Draft 2 · 7 October 2026 · Bitcoin Stream (<a href="https://github.com/AwokenLazarus/Bitcoin-Stream" rel="noopener">source</a>). Working on test networks only; not yet on XBT mainnet. An outside review is being worked through; see <a href="#status">Status</a>.</p>
   <nav class="toc" aria-label="On this page">
     <p class="category">On this page</p>
-    <a href="#problem">The problem</a><a href="#idea">The idea</a><a href="#channel">The channel</a><a href="#http">Paying over HTTP</a><a href="#fair">Paying only for what checks out</a><a href="#wallet">A wallet for agents</a><a href="#hubs">Hubs</a><a href="#lightning">Beside Lightning</a><a href="#numbers">Numbers</a><a href="#status">Status and limits</a>
+    <a href="#problem">The problem</a><a href="#idea">The idea</a><a href="#channel">The channel</a><a href="#http">Paying over HTTP</a><a href="#fair">Paying only for what checks out</a><a href="#wallet">A wallet for agents</a><a href="#hubs">Hubs</a><a href="#lightning">Beside Lightning</a><a href="#prior">Prior art</a><a href="#numbers">Numbers</a><a href="#status">Status and limits</a>
   </nav>
 </section>
 
@@ -80,7 +80,7 @@
 
     <h2 id="problem"><span class="n">1</span>The problem</h2>
     <p>More and more of what we buy arrives over time: the tokens of a model's answer, the minutes of a stream, the pages of a dataset, the thousandth call to an API. Machines are now the buyers as often as people, and the prices are tiny: fractions of a cent, thousands of times an hour.</p>
-    <p>Every existing way to pay for that asks someone to trust someone. Pay up front and you trust the seller to deliver. Pay afterwards and the seller trusts you. A subscription or an API key trusts a company with your card. An on-chain payment for each piece is honest but far too slow and too costly.</p>
+    <p>Most ways to pay for that ask someone to trust someone. Pay up front and you trust the seller to deliver. Pay afterwards and the seller trusts you. A subscription or an API key trusts a company with your card. An on-chain payment for each piece is honest but far too slow and too costly.</p>
     <p>Stream removes the trust from the middle. Buyer and seller settle continuously, in amounts as small as the service itself, and either can walk away at any moment having lost at most one piece.</p>
 
     <h2 id="idea"><span class="n">2</span>The idea</h2>
@@ -153,9 +153,9 @@
     <dl>
       <dt>Nothing to revoke</dt><dd>An old state pays the seller less, so it has no reason to publish one, and the buyer cannot publish anything without the seller's signature. There are no penalty transactions and no watchtowers.</dd>
       <dt>The buyer can go offline</dt><dd>After it signs, the buyer has nothing to watch. If the seller disappears, the refund path returns everything once the expiry height passes.</dd>
-      <dt>The seller has one duty</dt><dd>Close before expiry. Software does this with a safety margin of a day (144 blocks) and the newest state in hand.</dd>
+      <dt>The seller has one duty</dt><dd>Close before expiry. Software does this with a safety margin of a day (144 blocks) and the newest state in hand. This is the one place the seller can lose: if fees spike and the close does not confirm before expiry, the buyer can take the refund. The close fee must be bumped as expiry nears.</dd>
       <dt>One round trip to open</dt><dd>The seller publishes one key. Each channel uses a fresh key derived from it, the buyer's key and the expiry, so no two channels look alike on chain and the seller does not need to be asked first.</dd>
-      <dt>Bound to XBT</dt><dd>XBT shares its history with Bitcoin, so every Stream signature commits to XBT's own signature-hash flag (<code>SIGHASH_ALL|UNIFIED</code>, 0x21). A state signed here cannot be replayed on the SHA-256 chain.</dd>
+      <dt>Bound to XBT</dt><dd>XBT shares its history, address format and network magic with Bitcoin, so a <code>bc1…</code> address is valid on both. Every Stream signature uses XBT's <code>SIGHASH_ALL|UNIFIED</code> (0x21), under which XBT signs a different digest from the one SHA-256 Bitcoin computes for the same transaction. A signature made here does not verify there, so a state cannot be replayed on the SHA-256 chain.</dd>
     </dl>
 
     <h2 id="http"><span class="n">4</span>Paying over HTTP</h2>
@@ -184,13 +184,14 @@
         <path class="ln-good" d="M505 252H120" marker-end="url(#a3)"/>
         <text class="t-good" x="490" y="244" text-anchor="end">200 OK · data · receipt signed by seller</text>
       </svg>
-      <figcaption><b>Figure 3.</b> The 402 step happens once. After that every request simply carries the next signature, and the price check is one signature verification: about 4&nbsp;ms per paid call in our Rust implementation.</figcaption>
+      <figcaption><b>Figure 3.</b> The 402 step happens once. After that every request simply carries the next signature, and the price check is one signature verification, a few hundredths of a millisecond. A whole paid call over local HTTP, with the new state saved to disk before the answer, takes about 4&nbsp;ms.</figcaption>
     </figure>
 
     <p>Each receipt is signed by the seller and bound to the hash of the exact request it paid for, so a buyer can prove what it bought and a seller cannot charge one request twice.</p>
+    <p>On the wire, Stream is XBT's binding of the x402 v2 <code>batch-settlement</code> scheme. Networks are named in CAIP-2 form. Because XBT and Bitcoin share a genesis block, XBT mainnet is keyed to its fork block, 961,640, instead of genesis: <code>bip122:0000000000000050c1e5f69672f45929</code>.</p>
 
     <h2 id="fair"><span class="n">5</span>Paying only for what checks out</h2>
-    <p>Paying per piece only helps if a bad piece can be caught. For anything that can be cut into chunks, a file, a dataset, a long result, the seller first signs a <em>manifest</em>: the Merkle root of every chunk it promises to send. Then the stream begins.</p>
+    <p>Paying per piece only helps if a bad piece can be caught. For content that exists before it is sold, such as a file, a dataset or a recorded stream, the seller first signs a <em>manifest</em>: the Merkle root of every chunk it promises to send. Then the stream begins.</p>
 
     <figure class="fig">
       <svg viewBox="0 0 720 210" role="img" aria-labelledby="f4t">
@@ -223,6 +224,8 @@
       </svg>
       <figcaption><b>Figure 4.</b> Streamed fair exchange. A seller that tampers with chunk 5 is paid for chunks 1 to 4, which it delivered, and nothing after.</figcaption>
     </figure>
+
+    <p>This only works for fixed content. Nobody can commit to the Merkle root of a model's answer before the answer exists. For generated output, paying per piece still limits what either side can lose to one piece, but it cannot prove that a piece is any good.</p>
 
     <h2 id="wallet"><span class="n">6</span>A wallet for agents</h2>
     <p>An AI model should be able to spend, but never to hold a key: a model can be tricked by what it reads. So the agent never signs. It asks a wallet to pay, and the wallet decides.</p>
@@ -257,7 +260,7 @@
 
     <p>The wallet speaks MCP, the protocol AI agents already use for tools, so any agent that can call a tool can pay. Each seller gets its own channel sized to that seller's budget. Payments above the owner's threshold wait for the owner's signature from another device. The policy itself is signed by the owner, so the agent cannot rewrite it.</p>
 
-    <h2 id="hubs"><span class="n">7</span>Hubs</h2>
+    <h2 id="hubs"><span class="n">7</span>Hubs <small class="note">(experimental)</small></h2>
     <p>A direct channel is ideal for a seller you use often. To reach many sellers with one channel, a buyer can pay through a hub.</p>
 
     <figure class="fig">
@@ -281,45 +284,58 @@
         <text class="t-s" x="225" y="132" text-anchor="middle">each state locked to</text>
         <text class="t-s" x="225" y="148" text-anchor="middle">the seller's signature</text>
       </svg>
-      <figcaption><b>Figure 6.</b> The hub can collect from the buyer only by completing its payment to the seller; one signature settles both. The hub forwards money but cannot keep it.</figcaption>
+      <figcaption><b>Figure 6.</b> The hub can collect from the buyer only by completing its payment to the seller; one signature settles both.</figcaption>
     </figure>
 
-    <p>The lock is an adaptor signature: the buyer's state for the hub is incomplete until the seller signs for the matching payment, and that signature is what completes it. There is no new script and no hash puzzle, so even amounts too small for an on-chain output are still enforceable, because what settles on chain is the channel's total, not each payment.</p>
+    <p>The lock is an adaptor signature: the buyer's state for the hub is incomplete until the seller signs for the matching payment, and that signature is what completes it. There is no new script and no hash puzzle.</p>
+    <p>The hub is experimental. The buyer's side holds, since the hub cannot collect without paying the seller. The hub's own side is harder: an outside review found two ways a hub can lose a forwarded payment when a channel closes or is replaced while a payment is in flight. One-way channels with no revocation give the hub nothing to fall back on, and that is the problem Lightning's commitment protocol was built to solve. Both issues are being fixed, and a bridge to Lightning comes before the hub goes any further.</p>
 
     <h2 id="lightning"><span class="n">8</span>Beside Lightning</h2>
-    <p>Lightning is the right tool for paying anyone, once. Stream is the right tool for paying a service continuously. They are not rivals; the same wallet pays both, under the same budgets.</p>
+    <p>Lightning is a network; a Stream channel is a direct line to one seller. The same wallet pays both, under the same budgets. The fair comparison is a direct Stream channel against Lightning used the way metered APIs use it today: L402, keysend, or a prepaid balance.</p>
     <div class="table-wrap prose-table">
       <table>
-        <thead><tr><th></th><th>Lightning</th><th>Stream</th></tr></thead>
+        <thead><tr><th></th><th>Direct Stream channel</th><th>Lightning (L402, keysend or a prepaid balance)</th></tr></thead>
         <tbody>
-          <tr><td>Unit</td><td>One invoice, one payment</td><td>A running total, signed per piece</td></tr>
-          <tr><td>Path</td><td>Routed across a network of nodes</td><td>Direct to the seller, or through one hub</td></tr>
-          <tr><td>The payer runs</td><td>A node with channels and liquidity, kept online or watched</td><td>A signer that may go offline at any time</td></tr>
-          <tr><td>Old states</td><td>Must be revoked and watched for</td><td>Harmless; nothing to watch</td></tr>
-          <tr><td>Tiny amounts</td><td>Payments below the dust limit are not enforceable on chain</td><td>Any amount; the total is what settles</td></tr>
-          <tr><td>Best for</td><td>Paying anyone, once</td><td>Metering a service you keep using</td></tr>
+          <tr><td>Per-call latency</td><td>The payment rides in the request header. No extra round trip.</td><td>An HTLC round per hop for each payment. L402 adds an invoice round trip unless a balance is prepaid.</td></tr>
+          <tr><td>The seller runs</td><td>A key, Electrum access and a watcher. No node, no inbound liquidity.</td><td>A node with inbound liquidity, online to receive.</td></tr>
+          <tr><td>Trust per call</td><td>One call of credit (the seller serves, then is paid).</td><td>None per payment. With a prepaid balance, the prepaid amount.</td></tr>
+          <tr><td>Granularity</td><td>A running total; the first state must pay at least 546 sat (the dust limit).</td><td>Millisatoshis. Dust limits only in-flight HTLCs, not settled balances.</td></tr>
+          <tr><td>Setup cost</td><td>An on-chain open and close for each buyer–seller pair, with funds locked until expiry.</td><td>One channel reaches every seller.</td></tr>
+          <tr><td>Reaching many sellers</td><td>A hub, still experimental.</td><td>Routing, with commitment and revocation already solved.</td></tr>
+          <tr><td>Interop</td><td>Stream clients and sellers only.</td><td>Any XBT Lightning wallet or merchant.</td></tr>
+          <tr><td>Direction</td><td>One way; topping up means a new channel.</td><td>Both ways.</td></tr>
         </tbody>
       </table>
     </div>
-    <p>A hub that also runs Lightning can bridge the two, so a Stream buyer can reach a Lightning seller. That is planned, not built.</p>
+    <p>Stream wins on the hot path: many small, fast payments from one buyer to one seller, such as a metered API or a model's tokens. Lightning wins at everything a network is for: reaching many sellers, receiving from ordinary wallets, moving money both ways. So the plan is to use Lightning for reach and to fund Stream channels, and to keep the direct channel for repeat buyer–seller pairs. The Lightning bridge comes before more hub work. BOLT 12 offers, which XBT's Lightning already supports, fit owner-approved budgets and subscriptions, though not per-call metering.</p>
 
-    <h2 id="numbers"><span class="n">9</span>Numbers</h2>
-    <p>Measured on test networks with our reference and Rust implementations.</p>
+    <h2 id="prior"><span class="n">9</span>Prior art</h2>
+    <p>Stream is not a new kind of channel. It is Jeremy Spilman's one-way payment channel (2013), in the <code>CHECKLOCKTIMEVERIFY</code> form that BIP&nbsp;65 gives as its example, bound to HTTP 402 and to an agent's spending policy. The policy wallet is the part we think is most useful.</p>
+    <dl>
+      <dt>L402</dt><dd>Lightning Labs' HTTP 402 binding: a macaroon plus a Lightning invoice. Stream does the same job for a direct channel, with the payment in the request instead of an invoice round trip.</dd>
+      <dt>x402</dt><dd>The HTTP payment standard Stream plugs into, as a <code>batch-settlement</code> scheme.</dd>
+      <dt>Nostr Wallet Connect</dt><dd>NIP-47 budgets let an app spend from a wallet within limits the owner set. The policy wallet applies the same idea to agents, with an owner-signed policy.</dd>
+      <dt>TumbleBit and A2L</dt><dd>Payment hubs built on adaptor signatures and puzzles, the research line behind Stream's hub locks.</dd>
+      <dt>Routstr and Cashu</dt><dd>Pay-per-token inference with ecash. Payments are instant and private, but the mint holds the money; Stream is non-custodial.</dd>
+      <dt>Ark</dt><dd>One operator serving many recipients off chain, the same shape as a hub. Users can always exit on chain alone, but must come back before their coins' expiry to refresh them; a Stream buyer can stay offline.</dd>
+    </dl>
+
+    <h2 id="numbers"><span class="n">10</span>Numbers</h2>
+    <p>Measured on local test networks. Conformance and interop figures are measured against our own reference implementations, which are not yet published.</p>
     <dl class="status">
-      <dt>Per paid call</dt><dd>About 4&nbsp;ms in Rust. The pure-Python reference: 10.1&nbsp;ms median, 12.1&nbsp;ms at the 99th percentile.</dd>
-      <dt>1,000 calls</dt><dd>At 150 sat each: 150,000 sat paid with about 1,200 sat of on-chain fees for the channel's whole life, an overhead of 0.8%.</dd>
+      <dt>Per paid call</dt><dd>About 4&nbsp;ms median for a whole paid call over local HTTP, in the reference implementation using libsecp256k1, including the HTTP round trip and a durable write of the new state. Checking the signature takes about 0.03&nbsp;ms. With pure-Python cryptography the call takes 10.1&nbsp;ms median and 12.1&nbsp;ms at the 99th percentile.</dd>
+      <dt>1,000 calls</dt><dd>At 150 sat each: 150,000 sat paid with about 900 sat of on-chain fees for the channel's whole life (a funding of about 150&nbsp;vB at 2&nbsp;sat/vB, plus the 600&nbsp;sat close fee), an overhead of about 0.6%. When fees are high, the close costs more.</dd>
       <dt>Refund</dt><dd>With the seller gone, the buyer recovered 199,400 of 200,000 sat after expiry; the rest was the transaction fee.</dd>
-      <dt>Paid inference</dt><dd>A model paid for token by token through a hub ran at 0.89 to 0.96 of its unpaid speed.</dd>
+      <dt>Paid inference</dt><dd>A model paid for token by token through a hub ran at 0.89 to 0.92 of its unpaid speed in an end-to-end test, and 0.96 in a local three-stage benchmark. Before a fix that took disk writes off the critical path, it ran at 0.74.</dd>
     </dl>
 
-    <h2 id="status"><span class="n">10</span>Status and limits</h2>
+    <h2 id="status"><span class="n">11</span>Status and limits</h2>
     <dl class="status">
-      <dt>Works</dt><dd>Open, pay, stream, close, refund and hub routing, on XBT's regtest and a private test network. A Claude agent given only the wallet's tools bought an analytics API, refused a tampered chunk, and the seller received exactly the 8,500 sat it charged.</dd>
-      <dt>Reviewed</dt><dd>An internal security review found three critical and four high-severity issues. All are fixed and covered by tests. No independent audit yet.</dd>
-      <dt>Not yet</dt><dd>XBT mainnet, deliberately on hold; a published specification; the Lightning bridge. Apps for Umbrel and StartOS are being tested on the real platforms.</dd>
-      <dt>Trade-offs</dt><dd>Funds are locked per channel until it closes. Money flows one way per channel. The seller must be online once before expiry to close. Opening and closing are public transactions.</dd>
+      <dt>Works</dt><dd>Open, pay, stream, close and refund, plus experimental hub routing, on XBT's regtest and a private test network. A Claude agent given only the wallet's tools bought an analytics API, refused a tampered chunk, and the seller received exactly the 8,500 sat it charged.</dd>
+      <dt>Reviewed</dt><dd>Only internally so far. Our internal review found three critical and four high-severity issues, all fixed and covered by tests; a summary will be published. An outside review of the published code then found more serious issues: in the agent wallet's budget accounting, the hub, the pay-with-work audit and the HTTP layer. Those fixes are in progress. An independent audit follows the fixes. Until then, use test networks only.</dd>
+      <dt>Not yet</dt><dd>XBT mainnet, deliberately on hold; a published specification; the Python reference implementations; the Lightning bridge. Apps for Umbrel and StartOS are being tested on the real platforms.</dd>
+      <dt>Trade-offs</dt><dd>Funds are locked per channel until it closes. Money flows one way per channel. The seller must close, with a fee high enough to confirm, before expiry. Opening and closing are public transactions.</dd>
     </dl>
-    <p>On the wire, Stream is XBT's binding of the x402 v2 <code>batch-settlement</code> scheme.</p>
 
     <div class="callout">
       <p><strong>In one sentence.</strong> Lock once, sign a bigger number for every piece you receive, settle once: a buyer can pay for anything that arrives over time, a seller is paid for exactly what it delivered, and neither has to trust the other for more than one piece.</p>
