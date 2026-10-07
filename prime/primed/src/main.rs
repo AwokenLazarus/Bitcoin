@@ -16,7 +16,7 @@ mod stats;
 mod validity;
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU64};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -28,7 +28,7 @@ use tokio::sync::{broadcast, watch};
 
 use crate::address::Network;
 use crate::config::Config;
-use crate::state::{now, Shared, Totals};
+use crate::state::{class_budget_held_off_at_start, now, Shared, Totals};
 
 #[derive(Parser)]
 #[command(name = "primed", version, about = "Lazarus DATUM Prime: pool side of the DATUM protocol with TIDES payouts")]
@@ -334,6 +334,7 @@ fn run(cfg: Config) -> i32 {
         class_budget_held_off: AtomicBool::new(false),
         cfg,
     });
+    arm_class_budget_hold(&shared);
     log::info!("pool pubkey {}", shared.pool.public_hex());
     log::info!(
         "payout {} fee {}bps stratum {}bps window {}x min-diff {}",
@@ -466,6 +467,35 @@ fn backfill_last_seen(ledger: &mut tides::Ledger, blocks: &[tides::BlockRecord])
         unknown.len(),
         unknown.len() - from_log
     );
+}
+
+/// A restart forgets the in-memory hold. Carry still above the resume line, or at the
+/// ceiling, is that hold: set it before the first coinbaser, and say so in the same words
+/// a running process uses.
+fn arm_class_budget_hold(shared: &Shared) {
+    if !shared.cfg.class_budget {
+        return;
+    }
+    let carry = shared.ledger.lock().unwrap_or_else(|e| e.into_inner()).window.total_carry();
+    let ceiling = shared.cfg.class_budget_carry_ceiling;
+    if !class_budget_held_off_at_start(carry, ceiling) {
+        return;
+    }
+    shared.class_budget_held_off.store(true, Ordering::Relaxed);
+    let resume = ceiling - ceiling / 4;
+    if ceiling == 0 || carry >= ceiling {
+        log::warn!(
+            "class-budget: carry on the books is {carry} sats, at or over class-budget-carry-ceiling \
+             ({ceiling}): coinbasers go out at the pool's budget, and blocks found on a class-limited \
+             gateway are Partial and owe, until carry is back under {resume}"
+        );
+    } else {
+        log::warn!(
+            "class-budget: carry on the books is {carry} sats, above the resume line after a restart \
+             (class-budget-carry-ceiling {ceiling}): coinbasers go out at the pool's budget, and blocks \
+             found on a class-limited gateway are Partial and owe, until carry is back under {resume}"
+        );
+    }
 }
 
 /// If the last `stats.json` (written by the previous process) disagrees with the

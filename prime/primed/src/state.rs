@@ -318,6 +318,16 @@ pub fn class_budget_held_off(held_off: bool, carry: u64, ceiling: u64) -> bool {
     }
 }
 
+/// Whether a process that has just started should hold class budgets off.
+///
+/// The flag lives in memory, so a restart forgets a hold. Carry still above the resume line
+/// (three quarters of the ceiling) is the same hold a running process would still be in, and
+/// carry at the ceiling starts one. Replies that have not relearned a budget must not pay that
+/// carry down through the band, or the hold never re-arms.
+pub fn class_budget_held_off_at_start(carry: u64, ceiling: u64) -> bool {
+    class_budget_held_off(true, carry, ceiling)
+}
+
 /// Every share hash the pool has credited, by block height, across all sessions.
 ///
 /// The hash commits to prev/merkle/nbits/txcount/version and the miner's nonces, so it is
@@ -875,6 +885,26 @@ mod tests {
         assert!(!shared.class_budget_open(400_000_000), "held off until well under it");
         assert!(shared.class_budget_open(375_000_000));
         assert!(shared.class_budget_open(c - 1));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A restart has no flag. Carry still above the resume line starts the process already held
+    /// off, so the blocks that relearn a budget cannot pay the hold down through the ceiling.
+    #[test]
+    fn a_restart_holds_budgets_off_while_carry_is_above_the_resume_line() {
+        let c = 500_000_000u64;
+        assert!(class_budget_held_off_at_start(c, c));
+        assert!(class_budget_held_off_at_start(c - 1, c), "under the ceiling is still inside the hold");
+        assert!(class_budget_held_off_at_start(375_000_001, c));
+        assert!(!class_budget_held_off_at_start(375_000_000, c));
+        assert!(!class_budget_held_off_at_start(0, c));
+        assert!(class_budget_held_off_at_start(0, 0), "a ceiling of 0 holds them off for good");
+
+        let (shared, dir) = test_shared("restart-hold");
+        shared.class_budget_held_off.store(class_budget_held_off_at_start(400_000_000, c), Ordering::Relaxed);
+        assert!(!shared.class_budget_open(400_000_000), "the hold survives the restart");
+        assert!(!shared.class_budget_open(c - 1));
+        assert!(shared.class_budget_open(375_000_000), "under the resume line it ends");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

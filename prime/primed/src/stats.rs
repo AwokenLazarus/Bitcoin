@@ -121,7 +121,7 @@ pub fn build(shared: &Shared) -> Value {
         })
         .collect();
 
-    let (blocks, finds, owed, carry_reserved) = {
+    let (blocks, finds, owed, carry_reserved, class_carry_unpaid) = {
         let b = shared.blocks.lock().unwrap();
         let finds = tides::gateway_finds(&b);
         let blocks: Vec<Value> =
@@ -129,7 +129,8 @@ pub fn build(shared: &Shared) -> Value {
         let owed: u64 = b.iter().filter(|r| !r.kind.starts_with("orphan")).map(|r| r.owed_sats).sum();
         let carry_reserved: u64 =
             b.iter().filter(|r| !r.kind.starts_with("orphan")).map(|r| r.carry_reserved_sats).sum();
-        (blocks, finds, owed, carry_reserved)
+        let class_carry_unpaid = tides::class_carry_unpaid(&b);
+        (blocks, finds, owed, carry_reserved, class_carry_unpaid)
     };
     let found_total: u64 = finds.values().map(|f| f.found).sum();
     let clients: Vec<Value> = {
@@ -342,9 +343,14 @@ pub fn build(shared: &Shared) -> Value {
             o.insert("class_budget_held_off".into(), json!(shared.class_budget_held_off.load(Ordering::Relaxed)));
         }
         // Earnings class-capped blocks left in the pool's output for their earners' carry, over
-        // the blocks in memory (`carry_reserved_sats`). What the fee wallet holds back is the
-        // smaller of this and `window.carry_total_sats`; see the README.
+        // the blocks in memory (`carry_reserved_sats`).
         doc["carry_reserved"] = json!(carry_reserved);
+        // Carry class budgets made that is still unpaid. Dust deferrals are in
+        // `window.carry_total_sats` and are not this. The fee wallet holds back
+        // min(recorded, this) when the field is present, and the older
+        // min(recorded, carry_total) when it is absent. Absent when the key is off
+        // and nothing has been reserved, so a keys-off stats document stays the one it always was.
+        doc["class_carry_unpaid_sats"] = json!(class_carry_unpaid);
     }
     doc
 }
