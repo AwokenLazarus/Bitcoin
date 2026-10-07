@@ -185,12 +185,14 @@ const COINBASE_WITNESS_WEIGHT: u32 = 36;
 const CLASS_BUDGET_TEMPLATE_SLACK: usize = 512;
 
 /// Weight a coinbase class is fitted into: the template's own `weightlimit` when the gateway
-/// reports one (optional pow section 0x06), otherwise [`DEFAULT_TEMPLATE_WEIGHT_LIMIT`], less the
-/// BLAKE2b header and the coinbase witness. A template of `txn_total_weight` leaves
-/// `(this - txn_total_weight) / 4` bytes.
+/// reports one (optional pow section 0x06), otherwise [`DEFAULT_TEMPLATE_WEIGHT_LIMIT`], and never
+/// above that. A report of the SHA256d 4,000,000 would leave enough room to call a template cut
+/// a class and turn the guard off. Less the BLAKE2b header and the coinbase witness. A template
+/// of `txn_total_weight` leaves `(this - txn_total_weight) / 4` bytes.
 fn template_weight_budget(weightlimit: Option<u32>) -> u32 {
     weightlimit
         .unwrap_or(DEFAULT_TEMPLATE_WEIGHT_LIMIT)
+        .min(DEFAULT_TEMPLATE_WEIGHT_LIMIT)
         .saturating_sub(HEADER_WEIGHT)
         .saturating_sub(COINBASE_WITNESS_WEIGHT)
 }
@@ -198,8 +200,9 @@ fn template_weight_budget(weightlimit: Option<u32>) -> u32 {
 /// Whether a template of `txn_total_weight` left room enough that a section keeping `kept` payee
 /// bytes was cut by its size class, not by the template. A template packed to this chain's
 /// 800,000 weight limit leaves about 2 KB, which is a template cut, not a class. The weight is
-/// the gateway's word: a gateway that lies about it can only stop itself teaching a budget, or
-/// teach itself a smaller one, as it could with the shares it sends anyway.
+/// the gateway's word, clamped to [`DEFAULT_TEMPLATE_WEIGHT_LIMIT`]. A report under that can only
+/// stop a budget or teach a smaller one. A report over it is this chain's limit, not a way to
+/// turn the guard off.
 fn template_left_room(kept: usize, txn_total_weight: u32, weightlimit: Option<u32>) -> bool {
     let left = (template_weight_budget(weightlimit).saturating_sub(txn_total_weight) / 4) as usize;
     left >= kept + CLASS_BUDGET_TEMPLATE_SLACK
@@ -3442,10 +3445,16 @@ mod tests {
         // have called this a class cut.
         assert!(!template_left_room(1_929, 790_000, None));
         assert!(!template_left_room(527, 798_000, None));
-        // a gateway that reports the SHA256d limit still has room at 3,992,000
-        assert!(template_left_room(527, 3_992_000, Some(4_000_000)));
-        assert!(template_left_room(310, 3_992_000, Some(4_000_000)));
-        assert!(template_left_room(1_300, 3_992_000, Some(4_000_000)));
+        // a report above this chain's limit is clamped to 800,000, so a template packed past
+        // that is not a class cut, the same as a gateway that omitted the section
+        assert!(!template_left_room(527, 3_992_000, Some(4_000_000)));
+        assert!(!template_left_room(310, 3_992_000, Some(4_000_000)));
+        assert!(!template_left_room(1_300, 3_992_000, Some(4_000_000)));
+        assert_eq!(template_left_room(1_929, 790_000, Some(4_000_000)), template_left_room(1_929, 790_000, None));
+        assert_eq!(template_left_room(527, 100_000, Some(4_000_000)), template_left_room(527, 100_000, None));
+        assert!(template_left_room(527, 100_000, Some(4_000_000)));
+        // a report under the cap is used as given
+        assert!(!template_left_room(527, 790_000, Some(700_000)));
         assert!(!template_left_room(527, 3_996_000, Some(4_000_000)));
         assert!(!template_left_room(1_500, 3_992_000, Some(4_000_000)));
         assert!(!template_left_room(31, 4_100_000, Some(4_000_000)));

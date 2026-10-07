@@ -129,7 +129,11 @@ pub fn build(shared: &Shared) -> Value {
         let owed: u64 = b.iter().filter(|r| !r.kind.starts_with("orphan")).map(|r| r.owed_sats).sum();
         let carry_reserved: u64 =
             b.iter().filter(|r| !r.kind.starts_with("orphan")).map(|r| r.carry_reserved_sats).sum();
-        let class_carry_unpaid = tides::class_carry_unpaid(&b);
+        let class_carry_unpaid = {
+            // Same lock order as `record_block`: `blocks`, then the prefix.
+            let prefix = shared.class_carry_prefix.lock().unwrap();
+            prefix.unpaid_with(&b)
+        };
         (blocks, finds, owed, carry_reserved, class_carry_unpaid)
     };
     let found_total: u64 = finds.values().map(|f| f.found).sum();
@@ -342,8 +346,9 @@ pub fn build(shared: &Shared) -> Value {
             );
             o.insert("class_budget_held_off".into(), json!(shared.class_budget_held_off.load(Ordering::Relaxed)));
         }
-        // Earnings class-capped blocks left in the pool's output for their earners' carry, over
-        // the blocks in memory (`carry_reserved_sats`).
+        // Earnings class-capped blocks left in the pool's output for their earners' carry
+        // (`carry_reserved_sats`). The sum is the blocks still in memory; the unpaid-class
+        // figure below includes the records the memory cap has dropped.
         doc["carry_reserved"] = json!(carry_reserved);
         // Carry class budgets made that is still unpaid. Dust deferrals are in
         // `window.carry_total_sats` and are not this. The fee wallet holds back
