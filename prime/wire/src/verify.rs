@@ -776,6 +776,7 @@ pub mod fixtures {
                 txn_total_size: 0,
                 txn_total_sigops: 0,
                 merkle_branches: pow::merkle_branches_for_coinbase(txs),
+                weightlimit: None,
             }),
             coinbase: Some(CoinbaseSection { coinbase_id: cb_id, coinb1, coinb2 }),
         }

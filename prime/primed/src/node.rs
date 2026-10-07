@@ -338,6 +338,7 @@ pub fn mark_orphan(shared: &Shared, hash: &str, height: u32, why: &str) {
     let mut reverse = Vec::new();
     let mut rebate = 0i64;
     let mut unbooked = None;
+    let mut debt_settled = Vec::new();
     let mut slot = shared.coinbaser_base.lock().unwrap_or_else(|e| e.into_inner());
     let mut ledger = shared.ledger.lock().unwrap();
     shared.update_block(hash, |r| {
@@ -347,7 +348,9 @@ pub fn mark_orphan(shared: &Shared, hash: &str, height: u32, why: &str) {
             // exactly what it has on the ledger comes off, and nothing else
             Some(books) => {
                 let (debits, credits) = (books.debited.len(), books.credited.len());
-                unbooked = Some((debits, credits, ledger.unbook(books)));
+                let (short, settled) = ledger.unbook_detail(books);
+                debt_settled = settled;
+                unbooked = Some((debits, credits, short));
             }
             // an orphan's coinbase paid nobody: give back the carry it cleared and take back
             // the earnings it deferred (the work is still in the window to be paid properly);
@@ -380,6 +383,36 @@ pub fn mark_orphan(shared: &Shared, hash: &str, height: u32, why: &str) {
     // The carry the orphan had paid is owed again; the next coinbaser must see it.
     drop(ledger);
     *slot = None;
+    // A sibling found on the same tip paid that carry once. The shortfall on its record was
+    // this block having already taken the carry off the books, and unbook just settled that
+    // debt. The record has to say the same thing or a sum of carry_shortfall_sats overstates it.
+    if !debt_settled.is_empty() {
+        let siblings: Vec<String> = shared
+            .blocks
+            .lock()
+            .unwrap()
+            .iter()
+            .rev()
+            .filter(|r| {
+                r.height == height && r.hash != hash && !r.kind.starts_with("orphan") && r.carry_shortfall_sats > 0
+            })
+            .map(|r| r.hash.clone())
+            .collect();
+        for sibling in siblings {
+            if debt_settled.iter().all(|(_, sats)| *sats == 0) {
+                break;
+            }
+            shared.update_block(&sibling, |r| {
+                let moved = tides::move_shortfall_to_paid(r, &mut debt_settled);
+                if moved > 0 {
+                    log::info!(
+                        "block {sibling}: {moved} sats of carry_shortfall were carry block {hash} had already \
+                         taken off the books; that block is orphaned, so this one paid them once"
+                    );
+                }
+            });
+        }
+    }
 }
 
 #[cfg(test)]
