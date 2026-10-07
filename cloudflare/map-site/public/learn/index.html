@@ -142,7 +142,7 @@
 
     <h2 id="mining">How mining works here</h2>
     <p>Most of this network's hashrate runs <strong>DATUM</strong>: the miner's own node builds the block template, and the pool only issues the coinbase split and verifies shares. It puts transaction selection back with miners rather than with a handful of pool operators, which was much of the point of changing the proof of work in the first place.</p>
-    <p>Pools that still build every template themselves, and hold rewards in their own wallet, are the exception here rather than the rule — and the direction of travel is away from them: Lazarus is retiring its own hosted stratum so that every block it finds is built by the miner who mined it. The <a href="/map/">galaxy map</a> reads every block's coinbase and shows which pools do which, straight from the chain.</p>
+    <p>Pools that still build every template themselves, and hold rewards in their own wallet, are the exception here rather than the rule. Lazarus keeps a public stratum as a donation, validation and fallback endpoint at 100%, with a grace at 25% then 100%, and pays 0% plus a DATUM bonus when the miner builds the block. The <a href="/map/">galaxy map</a> reads every block's coinbase and shows which pools do which, straight from the chain.</p>
 
     <h3>How pools pay here</h3>
     <p>Because rewards are paid inside the coinbase of the block that earned them, a payout and a block are the same event: no pool holds a balance for you, and nothing is owed if a pool disappears overnight. Each pool sets its own split and window — the <a href="https://pool.lazarus-xbt.xyz" rel="noopener">Lazarus Pool site</a> documents the one it uses.</p>

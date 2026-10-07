@@ -2,11 +2,11 @@
 // Lazarus Pool, in the pool's own words.
 //
 // Rule for every entry: only what the public site, llms.txt or the public APIs already say. No
-// operator internals (hosts behind the public names, grace, keys, treasury, partner terms,
+// operator internals (hosts behind the public names, failover, keys, treasury, partner terms,
 // security findings). Figures that move (fees, bonus, minimum output) are given with the date they
 // were true and a pointer to the live tool, so an assistant never presents them as permanent.
 
-export const FAQ_VERSION = "2026-10-07.1";
+export const FAQ_VERSION = "2026-10-07.2";
 
 const S = "https://pool.lazarus-xbt.xyz";
 const E = "https://mempool.lazarus-xbt.xyz";
@@ -17,8 +17,8 @@ export const FAQ = [
     title: "Fees on each path (own DATUM gateway, public stratum, solo)",
     keywords: ["fee", "fees", "cost", "percent", "charge", "cheap", "expensive", "100", "50", "25", "grace", "donation", "15", "price", "take"],
     answer:
-      "Own DATUM gateway: 0% fee, plus the DATUM bonus (see 'datum-bonus'). Public stratum is a donation and validation endpoint at 100% since 2026-10-07 05:00 UTC: 50 points to DATUM gateways and 50 to the pool address, with a 24 h grace at 25% (12.5 points) or 96 h if the address mined through a DATUM gateway on Lazarus in the prior 30 days. " +
-      "Point a miner at it to confirm it connects and submits shares while your own node is still coming online. Solo stratum is closed. The fee is applied when a block is paid, to the work in the window. " +
+      "Own DATUM gateway: 0% fee, plus the DATUM bonus (see 'datum-bonus'). Public stratum is a donation, validation and fallback endpoint at 100% since 2026-10-07 05:00 UTC: 50 points to DATUM gateways and 50 to the pool address, with a 24 h grace at 25% (12.5 points), or 96 h if the address mined through a DATUM gateway on Lazarus in the prior 30 days, then 100%. " +
+      "Point a miner at it to confirm it connects and submits shares while your own node and DATUM gateway are still coming online, or as a fallback if your own gateway goes down. Solo stratum is closed. The fee is applied when a block is paid, to the work in the window. " +
       "These are the values as of this knowledge base's version; for the live numbers call pool_status or connection_info, which read them from the pool.",
     links: [`${S}/pools`, `${S}/datum-subsidy`],
   },
@@ -27,18 +27,18 @@ export const FAQ = [
     title: "The DATUM bonus (rebate): how DATUM miners earn more than 100%",
     keywords: ["bonus", "rebate", "subsidy", "uplift", "datum", "extra", "credited"],
     answer:
-      "When a block is found, 50 points of the public stratum's 100% fee on that block's stratum work are credited to the addresses mining through their own DATUM gateway, split in proportion to their DATUM work in the window. During an address's 24 h grace (96 h if it mined through a DATUM gateway on Lazarus in the prior 30 days) the credit is 12.5 points of the 25% grace fee. " +
+      "When a block is found, 50 points of the public stratum's 100% fee on that block's stratum work are credited to the addresses mining through their own DATUM gateway, split in proportion to their DATUM work in the window. During an address's 24 h grace (96 h if it mined through a DATUM gateway on Lazarus in the prior 30 days) the credit is 12.5 points of the 25% grace fee; after the grace the fee is 100% and the credit is 50 points. " +
       "The credit is booked as carry (see 'carry') and paid with that address's next coinbase output that clears the minimum. The uplift it gives is a live number that shrinks as DATUM's share of the pool grows (about +3.9% on 26 Sep 2026); " +
       "miner_overview shows it per address (datum_bonus_earned_xbt, if_on_datum) and pool_status shows the earnings per TH/s on each path.",
     links: [`${S}/datum-subsidy`],
   },
   {
     id: "datum-vs-stratum",
-    title: "DATUM gateway or public stratum: which to use, and why stratum is winding down",
+    title: "DATUM gateway or public stratum: which to use",
     keywords: ["datum", "stratum", "gateway", "which", "choose", "should", "difference", "vs", "versus", "own", "node", "sv1", "invalidate", "knots"],
     answer:
       "With your own DATUM gateway you run a Bitcoin Knots node for this chain, build your own block templates, pay 0% and earn the DATUM bonus; the pool only supplies the coinbase split. " +
-      "The public stratum needs no node. It is a donation and validation endpoint at 100%, with a 24 h / 96 h grace at 25%, and it is capped (see 'self-cap'). Bitcoin Knots has also announced a future rule to invalidate coinbase payouts to addresses that hash through any pool's stratum (SV1); moving to another pool does not avoid it. " +
+      "The public stratum needs no node. It is a donation, validation and fallback endpoint at 100%, with a 24 h / 96 h grace at 25%, then 100%, and it is capped (see 'self-cap'). Bitcoin Knots has also announced a future rule to invalidate coinbase payouts to addresses that hash through any pool's stratum (SV1); moving to another pool does not avoid it. " +
       "The pool therefore recommends your own DATUM gateway for everyone who can run a node.",
     links: [`${S}/mine-xbt`, "https://convoy.xyz/getstarted"],
   },
@@ -167,8 +167,7 @@ export const FAQ = [
     title: "Solo mining",
     keywords: ["solo", "alone", "whole", "block", "finder", "lottery"],
     answer:
-      "Solo is separate from the pool: a block you find pays your address the whole block less the 7.5% solo fee, and between blocks you earn nothing. Solo work never enters the TIDES window. " +
-      "See the connect page for the solo endpoints.",
+      "Solo stratum is closed (ports 23335 and 3334). A block found on your own node is yours; the pool does not offer a solo port. Own DATUM gateway is the path that pays.",
     links: [`${S}/connect`],
   },
   {

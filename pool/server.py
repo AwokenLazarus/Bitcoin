@@ -442,6 +442,10 @@ def fetch_prime_window():
             # path that holds the majority; stratum_work is the public-stratum part.
             "fee_path": str(m.get("fee_path") or "").lower(),
             "stratum_work": int(float(m.get("stratum_work") or 0)),
+            # Part of stratum_work done inside this address's grace, and the unix
+            # time the grace ends. Absent on a stats document from before the knobs.
+            "grace_work": _nonneg_int(m.get("grace_work")),
+            "stratum_grace_until": _opt_int(m.get("stratum_grace_until")),
         }
         if not by[ident]["fee_path"]:
             by[ident]["fee_path"] = "stratum" if by[ident]["stratum_work"] * 2 > work else "datum"
@@ -455,8 +459,10 @@ def fetch_prime_window():
     stratum_work = sum(v["stratum_work"] for v in by.values())
     total_work = sum(v["window_work"] for v in by.values())
     datum_work = max(0, total_work - stratum_work)
+    grace_work = sum(min(v["grace_work"], v["stratum_work"]) for v in by.values())
     rebate_bps = int(pool.get("datum_rebate_bps") or 0)
-    datum_uplift = (rebate_bps / 100.0) * (stratum_work / datum_work) if (rebate_bps and datum_work > 0) else 0.0
+    grace_rebate_bps = _opt_int(pool.get("stratum_grace_rebate_bps"))
+    datum_uplift = _datum_uplift_percent(stratum_work, datum_work, rebate_bps, grace_work, grace_rebate_bps)
     meta = {
         "stratum_fee_bps": stratum_fee_bps,
         "datum_work": datum_work,
@@ -470,6 +476,14 @@ def fetch_prime_window():
         # rewards owed to it. 0 when primed predates the feature or has it off.
         "datum_rebate_bps": int(pool.get("datum_rebate_bps") or 0),
         "solo_rebate_bps": int(pool.get("solo_rebate_bps") or 0),
+        # None when this stats document has no grace knobs, so a caller can tell
+        # "not published" from a real zero. Do not fill the published 25% here.
+        "stratum_grace_hours": _opt_int(pool.get("stratum_grace_hours")),
+        "stratum_grace_datum_hours": _opt_int(pool.get("stratum_grace_datum_hours")),
+        "stratum_grace_fee_bps": _opt_int(pool.get("stratum_grace_fee_bps")),
+        "stratum_grace_rebate_bps": grace_rebate_bps,
+        "stratum_grace_rearm_hours": _opt_int(pool.get("stratum_grace_rearm_hours")),
+        "stratum_grace_epoch": _opt_int(pool.get("stratum_grace_epoch")),
         "sample_rebate_sats": int(win.get("sample_rebate_sats") or 0),
         "sample_rebate_owed_credited_sats": int(win.get("sample_rebate_owed_credited_sats") or 0),
         "rebate_owed_sats": int(win.get("rebate_owed_sats") or 0),
@@ -1174,6 +1188,110 @@ def _bps_or(val, fallback):
     if val is None or val == "":
         return int(round(fallback))
     return int(val)
+
+
+def _opt_int(val):
+    """Integer from primed, or None when the key is absent. 0 is a real value."""
+    if isinstance(val, bool) or val is None or val == "":
+        return None
+    try:
+        return int(float(val))
+    except (TypeError, ValueError):
+        return None
+
+
+def _nonneg_int(val):
+    n = _opt_int(val)
+    return n if n is not None and n > 0 else 0
+
+
+def _datum_uplift_percent(stratum_work, datum_work, rebate_bps, grace_work, grace_rebate_bps):
+    """Percent above its proportional share that DATUM work earns from the rebate.
+
+    Full-fee stratum work is credited at rebate_bps. Grace work is credited at
+    grace_rebate_bps when that knob is in the stats document. When the knob is
+    absent, grace work is left out of the pot rather than given the full rebate.
+    """
+    datum_work = int(datum_work or 0)
+    if datum_work <= 0:
+        return 0.0
+    full = max(0, int(stratum_work or 0) - int(grace_work or 0))
+    credited = int(rebate_bps or 0) * full
+    if grace_rebate_bps is not None:
+        credited += int(grace_rebate_bps) * int(grace_work or 0)
+    if credited <= 0:
+        return 0.0
+    return (credited / datum_work) / 100.0
+
+
+def _window_fee_percent(window_work, stratum_work, grace_work, datum_fee, stratum_fee, grace_fee):
+    """Fee percent on work already in the window. Grace work uses grace_fee when known."""
+    ww = int(window_work or 0)
+    if ww <= 0:
+        return float(datum_fee)
+    sw = min(max(0, int(stratum_work or 0)), ww)
+    gw = min(max(0, int(grace_work or 0)), sw)
+    # No grace rate in this stats document: do not invent one. Bill that work
+    # at the stratum rate the document does publish.
+    gw_fee = stratum_fee if grace_fee is None else grace_fee
+    full = sw - gw
+    datum_w = ww - sw
+    return (gw_fee * gw + stratum_fee * full + datum_fee * datum_w) / ww
+
+
+def _miner_stratum_fees(pinfo, datum_fee, stratum_fee, grace_fee, now):
+    """Current rate for the miner page, and the window blend for the estimate.
+
+    An address still inside stratum_grace_until is shown at the grace rate.
+    After that clock, a pure-stratum address is shown at the full stratum rate.
+    est_fee_percent still blends grace_work already in the window, so shares
+    keep the terms they were done under.
+    """
+    pinfo = pinfo or {}
+    path = str(pinfo.get("fee_path") or "")
+    ww = int(pinfo.get("window_work") or 0)
+    sw = min(max(0, int(pinfo.get("stratum_work") or 0)), ww) if ww else 0
+    gw = min(max(0, int(pinfo.get("grace_work") or 0)), sw)
+    if ww:
+        est = _window_fee_percent(ww, sw, gw, datum_fee, stratum_fee, grace_fee)
+    else:
+        est = stratum_fee if path == "stratum" else datum_fee
+    until = pinfo.get("stratum_grace_until")
+    in_grace = (
+        isinstance(until, (int, float))
+        and not isinstance(until, bool)
+        and float(until) > float(now)
+        and path == "stratum"
+        and grace_fee is not None
+    )
+    if in_grace:
+        shown = grace_fee
+    elif path == "stratum" and (ww == 0 or sw >= ww):
+        shown = stratum_fee
+    else:
+        shown = est
+    return {
+        "fee_percent_path": shown,
+        "est_fee_percent": est,
+        "in_stratum_grace": bool(in_grace),
+        "stratum_grace_until": int(until) if isinstance(until, (int, float)) and not isinstance(until, bool) else None,
+        "grace_fee_percent": grace_fee,
+    }
+
+
+def _append_stratum_grace(fee_clause, stratum_fee, prime):
+    """Name the grace, then the full rate, when primed published the knobs."""
+    prime = prime or {}
+    hours = _opt_int(prime.get("stratum_grace_hours"))
+    g_bps = prime.get("stratum_grace_fee_bps")
+    if hours is None or isinstance(g_bps, bool) or not isinstance(g_bps, (int, float)):
+        return fee_clause
+    d_hours = _opt_int(prime.get("stratum_grace_datum_hours"))
+    bit = f", with a {hours} h grace at {g_bps / 100:g}%"
+    if d_hours:
+        bit += f" ({d_hours} h if the address had DATUM work here in the prior 30 days)"
+    bit += f", then {stratum_fee:g}%"
+    return fee_clause + bit
 
 
 def _fee_percent_for_path(fee_path):
@@ -3650,6 +3768,12 @@ def prime_summary():
         "stratum_fee_bps": _bps_or(meta.get("stratum_fee_bps"), fee_bps),
         "datum_rebate_bps": int(meta.get("datum_rebate_bps") or 0),
         "solo_rebate_bps": int(meta.get("solo_rebate_bps") or 0),
+        "stratum_grace_hours": meta.get("stratum_grace_hours"),
+        "stratum_grace_datum_hours": meta.get("stratum_grace_datum_hours"),
+        "stratum_grace_fee_bps": meta.get("stratum_grace_fee_bps"),
+        "stratum_grace_rebate_bps": meta.get("stratum_grace_rebate_bps"),
+        "stratum_grace_rearm_hours": meta.get("stratum_grace_rearm_hours"),
+        "stratum_grace_epoch": meta.get("stratum_grace_epoch"),
         "rebate_owed_sats": int(meta.get("rebate_owed_sats") or 0),
         "sample_rebate_sats": int(meta.get("sample_rebate_sats") or 0),
         "datum_work_percent": float(meta.get("datum_work_percent") or 0),
@@ -3989,6 +4113,7 @@ def pool_payload():
         fee_clause = f"{100-datum_fee:g}% to miners, {datum_fee:g}% fee"
     else:
         fee_clause = f"{datum_fee:g}% fee through your own DATUM gateway, {stratum_fee:g}% on the public stratum"
+        fee_clause = _append_stratum_grace(fee_clause, stratum_fee, prime)
         if rebate_pct > 0:
             fee_clause += f"; {rebate_pct:g} point{'s' if rebate_pct != 1 else ''} of the stratum fee is credited to DATUM miners"
     payout = (
@@ -4017,11 +4142,22 @@ def pool_payload():
             "datum_work_percent": float(prime.get("datum_work_percent") or 0),
             "stratum_work_percent": float(prime.get("stratum_work_percent") or 0),
             "datum_miners": int(prime.get("datum_miners") or 0),
-            "note": "The fee is taken per miner from that miner's window share, by the path the work arrived on. Switching paths keeps the accepted work."
-            + (
-                f" {rebate_pct:g}% of stratum work's value is credited to DATUM miners on every block, pro rata by DATUM work, and paid with their next output."
-                if rebate_pct > 0
-                else ""
+            "note": (
+                "The fee is taken per miner from that miner's window share, by the path the work arrived on. Switching paths keeps the accepted work."
+                + (
+                    f" {rebate_pct:g}% of stratum work's value is credited to DATUM miners on every block, pro rata by DATUM work, and paid with their next output."
+                    if rebate_pct > 0
+                    else ""
+                )
+                + (
+                    " The public stratum is a donation, validation and fallback endpoint"
+                    + _append_stratum_grace("", stratum_fee, prime)
+                    + "."
+                    if _opt_int(prime.get("stratum_grace_hours")) is not None
+                    and isinstance(prime.get("stratum_grace_fee_bps"), (int, float))
+                    and not isinstance(prime.get("stratum_grace_fee_bps"), bool)
+                    else ""
+                )
             ),
         },
         "stratum": f"stratum+tcp://{STRATUM_HOST}:{STRATUM_PORT}",
@@ -4173,13 +4309,20 @@ def miner_payload(address):
     # own gateway), not a single rate for everyone. primed charges each unit of work at its
     # own path's rate, so window work that arrived both ways is billed at the blend, not at
     # whichever path happens to hold the majority.
-    path_fee = _fee_percent_for_path(
-        pinfo.get("fee_path") or ("stratum" if any((m.get("via") or "stratum") == "stratum" for m in recs) else "datum")
+    _pm_fee = state.get("prime_meta") or {}
+    _g_bps = _pm_fee.get("stratum_grace_fee_bps")
+    _grace_fee = (_g_bps / 100.0) if isinstance(_g_bps, (int, float)) and not isinstance(_g_bps, bool) else None
+    _path_guess = pinfo.get("fee_path") or ("stratum" if any((m.get("via") or "stratum") == "stratum" for m in recs) else "datum")
+    _pinfo_fee = dict(pinfo)
+    _pinfo_fee["fee_path"] = _path_guess
+    _fee_view = _miner_stratum_fees(
+        _pinfo_fee,
+        _fee_percent_for_path("datum"),
+        _fee_percent_for_path("stratum"),
+        _grace_fee,
+        time.time(),
     )
-    _ww = int(pinfo.get("window_work") or 0)
-    _sw = min(int(pinfo.get("stratum_work") or 0), _ww)
-    if 0 < _sw < _ww:
-        path_fee = _fee_percent_for_path("stratum") * _sw / _ww + _fee_percent_for_path("datum") * (_ww - _sw) / _ww
+    path_fee = _fee_view["est_fee_percent"]
     gross_day = ((miner_hs * 86400.0 / miner_need) * SUBSIDY) if miner_need and miner_hs else 0.0
     est = gross_day * (1 - path_fee / 100.0)
     # The DATUM case for this address, at today's window split: 0% fee plus the rebate
@@ -4391,9 +4534,12 @@ def miner_payload(address):
         "datum_uplift_percent": uplift_pct,
         "datum_rebate_percent": int(_pm.get("datum_rebate_bps") or 0) / 100.0,
         "min_payout_btc": int(((state.get("prime_meta") or {}).get("pool") or {}).get("min_payout") or 0) / 1e8,
-        "fee_path": pinfo.get("fee_path") or "",
-        "fee_percent_path": path_fee,
-        "est_fee_percent": path_fee,
+        "fee_path": pinfo.get("fee_path") or _path_guess,
+        "fee_percent_path": _fee_view["fee_percent_path"],
+        "est_fee_percent": _fee_view["est_fee_percent"],
+        "in_stratum_grace": _fee_view["in_stratum_grace"],
+        "stratum_grace_until": _fee_view["stratum_grace_until"],
+        "grace_fee_percent": _fee_view["grace_fee_percent"],
         "gateway_name": "",
         "paid_btc": paid_btc,
         "unpaid_btc": 0.0,
@@ -4883,7 +5029,7 @@ _POOL_TABLE_EN = """<div class="seo-table"><table>
         <caption>BLAKE2b Bitcoin (XBT / BTCB2) pools, as each publishes its own terms, 18 September 2026</caption>
         <thead><tr><th scope="col">Pool</th><th scope="col">Fee</th><th scope="col">Reward scheme</th><th scope="col">Who holds your coins</th><th scope="col">The block's transaction fees</th><th scope="col">Limit on its own share</th></tr></thead>
         <tbody>
-        <tr><th scope="row">Lazarus Pool</th><td>0% own DATUM gateway · public stratum donation endpoint at 100% (50 points to DATUM gateways, 50 to the pool), with a 24 h / 96 h failover grace at 25%</td><td>TIDES, 8&times; difficulty</td><td>Nobody. The block's coinbase pays your address</td><td>Scale every miner's payout up</td><td>Stratum held to 15%, enforced by relaying new miners elsewhere</td></tr>
+        <tr><th scope="row">Lazarus Pool</th><td>0% own DATUM gateway · public stratum donation, validation and fallback endpoint at 100% (50 points to DATUM gateways, 50 to the pool), with a 24 h / 96 h grace at 25%, then 100%</td><td>TIDES, 8&times; difficulty</td><td>Nobody. The block's coinbase pays your address</td><td>Scale every miner's payout up</td><td>Stratum held to 15%, enforced by relaying new miners elsewhere</td></tr>
         <tr><th scope="row">Riptide</th><td>0% own DATUM · 1% stratum (variable; currently 1%, half the skim to live DATUM miners)</td><td>TIDES</td><td>Coinbase</td><td>Not published separately</td><td>None published</td></tr>
         <tr><th scope="row">CONVOY</th><td>1% DATUM · 2% failover stratum</td><td>TIDES</td><td>Generation transaction when it fits; otherwise a balance until 0.01048576 BTC</td><td>Included in the TIDES split</td><td>None published</td></tr>
         <tr><th scope="row">B2Pool</th><td>0% own DATUM · 1% TIDES stratum</td><td>TIDES, 4&times; difficulty</td><td>Coinbase where it fits, otherwise the pool until your balance passes 10,000 sat</td><td>Stay with the pool (only the subsidy is shared)</td><td>None published</td></tr>
@@ -4897,7 +5043,7 @@ _POOL_TABLE_ZH = """<div class="seo-table"><table>
         <caption>BLAKE2b 比特币（XBT / BTCB2）矿池对比，均按各家自行公布的口径，2026 年 9 月 18 日</caption>
         <thead><tr><th scope="col">矿池</th><th scope="col">手续费</th><th scope="col">奖励方式</th><th scope="col">谁替你拿着币</th><th scope="col">区块里的交易费</th><th scope="col">自身占比上限</th></tr></thead>
         <tbody>
-        <tr><th scope="row">Lazarus Pool</th><td>自建 DATUM 网关 0% · 公共 stratum 为捐赠端点，费率 100%（50 个点给 DATUM 网关，50 个点归矿池），并有 24 小时 / 96 小时、费率为 25% 的故障切换宽限期</td><td>TIDES，难度 8 倍</td><td>没有人。由区块的 coinbase 直接付到你的地址</td><td>等比例抬高每位矿工的收益</td><td>stratum 上限 15%，超过即把新矿工中继到别家</td></tr>
+        <tr><th scope="row">Lazarus Pool</th><td>自建 DATUM 网关 0% · 公共 stratum 为捐赠、验证与后备端点，费率 100%（50 个点给 DATUM 网关，50 个点归矿池），并有 24 小时 / 96 小时、费率为 25%、之后为 100% 的宽限期</td><td>TIDES，难度 8 倍</td><td>没有人。由区块的 coinbase 直接付到你的地址</td><td>等比例抬高每位矿工的收益</td><td>stratum 上限 15%，超过即把新矿工中继到别家</td></tr>
         <tr><th scope="row">Riptide</th><td>自建 DATUM 0% · stratum 1%（可变，目前 1%，抽成一半给在线 DATUM 矿工）</td><td>TIDES</td><td>coinbase</td><td>未单独公布</td><td>未公布</td></tr>
         <tr><th scope="row">CONVOY</th><td>DATUM 1% · 故障转移 stratum 2%</td><td>TIDES</td><td>能进 coinbase 就进，否则代持至 0.01048576 BTC</td><td>计入 TIDES 分配</td><td>未公布</td></tr>
         <tr><th scope="row">B2Pool</th><td>自建 DATUM 0% · TIDES stratum 1%</td><td>TIDES，难度 4 倍</td><td>能进 coinbase 就进，否则由矿池代持至余额超过 10,000 sat</td><td>留给矿池（只分享区块补贴）</td><td>未公布</td></tr>
@@ -4985,11 +5131,11 @@ _SEO_INTRO = {
     "/datum-subsidy": {
         "en": ("The DATUM subsidy: getting paid to decentralize", [
             "Running your own DATUM gateway against your own Bitcoin Knots node means you build the block template and choose the transactions in it. The pool only supplies the coinbase split and verifies your shares. That work costs you nothing in fees here — DATUM miners pay 0% — and it moves template construction out of the pool's hands, which is the part of mining centralization that actually matters.",
-            "Lazarus Pool is the first pool anywhere to fund a subsidy for that from its own stratum hashers. The public stratum is a donation and validation endpoint at 100%, with a 24 h / 96 h failover grace at 25% (12.5 points to DATUM gateways during the grace). 50 points of the 100% are not kept: on every block found they are credited pro rata to every DATUM miner holding work in the window, whether or not that miner's template produced the block. Decentralizing the network pays better than using the pool's own stratum, which is the incentive the right way round. <a href=\"/connect\">Gateway setup and the config to copy.</a>",
+            "Lazarus Pool is the first pool anywhere to fund a subsidy for that from its own stratum hashers. The public stratum is a donation, validation and fallback endpoint at 100%, with a 24 h / 96 h grace at 25% (12.5 points to DATUM gateways during the grace), then 100%. 50 points of the 100% are not kept: on every block found they are credited pro rata to every DATUM miner holding work in the window, whether or not that miner's template produced the block. Decentralizing the network pays better than using the pool's own stratum, which is the incentive the right way round. <a href=\"/connect\">Gateway setup and the config to copy.</a>",
         ]),
         "zh": ("DATUM 补贴：为去中心化拿钱", [
             "用自己的 Bitcoin Knots 节点跑自己的 DATUM 网关，意味着区块模板由你构建、交易由你挑选，矿池只提供 coinbase 拆分并校验你的份额。在这里这件事不收你一分手续费——DATUM 矿工 0%——而且它把模板构建权从矿池手里移走，那才是挖矿中心化真正要紧的一环。",
-            "Lazarus Pool 是全网第一家用自有 stratum 算力为此出资补贴的矿池。公共 stratum 是捐赠与验证端点，费率 100%，并有 24 小时 / 96 小时、费率为 25% 的故障切换宽限期（宽限期内 12.5 个点给 DATUM 网关）。100% 里的 50 个点并不留下：每找到一个区块，就按比例记给窗口内每一位 DATUM 矿工，无论那个区块是不是由他的模板产出。让网络去中心化比用矿池的 stratum 更赚钱——激励方向本该如此。<a href=\"/connect\">网关配置与可直接复制的 config。</a>",
+            "Lazarus Pool 是全网第一家用自有 stratum 算力为此出资补贴的矿池。公共 stratum 是捐赠、验证与后备端点，费率 100%，并有 24 小时 / 96 小时、费率为 25%、之后为 100% 的宽限期（宽限期内 12.5 个点给 DATUM 网关）。100% 里的 50 个点并不留下：每找到一个区块，就按比例记给窗口内每一位 DATUM 矿工，无论那个区块是不是由他的模板产出。让网络去中心化比用矿池的 stratum 更赚钱——激励方向本该如此。<a href=\"/connect\">网关配置与可直接复制的 config。</a>",
         ]),
     },
     "/profitability": {
@@ -5015,11 +5161,11 @@ _SEO_INTRO = {
     "/connect": {
         "en": ("Connect a miner to Lazarus Pool", [
             "Point the miner at <b>stratum+tcp://stratum.lazarus-xbt.xyz:23334</b>, set the username to the address you want paid — optionally <code>address.worker</code> — and the password to <code>x</code>. The algorithm is BLAKE2b with a Sia-style header, not SHA-256d. New sessions start at difficulty 4096 and vardiff steps up toward your hashrate from there. There is no account and no registration; the username is the payout instruction.",
-            "There are two ways in. The public stratum is a donation and validation endpoint at 100%, with a 24 h / 96 h failover grace at 25%: point a miner at it to confirm it connects and submits shares while your own node is still coming online. Our node builds the templates, which is the one-line setup, but Bitcoin Knots has announced a rule to invalidate payouts to addresses that hash through any pool's stratum, so it is not a way to be paid. Running your own Bitcoin Knots node and DATUM gateway costs 0% and pays you a <a href=\"/datum-subsidy\">share of that stratum fee</a> on every block, because you are building the templates yourself. Both land in the same TIDES window under your address, so switching later keeps the accepted work you already have. For a longer Knots + DATUM walkthrough, use <a href=\"https://convoy.xyz/getstarted\">CONVOY’s get-started guide</a> (also in <a href=\"https://convoy.xyz/getstarted?lang=zh\">中文</a>), then come back here for this pool’s host, port, and pubkey.",
+            "There are two ways in. The public stratum is a donation, validation and fallback endpoint at 100%, with a 24 h / 96 h grace at 25%, then 100%: point a miner at it to confirm it connects and submits shares while your own node and DATUM gateway are still coming online, or as a fallback if your own gateway goes down. Our node builds the templates, which is the one-line setup, but Bitcoin Knots has announced a rule to invalidate payouts to addresses that hash through any pool's stratum, so it is not a way to be paid. Running your own Bitcoin Knots node and DATUM gateway costs 0% and pays you a <a href=\"/datum-subsidy\">share of that stratum fee</a> on every block, because you are building the templates yourself. Both land in the same TIDES window under your address, so switching later keeps the accepted work you already have. For a longer Knots + DATUM walkthrough, use <a href=\"https://convoy.xyz/getstarted\">CONVOY’s get-started guide</a> (also in <a href=\"https://convoy.xyz/getstarted?lang=zh\">中文</a>), then come back here for this pool’s host, port, and pubkey.",
         ]),
         "zh": ("把矿机接入 Lazarus Pool", [
             "把矿机指向 <b>stratum+tcp://stratum.lazarus-xbt.xyz:23334</b>，用户名填你要收款的地址（也可以写成 <code>地址.worker</code>），密码填 <code>x</code>。算法是 BLAKE2b（Sia 风格区块头），不是 SHA-256d。新会话从难度 4096 起步，之后 vardiff 会朝你的算力逐步调整。没有账户，也不用注册——用户名就是收款指令。",
-            "有两条路。公共 stratum 是捐赠与验证端点，费率 100%，并有 24 小时 / 96 小时、费率为 25% 的故障切换宽限期：在自己的节点仍在上线时，把矿机指向它即可确认能够连接并提交份额。模板由我们的节点构建，配置只有一行，但 Bitcoin Knots 已宣布将判定通过任何矿池 stratum 出算力的地址所获付款无效，所以它不是拿得到付款的路。自己跑 Bitcoin Knots 节点和 DATUM 网关则是 0%，而且因为模板是你自己构建的，每个区块还会把<a href=\"/datum-subsidy\">那笔 stratum 手续费的一部分</a>付给你。两条路都记入同一个 TIDES 窗口、同一个地址，所以以后切换不会丢掉已积累的工作量。更完整的 Knots + DATUM 说明见 <a href=\"https://convoy.xyz/getstarted?lang=zh\">CONVOY 入门指南（中文）</a>（<a href=\"https://convoy.xyz/getstarted\">English</a>），然后回到本页填写本池的主机、端口和公钥。",
+            "有两条路。公共 stratum 是捐赠、验证与后备端点，费率 100%，并有 24 小时 / 96 小时、费率为 25%、之后为 100% 的宽限期：在自己的节点和 DATUM 网关仍在上线时，或在自己的网关中断时作为后备，把矿机指向它即可确认能够连接并提交份额。模板由我们的节点构建，配置只有一行，但 Bitcoin Knots 已宣布将判定通过任何矿池 stratum 出算力的地址所获付款无效，所以它不是拿得到付款的路。自己跑 Bitcoin Knots 节点和 DATUM 网关则是 0%，而且因为模板是你自己构建的，每个区块还会把<a href=\"/datum-subsidy\">那笔 stratum 手续费的一部分</a>付给你。两条路都记入同一个 TIDES 窗口、同一个地址，所以以后切换不会丢掉已积累的工作量。更完整的 Knots + DATUM 说明见 <a href=\"https://convoy.xyz/getstarted?lang=zh\">CONVOY 入门指南（中文）</a>（<a href=\"https://convoy.xyz/getstarted\">English</a>），然后回到本页填写本池的主机、端口和公钥。",
         ]),
     },
     "/ratum": {"en": _RATUM_INTRO_EN, "zh": _RATUM_INTRO_ZH},
@@ -5081,13 +5227,13 @@ _SEO_INTRO = {
         "en": ("Which XBT (BTCB2) pool should you point hashrate at?", [
             "The fee is the number everyone compares first and the least interesting of the four things that actually differ between pools on this chain. The others: whether the pool ever holds your coins, whether the transaction fees in a found block reach the miners or stay with the operator, and whether the pool does anything at all to limit its own share of the network.",
             _POOL_TABLE_EN,
-            "Read that honestly and our public stratum is the expensive one: a donation and validation endpoint at 100%, with a 24 h / 96 h failover grace at 25%. That is deliberate. Bitcoin Knots has announced a rule to invalidate coinbase payouts to addresses that hash through a pool's stratum, on every pool, so a cheaper pool is not a way out: a stratum hasher there will not be paid either. What the fee buys is the other column: 50 points are handed back to DATUM miners on every block found (12.5 points during the grace), which is why the path we actually recommend, your own node and gateway, is 0% and earns the subsidy on top of a full window share.",
+            "Read that honestly and our public stratum is the expensive one: a donation, validation and fallback endpoint at 100%, with a 24 h / 96 h grace at 25%, then 100%. That is deliberate. Bitcoin Knots has announced a rule to invalidate coinbase payouts to addresses that hash through a pool's stratum, on every pool, so a cheaper pool is not a way out: a stratum hasher there will not be paid either. What the fee buys is the other column: 50 points are handed back to DATUM miners on every block found (12.5 points during the grace), which is why the path we actually recommend, your own node and gateway, is 0% and earns the subsidy on top of a full window share.",
             "The rest of the table is where nothing else on this chain matches. Transaction fees in a block scale every payout up here instead of staying with the pool. Nothing is ever held — the block itself pays your address, so there is no balance, threshold or withdrawal. And once its stratum passes 15% of network hashrate this pool <a href=\"/self-cap\">turns new miners away</a> and hands them to someone else. The five pools we relay to are grouped in the table with Lazarus; figures are as each pool published them on 18 September 2026 — check their sites before you commit a fleet.",
         ]),
         "zh": ("XBT（BTCB2）该挖哪个矿池？", [
             "手续费是所有人第一个拿来比的数字，也是本链各矿池之间真正有差别的四件事里最不重要的一件。另外三件是：矿池会不会替你保管币、所出区块里的交易费是分给矿工还是留给运营者，以及这家矿池有没有采取任何措施限制自己在全网中的占比。",
             _POOL_TABLE_ZH,
-            "如实来看，我们的公共 stratum 是贵的那一个：捐赠与验证端点，费率 100%，并有 24 小时 / 96 小时、费率为 25% 的故障切换宽限期。这是有意为之。Bitcoin Knots 已宣布一项规则：在任何矿池，通过矿池 stratum 出算力的地址所获 coinbase 付款都将被判无效，所以换一家更便宜的矿池并不是出路，在那里用 stratum 出算力同样拿不到付款。这笔费用换来的是隔壁那一列：每次出块把 50 个点返还给 DATUM 矿工（宽限期内为 12.5 个点）——这也正是我们真正推荐的那条路（自己的节点和网关）为什么是 0%，而且在拿到完整窗口份额之外还额外拿补贴。",
+            "如实来看，我们的公共 stratum 是贵的那一个：捐赠、验证与后备端点，费率 100%，并有 24 小时 / 96 小时、费率为 25%、之后为 100% 的宽限期。这是有意为之。Bitcoin Knots 已宣布一项规则：在任何矿池，通过矿池 stratum 出算力的地址所获 coinbase 付款都将被判无效，所以换一家更便宜的矿池并不是出路，在那里用 stratum 出算力同样拿不到付款。这笔费用换来的是隔壁那一列：每次出块把 50 个点返还给 DATUM 矿工（宽限期内为 12.5 个点）——这也正是我们真正推荐的那条路（自己的节点和网关）为什么是 0%，而且在拿到完整窗口份额之外还额外拿补贴。",
             "表格剩下的部分，本链目前没有别家能对上。这里区块中的交易费会等比例抬高每一笔支付，而不是留在矿池。任何时候都不代持——由区块本身付到你的地址，因此没有余额、不用提现（低于 0.005 XBT 的输出会结转到下一笔）。而且一旦自家 stratum 超过全网 15% 的算力，本矿池会<a href=\"/self-cap\">把新矿工拒之门外</a>并转交给别家。我们转发到的五家矿池和 Lazarus 列在同一张表里；表中数字为各矿池 2026 年 9 月 18 日自行公布的口径，投入整批机器前请先到各家网站核对。",
         ]),
     },
@@ -5270,7 +5416,7 @@ _LLMS_TXT = """# Lazarus Pool
 - Stratum protocol reference (markdown): {site}/stratum-protocol.md
 - Public API reference: {site}/api
 - Explorer: https://mempool.lazarus-xbt.xyz
-- Public stratum: a donation and validation endpoint at 100% (50 points to DATUM gateways, 50 to the pool address), with a 24 h failover grace at 25% (12.5 points) or 96 h if the address mined through a DATUM gateway on Lazarus in the prior 30 days. Point a miner at stratum+tcp://stratum.lazarus-xbt.xyz:23334 to confirm it connects and submits shares while your own node is still coming online. Bitcoin Knots has announced a rule to invalidate coinbase payouts to addresses that hash through any pool's stratum (SV1); moving to another pool does not avoid it. Run your own DATUM gateway.
+- Public stratum: a donation, validation and fallback endpoint at 100% (50 points to DATUM gateways, 50 to the pool address), with a 24 h grace at 25% (12.5 points), or 96 h if the address mined through a DATUM gateway on Lazarus in the prior 30 days, then 100%. Point a miner at stratum+tcp://stratum.lazarus-xbt.xyz:23334 to confirm it connects and submits shares while your own node and DATUM gateway are still coming online, or as a fallback if your own gateway goes down. Bitcoin Knots has announced a rule to invalidate coinbase payouts to addresses that hash through any pool's stratum (SV1); moving to another pool does not avoid it. Run your own DATUM gateway.
 - Coinbase maturity: Knots 29.4.2 (#419) holds coinbases mined from block 973,440 until block 979,920 (about 5 Nov 2026) for 6,480 blocks instead of 100, so a payout from block N is spendable at about block N + 6,480. DATUM gateway nodes must run Knots 29.4.2 or later.
 - MCP server for AI assistants (read-only, no login, Streamable HTTP): https://mcp.lazarus-xbt.xyz/mcp (guide: https://mcp.lazarus-xbt.xyz)
 - GitHub: https://github.com/AwokenLazarus/Bitcoin
@@ -5307,7 +5453,7 @@ GATEWAYSPLACEHOLDER
 ## Fees
 
 - Own DATUM gateway: 0%, plus the DATUM subsidy taken from the public-stratum fee
-- Public stratum: donation and validation endpoint at 100% (50 points to DATUM gateways, 50 to the pool), with a 24 h / 96 h failover grace at 25% (12.5 points during the grace)
+- Public stratum: donation, validation and fallback endpoint at 100% (50 points to DATUM gateways, 50 to the pool), with a 24 h / 96 h grace at 25% (12.5 points during the grace), then 100%
 - Solo stratum: closed
 
 ## Hardware
@@ -5348,8 +5494,8 @@ Fees are the least of it. What differs is custody, what happens to the transacti
 block, and whether a pool limits its own share. As each pool published its own terms on 18 September
 2026:
 
-- Lazarus Pool: 0% with your own DATUM gateway. Public stratum is a donation and validation endpoint at 100%,
-  with 50 points to DATUM gateways and 50 to the pool, and a 24 h / 96 h failover grace at 25%. TIDES, window of 8x difficulty. No custody at all — the block's
+- Lazarus Pool: 0% with your own DATUM gateway. Public stratum is a donation, validation and fallback endpoint at 100%,
+  with 50 points to DATUM gateways and 50 to the pool, and a 24 h / 96 h grace at 25%, then 100%. TIDES, window of 8x difficulty. No custody at all — the block's
   coinbase pays your address, so there is no balance or withdrawal (outputs under 0.005 XBT carry
   forward to the next block). The block's
   transaction fees scale every miner's payout up. Stratum self-capped at 15%.

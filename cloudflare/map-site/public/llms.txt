@@ -19,7 +19,7 @@ Key facts:
 - [Lazarus Key](https://lazarus-xbt.xyz/key/): a hardware-signed XBT wallet forked from Block's Bitkey app (Android)
 
 ## Mine
-- [Lazarus Pool](https://pool.lazarus-xbt.xyz/): TIDES payouts in the coinbase, no custody, and a DATUM bonus for miners who build their own blocks through their own gateway; current fees and stratum details are on the pool site and its llms.txt: https://pool.lazarus-xbt.xyz/llms.txt
+- [Lazarus Pool](https://pool.lazarus-xbt.xyz/): TIDES payouts in the coinbase, no custody. Own DATUM gateway is 0% plus a DATUM bonus. The public stratum (stratum+tcp://stratum.lazarus-xbt.xyz:23334) is a donation, validation and fallback endpoint at 100%, with a 24 h grace at 25% (96 h if the address had DATUM work on Lazarus in the prior 30 days), then 100%. Fees in full: https://pool.lazarus-xbt.xyz/llms.txt
 - [Connect a miner](https://pool.lazarus-xbt.xyz/connect)
 - [Siacoin ASICs that mine XBT](https://pool.lazarus-xbt.xyz/hardware)
 
