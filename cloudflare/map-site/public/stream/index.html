@@ -1,0 +1,378 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Stream: Pay As It Arrives — An XBT Whitepaper | Lazarus</title>
+<meta name="description" content="Stream lets people and AI agents pay for a service piece by piece as it arrives, over XBT payment channels: one signature per piece, no watchtower, stop any time and the rest is never paid.">
+<link rel="canonical" href="https://lazarus-xbt.xyz/stream/">
+<meta property="og:type" content="article">
+<meta property="og:site_name" content="Lazarus · Bitcoin BLAKE2b">
+<meta property="og:title" content="Stream: pay as it arrives">
+<meta property="og:description" content="Pay for a service piece by piece as it arrives, over XBT payment channels. One signature per piece, no watchtower, stop any time.">
+<meta property="og:url" content="https://lazarus-xbt.xyz/stream/">
+<meta name="twitter:card" content="summary_large_image">
+<meta property="og:image" content="https://lazarus-xbt.xyz/assets/og.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:image:alt" content="Lazarus XBT, lazarus-xbt.xyz">
+<meta name="twitter:site" content="@LazarusPoolXBT">
+<meta name="twitter:title" content="Stream: pay as it arrives">
+<meta name="twitter:description" content="Pay for a service piece by piece as it arrives, over XBT payment channels. One signature per piece, no watchtower, stop any time.">
+<meta name="twitter:image" content="https://lazarus-xbt.xyz/assets/og.png">
+<meta name="theme-color" content="#1a1712">
+<link rel="icon" href="/favicon.ico" sizes="32x32">
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&family=Newsreader:ital,wght@0,400;0,500;1,400&display=swap">
+<link rel="stylesheet" href="/assets/hub.css?v=7">
+<link rel="stylesheet" href="/stream/stream.css?v=1">
+<script src="/assets/js.js"></script>
+<script type="application/ld+json">
+{
+ "@context": "https://schema.org",
+ "@type": "TechArticle",
+ "@id": "https://lazarus-xbt.xyz/stream/#article",
+ "headline": "Stream: pay as it arrives",
+ "description": "Stream lets people and AI agents pay for a service piece by piece as it arrives, over XBT payment channels.",
+ "url": "https://lazarus-xbt.xyz/stream/",
+ "image": "https://lazarus-xbt.xyz/assets/og.png",
+ "datePublished": "2026-10-07",
+ "dateModified": "2026-10-07",
+ "inLanguage": "en",
+ "author": { "@type": "Person", "name": "Lazarus", "alternateName": "Awoken Lazarus", "url": "https://x.com/Awoken_Lazarus" },
+ "publisher": { "@id": "https://lazarus-xbt.xyz/#org" },
+ "isPartOf": { "@id": "https://lazarus-xbt.xyz/#website" },
+ "about": ["payment channels", "x402", "AI agents", "streaming payments", "XBT"]
+}
+</script>
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+<header class="site-header">
+  <div class="topbar wrap">
+    <a class="wordmark" href="/"><svg class="chi" viewBox="0 0 20.36 32" aria-hidden="true"><path d="M15.96 4.16C15.96 2.91 15.56 2.02 14.61 1.56C14.14 1.33 13.51 1.21 12.71 1.21H9.61L9.69 0H13.65C14.77 0 15.67 0.18 16.36 0.55C17.04 0.91 17.54 1.4 17.86 2.01C18.17 2.63 18.33 3.32 18.33 4.07C18.33 4.84 18.17 5.55 17.84 6.2C17.52 6.84 17.01 7.36 16.32 7.75C15.63 8.13 15.3 8.33 14.01 8.33H9.69L9.61 7.12H13.4C14.39 7.12 15.19 6.66 15.63 5.78C15.85 5.35 15.96 4.81 15.96 4.16ZM11.57 0 11.57 10.83V30.94L13.18 31.55V32H7.2V31.55L8.8 30.94V10.83V1.06L7.2 0.45V0ZM9.8 20.31 3.89 27.07 6.01 27.79V28.32H0V27.79L2.08 27.07L9.02 19.39L9.97 18.7L15.18 12.61L13.05 11.89V11.36H19.07V11.89L16.99 12.61L10.77 19.61ZM14.05 27.07 9.04 20.79 8.6 20.39 2.34 12.63 0.3 11.89V11.36H8.93V11.89L6.61 12.61L10.91 18.05L11.38 18.5L18.32 27.04L20.36 27.79V28.32H11.73V27.79Z"/></svg>Lazarus <em>XBT</em></a>
+    <button class="nav-toggle" type="button" aria-expanded="false" aria-controls="site-nav">Menu</button>
+    <nav class="site-nav" id="site-nav" aria-label="Main">
+      <a href="/learn/">The chain</a><a href="/ecosystem/">Ecosystem</a><a href="/map/">Galaxy map</a><a href="/naughtylist/">Naughty list</a><a href="/key/">Lazarus Key</a><a href="/faq/">FAQ</a>
+      <a class="btn small" href="https://pool.lazarus-xbt.xyz" rel="noopener">Lazarus Pool</a>
+    </nav>
+  </div>
+</header>
+<main id="main">
+
+<section class="hero wrap">
+  <h1><span class="kicker">Whitepaper · XBT Stream</span>Stream: pay as it <em>arrives</em></h1>
+  <p class="lede">A way for people and AI agents to pay for a service piece by piece, while it is being delivered: an answer token by token, a file chunk by chunk, an API call by call. Each piece costs one signature. Stop at any moment and nothing more is owed.</p>
+  <p class="note">Draft 1 · 7 October 2026 · Lazarus. Working on test networks; not yet on XBT mainnet.</p>
+  <nav class="toc" aria-label="On this page">
+    <p class="category">On this page</p>
+    <a href="#problem">The problem</a><a href="#idea">The idea</a><a href="#channel">The channel</a><a href="#http">Paying over HTTP</a><a href="#fair">Paying only for what checks out</a><a href="#wallet">A wallet for agents</a><a href="#hubs">Hubs</a><a href="#lightning">Beside Lightning</a><a href="#numbers">Numbers</a><a href="#status">Status and limits</a>
+  </nav>
+</section>
+
+<section class="section wrap">
+  <div class="prose paper" data-reveal>
+
+    <p class="pull">Lightning made payments fast. Stream makes them continuous.</p>
+
+    <h2 id="problem"><span class="n">1</span>The problem</h2>
+    <p>More and more of what we buy arrives over time: the tokens of a model's answer, the minutes of a stream, the pages of a dataset, the thousandth call to an API. Machines are now the buyers as often as people, and the prices are tiny: fractions of a cent, thousands of times an hour.</p>
+    <p>Every existing way to pay for that asks someone to trust someone. Pay up front and you trust the seller to deliver. Pay afterwards and the seller trusts you. A subscription or an API key trusts a company with your card. An on-chain payment for each piece is honest but far too slow and too costly.</p>
+    <p>Stream removes the trust from the middle. Buyer and seller settle continuously, in amounts as small as the service itself, and either can walk away at any moment having lost at most one piece.</p>
+
+    <h2 id="idea"><span class="n">2</span>The idea</h2>
+    <p>Lock coins once. For every piece delivered, the buyer signs a slightly larger running total. Settle once, at the end, for the last total signed.</p>
+
+    <figure class="fig">
+      <svg viewBox="0 0 720 225" role="img" aria-labelledby="f1t">
+        <title id="f1t">A channel's life: open on chain, sign a growing total off chain, close on chain; or refund after expiry.</title>
+        <defs><marker id="a1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path class="arrow-brass" d="M0 0L10 5L0 10z"/></marker></defs>
+        <text class="t-h" x="20" y="36">ON CHAIN</text>
+        <text class="t-h" x="200" y="36">OFF CHAIN · ONE SIGNATURE PER PIECE</text>
+        <text class="t-h" x="552" y="36">ON CHAIN</text>
+        <rect class="box-brass" x="20" y="48" width="152" height="84" rx="8"/>
+        <text class="t" x="34" y="74">1 · Open</text>
+        <text class="t-s" x="34" y="96">Buyer locks funds</text>
+        <text class="t-m" x="34" y="117">200,000 sat</text>
+        <path class="ln-brass" d="M172 90H192" marker-end="url(#a1)"/>
+        <rect class="bar" x="204" y="122" width="24" height="10" rx="2"/>
+        <rect class="bar" x="244" y="112" width="24" height="20" rx="2"/>
+        <rect class="bar" x="284" y="102" width="24" height="30" rx="2"/>
+        <rect class="bar" x="324" y="92" width="24" height="40" rx="2"/>
+        <rect class="bar" x="364" y="82" width="24" height="50" rx="2"/>
+        <rect class="bar" x="404" y="72" width="24" height="60" rx="2"/>
+        <rect class="bar" x="444" y="62" width="24" height="70" rx="2"/>
+        <rect class="bar" x="484" y="52" width="24" height="80" rx="2"/>
+        <text class="t-m" x="216" y="150" text-anchor="middle">150</text>
+        <text class="t-m" x="256" y="150" text-anchor="middle">300</text>
+        <text class="t-m" x="296" y="150" text-anchor="middle">450</text>
+        <text class="t-m" x="336" y="150" text-anchor="middle">600</text>
+        <text class="t-m" x="376" y="150" text-anchor="middle">750</text>
+        <text class="t-m" x="416" y="150" text-anchor="middle">900</text>
+        <text class="t-m" x="456" y="150" text-anchor="middle">1050</text>
+        <text class="t-m" x="496" y="150" text-anchor="middle">1200</text>
+        <text class="t-s" x="356" y="170" text-anchor="middle">2 · Stream: each signature replaces the last</text>
+        <path class="ln-brass" d="M512 90H540" marker-end="url(#a1)"/>
+        <rect class="box-brass" x="550" y="48" width="152" height="84" rx="8"/>
+        <text class="t" x="564" y="74">3 · Close</text>
+        <text class="t-s" x="564" y="96">Seller takes 1,200</text>
+        <text class="t-s" x="564" y="117">Buyer gets the rest</text>
+        <path class="ln-dash" d="M96 132V200H626V140" marker-end="url(#a1)"/>
+        <text class="t-s" x="361" y="194" text-anchor="middle">Seller never closes? After the expiry height the buyer takes it all back, alone.</text>
+      </svg>
+      <figcaption><b>Figure 1.</b> Two transactions on chain, any number of payments between them. The seller holds only the newest signature, which is always the one that pays it most.</figcaption>
+    </figure>
+
+    <p>That is the whole protocol. Everything else in this paper is how to make it safe, fast, and usable by software that should never be trusted with a key.</p>
+
+    <h2 id="channel"><span class="n">3</span>The channel</h2>
+    <p>A Stream channel is one ordinary XBT output with two ways to spend it.</p>
+
+    <figure class="fig">
+      <svg viewBox="0 0 720 200" role="img" aria-labelledby="f2t">
+        <title id="f2t">The channel coin can be spent by buyer and seller together at any time, or by the buyer alone after expiry.</title>
+        <rect class="box-brass" x="20" y="68" width="180" height="64" rx="8"/>
+        <text class="t" x="36" y="94">Channel coin</text>
+        <text class="t-m" x="36" y="116">one P2WSH output</text>
+        <path class="ln-brass" d="M200 100C250 100 250 50 300 50"/>
+        <path class="ln-dash" d="M200 100C250 100 250 150 300 150"/>
+        <rect class="box" x="300" y="18" width="400" height="64" rx="8"/>
+        <text class="t" x="316" y="44">Any time: seller's key + buyer's key</text>
+        <text class="t-s" x="316" y="66">How payment settles. The seller adds its half to the newest state.</text>
+        <rect class="box" x="300" y="118" width="400" height="64" rx="8"/>
+        <text class="t" x="316" y="144">After the expiry height: buyer's key alone</text>
+        <text class="t-s" x="316" y="166">How an unused or abandoned channel is refunded.</text>
+      </svg>
+      <figcaption><b>Figure 2.</b> The whole script: <code>IF &lt;seller&gt; CHECKSIGVERIFY ELSE &lt;expiry&gt; CHECKLOCKTIMEVERIFY DROP ENDIF &lt;buyer&gt; CHECKSIG</code>.</figcaption>
+    </figure>
+
+    <p>Money only moves one way, from buyer to seller, and each new state pays the seller more than the last. That single fact removes most of what makes payment channels hard:</p>
+    <dl>
+      <dt>Nothing to revoke</dt><dd>An old state pays the seller less, so it has no reason to publish one, and the buyer cannot publish anything without the seller's signature. There are no penalty transactions and no watchtowers.</dd>
+      <dt>The buyer can go offline</dt><dd>After it signs, the buyer has nothing to watch. If the seller disappears, the refund path returns everything once the expiry height passes.</dd>
+      <dt>The seller has one duty</dt><dd>Close before expiry. Software does this with a safety margin of a day (144 blocks) and the newest state in hand.</dd>
+      <dt>One round trip to open</dt><dd>The seller publishes one key. Each channel uses a fresh key derived from it, the buyer's key and the expiry, so no two channels look alike on chain and the seller does not need to be asked first.</dd>
+      <dt>Bound to XBT</dt><dd>XBT shares its history with Bitcoin, so every Stream signature commits to XBT's own signature-hash flag (<code>SIGHASH_ALL|UNIFIED</code>, 0x21). A state signed here cannot be replayed on the SHA-256 chain.</dd>
+    </dl>
+
+    <h2 id="http"><span class="n">4</span>Paying over HTTP</h2>
+    <p>The web has had a status code for this since 1997: <code>402 Payment Required</code>. The x402 standard gives it a shape: the server answers with a price and terms, and the client retries with a payment in a header. Stream is a payment scheme for x402, so a client that speaks x402 can pay with it.</p>
+
+    <figure class="fig">
+      <svg viewBox="0 0 720 300" role="img" aria-labelledby="f3t">
+        <title id="f3t">One paid call: request, 402 with price, retry with a signed state, then data and a signed receipt.</title>
+        <defs><marker id="a3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path class="arrow-brass" d="M0 0L10 5L0 10z"/></marker></defs>
+        <rect class="box-brass" x="40" y="16" width="150" height="40" rx="8"/>
+        <text class="t" x="115" y="41" text-anchor="middle">Buyer (an agent)</text>
+        <rect class="box-brass" x="430" y="16" width="150" height="40" rx="8"/>
+        <text class="t" x="505" y="41" text-anchor="middle">Seller (an API)</text>
+        <path class="ln-dash" d="M115 56V285"/>
+        <path class="ln-dash" d="M505 56V285"/>
+        <path class="ln-brass" d="M115 92H500" marker-end="url(#a3)"/>
+        <text class="t-m" x="130" y="84">GET /forecast</text>
+        <path class="ln" d="M505 136H120" marker-end="url(#a3)"/>
+        <text class="t-m" x="490" y="128" text-anchor="end">402 · price 150 sat · seller key · terms</text>
+        <path class="ln-brass" d="M115 184H500" marker-end="url(#a3)"/>
+        <text class="t-m" x="130" y="176">GET /forecast + PAYMENT-SIGNATURE</text>
+        <text class="t-s" x="130" y="202">{ channel, seq 8, total 1,200, signature }</text>
+        <rect class="box" x="522" y="160" width="186" height="48" rx="6"/>
+        <text class="t-s" x="534" y="180">verify one signature,</text>
+        <text class="t-s" x="534" y="198">keep it, drop the old one</text>
+        <path class="ln-good" d="M505 252H120" marker-end="url(#a3)"/>
+        <text class="t-good" x="490" y="244" text-anchor="end">200 OK · data · receipt signed by seller</text>
+      </svg>
+      <figcaption><b>Figure 3.</b> The 402 step happens once. After that every request simply carries the next signature, and the price check is one signature verification: about 4&nbsp;ms per paid call in our Rust implementation.</figcaption>
+    </figure>
+
+    <p>Each receipt is signed by the seller and bound to the hash of the exact request it paid for, so a buyer can prove what it bought and a seller cannot charge one request twice.</p>
+
+    <h2 id="fair"><span class="n">5</span>Paying only for what checks out</h2>
+    <p>Paying per piece only helps if a bad piece can be caught. For anything that can be cut into chunks, a file, a dataset, a long result, the seller first signs a <em>manifest</em>: the Merkle root of every chunk it promises to send. Then the stream begins.</p>
+
+    <figure class="fig">
+      <svg viewBox="0 0 720 210" role="img" aria-labelledby="f4t">
+        <title id="f4t">Chunks are checked against the signed manifest and paid one by one; a chunk that fails its proof is not paid and the stream stops.</title>
+        <rect class="box-brass" x="20" y="20" width="180" height="60" rx="8"/>
+        <text class="t" x="36" y="45">Signed manifest</text>
+        <text class="t-m" x="36" y="66">root = H(chunk 1…8)</text>
+        <path class="ln-dash" d="M110 80V130H222"/>
+        <text class="t-s" x="232" y="100">Each chunk arrives with a proof. Check it, then sign for it.</text>
+        <rect class="chunk" x="232" y="112" width="50" height="38" rx="5"/>
+        <rect class="chunk" x="290" y="112" width="50" height="38" rx="5"/>
+        <rect class="chunk" x="348" y="112" width="50" height="38" rx="5"/>
+        <rect class="chunk" x="406" y="112" width="50" height="38" rx="5"/>
+        <rect class="chunk-bad" x="464" y="112" width="50" height="38" rx="5"/>
+        <rect class="chunk-off" x="522" y="112" width="50" height="38" rx="5"/>
+        <rect class="chunk-off" x="580" y="112" width="50" height="38" rx="5"/>
+        <rect class="chunk-off" x="638" y="112" width="50" height="38" rx="5"/>
+        <text class="t-m" x="257" y="136" text-anchor="middle">1</text>
+        <text class="t-m" x="315" y="136" text-anchor="middle">2</text>
+        <text class="t-m" x="373" y="136" text-anchor="middle">3</text>
+        <text class="t-m" x="431" y="136" text-anchor="middle">4</text>
+        <text class="t-bad" x="489" y="136" text-anchor="middle">5</text>
+        <text class="t-s" x="547" y="136" text-anchor="middle">6</text>
+        <text class="t-s" x="605" y="136" text-anchor="middle">7</text>
+        <text class="t-s" x="663" y="136" text-anchor="middle">8</text>
+        <text class="t-good" x="344" y="172" text-anchor="middle">verified · paid</text>
+        <text class="t-bad" x="489" y="172" text-anchor="middle">bad proof</text>
+        <text class="t-s" x="605" y="172" text-anchor="middle">never paid</text>
+        <text class="t-s" x="232" y="198">Neither side can lose more than one chunk's price.</text>
+      </svg>
+      <figcaption><b>Figure 4.</b> Streamed fair exchange. A seller that tampers with chunk 5 is paid for chunks 1 to 4, which it delivered, and nothing after.</figcaption>
+    </figure>
+
+    <h2 id="wallet"><span class="n">6</span>A wallet for agents</h2>
+    <p>An AI model should be able to spend, but never to hold a key: a model can be tricked by what it reads. So the agent never signs. It asks a wallet to pay, and the wallet decides.</p>
+
+    <figure class="fig">
+      <svg viewBox="0 0 720 220" role="img" aria-labelledby="f5t">
+        <title id="f5t">The agent asks the policy wallet to pay over MCP; the wallet holds the keys and enforces the owner's signed policy.</title>
+        <defs><marker id="a5" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path class="arrow-brass" d="M0 0L10 5L0 10z"/></marker></defs>
+        <rect class="box" x="20" y="80" width="140" height="64" rx="8"/>
+        <text class="t" x="36" y="106">AI agent</text>
+        <text class="t-s" x="36" y="126">asks; cannot sign</text>
+        <path class="ln-brass" d="M160 112H214" marker-end="url(#a5)"/>
+        <text class="t-m" x="187" y="104" text-anchor="middle">MCP</text>
+        <rect class="box-brass" x="220" y="30" width="250" height="164" rx="8"/>
+        <text class="t" x="238" y="58">Policy wallet</text>
+        <text class="t-s" x="238" y="84">holds the keys</text>
+        <text class="t-s" x="238" y="106">daily budget · per-seller caps</text>
+        <text class="t-s" x="238" y="128">allowed sellers only</text>
+        <text class="t-s" x="238" y="150">human approval above a threshold</text>
+        <text class="t-s" x="238" y="172">tamper-evident log of every signature</text>
+        <rect class="box" x="530" y="20" width="170" height="64" rx="8"/>
+        <text class="t" x="546" y="46">Owner</text>
+        <text class="t-s" x="546" y="66">signs the policy</text>
+        <path class="ln" d="M530 60H476" marker-end="url(#a5)"/>
+        <rect class="box" x="530" y="136" width="170" height="64" rx="8"/>
+        <text class="t" x="546" y="162">Channels</text>
+        <text class="t-s" x="546" y="182">Stream · Lightning</text>
+        <path class="ln-brass" d="M470 168H524" marker-end="url(#a5)"/>
+      </svg>
+      <figcaption><b>Figure 5.</b> The model sees tools such as <i>quote</i>, <i>pay</i> and <i>balance</i>. A prompt-injected agent can at worst spend what its policy already allows.</figcaption>
+    </figure>
+
+    <p>The wallet speaks MCP, the protocol AI agents already use for tools, so any agent that can call a tool can pay. Each seller gets its own channel sized to that seller's budget. Payments above the owner's threshold wait for the owner's signature from another device. The policy itself is signed by the owner, so the agent cannot rewrite it.</p>
+
+    <h2 id="hubs"><span class="n">7</span>Hubs</h2>
+    <p>A direct channel is ideal for a seller you use often. To reach many sellers with one channel, a buyer can pay through a hub.</p>
+
+    <figure class="fig">
+      <svg viewBox="0 0 720 220" role="img" aria-labelledby="f6t">
+        <title id="f6t">A buyer pays three sellers through one hub; each forwarded payment is locked so the hub is paid only when the seller is.</title>
+        <path class="ln-brass" d="M134 110H316"/>
+        <path class="ln" d="M404 110C500 110 520 44 588 44"/>
+        <path class="ln" d="M404 110H588"/>
+        <path class="ln" d="M404 110C500 110 520 176 588 176"/>
+        <circle class="box-brass" cx="94" cy="110" r="40"/>
+        <text class="t" x="94" y="115" text-anchor="middle">Buyer</text>
+        <circle class="box-brass" cx="360" cy="110" r="44"/>
+        <text class="t" x="360" y="115" text-anchor="middle">Hub</text>
+        <rect class="box" x="590" y="26" width="110" height="36" rx="8"/>
+        <text class="t" x="645" y="49" text-anchor="middle">Model API</text>
+        <rect class="box" x="590" y="92" width="110" height="36" rx="8"/>
+        <text class="t" x="645" y="115" text-anchor="middle">Data feed</text>
+        <rect class="box" x="590" y="158" width="110" height="36" rx="8"/>
+        <text class="t" x="645" y="181" text-anchor="middle">Compute</text>
+        <text class="t-m" x="225" y="100" text-anchor="middle">one channel</text>
+        <text class="t-s" x="225" y="132" text-anchor="middle">each state locked to</text>
+        <text class="t-s" x="225" y="148" text-anchor="middle">the seller's signature</text>
+      </svg>
+      <figcaption><b>Figure 6.</b> The hub can collect from the buyer only by completing its payment to the seller; one signature settles both. The hub forwards money but cannot keep it.</figcaption>
+    </figure>
+
+    <p>The lock is an adaptor signature: the buyer's state for the hub is incomplete until the seller signs for the matching payment, and that signature is what completes it. There is no new script and no hash puzzle, so even amounts too small for an on-chain output are still enforceable, because what settles on chain is the channel's total, not each payment.</p>
+
+    <h2 id="lightning"><span class="n">8</span>Beside Lightning</h2>
+    <p>Lightning is the right tool for paying anyone, once. Stream is the right tool for paying a service continuously. They are not rivals; the same wallet pays both, under the same budgets.</p>
+    <div class="table-wrap prose-table">
+      <table>
+        <thead><tr><th></th><th>Lightning</th><th>Stream</th></tr></thead>
+        <tbody>
+          <tr><td>Unit</td><td>One invoice, one payment</td><td>A running total, signed per piece</td></tr>
+          <tr><td>Path</td><td>Routed across a network of nodes</td><td>Direct to the seller, or through one hub</td></tr>
+          <tr><td>The payer runs</td><td>A node with channels and liquidity, kept online or watched</td><td>A signer that may go offline at any time</td></tr>
+          <tr><td>Old states</td><td>Must be revoked and watched for</td><td>Harmless; nothing to watch</td></tr>
+          <tr><td>Tiny amounts</td><td>Payments below the dust limit are not enforceable on chain</td><td>Any amount; the total is what settles</td></tr>
+          <tr><td>Best for</td><td>Paying anyone, once</td><td>Metering a service you keep using</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p>A hub that also runs Lightning can bridge the two, so a Stream buyer can reach a Lightning seller. That is planned, not built.</p>
+
+    <h2 id="numbers"><span class="n">9</span>Numbers</h2>
+    <p>Measured on test networks with our reference and Rust implementations.</p>
+    <dl class="status">
+      <dt>Per paid call</dt><dd>About 4&nbsp;ms in Rust. The pure-Python reference: 10.1&nbsp;ms median, 12.1&nbsp;ms at the 99th percentile.</dd>
+      <dt>1,000 calls</dt><dd>At 150 sat each: 150,000 sat paid with about 1,200 sat of on-chain fees for the channel's whole life, an overhead of 0.8%.</dd>
+      <dt>Refund</dt><dd>With the seller gone, the buyer recovered 199,400 of 200,000 sat after expiry; the rest was the transaction fee.</dd>
+      <dt>Paid inference</dt><dd>A model paid for token by token through a hub ran at 0.89 to 0.96 of its unpaid speed.</dd>
+    </dl>
+
+    <h2 id="status"><span class="n">10</span>Status and limits</h2>
+    <dl class="status">
+      <dt>Works</dt><dd>Open, pay, stream, close, refund and hub routing, on XBT's regtest and a private test network. A Claude agent given only the wallet's tools bought an analytics API, refused a tampered chunk, and the seller received exactly the 8,500 sat it charged.</dd>
+      <dt>Reviewed</dt><dd>An internal security review found three critical and four high-severity issues. All are fixed and covered by tests. No independent audit yet.</dd>
+      <dt>Not yet</dt><dd>XBT mainnet, deliberately on hold; a published specification; the Lightning bridge. Apps for Umbrel and StartOS are being tested on the real platforms.</dd>
+      <dt>Trade-offs</dt><dd>Funds are locked per channel until it closes. Money flows one way per channel. The seller must be online once before expiry to close. Opening and closing are public transactions.</dd>
+    </dl>
+    <p>On the wire, Stream is XBT's binding of the x402 v2 <code>batch-settlement</code> scheme.</p>
+
+    <div class="callout">
+      <p><strong>In one sentence.</strong> Lock once, sign a bigger number for every piece you receive, settle once: a buyer can pay for anything that arrives over time, a seller is paid for exactly what it delivered, and neither has to trust the other for more than one piece.</p>
+    </div>
+
+  </div>
+</section>
+</main>
+<footer class="site-footer">
+  <div class="wrap footer-grid">
+    <div>
+      <a class="wordmark" href="/"><svg class="chi" viewBox="0 0 20.36 32" aria-hidden="true"><path d="M15.96 4.16C15.96 2.91 15.56 2.02 14.61 1.56C14.14 1.33 13.51 1.21 12.71 1.21H9.61L9.69 0H13.65C14.77 0 15.67 0.18 16.36 0.55C17.04 0.91 17.54 1.4 17.86 2.01C18.17 2.63 18.33 3.32 18.33 4.07C18.33 4.84 18.17 5.55 17.84 6.2C17.52 6.84 17.01 7.36 16.32 7.75C15.63 8.13 15.3 8.33 14.01 8.33H9.69L9.61 7.12H13.4C14.39 7.12 15.19 6.66 15.63 5.78C15.85 5.35 15.96 4.81 15.96 4.16ZM11.57 0 11.57 10.83V30.94L13.18 31.55V32H7.2V31.55L8.8 30.94V10.83V1.06L7.2 0.45V0ZM9.8 20.31 3.89 27.07 6.01 27.79V28.32H0V27.79L2.08 27.07L9.02 19.39L9.97 18.7L15.18 12.61L13.05 11.89V11.36H19.07V11.89L16.99 12.61L10.77 19.61ZM14.05 27.07 9.04 20.79 8.6 20.39 2.34 12.63 0.3 11.89V11.36H8.93V11.89L6.61 12.61L10.91 18.05L11.38 18.5L18.32 27.04L20.36 27.79V28.32H11.73V27.79Z"/></svg>Lazarus <em>XBT</em></a>
+      <p class="note" style="margin-top:.8rem;max-width:22rem">A hub for Bitcoin on BLAKE2b proof of work: the chain, the pools, the software and the people building on it.</p>
+      <p class="note faint"><i>Proverbs 11:1</i> — a just weight is his delight.</p>
+    </div>
+    <div class="footer-col">
+      <p class="category">Network</p>
+      <a href="/learn/">What XBT is</a>
+      <a href="/blake2b/">BLAKE2b vs SHA-256</a>
+      <a href="/learn/#softfork">Soft fork status</a>
+      <a href="https://mempool.lazarus-xbt.xyz" rel="noopener">Block explorer</a>
+      <a href="/map/">Galaxy map</a>
+      <a href="/ecosystem/#pools">Pool directory</a>
+    </div>
+    <div class="footer-col">
+      <p class="category">Mine</p>
+      <a href="https://pool.lazarus-xbt.xyz" rel="noopener">XBT mining pool</a>
+      <a href="https://pool.lazarus-xbt.xyz/connect" rel="noopener">Connect a Siacoin ASIC</a>
+      <a href="https://pool.lazarus-xbt.xyz/hardware" rel="noopener">ASICs that mine XBT</a>
+      <a href="https://pool.lazarus-xbt.xyz/how" rel="noopener">How the pool pays</a>
+      <a href="/ecosystem/#pools">Other pools</a>
+    </div>
+    <div class="footer-col">
+      <p class="category">Build</p>
+      <a href="https://github.com/AwokenLazarus/Bitcoin" rel="noopener">Source on GitHub</a>
+      <a href="https://github.com/AwokenLazarus/lazarus-key" rel="noopener">Lazarus Key source</a>
+      <a href="/ecosystem/#software">Software</a>
+      <a href="/stream/">Stream whitepaper</a>
+      <a href="https://mcp.lazarus-xbt.xyz" rel="noopener">MCP server</a>
+      <a href="https://mempool.lazarus-xbt.xyz/api" rel="noopener">Explorer API</a>
+    </div>
+    <div class="footer-col">
+      <p class="category">Community</p>
+      <a href="https://discord.gg/fD33dJXnzz" rel="noopener">Discord</a>
+      <a href="https://x.com/Awoken_Lazarus" rel="noopener">X</a>
+      <a href="/faq/">FAQ</a>
+    </div>
+  </div>
+  <div class="wrap footer-bottom">
+    <span>Lazarus · Bitcoin BLAKE2b (XBT). Public data, no accounts, no custody.</span>
+    <span class="live">live</span>
+  </div>
+</footer>
+<script src="/assets/hub.js?v=2" defer></script>
+</body>
+</html>

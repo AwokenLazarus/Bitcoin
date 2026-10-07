@@ -1,0 +1,42 @@
+/* /stream/ — the Stream whitepaper. Figures only; text uses hub.css. Inline styles are blocked by the CSP,
+   so every SVG is styled from here by class. */
+
+.paper { max-width: 44rem; }
+.paper h2 { margin-top: 3.2rem; }
+.paper h2 .n { font: 500 0.8em/1 var(--mono); color: var(--brass-dim); margin-right: 0.6rem; }
+.paper .pull { font: 400 clamp(1.25rem, 1.1rem + 0.6vw, 1.6rem)/1.4 var(--serif); color: var(--ink); border-left: 3px solid var(--brass); padding-left: 1.1rem; margin: 2rem 0; }
+
+.fig { margin: 2rem 0 2.2rem; }
+.fig svg { display: block; width: 100%; height: auto; background: var(--bg-inset); border: 1px solid var(--line); border-radius: var(--r); }
+.fig figcaption { margin-top: 0.7rem; color: var(--muted); font-size: 0.92rem; }
+.fig figcaption b { color: var(--ink); font-weight: 600; }
+
+.fig .t { font: 400 13px var(--sans); fill: var(--ink); }
+.fig .t-s { font: 400 11.5px var(--sans); fill: var(--muted); }
+.fig .t-m { font: 500 11.5px var(--mono); fill: var(--brass); }
+.fig .t-h { font: 600 10.5px var(--sans); letter-spacing: 0.14em; fill: var(--faint); }
+.fig .t-b { font: 600 13px var(--sans); fill: var(--brass-ink); }
+.fig .t-bad { font: 500 11.5px var(--mono); fill: var(--bad); }
+.fig .t-good { font: 500 11.5px var(--mono); fill: var(--good); }
+
+.fig .box { fill: var(--bg-card); stroke: var(--line-strong); stroke-width: 1; }
+.fig .box-brass { fill: oklch(80% 0.11 84 / 0.08); stroke: var(--brass-dim); stroke-width: 1; }
+.fig .solid { fill: var(--brass); stroke: none; }
+.fig .chunk { fill: oklch(80% 0.11 84 / 0.16); stroke: var(--brass-dim); stroke-width: 1; }
+.fig .chunk-bad { fill: oklch(68% 0.145 28 / 0.16); stroke: var(--bad); stroke-width: 1; }
+.fig .chunk-off { fill: none; stroke: var(--line-strong); stroke-width: 1; stroke-dasharray: 3 3; }
+.fig .ln { stroke: var(--line-strong); stroke-width: 1.2; fill: none; }
+.fig .ln-brass { stroke: var(--brass); stroke-width: 1.6; fill: none; }
+.fig .ln-dash { stroke: var(--faint); stroke-width: 1.2; fill: none; stroke-dasharray: 4 4; }
+.fig .ln-bad { stroke: var(--bad); stroke-width: 1.4; fill: none; }
+.fig .ln-good { stroke: var(--good); stroke-width: 1.4; fill: none; }
+.fig .bar { fill: var(--brass); opacity: 0.85; }
+.fig .bar-track { fill: none; stroke: var(--line); stroke-width: 1; }
+.fig .arrow { fill: var(--line-strong); }
+.fig .arrow-brass { fill: var(--brass); }
+.fig .arrow-good { fill: var(--good); }
+
+.status { display: grid; gap: 0.6rem 1.4rem; grid-template-columns: max-content 1fr; margin: 1.2rem 0; }
+.status dt { font: 600 0.72rem/1.9 var(--sans); letter-spacing: 0.12em; text-transform: uppercase; color: var(--faint); }
+.status dd { margin: 0; }
+@media (max-width: 34rem) { .status { grid-template-columns: 1fr; } .status dd { margin-bottom: 0.6rem; } }
