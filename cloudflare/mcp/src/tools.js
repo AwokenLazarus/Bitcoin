@@ -41,7 +41,7 @@ export const TOOLS = [
     name: "miner_overview",
     title: "One payout address at a glance: hashrate, path and fee, window share, earnings, what is paid and pending",
     description:
-      "Summary for one payout address on Lazarus Pool: whether it is online, hashrate, whether it mines through its own DATUM gateway (0% fee + bonus) or the public stratum (25% since block 973,750), " +
+      "Summary for one payout address on Lazarus Pool: whether it is online, hashrate, whether it mines through its own DATUM gateway (0% fee + bonus) or the public stratum (a donation endpoint at 100%, with a 24 h / 96 h failover grace at 25%), " +
       "its share of the TIDES window, what the next block would pay it, estimated XBT per day, totals paid / maturing / carried, and what it would gain by moving to DATUM. Start here for any question about 'my mining'.",
     heavy: true,
     inputSchema: { type: "object", properties: { address: addressArg }, required: ["address"], additionalProperties: false },
@@ -240,7 +240,7 @@ export const TOOLS = [
       return { recommended: "own DATUM gateway", datum_gateway: { pool_host: d.pool_host, pool_port: d.pool_port, pool_pubkey: d.pool_pubkey, fee_percent: 0, bonus: "a share of the public stratum's fee is credited to DATUM miners on every block",
           steps: ["Run Bitcoin Knots for this chain with server=1 and a cookie or RPC user the gateway can read", `Build a DATUM gateway (${firstBuild(builds)} is first in gateway_builds, ranked by what the pool measured) and put pool_host, pool_port and pool_pubkey in its datum section`,
             "Set mining.pool_address to your payout address", "Set stratum.vardiff_min to 4096 (stock default 16384 makes small miners' stats jumpy)", "Point your machines at your gateway's stratum port with username address.worker"] },
-        public_stratum: { url: p.stratum, username: "youraddress.workername", password: "x", fee_percent: f.stratum_percent ?? 25, algorithm: "BLAKE2b (Siacoin-style header), not SHA-256d" },
+        public_stratum: { url: p.stratum, username: "youraddress.workername", password: "x", fee_percent: f.stratum_percent ?? 100, algorithm: "BLAKE2b (Siacoin-style header), not SHA-256d" },
         gateway_builds: builds, hardware: "Any Siacoin BLAKE2b ASIC", verify: "After connecting, use miner_overview with your address, or gateway_status with your gateway's name.", setup_page: `${POOL_SITE}/connect` };
     },
   },
