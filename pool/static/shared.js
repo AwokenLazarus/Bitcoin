@@ -594,7 +594,15 @@
     // The "Next block" figure is Prime's own output for this address. Zero with work in the
     // window means the share is under the floor this block; it accrues as carry, never lost.
     const nextBlockNote = (m) => {
-      const path = m.fee_path ? (m.fee_path === "stratum" ? t("miner.pathStratum", { fee: feePct(m.fee_percent_path != null ? m.fee_percent_path : feeForPath(m.fee_path)) }) : t("miner.pathGw", { fee: feePct(m.fee_percent_path != null ? m.fee_percent_path : feeForPath(m.fee_path)) })) : "";
+      const pathFee = m.fee_percent_path != null ? m.fee_percent_path : feeForPath(m.fee_path);
+      let path = "";
+      if (m.in_stratum_grace && m.stratum_grace_until && m.grace_fee_percent != null) {
+        path = t("miner.pathStratumGrace", { fee: feePct(m.grace_fee_percent), until: when(m.stratum_grace_until) });
+      } else if (m.fee_path === "stratum") {
+        path = t("miner.pathStratum", { fee: feePct(pathFee) });
+      } else if (m.fee_path) {
+        path = t("miner.pathGw", { fee: feePct(pathFee) });
+      }
       if (m.next_block_exact && !(Number(m.block_payout_btc) > 0) && Number(m.window_work) > 0) {
         return t("miner.nextUnder", { floor: floorBtc > 0 ? amt(floorBtc) + " " : "", path });
       }

@@ -687,7 +687,7 @@
               '<p class="lz-kicker">Miners</p>' +
               '<p class="lz-head">Mine with Lazarus Pool, paid in the block itself</p>' +
               '<p class="lz-stats" id="lz-pool-stats"><span class="lz-dot" aria-hidden="true"></span><span class="lz-stats-text">Loading pool status…</span></p>' +
-              '<p class="lz-copy" id="lz-pool-copy">Every block found pays each miner directly in its coinbase by TIDES window share. 0% fee through your own DATUM gateway, 25% on the public stratum.</p>' +
+              '<p class="lz-copy" id="lz-pool-copy">Every block found pays each miner directly in its coinbase by TIDES window share. 0% fee through your own DATUM gateway. The public stratum is a donation, validation and fallback endpoint at 100%, with a 24 h grace at 25% (96 h if the address had DATUM work here in the prior 30 days), then 100%.</p>' +
               '<p class="lz-actions">' +
                 '<a class="btn btn-primary btn-sm" href="' + POOL + '" target="_blank" rel="noopener">Open Lazarus Pool ↗</a>' +
                 '<a class="btn btn-secondary btn-sm" href="/mining/pool/' + POOL_SLUG + '">Blocks found by Lazarus</a>' +
@@ -712,9 +712,21 @@
         // With the DATUM bonus on, a gateway miner is paid more than its window share, and
         // the explorer's one paragraph about the pool is the place to say so.
         var uplift = Number(fees.datum_uplift_percent) || 0;
-        c.textContent = 'Every block found pays each miner directly in its coinbase by TIDES window share. ' + pct(fees.datum_percent) + ' fee through your own DATUM gateway, ' + pct(fees.stratum_percent) + ' on the public stratum'
+        var stratum = pct(fees.stratum_percent);
+        var gBps = pr.stratum_grace_fee_bps;
+        var gHours = pr.stratum_grace_hours;
+        var grace;
+        if (gBps != null && gHours != null) {
+          grace = ', with a ' + gHours + ' h grace at ' + pct(gBps / 100)
+            + (pr.stratum_grace_datum_hours ? ' (' + pr.stratum_grace_datum_hours + ' h if the address had DATUM work here in the prior 30 days)' : '')
+            + ', then ' + stratum;
+        } else {
+          // Same published sentence as the no-JS paragraph, used until /api/pool sends the knobs.
+          grace = ', with a 24 h grace at 25% (96 h if the address had DATUM work here in the prior 30 days), then ' + stratum;
+        }
+        c.textContent = 'Every block found pays each miner directly in its coinbase by TIDES window share. ' + pct(fees.datum_percent) + ' fee through your own DATUM gateway. The public stratum is a donation, validation and fallback endpoint at ' + stratum + grace
           + (Number(fees.datum_rebate_percent) > 0
-            ? ' — and ' + pct(fees.datum_rebate_percent) + ' of public-stratum work is credited to DATUM miners in the window on every block'
+            ? '. ' + pct(fees.datum_rebate_percent) + ' of public-stratum work is credited to DATUM miners in the window on every block'
               + (uplift > 0 ? ', worth +' + pct(uplift) + ' on their share right now.' : '.')
             : '.');
       }

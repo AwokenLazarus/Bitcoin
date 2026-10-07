@@ -75,41 +75,11 @@
   const promoDismissed = () => {
     try { return localStorage.getItem(PROMO_DISMISS_KEY) === "1"; } catch (e) { return false; }
   };
-  try { if (localStorage.getItem("lazarus.stratum100.v7.dismissed") === "1") { const el = $("stratumnotice"); if (el) el.hidden = true; } } catch (e) { /* private mode */ }
+  try { if (localStorage.getItem("lazarus.stratum100.v9.dismissed") === "1") { const el = $("stratumnotice"); if (el) el.hidden = true; } } catch (e) { /* private mode */ }
   $("stratumnotice-dismiss")?.addEventListener("click", () => {
-    try { localStorage.setItem("lazarus.stratum100.v7.dismissed", "1"); } catch (e) { /* private mode */ }
+    try { localStorage.setItem("lazarus.stratum100.v9.dismissed", "1"); } catch (e) { /* private mode */ }
     const el = $("stratumnotice"); if (el) el.hidden = true;
   });
-  // 2026-10-07 00:00 America/Chicago (CDT, UTC−5): the public stratum becomes the donation and validation endpoint.
-  const STRATUM_DONATION_AT = Date.parse("2026-10-07T05:00:00Z");
-  function paintStratumCountdown() {
-    const live = $("stratumnotice-count-live");
-    const done = $("stratumnotice-count-done");
-    const remain = $("stratumnotice-remain");
-    if (!live || !done || !remain || !window.LZ_I18N) return false;
-    const left = STRATUM_DONATION_AT - Date.now();
-    if (left <= 0) {
-      live.hidden = true;
-      done.hidden = false;
-      return true;
-    }
-    const total = Math.floor(left / 1000);
-    const days = Math.floor(total / 86400);
-    const pad = (n) => String(n).padStart(2, "0");
-    const vars = {
-      d: String(days),
-      h: pad(Math.floor((total % 86400) / 3600)),
-      m: pad(Math.floor((total % 3600) / 60)),
-      s: pad(total % 60),
-    };
-    remain.textContent = LZ_I18N.t(days > 0 ? "stratumnotice.countdownClock" : "stratumnotice.countdownClockShort", vars);
-    live.hidden = false;
-    done.hidden = true;
-    return false;
-  }
-  paintStratumCountdown();
-  const stratumCountT = setInterval(() => { if (paintStratumCountdown()) clearInterval(stratumCountT); }, 1000);
-  document.addEventListener("lz:i18n", () => { paintStratumCountdown(); });
   $("promo-dismiss")?.addEventListener("click", () => {
     try { localStorage.setItem(PROMO_DISMISS_KEY, "1"); } catch (e) { /* private mode */ }
     const el = $("datum-promo");

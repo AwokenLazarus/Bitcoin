@@ -1,5 +1,7 @@
 # DATUM rebate: 15% stratum, 7.5 points credited to DATUM miners
 
+> Current schedule (2026-10-07): the public stratum is a donation, validation and fallback endpoint at 100% (50 points to DATUM gateways, 50 to the pool), with a 24 h grace at 25% (12.5 points) or 96 h if the address had DATUM work on Lazarus in the prior 30 days, then 100%. This note is the 15% / 7.5-point schedule it replaced. Do not treat the body as the live fee.
+
 Status: **live since 2026-09-15**. `stratum-fee-bps = 1500`, `fee-bps = 0`,
 `datum-rebate-bps = 750`. Dedicated solo is a separate knob (`solo_fee_bps = 750`,
 7.5%) and `solo-rebate-bps = 0`. The dashboard reads the rebate numbers from primed

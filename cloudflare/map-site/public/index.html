@@ -227,7 +227,7 @@
     </a>
   </div>
   <div class="callout warn" data-reveal>
-    <p><strong>Pool stratum is on the way out.</strong> Lazarus is retiring its hosted stratum: work sent through it will not continue to be supported or paid. Nodes are also deciding to invalidate coinbase payouts to addresses that hash through a pool's stratum rather than their own node, which would apply on every pool. Running your own DATUM gateway settles it — the pool site has the <a href="https://pool.lazarus-xbt.xyz/connect" rel="noopener">DATUM gateway setup</a>.</p>
+    <p><strong>Public stratum is a donation, validation and fallback endpoint.</strong> <code>stratum+tcp://stratum.lazarus-xbt.xyz:23334</code> (and port 3333) takes a donation of hash at 100% (50 points to DATUM gateways, 50 to the pool), confirms a miner connects while your own node and DATUM gateway come online, and is the fallback if your own gateway goes down. An address that starts there pays a grace at 25% (12.5 points to DATUM) for 24 hours, or 96 hours if it had DATUM work on Lazarus in the prior 30 days, then 100%. The clock does not pause. A pool that proxies its stratum hashers through its own DATUM gateway pays 100% with no grace. Your own DATUM gateway is 0% plus the DATUM bonus. Solo stratum is closed. During the 45-day coinbase maturity window, stratum-hashing rewards on any pool are invalidated. The pool site has the <a href="https://pool.lazarus-xbt.xyz/connect" rel="noopener">DATUM gateway setup</a>.</p>
   </div>
 </section>
 
