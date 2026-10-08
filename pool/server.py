@@ -5211,11 +5211,11 @@ _SEO_INTRO = {
     },
     "/rentals": {
         "en": ("Rent BLAKE2b hashrate, pointed at your own node", [
-            "RouteHash lists BLAKE2b ASICs by the hour, paid in BTC. A rental is aimed at your own node: in RouteHash, add your own DATUM gateway’s stratum listener — the port on your machine, publicly reachable — as the destination. Your gateway connects to Lazarus over DATUM. This page does not name a pool endpoint as a place to send rented hashrate.",
+            "RouteHash lists BLAKE2b ASICs by the hour, paid in BTC or XBT (XBT at the NeoxEX best bid; with no trade when the owner takes XBT). A rental is aimed at your own node: in RouteHash, add your own DATUM gateway’s stratum listener — the port on your machine, publicly reachable — as the destination. Your gateway connects to Lazarus over DATUM. This page does not name a pool endpoint as a place to send rented hashrate.",
             "Each rig shows the advertised and live hashrate, the price per TH per day, the minimum booking with the platform fee included, and what that hashrate would earn in XBT on Lazarus through your own DATUM gateway at current difficulty. Luck, transaction fees and electricity are not in the estimate. Lazarus Pool is not responsible for RouteHash. <a href=\"/hardware\">Machines for sale are listed here.</a>",
         ]),
         "zh": ("租 BLAKE2b 算力，指向你自己的节点", [
-            "RouteHash 按小时挂出 BLAKE2b 矿机，租金以 BTC 支付。租来的算力指向你自己的节点：在 RouteHash 里，把你自己的 DATUM 网关的 stratum 监听端口（在你的机器上、公网能够连到的那个端口）设为目的地。你的网关通过 DATUM 连到 Lazarus。本页不会把任何矿池端点写成租来算力的去处。",
+            "RouteHash 按小时挂出 BLAKE2b 矿机，租金以 BTC 或 XBT 支付（XBT 按 NeoxEX 最优买价；矿机主人收 XBT 时不经交易）。租来的算力指向你自己的节点：在 RouteHash 里，把你自己的 DATUM 网关的 stratum 监听端口（在你的机器上、公网能够连到的那个端口）设为目的地。你的网关通过 DATUM 连到 Lazarus。本页不会把任何矿池端点写成租来算力的去处。",
             "每台矿机列出标称算力与实时算力、每 TH 每天的价格、含平台费的最短租期，以及这份算力按当前难度、走你自己的 DATUM 网关、在 Lazarus 上预计每天能挖到的 XBT。运气、交易费和电费都不在估算里。Lazarus Pool 不对 RouteHash 负责。<a href=\"/hardware\">在售的机器在这里。</a>",
         ]),
     },
@@ -5528,7 +5528,7 @@ to the block subsidy.
 
 ## Renting hashrate
 
-BLAKE2b ASICs listed on RouteHash (https://app.routehash.com/) can be rented by the hour and are paid in BTC to RouteHash. The only destination this page names is the renter's own DATUM gateway: the listener on the renter's machine, publicly reachable, with that gateway connected to Lazarus over DATUM. Lazarus Pool does not run the rental and is not paid for it. Estimates are XBT per day at current difficulty through that gateway, excluding luck and electricity. See {site}/rentals.
+BLAKE2b ASICs listed on RouteHash (https://app.routehash.com/) can be rented by the hour and are paid to RouteHash in BTC or XBT. XBT is booked at the NeoxEX BTCB2/BTC best bid: with no trade when the rig's owner takes XBT, otherwise RouteHash sells it for BTC on NeoxEX (exchange fee on top). /api/rentals gives each rig's cost per day and minimum booking in BTC, XBT and USD. The only destination this page names is the renter's own DATUM gateway: the listener on the renter's machine, publicly reachable, with that gateway connected to Lazarus over DATUM. Lazarus Pool does not run the rental and is not paid for it. Estimates are XBT per day at current difficulty through that gateway, excluding luck and electricity. See {site}/rentals.
 
 ## Payouts and decentralization
 
