@@ -12,7 +12,7 @@
   // view -> the <main> sections it shows. `home` is first: it is what "/" opens.
   const VIEWS = {
     home: ["fees", "status"],
-    mine: ["connect", "hardware"],
+    mine: ["connect", "hardware", "rentals"],
     payouts: ["payout", "blocks"],
     network: ["miners", "gateways", "solo"],
     me: ["dashboard"],
@@ -32,7 +32,7 @@
   const PATH_VIEW = {
     "/how": "learn", "/bip110": "learn", "/tides": "learn", "/non-custodial": "learn", "/self-cap": "learn", "/pools": "learn",
     "/datum-subsidy": "learn", "/api": "learn",
-    "/connect": "mine", "/mine-xbt": "mine", "/ratum": "mine", "/flytheelephant": "mine", "/hardware": "mine", "/profitability": "mine", "/calculator": "mine",
+    "/connect": "mine", "/mine-xbt": "mine", "/ratum": "mine", "/flytheelephant": "mine", "/hardware": "mine", "/rentals": "mine", "/profitability": "mine", "/calculator": "mine",
     "/blocks": "payouts",
   };
   const pagePath = location.pathname.replace(/^\/zh(?=\/|$)/, "").replace(/\/$/, "") || "/";
@@ -102,7 +102,7 @@
   // A view with more than one section gets a slim bar of its parts under the header.
   const SUB = {
     home: [["fees", "app.sub.intro"], ["hashchart", "app.sub.chart"], ["status", "app.sub.live"]],
-    mine: [["connect", "nav.connect"], ["hardware", "nav.hardware"], ["calc", "app.sub.calc"]],
+    mine: [["connect", "nav.connect"], ["hardware", "nav.hardware"], ["rentals", "nav.rentals"], ["calc", "app.sub.calc"]],
     payouts: [["payout", "nav.payout"], ["blocks", "nav.blocks"]],
     network: [["miners", "nav.miners"], ["gateways", "nav.gateways"], ["solo", "nav.solo"]],
     learn: [["learn", "app.sub.basics"], ["how", "nav.how"], ["pools", "nav.pools"]],
@@ -297,7 +297,7 @@
 
   function destinations() {
     const d = [
-      ["home", "#status"], ["chart", "#hashchart"], ["connect", "#connect"], ["datum", "#datum"], ["hardware", "#hardware"],
+      ["home", "#status"], ["chart", "#hashchart"], ["connect", "#connect"], ["datum", "#datum"], ["hardware", "#hardware"], ["rentals", "#rentals"],
       ["calc", "#calc"], ["payout", "#payout"], ["blocks", "#blocks"], ["miners", "#miners"], ["gateways", "#gateways"],
       ["me", "#dashboard"], ["learn", "#learn"], ["how", "#how"], ["pools", "#pools"],
     ].map(([k, href]) => ({ label: T("pal.go." + k), href }));

@@ -2144,6 +2144,8 @@
   .hw-facts > div:first-child dd { color: var(--brass); }
   #hardware-empty { max-width: 52rem; }
   #hardware-disclaimer { max-width: 52rem; margin-top: 0.2rem; }
+  #rentals-empty, #rentals-owners, #rentals-disclaimer { max-width: 52rem; }
+  #rentals-disclaimer { margin-top: 0.2rem; }
 
   /* ---- How it works: three numbered steps. */
   .how-grid {

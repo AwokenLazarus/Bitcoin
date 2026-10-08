@@ -20,6 +20,8 @@ from pathlib import Path
 from collections import defaultdict, deque
 from urllib.parse import parse_qs, unquote, urlparse
 
+import rentals
+
 ROOT = Path(__file__).resolve().parent
 DB = Path(os.environ.get("POOL_DB") or (ROOT / "pool.sqlite"))
 STATIC = ROOT / "static"
@@ -2194,6 +2196,41 @@ def hardware_payload():
         "error": err or "",
         "note": "Estimates use current network difficulty and the 3.125 XBT base subsidy, through a DATUM gateway on Lazarus (bonus included). Electricity is not included. Prices are BT-Miners list prices.",
     }
+
+
+def rentals_payload():
+    """Blake2b rigs on RouteHash, with a Lazarus yield through your own DATUM gateway."""
+    pool = cache_peek("pool") or {}
+    if not pool.get("ths_btc_day"):
+        try:
+            pool = cached("pool", 5.0, pool_payload) or pool
+        except Exception:
+            pass
+    px = price_payload()
+    usd = px.get("USD")
+    try:
+        usd = float(usd) if usd is not None else None
+    except (TypeError, ValueError):
+        usd = None
+    ths_gross = float(pool.get("ths_btc_day") or 0)
+    ths_datum = float(pool.get("ths_btc_day_datum_bonus") or pool.get("ths_btc_day_datum") or 0)
+    if ths_datum <= 0 and ths_gross > 0:
+        ths_datum = ths_gross
+
+    def get_text(url):
+        raw = curl(
+            url,
+            timeout=12,
+            headers=(
+                "User-Agent: LazarusPool/1.0 (+https://pool.lazarus-xbt.xyz)",
+                "Accept: application/json",
+            ),
+        )
+        if not raw:
+            raise RuntimeError("empty response")
+        return raw
+
+    return rentals.payload(ths_btc_day=ths_datum or None, xbt_usd=usd, get_text=get_text)
 
 
 # Identities are DATUM usernames minus the worker suffix: an address, or whatever a
@@ -4807,6 +4844,18 @@ _SEO_PAGES = {
             "scroll": "hardware",
         },
     },
+    "/rentals": {
+        "en": {
+            "title": "Rent BLAKE2b Hashrate for Your Own Node | Lazarus Pool",
+            "description": "Rent a BLAKE2b ASIC on RouteHash and point it at your own DATUM gateway. See the cost against estimated XBT per day on Lazarus. Lazarus is not the rental desk.",
+            "scroll": "rentals",
+        },
+        "zh": {
+            "title": "租 BLAKE2b 算力，指向你自己的节点 — Lazarus Pool",
+            "description": "在 RouteHash 租一台 BLAKE2b 矿机，指向你自己的 DATUM 网关。租金对照在 Lazarus 上预计每天能挖到的 XBT。Lazarus 不是出租方。",
+            "scroll": "rentals",
+        },
+    },
     "/connect": {
         "en": {
             "title": "Connect to Lazarus Pool: XBT Stratum & DATUM Settings",
@@ -5067,6 +5116,7 @@ _API_TABLE_EN = """<div class="seo-table"><table>
         <tr><th scope="row"><code>/api/solo</code></th><td>Solo miners and blocks found solo</td></tr>
         <tr><th scope="row"><code>/api/price</code></th><td>The XBT price the site converts with</td></tr>
         <tr><th scope="row"><code>/api/hardware</code></th><td>The Siacoin ASIC list with prices and estimated XBT and dollars per day</td></tr>
+        <tr><th scope="row"><code>/api/rentals</code></th><td>BLAKE2b rigs listed on RouteHash, with the rental cost and estimated XBT per day through your own DATUM gateway</td></tr>
         </tbody>
       </table></div>"""
 
@@ -5084,6 +5134,7 @@ _API_TABLE_ZH = """<div class="seo-table"><table>
         <tr><th scope="row"><code>/api/solo</code></th><td>单挖矿工与单挖出的区块</td></tr>
         <tr><th scope="row"><code>/api/price</code></th><td>本站折算所用的 XBT 价格</td></tr>
         <tr><th scope="row"><code>/api/hardware</code></th><td>Siacoin 矿机列表，含价格与每日 XBT / 美元估算</td></tr>
+        <tr><th scope="row"><code>/api/rentals</code></th><td>RouteHash 上的 BLAKE2b 矿机，含租金，以及走你自己的 DATUM 网关时预计每天的 XBT</td></tr>
         </tbody>
       </table></div>"""
 
@@ -5151,11 +5202,21 @@ _SEO_INTRO = {
     "/hardware": {
         "en": ("Siacoin BLAKE2b ASICs that mine Bitcoin XBT", [
             "Any ASIC that can mine Siacoin can mine Bitcoin XBT, because both are BLAKE2b — no firmware change, no new hardware. Goldshell's SC series, iBeLink's BM-S3, BM-S3+ and BM-N3, and the Antminer A3 all connect and start hashing. SHA-256 machines cannot: an S19, S21 or Whatsminer will never produce a valid share on this chain.",
-            "The list below is BT-Miners' BTCB2 collection with their prices, turned into estimated XBT and dollars per day at current difficulty and price, through your own DATUM gateway with the subsidy included. Electricity is not in those numbers. Click any machine to open its page on BT-Miners. Lazarus Pool is not responsible for BT-Miners' customer support or quality of service.",
+            "The list below is BT-Miners' BTCB2 collection with their prices, turned into estimated XBT and dollars per day at current difficulty and price, through your own DATUM gateway with the subsidy included. Electricity is not in those numbers. Click any machine to open its page on BT-Miners. Lazarus Pool is not responsible for BT-Miners' customer support or quality of service. Renting instead of buying: <a href=\"/rentals\">BLAKE2b rigs on RouteHash</a>, pointed at your own DATUM gateway.",
         ]),
         "zh": ("能挖比特币 XBT 的 Siacoin BLAKE2b 矿机", [
             "任何能挖 Siacoin 的 ASIC 都能挖比特币 XBT，因为两者同为 BLAKE2b——不用换固件，也不用换硬件。金贝 SC 系列、iBeLink BM-S3 / BM-S3+ / BM-N3、蚂蚁 A3 都能直接连上开始工作。SHA-256 机器不行：S19、S21 或神马在本链永远产不出有效份额。",
-            "下面的列表来自 BT-Miners 的 BTCB2 系列，价格是他们的，并按当前难度与价格换算成每日 XBT 与美元估算，走你自己的 DATUM 网关并计入补贴。电费不在其中。点击任意机器可打开其 BT-Miners 页面。Lazarus Pool 不对 BT-Miners 的客户支持或服务质量负责。",
+            "下面的列表来自 BT-Miners 的 BTCB2 系列，价格是他们的，并按当前难度与价格换算成每日 XBT 与美元估算，走你自己的 DATUM 网关并计入补贴。电费不在其中。点击任意机器可打开其 BT-Miners 页面。Lazarus Pool 不对 BT-Miners 的客户支持或服务质量负责。不想买、想租：<a href=\"/rentals\">RouteHash 上的 BLAKE2b 矿机</a>，指向你自己的 DATUM 网关。",
+        ]),
+    },
+    "/rentals": {
+        "en": ("Rent BLAKE2b hashrate, pointed at your own node", [
+            "RouteHash lists BLAKE2b ASICs by the hour, paid in BTC. A rental is aimed at your own node: in RouteHash, add your own DATUM gateway’s stratum listener — the port on your machine, publicly reachable — as the destination. Your gateway connects to Lazarus over DATUM. This page does not name a pool endpoint as a place to send rented hashrate.",
+            "Each rig shows the advertised and live hashrate, the price per TH per day, the minimum booking with the platform fee included, and what that hashrate would earn in XBT on Lazarus through your own DATUM gateway at current difficulty. Luck, transaction fees and electricity are not in the estimate. Lazarus Pool is not responsible for RouteHash. <a href=\"/hardware\">Machines for sale are listed here.</a>",
+        ]),
+        "zh": ("租 BLAKE2b 算力，指向你自己的节点", [
+            "RouteHash 按小时挂出 BLAKE2b 矿机，租金以 BTC 支付。租来的算力指向你自己的节点：在 RouteHash 里，把你自己的 DATUM 网关的 stratum 监听端口（在你的机器上、公网能够连到的那个端口）设为目的地。你的网关通过 DATUM 连到 Lazarus。本页不会把任何矿池端点写成租来算力的去处。",
+            "每台矿机列出标称算力与实时算力、每 TH 每天的价格、含平台费的最短租期，以及这份算力按当前难度、走你自己的 DATUM 网关、在 Lazarus 上预计每天能挖到的 XBT。运气、交易费和电费都不在估算里。Lazarus Pool 不对 RouteHash 负责。<a href=\"/hardware\">在售的机器在这里。</a>",
         ]),
     },
     "/connect": {
@@ -5377,7 +5438,7 @@ A longer Knots + DATUM walkthrough is at https://convoy.xyz/getstarted
 ## Machine-readable pool data
 
 `/api/pool`, `/api/coinbaser`, `/api/blocks`, `/api/found/<blockhash>`, `/api/miners`,
-`/api/gateways`, `/api/payouts`, `/api/hardware` — public JSON, no key.
+`/api/gateways`, `/api/payouts`, `/api/hardware`, `/api/rentals` — public JSON, no key.
 Full reference: SITEPLACEHOLDER/api
 """
 
@@ -5403,6 +5464,7 @@ _LLMS_TXT = """# Lazarus Pool
 - Site: {site}/
 - How to mine: {site}/mine-xbt
 - Hardware (Siacoin ASICs, with earnings estimates): {site}/hardware
+- Rent BLAKE2b hashrate: {site}/rentals
 - Earnings calculator: {site}/calculator
 - Is it profitable: {site}/profitability
 - The BIP-110 fork: {site}/bip110
@@ -5463,6 +5525,10 @@ change. Examples: Goldshell SC-series (SC6-SE, SC-BOX), iBeLink BM-S3 / BM-S3+ /
 SHA-256 miners (Antminer S19/S21, Whatsminer M30/M50) will not work. Idle Siacoin rigs are the
 cheapest route into profitable crypto mining on this chain because difficulty is still low relative
 to the block subsidy.
+
+## Renting hashrate
+
+BLAKE2b ASICs listed on RouteHash (https://app.routehash.com/) can be rented by the hour and are paid in BTC to RouteHash. The only destination this page names is the renter's own DATUM gateway: the listener on the renter's machine, publicly reachable, with that gateway connected to Lazarus over DATUM. Lazarus Pool does not run the rental and is not paid for it. Estimates are XBT per day at current difficulty through that gateway, excluding luck and electricity. See {site}/rentals.
 
 ## Payouts and decentralization
 
@@ -5611,7 +5677,16 @@ def render_pool_index(path, query=""):
             raw, count=1)
     raw = _inject_intro(raw, meta)
     raw = raw if home else _keyword_page(raw, meta)
+    raw = rentals.apply_section(raw, rentals.view_rigs(), _rentals_labels(meta["lang"]))
     return _localize_zh(raw) if meta["lang"] == "zh-CN" else raw
+
+
+def _rentals_labels(lang):
+    locale = "zh-CN" if lang == "zh-CN" else "en"
+    block = (_i18n_dict(locale).get("rentals") or {}).get("card") or {}
+    if not isinstance(block, dict):
+        return {}
+    return {key: value for key, value in block.items() if isinstance(value, str)}
 
 
 # Server-side Chinese. i18n.js translates [data-i18n*] elements in the browser, so before this a
@@ -5736,6 +5811,7 @@ def _localize_zh(raw):
 # app view (app.js PATH_VIEW) the topic is about. Links into anything cut go to the homepage.
 _SEO_KEEP = {
     "/hardware": ("hardware",),
+    "/rentals": ("rentals",),
     "/calculator": ("hardware",),
     "/profitability": ("hardware",),
     "/connect": ("connect",),
@@ -5761,7 +5837,8 @@ _ORG_ID = "https://lazarus-xbt.xyz/#org"
 # a page's modified date only when its words change, never per deploy. /blocks and /calculator are
 # live data and a tool, so they stay plain WebPages.
 _SEO_ARTICLE = {
-    "/hardware": ("Article", "2026-09-13", "2026-09-23"),
+    "/hardware": ("Article", "2026-09-13", "2026-10-08"),
+    "/rentals": ("Article", "2026-10-08", "2026-10-08"),
     "/profitability": ("Article", "2026-09-13", "2026-09-23"),
     "/pools": ("Article", "2026-09-13", "2026-09-27"),
     "/self-cap": ("Article", "2026-09-13", "2026-09-23"),
@@ -5920,6 +5997,7 @@ _SITEMAP_ORDER = (
     ("/", "hourly", "1.0"),
     ("/mine-xbt", "weekly", "0.9"),
     ("/hardware", "daily", "0.9"),
+    ("/rentals", "daily", "0.8"),
     ("/profitability", "daily", "0.9"),
     ("/calculator", "daily", "0.9"),
     ("/pools", "weekly", "0.9"),
@@ -6084,6 +6162,7 @@ _CHEAP_PATHS = frozenset(
         "/",
         "/index.html",
         "/hardware",
+        "/rentals",
         "/connect",
         "/ratum",
         "/mine-xbt",
@@ -6115,6 +6194,7 @@ _CHEAP_PATHS = frozenset(
         "/api/v1/prices",
         "/api/payouts",
         "/api/hardware",
+        "/api/rentals",
     )
 )
 
@@ -6334,6 +6414,9 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path == "/api/hardware":
             self.send_json(cached("hardware", 15.0, hardware_payload), cache_s=15)
+            return
+        if path == "/api/rentals":
+            self.send_json(cached("rentals", 15.0, rentals_payload), cache_s=15)
             return
         if path.startswith("/api/found/"):
             # One spelling per hash: the node reads hex in any case, so every mix of upper and

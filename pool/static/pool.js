@@ -1526,6 +1526,86 @@
     }).join("");
   }
 
+  // RouteHash BLAKE2b rentals. The destination named on the card is the renter's own gateway.
+  function rentals(doc) {
+    const grid = $("rentals-grid");
+    const empty = $("rentals-empty");
+    const meta = $("rentals-meta");
+    if (!grid) return;
+    const rigs = (doc && doc.rigs) || [];
+    if (meta) meta.textContent = rigs.length ? t("rentals.source", { shop: "RouteHash" }) : "";
+    if (!rigs.length) {
+      grid.innerHTML = "";
+      if (empty) empty.hidden = false;
+      return;
+    }
+    if (empty) empty.hidden = true;
+    const moneyDay = (usd) => {
+      const u = Number(usd);
+      if (!Number.isFinite(u)) return "\u2014";
+      if (u >= 100) return "$" + u.toLocaleString(loc(), { maximumFractionDigits: 0 });
+      return "$" + u.toLocaleString(loc(), { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    };
+    const btc = (n) => {
+      const x = Number(n);
+      if (!Number.isFinite(x)) return "\u2014";
+      return x.toLocaleString(loc(), { maximumFractionDigits: 8 }) + " BTC";
+    };
+    const th = (n) => {
+      const x = Number(n);
+      if (!Number.isFinite(x) || x <= 0) return "\u2014";
+      return x.toLocaleString(loc(), { maximumFractionDigits: 3 }) + " TH/s";
+    };
+    const hours = (r) => {
+      const lo = Number(r.min_hours);
+      const hi = Number(r.max_hours);
+      const trim = (v) => v.toLocaleString(loc(), { maximumFractionDigits: 2 });
+      if (lo > 0 && hi > 0) return trim(lo) + "\u2013" + trim(hi) + " h";
+      if (lo > 0) return trim(lo) + " h min";
+      if (hi > 0) return "up to " + trim(hi) + " h";
+      return "\u2014";
+    };
+    const fee = (bps) => {
+      const n = Number(bps);
+      if (!Number.isFinite(n)) return "\u2014";
+      const pct = n / 100;
+      return (pct === Math.round(pct) ? String(pct) : pct.toFixed(2)) + "%";
+    };
+    grid.innerHTML = rigs.map((r) => {
+      const href = esc(r.url || "https://app.routehash.com/");
+      const name = esc(r.name || "Rig");
+      const rented = !!r.is_already_rented;
+      const rentable = !!r.rentable && !rented;
+      const pill = rented ? t("rentals.card.rented") : rentable ? t("rentals.card.rentable") : (r.status || t("rentals.card.unavailable"));
+      const pillCls = rented ? "warn" : rentable ? "ok" : "";
+      const live = Number(r.live_th) > 0 ? " \u00b7 " + t("rentals.card.live") + " " + th(r.live_th) : "";
+      const spec = th(r.hashrate_th) + live + " \u00b7 " + hours(r);
+      const fact = (dt, dd) => `<div><dt>${esc(dt)}</dt><dd>${esc(dd)}</dd></div>`;
+      return `<li>
+        <a class="hw-card${rentable ? "" : " oos"}" href="${href}" target="_blank" rel="noreferrer" data-rig="${esc(r.rig_id)}">
+          <span class="hw-img hw-img-empty" aria-hidden="true"></span>
+          <div class="hw-body">
+            <div class="hw-head">
+              <h3>${name}</h3>
+              <span class="pill ${pillCls}">${esc(pill)}</span>
+            </div>
+            <p class="hw-spec">${esc(spec)}</p>
+            <dl class="hw-facts">
+              ${fact(t("rentals.card.sats"), Number.isFinite(Number(r.price_sats_th_day)) ? num(r.price_sats_th_day) : "\u2014")}
+              ${fact(t("rentals.card.usdTh"), moneyDay(r.price_usd_th_day))}
+              ${fact(t("rentals.card.btcDay"), btc(r.btc_day_with_fee) + " \u00b7 " + moneyDay(r.usd_cost_day))}
+              ${fact(t("rentals.card.minCost"), btc(r.min_cost_btc) + " \u00b7 " + moneyDay(r.min_cost_usd))}
+              ${fact(t("rentals.card.fee"), fee(r.platform_fee_bps))}
+              ${fact(t("rentals.card.xbtDay"), r.xbt_day == null ? "\u2014" : amt(r.xbt_day))}
+              ${fact(t("rentals.card.usdDay"), moneyDay(r.usd_day))}
+            </dl>
+            <p class="hw-spec">${esc(t("rentals.card.rent"))}</p>
+          </div>
+        </a>
+      </li>`;
+    }).join("");
+  }
+
   // --------------------------------------------------------------- refresh
   let refreshBusy = false;
   let lastHeavy = 0;
@@ -1611,6 +1691,8 @@
       if (minerAddr) showMiner(minerAddr).catch(() => {});
       const hw = await j("/api/hardware").catch(() => null);
       hardware(hw);
+      const rent = await j("/api/rentals").catch(() => null);
+      rentals(rent);
 
       const now = Date.now();
       if (now - lastHeavy > 60000 || !(lastPays.payouts || []).length) {
@@ -1647,7 +1729,7 @@
   // retired anchors kept so old bookmarks still land somewhere sensible. "ratum" holds the
   // place of the Ratum gateway guide (XBT-082) and opens the DATUM tab until it lands.
   const SECTIONS = new Set([
-    "", "top", "fees", "status", "payout", "window", "connect", "hardware", "gw-pick", "dashboard", "miners", "gateways",
+    "", "top", "fees", "status", "payout", "window", "connect", "hardware", "rentals", "gw-pick", "dashboard", "miners", "gateways",
     "blocks", "payouts", "pools", "how", "datum", "ratum", "mine", "solo", "calc", "learn", "hashchart",
   ]);
 

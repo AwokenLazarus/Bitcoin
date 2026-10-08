@@ -64,7 +64,7 @@
 <link rel="preload" as="style" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;1,400&family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,500;1,6..72,400;1,6..72,500&display=swap">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;1,400&family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,500;1,6..72,400;1,6..72,500&display=swap" media="print" onload="this.media='all'">
 <noscript><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;1,400&family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,500;1,6..72,400;1,6..72,500&display=swap"></noscript>
-<link rel="stylesheet" href="/static/pool.css?v=cd1">
+<link rel="stylesheet" href="/static/pool.css?v=rent1">
 <link rel="stylesheet" href="/static/app.css?v=ask2">
 <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
 <link rel="icon" href="/static/favicon-48.png" sizes="48x48" type="image/png">
@@ -75,7 +75,7 @@
   <p>Lazarus Pool is a mining pool for Bitcoin (XBT / BTCB2), the <a href="/bip110">BIP-110 Bitcoin fork</a> that mines with BLAKE2b instead of SHA-256d. Any ASIC that can mine Siacoin can mine it. Public stratum: <code>stratum+tcp://stratum.lazarus-xbt.xyz:23334</code> (username = your payout address, password <code>x</code>). Fees: 0% with your own DATUM gateway plus the <a href="/datum-subsidy">DATUM subsidy</a>. The public stratum is a donation, validation and fallback endpoint at 100%, with 50 points to DATUM gateways and 50 to the pool, and a 24 h / 96 h grace at 25%, then 100%. <a href="/tides">TIDES</a> pays every miner inside the coinbase of each block found, so the pool never holds your coins.</p>
   <p>Lazarus Pool is the first pool confirmed to pay TIDES as a split coinbase on BLAKE2b Bitcoin mainnet, and the first pool anywhere to use its stratum hashers to subsidize DATUM miners — paying miners for securing and decentralizing the network instead of charging them for it.</p>
   <p>Nothing is ever held for you: payouts are <a href="/non-custodial">outputs of the block itself</a>, with no balance and no withdrawal. Once its stratum passes 15% of network hashrate the pool <a href="/self-cap">relays new miners to another pool</a> rather than keep growing. <a href="/pools">How the pools on this chain compare</a>.</p>
-  <p>See <a href="/hardware">Siacoin BLAKE2b ASICs</a> and their estimated earnings, work out <a href="/calculator">what your hashrate earns per day</a>, check whether <a href="/profitability">mining XBT is profitable</a> right now, or read <a href="/mine-xbt">how to point a miner here</a>. Longer DATUM gateway setup: <a href="https://convoy.xyz/getstarted">CONVOY get started</a> / <a href="https://convoy.xyz/getstarted?lang=zh">中文</a>. Developers: <a href="/stratum-protocol.md">the stratum protocol on this chain</a> and the <a href="/api">public API</a>. Block explorer: <a href="https://mempool.lazarus-xbt.xyz">mempool.lazarus-xbt.xyz</a>. 中文：<a href="/zh/">简体中文版</a>.</p>
+  <p>See <a href="/hardware">Siacoin BLAKE2b ASICs</a> and their estimated earnings, <a href="/rentals">rent BLAKE2b hashrate</a> onto your own node, work out <a href="/calculator">what your hashrate earns per day</a>, check whether <a href="/profitability">mining XBT is profitable</a> right now, or read <a href="/mine-xbt">how to point a miner here</a>. Longer DATUM gateway setup: <a href="https://convoy.xyz/getstarted">CONVOY get started</a> / <a href="https://convoy.xyz/getstarted?lang=zh">中文</a>. Developers: <a href="/stratum-protocol.md">the stratum protocol on this chain</a> and the <a href="/api">public API</a>. Block explorer: <a href="https://mempool.lazarus-xbt.xyz">mempool.lazarus-xbt.xyz</a>. 中文：<a href="/zh/">简体中文版</a>.</p>
 </noscript>
 <a class="skip" href="#status" data-i18n="skip">Skip to pool status</a>
 
@@ -557,10 +557,30 @@
       <div class="hw-toolbar">
         <p class="note faint" id="hardware-meta"></p>
         <a class="btn small" href="https://bt-miners.com/collections/btcb2-miners/" target="_blank" rel="noreferrer" data-i18n="hardware.shopAll">All BTCB2 miners on BT-Miners<span class="ext" aria-hidden="true"></span></a>
+        <a class="btn small" href="/rentals" data-i18n="hardware.rent">Rent hashrate</a>
       </div>
       <ul class="hw-grid" id="hardware-grid"></ul>
       <p class="note" id="hardware-empty" hidden data-i18n-html="hardware.empty">Could not load the catalog. Open <a href="https://bt-miners.com/collections/btcb2-miners/" target="_blank" rel="noreferrer">BT-Miners’ BTCB2 collection</a> directly.</p>
       <p class="note faint" id="hardware-disclaimer" data-i18n="hardware.disclaimer">Lazarus Pool is not responsible for BT-Miners customer support or quality of service.</p>
+    </div>
+  </section>
+
+  <section id="rentals" class="section" aria-labelledby="rentals-title">
+    <div class="wrap">
+      <header class="section-head">
+        <p class="eyebrow" data-i18n="rentals.eyebrow">Rent hashrate</p>
+        <h2 id="rentals-title" data-i18n="rentals.title">BLAKE2b rigs you can rent, pointed at your own node.</h2>
+        <p class="section-lede" data-i18n-html="rentals.lede">Rented BLAKE2b ASICs from <a href="https://app.routehash.com/" target="_blank" rel="noreferrer">RouteHash</a> can be pointed at your own node. In RouteHash, add your own DATUM gateway’s stratum listener — the port on your machine, publicly reachable — as the destination. Your gateway connects to Lazarus over DATUM. The figures compare the rental cost with what that hashrate would earn on Lazarus through your own DATUM gateway. <a href="/hardware">Buying a machine</a> is the other way.</p>
+      </header>
+      <div class="hw-toolbar">
+        <p class="note faint" id="rentals-meta"></p>
+        <a class="btn small" href="https://app.routehash.com/" target="_blank" rel="noreferrer" data-i18n="rentals.rentAll">All rentals on RouteHash<span class="ext" aria-hidden="true"></span></a>
+        <a class="btn small" href="/hardware" data-i18n="rentals.buy">Buy a miner</a>
+      </div>
+      <ul class="hw-grid" id="rentals-grid"></ul>
+      <p class="note" id="rentals-empty" hidden data-i18n="rentals.empty">No BLAKE2b rigs listed right now.</p>
+      <p class="note" id="rentals-owners" data-i18n="rentals.owners">List your BLAKE2b miner on RouteHash to earn between your own mining.</p>
+      <p class="note faint" id="rentals-disclaimer" data-i18n="rentals.disclaimer">Lazarus Pool is not responsible for RouteHash customer support or quality of service. Rentals are paid in BTC to RouteHash. Estimates exclude luck, transaction fees and electricity.</p>
     </div>
   </section>
 
@@ -872,6 +892,7 @@
       <a href="#payout" data-i18n="footer.payout">Next payout</a>
       <a href="#connect" data-i18n="footer.connect">Connect a miner</a>
       <a href="#hardware" data-i18n="footer.hardware">Hardware</a>
+      <a href="#rentals" data-i18n="footer.rentals">Rent hashrate</a>
       <a href="#dashboard" data-i18n="footer.stats">Your stats</a>
       <a href="#blocks" data-i18n="footer.blocks">Blocks & payouts</a>
       <a href="#pools" data-i18n="footer.pools">Other DATUM pools</a>
@@ -884,6 +905,7 @@
       <a href="/profitability" data-i18n="footer.profit">Is mining XBT profitable?</a>
       <a href="/calculator" data-i18n="footer.calc">Mining calculator</a>
       <a href="/hardware" data-i18n="footer.asics">Siacoin BLAKE2b ASICs</a>
+      <a href="/rentals" data-i18n="footer.rentPage">Rent hashrate</a>
       <a href="/mine-xbt" data-i18n="footer.mineXbt">How to mine XBT</a>
       <a href="/pools" data-i18n="footer.compare">Compare XBT pools</a>
       <a href="/self-cap" data-i18n="footer.selfCap">The 15% stratum cap</a>
@@ -930,12 +952,12 @@
 </nav>
 
 <script src="/static/i18n.js?v=seo1"></script>
-<script src="/static/i18n/en.js?v=cd8"></script>
-<script src="/static/i18n/zh-CN.js?v=cd8"></script>
+<script src="/static/i18n/en.js?v=rent1"></script>
+<script src="/static/i18n/zh-CN.js?v=rent1"></script>
 <script>LZ_I18N.boot();</script>
 <script src="/static/shared.js?v=grace1"></script>
-<script src="/static/app.js?v=ask2"></script>
-<script src="/static/pool.js?v=cd8"></script>
+<script src="/static/app.js?v=rent1"></script>
+<script src="/static/pool.js?v=rent1"></script>
 <script src="/static/chart.js?v=app4"></script>
 </body>
 </html>
