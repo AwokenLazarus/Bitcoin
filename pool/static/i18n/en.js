@@ -485,7 +485,7 @@ window.LZ_I18N_DICTS["en"] = {
       "live": "live",
       "sats": "sats / TH / day",
       "usdTh": "USD / TH / day",
-      "btcDay": "BTC / day incl. fee",
+      "btcDay": "Cost / day incl. fee",
       "minCost": "Minimum booking",
       "fee": "Platform fee",
       "xbtDay": "Est. XBT / day",

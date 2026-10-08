@@ -40,7 +40,7 @@ for p in exact:
         print(f"{'DIFF' if not same else 'note'} {p}: {so}/{len(bo)} vs {sc}/{len(bc)}{note}")
 print(f"static+pages: {len(exact)} checked, {bad} differ")
 
-apis = ["/api/pool", "/api/price", "/api/v1/prices", "/api/miners", "/api/blocks", "/api/coinbaser", "/api/solo", "/api/gateways", "/api/payouts", "/api/makegoods", "/api/hardware", "/api/miner/notanaddress", "/api/nope"]
+apis = ["/api/pool", "/api/price", "/api/v1/prices", "/api/miners", "/api/blocks", "/api/coinbaser", "/api/solo", "/api/gateways", "/api/payouts", "/api/makegoods", "/api/hardware", "/api/rentals", "/api/miner/notanaddress", "/api/nope"]
 for p in apis:
     so, bo, _ = get(origin, p)
     sc, bc, hc = get(cand, p)

@@ -150,6 +150,7 @@ class Rig:
     price_sats_th_day: int | None
     price_usd_th_day: float | None
     btc_day_with_fee: float | None
+    usd_cost_day: float | None
     min_cost_btc: float | None
     min_cost_usd: float | None
     platform_fee_bps: int | None
@@ -252,6 +253,7 @@ def normalize(rows, *, ths_btc_day, btc_usd, xbt_usd) -> list[Rig]:
                 price_sats_th_day=sats,
                 price_usd_th_day=usd_th,
                 btc_day_with_fee=_f(day),
+                usd_cost_day=_f(day * btc) if day is not None and btc is not None and btc > 0 else None,
                 min_cost_btc=_f(booking),
                 min_cost_usd=_f(booking * btc) if booking is not None and btc is not None and btc > 0 else None,
                 platform_fee_bps=fee_bps,
@@ -478,7 +480,7 @@ def card_html(rig: dict, labels: dict) -> str:
     facts = (
         (labels.get("sats", "sats / TH / day"), _sats_text(rig.get("price_sats_th_day"))),
         (labels.get("usdTh", "USD / TH / day"), _usd_text(rig.get("price_usd_th_day"))),
-        (labels.get("btcDay", "BTC / day incl. fee"), _btc_text(rig.get("btc_day_with_fee"))),
+        (labels.get("btcDay", "Cost / day incl. fee"), _btc_text(rig.get("btc_day_with_fee")) + " · " + _usd_text(rig.get("usd_cost_day"))),
         (labels.get("minCost", "Minimum booking"), _btc_text(rig.get("min_cost_btc")) + " · " + _usd_text(rig.get("min_cost_usd"))),
         (labels.get("fee", "Platform fee"), _fee_text(rig.get("platform_fee_bps"))),
         (labels.get("xbtDay", "Est. XBT / day"), _xbt_text(rig.get("xbt_day"))),

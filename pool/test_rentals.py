@@ -36,7 +36,7 @@ LABELS = {
     "live": "live",
     "sats": "sats / TH / day",
     "usdTh": "USD / TH / day",
-    "btcDay": "BTC / day incl. fee",
+    "btcDay": "Cost / day incl. fee",
     "minCost": "Minimum booking",
     "fee": "Platform fee",
     "xbtDay": "Est. XBT / day",
@@ -111,6 +111,7 @@ class RentalsMath(unittest.TestCase):
         self.assertAlmostEqual(rig.btc_day_with_fee, upstream["price_btc_day_with_fee"], places=12)
         self.assertAlmostEqual(rig.min_cost_btc, upstream["est_min_cost_btc"], places=12)
         self.assertAlmostEqual(rig.min_cost_usd, rig.min_cost_btc * 82707, places=8)
+        self.assertAlmostEqual(rig.usd_cost_day, rig.btc_day_with_fee * 82707, places=8)
         self.assertAlmostEqual(rig.price_usd_th_day, 5500 / 1e8 * 82707, places=6)
         self.assertAlmostEqual(rig.xbt_day, 0.55 * 0.01, places=8)
         self.assertAlmostEqual(rig.usd_day, rig.xbt_day * 2, places=8)
