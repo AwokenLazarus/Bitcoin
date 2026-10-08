@@ -169,42 +169,23 @@ fn kept_payee_bytes(issued: &[Output], pool_script: &[u8], cb: &coinbase::Coinba
     (kept > 0 && skipped).then_some(kept)
 }
 
-/// This chain's GBT `weightlimit` when a gateway does not report the template's own.
-/// Heavier blocks fail `bad-blk-weight-reduced_data`. The 4_000_000 this replaced is the
-/// SHA256d consensus limit, which this chain does not use.
-const DEFAULT_TEMPLATE_WEIGHT_LIMIT: u32 = 800_000;
-/// BLAKE2b header, four weight units a byte. The 340 this replaced was the 80-byte SHA256d header
-/// (`datum_stratum_coinbase_fit_to_template` still adds 340 on CONVOY trees that lack the fix).
-const HEADER_WEIGHT: u32 = 164 * 4;
-/// Witness the node adds to the coinbase: marker, flag, and one 32-byte item. CONVOY counts the
-/// same 36.
-const COINBASE_WITNESS_WEIGHT: u32 = 36;
+/// The block weight CONVOY fits a coinbase class into (`datum_stratum_coinbase_fit_to_template`
+/// in `datum_coinbaser.c`): the consensus limit less the header and coinbase frame it counts. A
+/// template of `txn_total_weight` leaves a class `(this - txn_total_weight) / 4` bytes.
+const TEMPLATE_WEIGHT_LIMIT: u32 = 4_000_000 - 340 - 36;
 /// Room a template must leave beyond the payee bytes a section kept for the cut to have been its
 /// class's and not the template's: a class's fixed part (the coinbase frame, scriptSig and pool
 /// output, about 250 bytes on a live CONVOY gateway) and one more output, with margin.
 const CLASS_BUDGET_TEMPLATE_SLACK: usize = 512;
 
-/// Weight a coinbase class is fitted into: the template's own `weightlimit` when the gateway
-/// reports one (optional pow section 0x06), otherwise [`DEFAULT_TEMPLATE_WEIGHT_LIMIT`], and never
-/// above that. A report of the SHA256d 4,000,000 would leave enough room to call a template cut
-/// a class and turn the guard off. Less the BLAKE2b header and the coinbase witness. A template
-/// of `txn_total_weight` leaves `(this - txn_total_weight) / 4` bytes.
-fn template_weight_budget(weightlimit: Option<u32>) -> u32 {
-    weightlimit
-        .unwrap_or(DEFAULT_TEMPLATE_WEIGHT_LIMIT)
-        .min(DEFAULT_TEMPLATE_WEIGHT_LIMIT)
-        .saturating_sub(HEADER_WEIGHT)
-        .saturating_sub(COINBASE_WITNESS_WEIGHT)
-}
-
 /// Whether a template of `txn_total_weight` left room enough that a section keeping `kept` payee
-/// bytes was cut by its size class, not by the template. A template packed to this chain's
-/// 800,000 weight limit leaves about 2 KB, which is a template cut, not a class. The weight is
-/// the gateway's word, clamped to [`DEFAULT_TEMPLATE_WEIGHT_LIMIT`]. A report under that can only
-/// stop a budget or teach a smaller one. A report over it is this chain's limit, not a way to
-/// turn the guard off.
-fn template_left_room(kept: usize, txn_total_weight: u32, weightlimit: Option<u32>) -> bool {
-    let left = (template_weight_budget(weightlimit).saturating_sub(txn_total_weight) / 4) as usize;
+/// bytes was cut by its size class, not by the template. Bitcoin Core's default template (4 000
+/// weight units kept for the coinbase) leaves about 1 900 bytes, more than a class of 17 outputs
+/// needs; one packed to the last few thousand weight units does not, and says nothing about the
+/// class. The weight is the gateway's word: a gateway that lies about it can only stop itself
+/// teaching a budget, or teach itself a smaller one, as it could with the shares it sends anyway.
+fn template_left_room(kept: usize, txn_total_weight: u32) -> bool {
+    let left = (TEMPLATE_WEIGHT_LIMIT.saturating_sub(txn_total_weight) / 4) as usize;
     left >= kept + CLASS_BUDGET_TEMPLATE_SLACK
 }
 
@@ -807,8 +788,6 @@ struct PartialJob {
     section: u8,
     coinbaser_id: u8,
     txn_total_weight: u32,
-    /// The template's GBT `weightlimit`, when the gateway reported one.
-    weightlimit: Option<u32>,
 }
 
 /// What an accepted pool-only share says about why its coinbase had no miner outputs.
@@ -1660,8 +1639,8 @@ impl Session {
             );
             return self.reject(&s, mining::REJECT_COINBASE_TOO_LARGE).await;
         }
-        let (height, coinbaser_id, prev_hash, nbits, txn_total_weight, weightlimit) = match &self.slots[job_id].job {
-            Some(j) => (j.height, j.coinbaser_id, j.prev_hash, j.nbits_u32(), j.txn_total_weight, j.weightlimit),
+        let (height, coinbaser_id, prev_hash, nbits, txn_total_weight) = match &self.slots[job_id].job {
+            Some(j) => (j.height, j.coinbaser_id, j.prev_hash, j.nbits_u32(), j.txn_total_weight),
             None => return self.reject(&s, mining::REJECT_BAD_JOB_ID).await,
         };
         // The job section is the gateway's account of the chain; the node's is the one that
@@ -1901,7 +1880,7 @@ impl Session {
         });
         // A share under min-diff earns nothing. Counting it would let one ground hash teach a budget.
         if matches!(v.coinbase_kind, CoinbaseKind::Partial(_)) && v.work > 0 {
-            let job = PartialJob { section: s.coinbase_id, coinbaser_id, txn_total_weight, weightlimit };
+            let job = PartialJob { section: s.coinbase_id, coinbaser_id, txn_total_weight };
             self.note_partial_share(job, issued_outputs.as_deref(), &v.coinbase);
         }
         let status = if matches!(v.coinbase_kind, CoinbaseKind::Split) {
@@ -2175,7 +2154,7 @@ impl Session {
     /// Learn this session's class budget from an accepted Partial share (`class-budget`): the
     /// payee bytes its section kept of the list its job was issued.
     fn note_partial_share(&mut self, job: PartialJob, issued: Option<&[Output]>, cb: &coinbase::Coinbase) {
-        let PartialJob { section, coinbaser_id, txn_total_weight, weightlimit } = job;
+        let PartialJob { section, coinbaser_id, txn_total_weight } = job;
         if self.class_budget.is_none() {
             return;
         }
@@ -2187,7 +2166,7 @@ impl Session {
             return;
         }
         let Some(kept) = kept_payee_bytes(issued, &self.shared.pool_script, cb) else { return };
-        if !template_left_room(kept, txn_total_weight, weightlimit) {
+        if !template_left_room(kept, txn_total_weight) {
             return;
         }
         self.expire_class_budget();
@@ -3436,29 +3415,14 @@ mod tests {
     /// A section is taken for its class only where the template left it more room than it kept.
     #[test]
     fn a_section_cut_by_a_full_template_is_not_taken_for_its_class() {
-        // this chain, no weightlimit on the share: 800,000. A quiet template has room.
-        assert!(template_left_room(527, 100_000, None));
-        assert!(template_left_room(1_929, 100_000, None));
-        assert!(template_left_room(527, 0, None));
-        // packed to the limit the way XBT-108's iohzrd run was: 1,929 payee bytes kept, and the
-        // template left less than that plus the 512-byte slack. The old 4,000,000 limit would
-        // have called this a class cut.
-        assert!(!template_left_room(1_929, 790_000, None));
-        assert!(!template_left_room(527, 798_000, None));
-        // a report above this chain's limit is clamped to 800,000, so a template packed past
-        // that is not a class cut, the same as a gateway that omitted the section
-        assert!(!template_left_room(527, 3_992_000, Some(4_000_000)));
-        assert!(!template_left_room(310, 3_992_000, Some(4_000_000)));
-        assert!(!template_left_room(1_300, 3_992_000, Some(4_000_000)));
-        assert_eq!(template_left_room(1_929, 790_000, Some(4_000_000)), template_left_room(1_929, 790_000, None));
-        assert_eq!(template_left_room(527, 100_000, Some(4_000_000)), template_left_room(527, 100_000, None));
-        assert!(template_left_room(527, 100_000, Some(4_000_000)));
-        // a report under the cap is used as given
-        assert!(!template_left_room(527, 790_000, Some(700_000)));
-        assert!(!template_left_room(527, 3_996_000, Some(4_000_000)));
-        assert!(!template_left_room(1_500, 3_992_000, Some(4_000_000)));
-        assert!(!template_left_room(31, 4_100_000, Some(4_000_000)));
-        assert!(!template_left_room(31, 4_100_000, None));
+        // what a node's default template leaves (4 000 weight units kept for the coinbase)
+        assert!(template_left_room(527, 3_992_000));
+        assert!(template_left_room(310, 3_992_000) && template_left_room(1_300, 3_992_000));
+        assert!(template_left_room(527, 0));
+        // packed to the last few thousand, or past the limit
+        assert!(!template_left_room(527, 3_996_000));
+        assert!(!template_left_room(1_500, 3_992_000));
+        assert!(!template_left_room(31, 4_100_000));
     }
 
     /// CONVOY C gateways only. iohzrd's `7491a50` is one, and never learns a budget: every

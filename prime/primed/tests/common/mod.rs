@@ -327,7 +327,6 @@ pub fn pool_only_share(
             txn_total_size: 0,
             txn_total_sigops: 0,
             merkle_branches: pow::merkle_branches_for_coinbase(&txs),
-            weightlimit: None,
         }),
         coinbase: Some(CoinbaseSection { coinbase_id: 0, coinb1, coinb2 }),
     }

@@ -16,7 +16,7 @@ mod stats;
 mod validity;
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -28,7 +28,7 @@ use tokio::sync::{broadcast, watch};
 
 use crate::address::Network;
 use crate::config::Config;
-use crate::state::{class_budget_held_off_at_start, now, Shared, Totals};
+use crate::state::{now, Shared, Totals};
 
 #[derive(Parser)]
 #[command(name = "primed", version, about = "Lazarus DATUM Prime: pool side of the DATUM protocol with TIDES payouts")]
@@ -269,7 +269,7 @@ fn run(cfg: Config) -> i32 {
         }
     }
     let block_log = BlockLog::open(&cfg.data_dir);
-    let mut blocks = match block_log.read_all() {
+    let blocks = match block_log.read_all() {
         Ok(b) => b,
         Err(e) => {
             eprintln!("blocks.jsonl: {e}");
@@ -287,21 +287,6 @@ fn run(cfg: Config) -> i32 {
         return 1;
     }
     backfill_last_seen(&mut ledger, &blocks);
-    // After reconcile: a repaired shortfall becomes `debited` on a hash the ledger already
-    // applied, and reconcile must not take it off the books a second time.
-    let repaired = tides::repair_orphan_sibling_shortfall(&mut blocks);
-    for record in &repaired {
-        if let Err(e) = block_log.append(record) {
-            log::error!("blocks.jsonl: could not record the sibling shortfall repair for {}: {e}", record.hash);
-            return 1;
-        }
-    }
-    if !repaired.is_empty() {
-        log::warn!(
-            "blocks.jsonl: repaired {} block record(s) whose shortfall a crash left behind an orphan",
-            repaired.len()
-        );
-    }
 
     let (tip_tx, tip) = watch::channel(None);
     let (notify, _) = broadcast::channel(64);
@@ -328,7 +313,6 @@ fn run(cfg: Config) -> i32 {
         network,
         ledger: Mutex::new(ledger),
         blocks: Mutex::new(blocks),
-        class_carry_prefix: Mutex::new(tides::ClassCarryFold::default()),
         block_log,
         clients: Mutex::new(Default::default()),
         quarantine: Default::default(),
@@ -350,7 +334,6 @@ fn run(cfg: Config) -> i32 {
         class_budget_held_off: AtomicBool::new(false),
         cfg,
     });
-    arm_class_budget_hold(&shared);
     log::info!("pool pubkey {}", shared.pool.public_hex());
     log::info!(
         "payout {} fee {}bps stratum {}bps window {}x min-diff {}",
@@ -483,35 +466,6 @@ fn backfill_last_seen(ledger: &mut tides::Ledger, blocks: &[tides::BlockRecord])
         unknown.len(),
         unknown.len() - from_log
     );
-}
-
-/// A restart forgets the in-memory hold. Carry still above the resume line, or at the
-/// ceiling, is that hold: set it before the first coinbaser, and say so in the same words
-/// a running process uses.
-fn arm_class_budget_hold(shared: &Shared) {
-    if !shared.cfg.class_budget {
-        return;
-    }
-    let carry = shared.ledger.lock().unwrap_or_else(|e| e.into_inner()).window.total_carry();
-    let ceiling = shared.cfg.class_budget_carry_ceiling;
-    if !class_budget_held_off_at_start(carry, ceiling) {
-        return;
-    }
-    shared.class_budget_held_off.store(true, Ordering::Relaxed);
-    let resume = ceiling - ceiling / 4;
-    if ceiling == 0 || carry >= ceiling {
-        log::warn!(
-            "class-budget: carry on the books is {carry} sats, at or over class-budget-carry-ceiling \
-             ({ceiling}): coinbasers go out at the pool's budget, and blocks found on a class-limited \
-             gateway are Partial and owe, until carry is back under {resume}"
-        );
-    } else {
-        log::warn!(
-            "class-budget: carry on the books is {carry} sats, above the resume line after a restart \
-             (class-budget-carry-ceiling {ceiling}): coinbasers go out at the pool's budget, and blocks \
-             found on a class-limited gateway are Partial and owe, until carry is back under {resume}"
-        );
-    }
 }
 
 /// If the last `stats.json` (written by the previous process) disagrees with the

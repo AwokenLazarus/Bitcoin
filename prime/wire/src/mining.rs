@@ -145,9 +145,6 @@ pub struct JobSection {
     pub txn_total_sigops: u32,
     /// SHA256d merkle branches for the coinbase, internal byte order.
     pub merkle_branches: Vec<[u8; 32]>,
-    /// The template's GBT `weightlimit`, when the gateway sends section 0x06. Absent on every
-    /// gateway that does not: primed then uses this chain's 800,000.
-    pub weightlimit: Option<u32>,
 }
 
 impl JobSection {
@@ -265,10 +262,6 @@ impl PowSubmit {
             for b in &j.merkle_branches {
                 m.extend_from_slice(b);
             }
-            if let Some(limit) = j.weightlimit {
-                m.push(0x06);
-                m.extend_from_slice(&limit.to_le_bytes());
-            }
         }
         if let Some(c) = &self.coinbase {
             m.push(0x02);
@@ -299,7 +292,6 @@ impl PowSubmit {
         let username = String::from_utf8_lossy(c.cstr(MAX_USERNAME)?).into_owned();
         let reserved = c.array::<4>()?;
 
-        let mut weightlimit: Option<u32> = None;
         let mut s = PowSubmit {
             job_id,
             coinbase_id,
@@ -357,15 +349,7 @@ impl PowSubmit {
                         txn_total_size,
                         txn_total_sigops,
                         merkle_branches,
-                        weightlimit,
                     });
-                }
-                0x06 => {
-                    let limit = c.u32()?;
-                    weightlimit = Some(limit);
-                    if let Some(job) = s.job.as_mut() {
-                        job.weightlimit = Some(limit);
-                    }
                 }
                 0x02 => {
                     let id = c.u8()?;
@@ -628,7 +612,6 @@ mod tests {
                 txn_total_size: 2,
                 txn_total_sigops: 3,
                 merkle_branches: vec![[1u8; 32], [2u8; 32], [3u8; 32]],
-                weightlimit: None,
             }),
             coinbase: Some(CoinbaseSection { coinbase_id: 4, coinb1: vec![1, 2, 3, 4, 5], coinb2: vec![6, 7] }),
         }
@@ -647,23 +630,6 @@ mod tests {
         assert!(s.use_time_offset());
         assert!(s.is_blake2b() && s.quickdiff() && !s.is_block());
         assert_eq!(s.claimed_work(), 8192);
-    }
-
-    /// Section 0x06 is the template's GBT weightlimit. Absent, the field stays None, which
-    /// primed reads as this chain's 800,000.
-    #[test]
-    fn job_weightlimit_round_trip() {
-        let mut s = sample();
-        s.job.as_mut().unwrap().weightlimit = Some(800_000);
-        match parse_client(&s.encode()).unwrap() {
-            ClientMsg::Pow(p) => assert_eq!(p.job.unwrap().weightlimit, Some(800_000)),
-            other => panic!("{other:?}"),
-        }
-        s.job.as_mut().unwrap().weightlimit = None;
-        match parse_client(&s.encode()).unwrap() {
-            ClientMsg::Pow(p) => assert_eq!(p.job.unwrap().weightlimit, None),
-            other => panic!("{other:?}"),
-        }
     }
 
     /// The iohzrd gateway leaves `FLAG_BLAKE2B` clear and marks the algorithm only in the

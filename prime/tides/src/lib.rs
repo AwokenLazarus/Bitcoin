@@ -384,15 +384,13 @@ impl Window {
 
     /// Put `sats` back on an identity's books: a double-pay debt is paid down first and only the
     /// rest is carry. Otherwise the same sats stand as a debt and as a balance at once, and the
-    /// next coinbaser pays the balance out while the debt waits. Returns how much of `sats`
-    /// paid a debt down rather than becoming carry.
+    /// next coinbaser pays the balance out while the debt waits. Returns the new carry.
     fn restore_carry(&mut self, identity: &str, sats: u64) -> u64 {
-        let paid = self.reduce_debt(identity, sats);
-        let rest = sats - paid;
-        if rest > 0 {
-            self.adjust_carry(identity, rest.min(i64::MAX as u64) as i64);
+        let rest = sats - self.reduce_debt(identity, sats);
+        if rest == 0 {
+            return self.carry_of(identity);
         }
-        paid
+        self.adjust_carry(identity, rest.min(i64::MAX as u64) as i64)
     }
 
     /// Move an identity's carry by `delta` sats, saturating at zero. Returns the new carry.
@@ -758,10 +756,7 @@ impl Ledger {
             }
             let known = self.window.ident_index.contains_key(identity);
             let new = if *d > 0 {
-                // restore_carry pays a double-pay debt before the rest is a balance.
-                // Callers are told the new carry, not how much of the credit went to the debt.
-                self.window.restore_carry(identity, d.unsigned_abs());
-                self.window.carry_of(identity)
+                self.window.restore_carry(identity, d.unsigned_abs())
             } else {
                 self.window.adjust_carry(identity, *d)
             };
@@ -861,13 +856,6 @@ impl Ledger {
     /// credit could not take back because it had already been paid out (only possible for a
     /// block the node confirmed and then reorganised away).
     pub fn unbook(&mut self, books: &mut Books) -> u64 {
-        self.unbook_detail(books).0
-    }
-
-    /// [`Ledger::unbook`], plus the debt each restored debit paid down. That debt is a later
-    /// coinbase that paid carry this block had already taken off the books. When this block is
-    /// the losing sibling, that later record's shortfall was not a second payment.
-    pub fn unbook_detail(&mut self, books: &mut Books) -> (u64, Vec<(String, u64)>) {
         let mut short = 0u64;
         if books.credits_live {
             for (identity, sats) in std::mem::take(&mut books.credited) {
@@ -883,16 +871,12 @@ impl Ledger {
             books.rebate_added = 0;
             books.credits_live = false;
         }
-        let mut debt_settled = Vec::new();
         if books.debits_live {
             // A later block on a coinbaser from before this one may have paid the same carry
             // again and left it as a debt. That payment stands, so what comes back settles the
             // debt before any of it is a balance to pay out a third time.
             for (identity, sats) in std::mem::take(&mut books.debited) {
-                let paid = self.window.restore_carry(&identity, sats);
-                if paid > 0 {
-                    debt_settled.push((identity, paid));
-                }
+                self.window.restore_carry(&identity, sats);
             }
             for (identity, sats) in std::mem::take(&mut books.shortfall) {
                 self.window.forgive_debt(&identity, sats);
@@ -902,7 +886,7 @@ impl Ledger {
             books.debits_live = false;
         }
         self.dirty = true;
-        (short, debt_settled)
+        short
     }
 
     /// Set stale balances aside for a payment made by hand. Each entry is taken only if the
@@ -1415,265 +1399,6 @@ pub struct BlockRecord {
 
 fn is_zero(n: &u64) -> bool {
     *n == 0
-}
-
-/// Move a false shortfall onto `carry_paid`.
-///
-/// `settled` is the debt an orphaned same-height sibling's debit paid down, and it is consumed
-/// as it is applied. The shortfall was that sibling having already taken the carry off the
-/// books; the chain paid it once. Returns the sats moved. Per-identity amounts come off
-/// `books.shortfall` and onto `books.debited`, so a later orphan of this block puts the carry
-/// back.
-pub fn move_shortfall_to_paid(record: &mut BlockRecord, settled: &mut [(String, u64)]) -> u64 {
-    if record.carry_shortfall_sats == 0 || settled.iter().all(|(_, sats)| *sats == 0) {
-        return 0;
-    }
-    let mut moved = 0u64;
-    if let Some(books) = record.books.as_mut() {
-        let mut still = Vec::new();
-        for (identity, sats) in std::mem::take(&mut books.shortfall) {
-            let take = take_settled(settled, &identity, sats);
-            if take > 0 {
-                books.debited.push((identity.clone(), take));
-                moved += take;
-            }
-            if sats > take {
-                still.push((identity, sats - take));
-            }
-        }
-        books.shortfall = still;
-        if moved > 0 {
-            books.debits_live = true;
-        }
-    } else {
-        let mut room = record.carry_shortfall_sats;
-        for (_, sats) in settled.iter_mut() {
-            let take = room.min(*sats);
-            *sats -= take;
-            room -= take;
-            moved += take;
-            if room == 0 {
-                break;
-            }
-        }
-    }
-    record.carry_paid = record.carry_paid.saturating_add(moved);
-    record.carry_shortfall_sats = record.carry_shortfall_sats.saturating_sub(moved);
-    moved
-}
-
-fn take_settled(settled: &mut [(String, u64)], identity: &str, want: u64) -> u64 {
-    let mut got = 0u64;
-    for (id, sats) in settled.iter_mut() {
-        if id == identity && *sats > 0 && got < want {
-            let take = (want - got).min(*sats);
-            *sats -= take;
-            got += take;
-        }
-    }
-    got
-}
-
-/// Replay of class carry and other carry, one pair of buckets per identity.
-///
-/// Primed keeps the last 10,000 block records in memory and drops the older ones. The figure
-/// is this fold of whatever was dropped, then the records still held. A restart loads the
-/// whole of `blocks.jsonl` and starts from an empty fold, so the dropped prefix is not counted
-/// twice.
-#[derive(Clone, Debug, Default)]
-pub struct ClassCarryFold {
-    /// Oldest credit first. `true` is class carry (a class budget's tail); `false` is everything
-    /// else (dust under the floor, rebate).
-    lots: HashMap<String, VecDeque<(bool, u64)>>,
-    /// `carry_reserved_sats` on blocks whose credits are not on the books yet. The output is
-    /// already in the wallet.
-    unsettled: u64,
-}
-
-impl ClassCarryFold {
-    /// Replay `blocks` onto this fold, in booking order. Orphans are skipped.
-    pub fn apply_blocks(&mut self, blocks: &[BlockRecord]) {
-        let mut order: Vec<&BlockRecord> = blocks.iter().filter(|b| !b.kind.starts_with("orphan")).collect();
-        order.sort_by(|a, b| (a.ts, a.height, a.hash.as_str()).cmp(&(b.ts, b.height, b.hash.as_str())));
-        for block in order {
-            self.apply(block);
-        }
-    }
-
-    /// Unpaid class carry after replaying `blocks` on top of this fold.
-    pub fn unpaid_with(&self, blocks: &[BlockRecord]) -> u64 {
-        let mut fold = self.clone();
-        fold.apply_blocks(blocks);
-        fold.unpaid()
-    }
-
-    fn unpaid(&self) -> u64 {
-        let class = self.lots.values().flatten().filter(|(is_class, _)| *is_class).map(|(_, sats)| *sats).sum::<u64>();
-        class.saturating_add(self.unsettled)
-    }
-
-    fn apply(&mut self, block: &BlockRecord) {
-        // A block pays carry from earlier blocks before its own credits land.
-        for (identity, sats) in identity_debits(block) {
-            self.debit(&identity, sats);
-        }
-        let credits_on = match &block.books {
-            Some(books) => books.credits_live,
-            None => true,
-        };
-        if !credits_on {
-            self.unsettled = self.unsettled.saturating_add(block.carry_reserved_sats);
-            return;
-        }
-        let credits = identity_credits(block);
-        let landed: u64 = credits.iter().map(|(_, sats)| *sats).sum();
-        // The reserve is the earnings a class budget deferred for room. Those credits are booked
-        // ahead of dust and rebate (`split::carry_delta`: unpaid, then rebate; and a balance
-        // under the floor sorts after one the budget could not fit). Filling the reserve from
-        // the front of that list puts it on those identities.
-        let mut class_left = block.carry_reserved_sats.min(landed);
-        for (identity, sats) in credits {
-            let class_part = sats.min(class_left);
-            class_left -= class_part;
-            let other = sats - class_part;
-            let lots = self.lots.entry(identity).or_default();
-            if class_part > 0 {
-                lots.push_back((true, class_part));
-            }
-            if other > 0 {
-                lots.push_back((false, other));
-            }
-        }
-    }
-
-    fn debit(&mut self, identity: &str, mut sats: u64) {
-        let Some(lots) = self.lots.get_mut(identity) else { return };
-        while sats > 0 {
-            let Some(front) = lots.front_mut() else { break };
-            let take = sats.min(front.1);
-            front.1 -= take;
-            sats -= take;
-            if front.1 == 0 {
-                lots.pop_front();
-            }
-        }
-    }
-}
-
-/// Carry class budgets put in the pool's output that has not been paid out.
-///
-/// Each identity has its own class carry and its own other carry, credited in the order the
-/// blocks booked them. A debit reduces that identity's buckets only. The coinbaser pays one
-/// balance per identity (`split::compute`: `m.carry.min(carry_room)`), not a class bucket and a
-/// dust bucket, so a partial payment has no bucket to name. It consumes this identity's credits
-/// from the oldest: that is the balance being paid down. Dust sitting on another identity is
-/// not this payment, and a debit larger than the credits replayed here does not come out of
-/// anyone else's class.
-///
-/// A confirmed block adds its `carry_reserved_sats` once those credits are on the books. An
-/// unsettled block's reserve is still in its pool output, so it counts too. Orphans are
-/// skipped: their booking was undone. The figure is every identity's unpaid class carry plus
-/// those unsettled reserves. The fee wallet holds this back, not all of `carry_total`, which
-/// also holds the dust.
-pub fn class_carry_unpaid(blocks: &[BlockRecord]) -> u64 {
-    ClassCarryFold::default().unpaid_with(blocks)
-}
-
-fn identity_debits(block: &BlockRecord) -> Vec<(String, u64)> {
-    match &block.books {
-        Some(books) if books.debits_live => books.debited.clone(),
-        Some(_) => Vec::new(),
-        None => block
-            .carry_delta
-            .iter()
-            .filter(|d| d.1 < 0)
-            .map(|(identity, sats)| (identity.clone(), sats.unsigned_abs()))
-            .collect(),
-    }
-}
-
-fn identity_credits(block: &BlockRecord) -> Vec<(String, u64)> {
-    match &block.books {
-        Some(books) => books.credited.clone(),
-        None => block
-            .carry_delta
-            .iter()
-            .filter(|d| d.1 > 0)
-            .map(|(identity, sats)| (identity.clone(), *sats as u64))
-            .collect(),
-    }
-}
-
-/// A crash between the orphan line and the sibling correction (`node::mark_orphan`) leaves the
-/// winner's shortfall in place. The orphan line is already appended, and `unbook` has cleared
-/// its books, so the debited list is gone; what that coinbase paid is still the negative
-/// `carry_delta`. On load, if those books are clear and a same-height sibling still has a
-/// shortfall for someone the orphan paid, move it once. A second call finds the shortfall
-/// already moved and changes nothing.
-struct OrphanPay {
-    height: u32,
-    hash: String,
-    paid: Vec<(String, u64)>,
-}
-
-pub fn repair_orphan_sibling_shortfall(blocks: &mut [BlockRecord]) -> Vec<BlockRecord> {
-    let orphans: Vec<OrphanPay> = blocks
-        .iter()
-        .filter(|b| b.kind.starts_with("orphan") && orphan_books_clear(b))
-        .filter_map(|b| {
-            let paid = negative_carry(b);
-            if paid.is_empty() {
-                None
-            } else {
-                Some(OrphanPay { height: b.height, hash: b.hash.clone(), paid })
-            }
-        })
-        .collect();
-    let mut changed = Vec::new();
-    for OrphanPay { height, hash, mut paid } in orphans {
-        let siblings: Vec<usize> = blocks
-            .iter()
-            .enumerate()
-            .rev()
-            .filter(|(_, r)| {
-                r.height == height && r.hash != hash && !r.kind.starts_with("orphan") && r.carry_shortfall_sats > 0
-            })
-            .map(|(i, _)| i)
-            .collect();
-        for sibling in siblings {
-            if paid.iter().all(|(_, sats)| *sats == 0) {
-                break;
-            }
-            let moved = move_shortfall_to_paid(&mut blocks[sibling], &mut paid);
-            if moved > 0 {
-                changed.push(blocks[sibling].clone());
-            }
-        }
-    }
-    changed
-}
-
-fn orphan_books_clear(block: &BlockRecord) -> bool {
-    match &block.books {
-        Some(books) => !books.debits_live && books.debited.is_empty() && books.shortfall.is_empty(),
-        None => false,
-    }
-}
-
-fn negative_carry(block: &BlockRecord) -> Vec<(String, u64)> {
-    let mut out: Vec<(String, u64)> = Vec::new();
-    for (identity, sats) in &block.carry_delta {
-        if *sats >= 0 {
-            continue;
-        }
-        let amt = sats.unsigned_abs();
-        if let Some(slot) = out.iter_mut().find(|(id, _)| id == identity) {
-            slot.1 = slot.1.saturating_add(amt);
-        } else {
-            out.push((identity.clone(), amt));
-        }
-    }
-    out
 }
 
 /// A found block's effect on the ledger, booked in two steps and undone exactly.
@@ -2223,229 +1948,6 @@ mod tests {
         l.unbook(&mut second);
         assert_eq!((l.window.debt_of("m"), l.window.carry_of("m")), (0, 40));
         let _ = fs::remove_dir_all(&dir);
-    }
-
-    /// Two block-target shares on one tip: the loser takes the carry, the winner is booked as a
-    /// shortfall, and orphaning the loser settles that debt. The winner's record must then say
-    /// the carry was paid once.
-    #[test]
-    fn orphaning_a_sibling_clears_the_winners_false_shortfall() {
-        let dir = std::env::temp_dir().join(format!("tides-sibling-{}-{}", std::process::id(), line!()));
-        let _ = fs::remove_dir_all(&dir);
-        let mut l = Ledger::open(&dir).unwrap();
-        l.set_carry("m", 100);
-        let mut loser = Books::new(0, 0);
-        l.book_debits(&[("m".into(), -100)], &mut loser);
-        let mut winner = Books::new(0, 0);
-        l.book_debits(&[("m".into(), -100)], &mut winner);
-        assert_eq!(winner.shortfall, vec![("m".into(), 100)]);
-        let mut record = BlockRecord {
-            ts: 1,
-            height: 2,
-            hash: "win".into(),
-            finder: None,
-            coinbase_value: 100,
-            kind: "split".into(),
-            owed_sats: 0,
-            split: vec![],
-            pool_sats: 0,
-            carry_paid: 0,
-            carry_delta: vec![("m".into(), -100)],
-            rebate_credited: 0,
-            rebate_delta: 0,
-            settled: false,
-            submit: "pending".into(),
-            gateway: "ab".into(),
-            books: Some(winner),
-            carry_shortfall_sats: 100,
-            carry_reserved_sats: 0,
-        };
-        let (_short, mut settled) = l.unbook_detail(&mut loser);
-        assert_eq!(settled, vec![("m".into(), 100)]);
-        assert_eq!(l.window.debt_of("m"), 0);
-        assert_eq!(move_shortfall_to_paid(&mut record, &mut settled), 100);
-        assert_eq!((record.carry_paid, record.carry_shortfall_sats), (100, 0));
-        let books = record.books.unwrap();
-        assert!(books.shortfall.is_empty());
-        assert_eq!(books.debited, vec![("m".into(), 100)]);
-        assert!(settled.iter().all(|(_, sats)| *sats == 0));
-        let _ = fs::remove_dir_all(&dir);
-    }
-
-    /// Dust on one identity is not class carry. Paying that identity does not clear another
-    /// identity's class tail, and paying part of the class tail leaves the rest.
-    #[test]
-    fn class_carry_unpaid_excludes_dust_deferrals() {
-        let dust = BlockRecord {
-            ts: 1,
-            height: 1,
-            hash: "dust".into(),
-            finder: None,
-            coinbase_value: 1,
-            kind: "partial".into(),
-            owed_sats: 50,
-            split: vec![],
-            pool_sats: 0,
-            carry_paid: 0,
-            carry_delta: vec![("d".into(), 100)],
-            rebate_credited: 0,
-            rebate_delta: 0,
-            settled: true,
-            submit: "accepted".into(),
-            gateway: "ab".into(),
-            books: None,
-            carry_shortfall_sats: 0,
-            carry_reserved_sats: 0,
-        };
-        let class = BlockRecord {
-            ts: 2,
-            height: 2,
-            hash: "class".into(),
-            finder: None,
-            coinbase_value: 1,
-            kind: "split".into(),
-            owed_sats: 0,
-            split: vec![],
-            pool_sats: 50,
-            carry_paid: 0,
-            carry_delta: vec![("c".into(), 50)],
-            rebate_credited: 0,
-            rebate_delta: 0,
-            settled: true,
-            submit: "accepted".into(),
-            gateway: "ab".into(),
-            books: None,
-            carry_shortfall_sats: 0,
-            carry_reserved_sats: 50,
-        };
-        let mut paid = class.clone();
-        paid.ts = 3;
-        paid.height = 3;
-        paid.hash = "pay".into();
-        paid.carry_paid = 80;
-        paid.carry_delta = vec![("d".into(), -80)];
-        paid.carry_reserved_sats = 0;
-        assert_eq!(class_carry_unpaid(&[dust.clone(), class.clone()]), 50);
-        // 80 of d's dust is paid; c's class carry is untouched
-        assert_eq!(class_carry_unpaid(&[dust.clone(), class.clone(), paid.clone()]), 50);
-        paid.carry_paid = 120;
-        paid.carry_delta = vec![("d".into(), -100), ("c".into(), -20)];
-        assert_eq!(class_carry_unpaid(&[dust, class, paid]), 30);
-    }
-
-    fn bare(ts: u64, height: u32, hash: &str) -> BlockRecord {
-        BlockRecord {
-            ts,
-            height,
-            hash: hash.into(),
-            finder: None,
-            coinbase_value: 1,
-            kind: "split".into(),
-            owed_sats: 0,
-            split: vec![],
-            pool_sats: 0,
-            carry_paid: 0,
-            carry_delta: vec![],
-            rebate_credited: 0,
-            rebate_delta: 0,
-            settled: true,
-            submit: "accepted".into(),
-            gateway: "ab".into(),
-            books: None,
-            carry_shortfall_sats: 0,
-            carry_reserved_sats: 0,
-        }
-    }
-
-    /// The review's case: 61 of dust across other identities, a class tail of 50, then a coinbase
-    /// that pays the class identity 50 and none of the dust. The figure is 0.
-    #[test]
-    fn paying_the_class_identity_clears_its_carry_while_other_dust_sits() {
-        let dust = |id: &str, sats: i64, n: u32| {
-            let mut block = bare(1, n, &format!("dust-{id}"));
-            block.carry_delta = vec![(id.into(), sats)];
-            block
-        };
-        let mut blocks = vec![dust("a", 20, 1), dust("b", 20, 2), dust("c", 21, 3)];
-        let mut class = bare(2, 4, "class");
-        class.carry_delta = vec![("tail".into(), 50)];
-        class.carry_reserved_sats = 50;
-        blocks.push(class);
-        assert_eq!(class_carry_unpaid(&blocks), 50);
-        let mut paid = bare(3, 5, "pay");
-        paid.carry_paid = 50;
-        paid.carry_delta = vec![("tail".into(), -50)];
-        blocks.push(paid);
-        assert_eq!(class_carry_unpaid(&blocks), 0);
-    }
-
-    /// A credit in the records a 10,000 cap would drop still counts, and a later debit of that
-    /// identity does not eat a class tail booked afterwards.
-    #[test]
-    fn class_carry_unpaid_keeps_a_credit_past_the_memory_cap() {
-        let mut blocks = Vec::with_capacity(10_002);
-        let mut old_class = bare(1, 1, "old-class");
-        old_class.carry_delta = vec![("k".into(), 40)];
-        old_class.carry_reserved_sats = 40;
-        blocks.push(old_class);
-        let mut old_other = bare(2, 2, "old-other");
-        old_other.carry_delta = vec![("c".into(), 61)];
-        blocks.push(old_other);
-        for n in 3u32..10_001 {
-            blocks.push(bare(u64::from(n), n, &format!("pad-{n}")));
-        }
-        let mut class = bare(10_001, 10_001, "class");
-        class.carry_delta = vec![("c".into(), 50)];
-        class.carry_reserved_sats = 50;
-        blocks.push(class);
-        let mut paid = bare(10_002, 10_002, "pay");
-        paid.carry_paid = 61;
-        paid.carry_delta = vec![("c".into(), -61)];
-        blocks.push(paid);
-        assert_eq!(blocks.len(), 10_002);
-        assert_eq!(class_carry_unpaid(&blocks), 90);
-        // The last 10,000 have the class tail and the debit, not the credits those came from.
-        // Without the dropped prefix the debit consumes the tail. With it, the tail remains
-        // and the older class credit is still unpaid.
-        let kept = &blocks[blocks.len() - 10_000..];
-        assert_eq!(class_carry_unpaid(kept), 0);
-        let mut prefix = ClassCarryFold::default();
-        prefix.apply_blocks(&blocks[..blocks.len() - 10_000]);
-        assert_eq!(prefix.unpaid_with(kept), 90);
-    }
-
-    /// Crash after the orphan line and before the sibling correction. Load moves the shortfall
-    /// once; a second load does not move it again.
-    #[test]
-    fn a_crash_between_orphan_and_sibling_is_repaired_once() {
-        let mut loser = bare(1, 9, "lose");
-        loser.kind = "orphan:split".into();
-        loser.carry_paid = 100;
-        loser.carry_delta = vec![("m".into(), -100)];
-        loser.books = Some(Books::default());
-        let mut winner = bare(2, 9, "win");
-        winner.carry_shortfall_sats = 100;
-        winner.carry_delta = vec![("m".into(), -100)];
-        winner.books = Some(Books { debits_live: true, shortfall: vec![("m".into(), 100)], ..Books::default() });
-        let mut blocks = vec![loser, winner];
-        let changed = repair_orphan_sibling_shortfall(&mut blocks);
-        assert_eq!(changed.len(), 1);
-        assert_eq!((blocks[1].carry_paid, blocks[1].carry_shortfall_sats), (100, 0));
-        let books = blocks[1].books.clone().unwrap();
-        assert!(books.shortfall.is_empty());
-        assert_eq!(books.debited, vec![("m".into(), 100)]);
-        assert!(repair_orphan_sibling_shortfall(&mut blocks).is_empty());
-        assert_eq!((blocks[1].carry_paid, blocks[1].carry_shortfall_sats), (100, 0));
-    }
-
-    /// A block whose credits are not on the books yet still counts its reserve, once.
-    #[test]
-    fn an_unsettled_class_reserve_counts_before_its_credits_land() {
-        let mut block = bare(1, 1, "pend");
-        block.carry_reserved_sats = 50;
-        block.carry_delta = vec![("c".into(), 50)];
-        block.books = Some(Books::default());
-        assert_eq!(class_carry_unpaid(&[block]), 50);
     }
 
     /// A coinbaser from before the last find credits the owed rebate that find already drew.

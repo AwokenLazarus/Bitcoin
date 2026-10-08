@@ -8,7 +8,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use datum_wire::crypto::Identity;
 use datum_wire::pow::Hash;
-use tides::{BlockLog, BlockRecord, ClassCarryFold, Ledger, MinerStat, SplitParams};
+use tides::{BlockLog, BlockRecord, Ledger, MinerStat, SplitParams};
 use tokio::sync::{broadcast, watch};
 
 use crate::address::{self, Network};
@@ -318,16 +318,6 @@ pub fn class_budget_held_off(held_off: bool, carry: u64, ceiling: u64) -> bool {
     }
 }
 
-/// Whether a process that has just started should hold class budgets off.
-///
-/// The flag lives in memory, so a restart forgets a hold. Carry still above the resume line
-/// (three quarters of the ceiling) is the same hold a running process would still be in, and
-/// carry at the ceiling starts one. Replies that have not relearned a budget must not pay that
-/// carry down through the band, or the hold never re-arms.
-pub fn class_budget_held_off_at_start(carry: u64, ceiling: u64) -> bool {
-    class_budget_held_off(true, carry, ceiling)
-}
-
 /// Every share hash the pool has credited, by block height, across all sessions.
 ///
 /// The hash commits to prev/merkle/nbits/txcount/version and the miner's nonces, so it is
@@ -479,10 +469,6 @@ pub struct Shared {
     pub split_params: SplitParams,
     pub ledger: Mutex<Ledger>,
     pub blocks: Mutex<Vec<BlockRecord>>,
-    /// Class-carry replay of records [`Shared::record_block`] has dropped past
-    /// [`BLOCKS_IN_MEMORY`]. Empty after a restart: startup loads the whole of `blocks.jsonl`
-    /// into `blocks`, so this is not added on top of a full list.
-    pub class_carry_prefix: Mutex<ClassCarryFold>,
     pub block_log: BlockLog,
     pub clients: Mutex<HashMap<u64, ClientInfo>>,
     /// Gateway identity key (full hex) -> when its refusal lapses, and why. Kept in memory:
@@ -755,11 +741,9 @@ impl Shared {
         }
         let mut b = self.blocks.lock().unwrap();
         b.push(r);
-        if b.len() > BLOCKS_IN_MEMORY {
-            // The prefix lock is taken while `blocks` is held. `stats` does the same, so the
-            // figure never sees a drained list whose credits have not been folded yet.
-            let mut prefix = self.class_carry_prefix.lock().unwrap();
-            retain_block_records(&mut b, &mut prefix);
+        if b.len() > 10_000 {
+            let excess = b.len() - 10_000;
+            b.drain(..excess);
         }
     }
 
@@ -774,19 +758,6 @@ impl Shared {
             log::error!("block log append failed: {e}");
         }
         Some(updated)
-    }
-}
-
-/// How many block records stay in memory. Older ones remain in `blocks.jsonl`; their effect on
-/// [`tides::class_carry_unpaid`] is folded into [`Shared::class_carry_prefix`] instead of being
-/// dropped from the figure.
-const BLOCKS_IN_MEMORY: usize = 10_000;
-
-fn retain_block_records(blocks: &mut Vec<BlockRecord>, prefix: &mut ClassCarryFold) {
-    if blocks.len() > BLOCKS_IN_MEMORY {
-        let excess = blocks.len() - BLOCKS_IN_MEMORY;
-        let dropped: Vec<BlockRecord> = blocks.drain(..excess).collect();
-        prefix.apply_blocks(&dropped);
     }
 }
 
@@ -833,7 +804,6 @@ mod tests {
             network: Network::Mainnet,
             ledger: Mutex::new(Ledger::open(dir.join("ledger")).unwrap()),
             blocks: Mutex::new(Vec::new()),
-            class_carry_prefix: Mutex::new(ClassCarryFold::default()),
             block_log: BlockLog::open(&dir),
             clients: Mutex::new(Default::default()),
             quarantine: Default::default(),
@@ -905,26 +875,6 @@ mod tests {
         assert!(!shared.class_budget_open(400_000_000), "held off until well under it");
         assert!(shared.class_budget_open(375_000_000));
         assert!(shared.class_budget_open(c - 1));
-        std::fs::remove_dir_all(&dir).unwrap();
-    }
-
-    /// A restart has no flag. Carry still above the resume line starts the process already held
-    /// off, so the blocks that relearn a budget cannot pay the hold down through the ceiling.
-    #[test]
-    fn a_restart_holds_budgets_off_while_carry_is_above_the_resume_line() {
-        let c = 500_000_000u64;
-        assert!(class_budget_held_off_at_start(c, c));
-        assert!(class_budget_held_off_at_start(c - 1, c), "under the ceiling is still inside the hold");
-        assert!(class_budget_held_off_at_start(375_000_001, c));
-        assert!(!class_budget_held_off_at_start(375_000_000, c));
-        assert!(!class_budget_held_off_at_start(0, c));
-        assert!(class_budget_held_off_at_start(0, 0), "a ceiling of 0 holds them off for good");
-
-        let (shared, dir) = test_shared("restart-hold");
-        shared.class_budget_held_off.store(class_budget_held_off_at_start(400_000_000, c), Ordering::Relaxed);
-        assert!(!shared.class_budget_open(400_000_000), "the hold survives the restart");
-        assert!(!shared.class_budget_open(c - 1));
-        assert!(shared.class_budget_open(375_000_000), "under the resume line it ends");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -1150,50 +1100,6 @@ mod tests {
         assert!(c.admit(house, 16, 8).is_ok());
         assert!(c.admit(house, 16, 8).is_ok());
         assert_eq!(c.admit(house, 16, 8), Err("connection limit reached"));
-    }
-
-    /// The 10,000-record cap drops the oldest records from memory. Their class carry stays in
-    /// the prefix, so the figure is the same as a replay of the whole list.
-    #[test]
-    fn a_list_past_the_memory_cap_still_counts_in_the_figure() {
-        fn bare(n: u32) -> BlockRecord {
-            BlockRecord {
-                ts: u64::from(n),
-                height: n,
-                hash: n.to_string(),
-                finder: None,
-                coinbase_value: 1,
-                kind: "split".into(),
-                owed_sats: 0,
-                split: vec![],
-                pool_sats: 0,
-                carry_paid: 0,
-                carry_delta: vec![],
-                rebate_credited: 0,
-                rebate_delta: 0,
-                settled: true,
-                submit: "accepted".into(),
-                gateway: "ab".into(),
-                books: None,
-                carry_shortfall_sats: 0,
-                carry_reserved_sats: 0,
-            }
-        }
-        let mut all = Vec::with_capacity(BLOCKS_IN_MEMORY + 1);
-        let mut first = bare(1);
-        first.carry_delta = vec![("k".into(), 40)];
-        first.carry_reserved_sats = 40;
-        all.push(first);
-        for n in 2..=(BLOCKS_IN_MEMORY as u32 + 1) {
-            all.push(bare(n));
-        }
-        assert_eq!(all.len(), BLOCKS_IN_MEMORY + 1);
-        assert_eq!(tides::class_carry_unpaid(&all), 40);
-        let mut prefix = ClassCarryFold::default();
-        retain_block_records(&mut all, &mut prefix);
-        assert_eq!(all.len(), BLOCKS_IN_MEMORY);
-        assert_eq!(tides::class_carry_unpaid(&all), 0);
-        assert_eq!(prefix.unpaid_with(&all), 40);
     }
 }
 
