@@ -2,8 +2,9 @@
 
 The marketplace list is one JSON document (a handful of rigs, not a stream), so it
 is held as a list. Fee maths is computed here from sats, hashrate, fee and hours.
-USD of a BTC amount uses a cached BTC/USD quote. XBT yield uses the caller's
-per-TH/day figure, the same one ``/api/hardware`` publishes.
+USD of a BTC amount uses a cached BTC/USD quote. XBT of a BTC amount uses the
+NeoxEX BTCB2_BTC best bid, the rate RouteHash books XBT payments at. XBT yield uses
+the caller's per-TH/day figure, the same one ``/api/hardware`` publishes.
 """
 
 from __future__ import annotations
@@ -30,10 +31,15 @@ BTC_USD_SOURCES = (
     ("coinbase", "https://api.coinbase.com/v2/prices/BTC-USD/spot"),
 )
 
+# RouteHash takes XBT from renters at the NeoxEX best bid. A rig whose owner takes
+# XBT is paid with no trade; otherwise RouteHash sells the XBT for BTC on NeoxEX.
+XBT_BTC_SOURCE = "NeoxEX"
+XBT_BTC_URL = "https://neoxa.exchange/api/exchange/ticker/BTCB2_BTC"
+
 NOTE = (
     "Estimates use current network difficulty and the 3.125 XBT base subsidy, "
     "through your own DATUM gateway on Lazarus (bonus included). Rental prices "
-    "are RouteHash's, paid in BTC. Luck, transaction fees and electricity are not included."
+    "are RouteHash's, paid in BTC or XBT; XBT amounts use the NeoxEX best bid. Luck, transaction fees and electricity are not included."
 )
 
 # Hits inside rental copy only. `stratum.` is a hostname (`stratum.example`), not the
@@ -55,7 +61,8 @@ _listings = {
     "refreshing": False,
     "error": "",
 }
-_btc = {"usd": None, "source": "", "ts": 0.0, "refreshing": False, "error": "", "stale": False}
+_btc = {"value": None, "source": "", "ts": 0.0, "refreshing": False, "error": "", "stale": False}
+_xbt = {"value": None, "source": "", "ts": 0.0, "refreshing": False, "error": "", "stale": False}
 _view: dict[str, list | None] = {"rigs": None}
 
 
@@ -70,10 +77,11 @@ def stratum_hits(text: str) -> list[str]:
 
 
 def reset() -> None:
-    """Drop cached listings, the BTC quote and the last rendered rigs. For tests."""
+    """Drop cached listings, both quotes and the last rendered rigs. For tests."""
     with _lock:
         _listings.update(rows=None, ts=0.0, fetched_at=None, refreshing=False, error="")
-        _btc.update(usd=None, source="", ts=0.0, refreshing=False, error="", stale=False)
+        for quote in (_btc, _xbt):
+            quote.update(value=None, source="", ts=0.0, refreshing=False, error="", stale=False)
         _view["rigs"] = None
 
 
@@ -151,8 +159,11 @@ class Rig:
     price_usd_th_day: float | None
     btc_day_with_fee: float | None
     usd_cost_day: float | None
+    xbt_cost_day: float | None
     min_cost_btc: float | None
     min_cost_usd: float | None
+    min_cost_xbt: float | None
+    takes_xbt: bool
     platform_fee_bps: int | None
     xbt_day: float | None
     usd_day: float | None
@@ -191,6 +202,19 @@ def _parse_btc_usd(source: str, body: str) -> float | None:
     return None
 
 
+def _parse_xbt_btc(body: str) -> float | None:
+    data = json.loads(body)
+    ticker = data.get("ticker") if isinstance(data, dict) else None
+    return _pos_float(ticker.get("bestBid")) if isinstance(ticker, dict) else None
+
+
+def quote_xbt_btc(get_text) -> tuple[float, str]:
+    bid = _parse_xbt_btc(get_text(XBT_BTC_URL))
+    if not bid:
+        raise RuntimeError("neoxex: no BTCB2_BTC bid")
+    return bid, XBT_BTC_SOURCE
+
+
 def quote_btc_usd(get_text) -> tuple[float | None, str]:
     """First source that answers. mempool.space, then Kraken, then Coinbase."""
     errors = []
@@ -206,11 +230,18 @@ def quote_btc_usd(get_text) -> tuple[float | None, str]:
     raise RuntimeError("; ".join(errors) or "no btc quote")
 
 
-def normalize(rows, *, ths_btc_day, btc_usd, xbt_usd) -> list[Rig]:
+def _over(amount: Decimal | None, rate: Decimal | None) -> float | None:
+    if amount is None or rate is None or rate <= 0:
+        return None
+    return _f(amount / rate)
+
+
+def normalize(rows, *, ths_btc_day, btc_usd, xbt_usd, xbt_btc=None) -> list[Rig]:
     """Blake2b rigs only. Yield is advertised TH times ``ths_btc_day`` (XBT/TH/day)."""
     ths_rate = _dec(ths_btc_day)
     btc = _dec(btc_usd)
     xbt_px = _dec(xbt_usd)
+    bid = _dec(xbt_btc)
     if ths_rate is not None and ths_rate <= 0:
         ths_rate = None
     rigs: list[Rig] = []
@@ -254,8 +285,11 @@ def normalize(rows, *, ths_btc_day, btc_usd, xbt_usd) -> list[Rig]:
                 price_usd_th_day=usd_th,
                 btc_day_with_fee=_f(day),
                 usd_cost_day=_f(day * btc) if day is not None and btc is not None and btc > 0 else None,
+                xbt_cost_day=_over(day, bid),
                 min_cost_btc=_f(booking),
                 min_cost_usd=_f(booking * btc) if booking is not None and btc is not None and btc > 0 else None,
+                min_cost_xbt=_over(booking, bid),
+                takes_xbt=bool(row.get("takes_xbt")),
                 platform_fee_bps=fee_bps,
                 xbt_day=xbt_day,
                 usd_day=usd_day,
@@ -324,61 +358,61 @@ def listings_catalog(get_text, max_age=900.0):
             return _listings["rows"] or [], _listings["fetched_at"], str(exc)
 
 
-def _btc_refresh(get_text) -> None:
+def _quote_refresh(state: dict, fetch, get_text) -> None:
     try:
-        usd, source = quote_btc_usd(get_text)
+        value, source = fetch(get_text)
         with _lock:
-            _btc["usd"] = usd
-            _btc["source"] = source
-            _btc["ts"] = time.time()
-            _btc["error"] = ""
-            _btc["stale"] = False
+            state.update(value=value, source=source, ts=time.time(), error="", stale=False)
     except Exception as exc:
-        print("rentals btc", exc, flush=True)
+        print("rentals quote", exc, flush=True)
         with _lock:
-            _btc["error"] = str(exc)
-            _btc["stale"] = _btc["usd"] is not None
-            if _btc["usd"] is None:
-                _btc["ts"] = time.time()
+            state["error"] = str(exc)
+            state["stale"] = state["value"] is not None
+            if state["value"] is None:
+                state["ts"] = time.time()
     finally:
         with _lock:
-            _btc["refreshing"] = False
+            state["refreshing"] = False
+
+
+def _quote_catalog(state: dict, fetch, get_text, max_age):
+    """Cached quote. A miss keeps the last good value and never invents 0."""
+    now = time.time()
+    with _lock:
+        value = state["value"]
+        if value and now - state["ts"] < max_age:
+            return value, state["source"], state["error"], False
+        if not state["refreshing"]:
+            state["refreshing"] = True
+            threading.Thread(target=_quote_refresh, args=(state, fetch, get_text), daemon=True).start()
+        if value:
+            return value, state["source"], state["error"], True
+    try:
+        value, source = fetch(get_text)
+        with _lock:
+            state.update(value=value, source=source, ts=time.time(), error="", stale=False)
+        return value, source, "", False
+    except Exception as exc:
+        print("rentals quote", exc, flush=True)
+        with _lock:
+            state["error"] = str(exc)
+            state["stale"] = state["value"] is not None
+            return state["value"], state["source"], str(exc), state["value"] is not None
 
 
 def btc_usd_catalog(get_text, max_age=900.0):
-    """Cached BTC/USD. A miss keeps the last good quote and never invents 0."""
-    now = time.time()
-    with _lock:
-        usd = _btc["usd"]
-        age = now - _btc["ts"]
-        if usd and age < max_age:
-            return usd, _btc["source"], _btc["error"], False
-        if not _btc["refreshing"]:
-            _btc["refreshing"] = True
-            threading.Thread(target=_btc_refresh, args=(get_text,), daemon=True).start()
-        if usd:
-            return usd, _btc["source"], _btc["error"], True
-    try:
-        usd, source = quote_btc_usd(get_text)
-        with _lock:
-            _btc["usd"] = usd
-            _btc["source"] = source
-            _btc["ts"] = time.time()
-            _btc["error"] = ""
-            _btc["stale"] = False
-        return usd, source, "", False
-    except Exception as exc:
-        print("rentals btc", exc, flush=True)
-        with _lock:
-            _btc["error"] = str(exc)
-            _btc["stale"] = _btc["usd"] is not None
-            return _btc["usd"], _btc["source"], str(exc), _btc["usd"] is not None
+    return _quote_catalog(_btc, quote_btc_usd, get_text, max_age)
+
+
+def xbt_btc_catalog(get_text, max_age=900.0):
+    return _quote_catalog(_xbt, quote_xbt_btc, get_text, max_age)
 
 
 def payload(*, ths_btc_day, xbt_usd, get_text, max_age=900.0) -> dict:
     rows, fetched_at, err = listings_catalog(get_text, max_age=max_age)
     btc_usd, btc_source, _btc_err, btc_stale = btc_usd_catalog(get_text, max_age=max_age)
-    rigs = normalize(rows, ths_btc_day=ths_btc_day, btc_usd=btc_usd, xbt_usd=xbt_usd)
+    xbt_btc, xbt_source, _xbt_err, xbt_stale = xbt_btc_catalog(get_text, max_age=max_age)
+    rigs = normalize(rows, ths_btc_day=ths_btc_day, btc_usd=btc_usd, xbt_usd=xbt_usd, xbt_btc=xbt_btc)
     encoded = [rig.to_json() for rig in rigs]
     with _lock:
         _view["rigs"] = encoded
@@ -389,6 +423,9 @@ def payload(*, ths_btc_day, xbt_usd, get_text, max_age=900.0) -> dict:
         "btc_usd": btc_usd,
         "btc_usd_source": btc_source,
         "btc_usd_stale": btc_stale,
+        "xbt_btc": xbt_btc,
+        "xbt_btc_source": xbt_source,
+        "xbt_btc_stale": xbt_stale,
         "price_usd": xbt_usd,
         "ths_btc_day": ths_btc_day,
         "rigs": encoded,
@@ -401,7 +438,7 @@ def wait_idle(timeout=2.0) -> None:
     deadline = time.time() + timeout
     while time.time() < deadline:
         with _lock:
-            if not _listings["refreshing"] and not _btc["refreshing"]:
+            if not _listings["refreshing"] and not _btc["refreshing"] and not _xbt["refreshing"]:
                 return
         time.sleep(0.01)
     raise TimeoutError("rentals refresh did not finish")
@@ -481,7 +518,9 @@ def card_html(rig: dict, labels: dict) -> str:
         (labels.get("sats", "sats / TH / day"), _sats_text(rig.get("price_sats_th_day"))),
         (labels.get("usdTh", "USD / TH / day"), _usd_text(rig.get("price_usd_th_day"))),
         (labels.get("btcDay", "Cost / day incl. fee"), _btc_text(rig.get("btc_day_with_fee")) + " · " + _usd_text(rig.get("usd_cost_day"))),
-        (labels.get("minCost", "Minimum booking"), _btc_text(rig.get("min_cost_btc")) + " · " + _usd_text(rig.get("min_cost_usd"))),
+        (labels.get("xbtCost", "Cost / day in XBT"), _xbt_text(rig.get("xbt_cost_day"))),
+        (labels.get("minCost", "Minimum booking"), " · ".join((_btc_text(rig.get("min_cost_btc")), _xbt_text(rig.get("min_cost_xbt")), _usd_text(rig.get("min_cost_usd"))))),
+        (labels.get("payXbt", "Pay in XBT"), labels.get("payXbtDirect", "Direct, no exchange") if rig.get("takes_xbt") else labels.get("payXbtConvert", "Converted on NeoxEX")),
         (labels.get("fee", "Platform fee"), _fee_text(rig.get("platform_fee_bps"))),
         (labels.get("xbtDay", "Est. XBT / day"), _xbt_text(rig.get("xbt_day"))),
         (labels.get("usdDay", "Est. $ / day"), _usd_text(rig.get("usd_day"))),

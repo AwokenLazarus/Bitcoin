@@ -37,7 +37,11 @@ LABELS = {
     "sats": "sats / TH / day",
     "usdTh": "USD / TH / day",
     "btcDay": "Cost / day incl. fee",
+    "xbtCost": "Cost / day in XBT",
     "minCost": "Minimum booking",
+    "payXbt": "Pay in XBT",
+    "payXbtDirect": "Direct, no exchange",
+    "payXbtConvert": "Converted on NeoxEX",
     "fee": "Platform fee",
     "xbtDay": "Est. XBT / day",
     "usdDay": "Est. $ / day",
@@ -95,7 +99,7 @@ class RentalsMath(unittest.TestCase):
         self.raw = json.loads(FIXTURE.read_text(encoding="utf-8"))
 
     def test_fixture_keeps_only_blake2b_and_matches_routehash_fee(self):
-        rigs = rentals.normalize(self.raw["listings"], ths_btc_day="0.01", btc_usd="82707", xbt_usd="2")
+        rigs = rentals.normalize(self.raw["listings"], ths_btc_day="0.01", btc_usd="82707", xbt_usd="2", xbt_btc="0.00966688")
         self.assertEqual(len(rigs), 1)
         rig = rigs[0]
         upstream = next(row for row in self.raw["listings"] if row["algo"] == "blake2b")
@@ -113,6 +117,9 @@ class RentalsMath(unittest.TestCase):
         self.assertAlmostEqual(rig.min_cost_usd, rig.min_cost_btc * 82707, places=8)
         self.assertAlmostEqual(rig.usd_cost_day, rig.btc_day_with_fee * 82707, places=8)
         self.assertAlmostEqual(rig.price_usd_th_day, 5500 / 1e8 * 82707, places=6)
+        self.assertAlmostEqual(rig.xbt_cost_day, rig.btc_day_with_fee / 0.00966688, places=10)
+        self.assertAlmostEqual(rig.min_cost_xbt, rig.min_cost_btc / 0.00966688, places=10)
+        self.assertTrue(rig.takes_xbt)
         self.assertAlmostEqual(rig.xbt_day, 0.55 * 0.01, places=8)
         self.assertAlmostEqual(rig.usd_day, rig.xbt_day * 2, places=8)
         self.assertEqual(rig.url, "https://app.routehash.com/?rent=2")
@@ -134,6 +141,9 @@ class RentalsMath(unittest.TestCase):
         self.assertIsNone(missing.min_cost_btc)
         self.assertIsNone(missing.min_cost_usd)
         self.assertIsNone(missing.xbt_day)
+        self.assertIsNone(missing.xbt_cost_day)
+        self.assertIsNone(missing.min_cost_xbt)
+        self.assertFalse(missing.takes_xbt)
         free = next(rig for rig in rigs if rig.rig_id == 8)
         day, booking = rentals.fee_math(1000, 2, 0, 24)
         self.assertAlmostEqual(free.btc_day_with_fee, float(day), places=12)
@@ -146,6 +156,10 @@ class RentalsMath(unittest.TestCase):
         coinbase = '{"data": {"amount": "82683.285", "base": "BTC", "currency": "USD"}}'
         self.assertEqual(rentals._parse_btc_usd("coinbase", coinbase), 82683.285)
         self.assertIsNone(rentals._parse_btc_usd("mempool.space", '{"USD": 0}'))
+        neoxex = '{"success": true, "pair": "BTCB2_BTC", "ticker": {"lastPrice": 0.0097, "bestBid": 0.00966688, "bestAsk": 0.0097}}'
+        self.assertEqual(rentals._parse_xbt_btc(neoxex), 0.00966688)
+        self.assertIsNone(rentals._parse_xbt_btc('{"ticker": {"bestBid": 0}}'))
+        self.assertIsNone(rentals._parse_xbt_btc('{"success": false}'))
 
     def test_upstream_error_keeps_the_stale_copy(self):
         kept = [{"algo": "blake2b", "rig_id": 9, "name": "Kept", "hashrate_th": 1,
@@ -168,6 +182,7 @@ class RentalsMath(unittest.TestCase):
         self.assertEqual(doc["rigs"][0]["name"], "Kept")
         self.assertIn("down", doc["error"])
         self.assertIsNone(doc["btc_usd"])
+        self.assertIsNone(doc["xbt_btc"])
 
     def test_cold_failure_is_an_empty_list_not_a_fake_zero_price(self):
         def down(_url):
@@ -179,8 +194,12 @@ class RentalsMath(unittest.TestCase):
         self.assertIn("down", err)
 
     def test_cards_for_zero_and_one_listing(self):
-        rigs = rentals.normalize(self.raw["listings"], ths_btc_day="0.01", btc_usd="82707", xbt_usd="2")
+        rigs = rentals.normalize(self.raw["listings"], ths_btc_day="0.01", btc_usd="82707", xbt_usd="2", xbt_btc="0.00966688")
         one = rentals.cards_html([rig.to_json() for rig in rigs], LABELS)
+        self.assertIn("Direct, no exchange", one)
+        self.assertIn("0.00319183 XBT", one)
+        converted = dict(rigs[0].to_json(), takes_xbt=False)
+        self.assertIn("Converted on NeoxEX", rentals.card_html(converted, LABELS))
         zero = rentals.cards_html([], LABELS)
         self.assertIn("data-rig=\"2\"", one)
         self.assertIn("Rent on RouteHash", one)
@@ -233,12 +252,16 @@ class RentalsPage(unittest.TestCase):
                 return body
             if "mempool.space" in url:
                 return '{"USD": 82707}'
+            if url == rentals.XBT_BTC_URL:
+                return '{"success": true, "ticker": {"bestBid": 0.00966688}}'
             raise RuntimeError(url)
 
         doc = rentals.payload(ths_btc_day="0.01", xbt_usd="2", get_text=get_text)
         self.assertEqual(doc["source"], "RouteHash")
         self.assertEqual(doc["source_url"], "https://app.routehash.com/")
         self.assertEqual(doc["btc_usd_source"], "mempool.space")
+        self.assertEqual(doc["xbt_btc"], 0.00966688)
+        self.assertEqual(doc["xbt_btc_source"], "NeoxEX")
         self.assertEqual(doc["error"], "")
         self.assertTrue(doc["fetched_at"])
         page = server.render_pool_index("/rentals")
@@ -257,6 +280,8 @@ class RentalsLive(unittest.TestCase):
         self.assertIsInstance(doc["rigs"], list)
         self.assertGreater(doc["btc_usd"], 1000)
         self.assertIn(doc["btc_usd_source"], {"mempool.space", "kraken", "coinbase"})
+        self.assertGreater(doc["xbt_btc"], 0)
+        self.assertEqual(doc["xbt_btc_source"], "NeoxEX")
         for rig in doc["rigs"]:
             self.assertTrue(rig["url"].startswith("https://app.routehash.com/?rent="))
             self.assertNotIn("stratum.", json.dumps(rig))

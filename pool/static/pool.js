@@ -1594,7 +1594,9 @@
               ${fact(t("rentals.card.sats"), Number.isFinite(Number(r.price_sats_th_day)) ? num(r.price_sats_th_day) : "\u2014")}
               ${fact(t("rentals.card.usdTh"), moneyDay(r.price_usd_th_day))}
               ${fact(t("rentals.card.btcDay"), btc(r.btc_day_with_fee) + " \u00b7 " + moneyDay(r.usd_cost_day))}
-              ${fact(t("rentals.card.minCost"), btc(r.min_cost_btc) + " \u00b7 " + moneyDay(r.min_cost_usd))}
+              ${fact(t("rentals.card.xbtCost"), r.xbt_cost_day == null ? "\u2014" : amt(r.xbt_cost_day))}
+              ${fact(t("rentals.card.minCost"), [btc(r.min_cost_btc), r.min_cost_xbt == null ? "\u2014" : amt(r.min_cost_xbt), moneyDay(r.min_cost_usd)].join(" \u00b7 "))}
+              ${fact(t("rentals.card.payXbt"), t(r.takes_xbt ? "rentals.card.payXbtDirect" : "rentals.card.payXbtConvert"))}
               ${fact(t("rentals.card.fee"), fee(r.platform_fee_bps))}
               ${fact(t("rentals.card.xbtDay"), r.xbt_day == null ? "\u2014" : amt(r.xbt_day))}
               ${fact(t("rentals.card.usdDay"), moneyDay(r.usd_day))}

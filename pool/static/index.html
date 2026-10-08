@@ -64,7 +64,7 @@
 <link rel="preload" as="style" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;1,400&family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,500;1,6..72,400;1,6..72,500&display=swap">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;1,400&family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,500;1,6..72,400;1,6..72,500&display=swap" media="print" onload="this.media='all'">
 <noscript><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;1,400&family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,500;1,6..72,400;1,6..72,500&display=swap"></noscript>
-<link rel="stylesheet" href="/static/pool.css?v=rent1">
+<link rel="stylesheet" href="/static/pool.css?v=rent2">
 <link rel="stylesheet" href="/static/app.css?v=ask2">
 <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
 <link rel="icon" href="/static/favicon-48.png" sizes="48x48" type="image/png">
@@ -570,7 +570,7 @@
       <header class="section-head">
         <p class="eyebrow" data-i18n="rentals.eyebrow">Rent hashrate</p>
         <h2 id="rentals-title" data-i18n="rentals.title">BLAKE2b rigs you can rent, pointed at your own node.</h2>
-        <p class="section-lede" data-i18n-html="rentals.lede">Rented BLAKE2b ASICs from <a href="https://app.routehash.com/" target="_blank" rel="noreferrer">RouteHash</a> can be pointed at your own node. In RouteHash, add your own DATUM gateway’s stratum listener — the port on your machine, publicly reachable — as the destination. Your gateway connects to Lazarus over DATUM. The figures compare the rental cost with what that hashrate would earn on Lazarus through your own DATUM gateway. <a href="/hardware">Buying a machine</a> is the other way.</p>
+        <p class="section-lede" data-i18n-html="rentals.lede">Rented BLAKE2b ASICs from <a href="https://app.routehash.com/" target="_blank" rel="noreferrer">RouteHash</a> can be pointed at your own node. In RouteHash, add your own DATUM gateway’s stratum listener — the port on your machine, publicly reachable — as the destination. Your gateway connects to Lazarus over DATUM. Pay in BTC or XBT: if the rig’s owner takes XBT, RouteHash books your XBT at the NeoxEX best bid with no trade; otherwise it sells your XBT for BTC on NeoxEX, with the exchange fee on top. The figures compare the rental cost with what that hashrate would earn on Lazarus through your own DATUM gateway. <a href="/hardware">Buying a machine</a> is the other way.</p>
       </header>
       <div class="hw-toolbar">
         <p class="note faint" id="rentals-meta"></p>
@@ -580,7 +580,7 @@
       <ul class="hw-grid" id="rentals-grid"></ul>
       <p class="note" id="rentals-empty" hidden data-i18n="rentals.empty">No BLAKE2b rigs listed right now.</p>
       <p class="note" id="rentals-owners" data-i18n="rentals.owners">List your BLAKE2b miner on RouteHash to earn between your own mining.</p>
-      <p class="note faint" id="rentals-disclaimer" data-i18n="rentals.disclaimer">Lazarus Pool is not responsible for RouteHash customer support or quality of service. Rentals are paid in BTC to RouteHash. Estimates exclude luck, transaction fees and electricity.</p>
+      <p class="note faint" id="rentals-disclaimer" data-i18n="rentals.disclaimer">Lazarus Pool is not responsible for RouteHash customer support or quality of service. Rentals are paid to RouteHash in BTC or XBT; XBT amounts use the NeoxEX best bid. Estimates exclude luck, transaction fees and electricity.</p>
     </div>
   </section>
 
@@ -952,12 +952,12 @@
 </nav>
 
 <script src="/static/i18n.js?v=seo1"></script>
-<script src="/static/i18n/en.js?v=rent1"></script>
-<script src="/static/i18n/zh-CN.js?v=rent1"></script>
+<script src="/static/i18n/en.js?v=rent2"></script>
+<script src="/static/i18n/zh-CN.js?v=rent2"></script>
 <script>LZ_I18N.boot();</script>
 <script src="/static/shared.js?v=grace1"></script>
-<script src="/static/app.js?v=rent1"></script>
-<script src="/static/pool.js?v=rent1"></script>
+<script src="/static/app.js?v=rent2"></script>
+<script src="/static/pool.js?v=rent2"></script>
 <script src="/static/chart.js?v=app4"></script>
 </body>
 </html>
