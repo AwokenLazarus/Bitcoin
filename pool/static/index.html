@@ -31,7 +31,7 @@
   {"@type":"Service","@id":"https://pool.lazarus-xbt.xyz/#service","name":"Lazarus Pool","serviceType":"Bitcoin mining pool","description":"Non-custodial mining pool for Bitcoin on BLAKE2b proof of work (tickers XBT, BTCB2). Every payout is an output of the block's coinbase via TIDES; DATUM gateways supported.","provider":{"@id":"https://lazarus-xbt.xyz/#org"},"areaServed":"Worldwide","audience":{"@type":"Audience","audienceType":"Owners of Sia-family BLAKE2b ASICs: Goldshell SC Lite, SC Box, SC Box II, SC5 Pro, iBeLink BM-S3, Antminer A3"},"url":"https://pool.lazarus-xbt.xyz/"},
   {"@type":"FAQPage","mainEntity":[
     {"@type":"Question","name":"Can I mine Bitcoin XBT (BTCB2) with a Siacoin ASIC?","acceptedAnswer":{"@type":"Answer","text":"Yes. Bitcoin XBT / BTCB2 uses BLAKE2b, the same algorithm Siacoin ASICs were built for. Goldshell SC-series, iBeLink BM-S3 / BM-S3+, Antminer A3 and other BLAKE2b-Sia boxes work on stock firmware. SHA-256 Bitcoin miners (S19, S21, Whatsminer) cannot mine this chain."}},
-    {"@type":"Question","name":"How do I connect a miner to Lazarus Pool?","acceptedAnswer":{"@type":"Answer","text":"Point the miner at stratum+tcp://stratum.lazarus-xbt.xyz:23334. Username is your payout address (bc1…). Password is x. Algorithm is BLAKE2b, not SHA-256d."}},
+    {"@type":"Question","name":"How do I connect a miner to Lazarus Pool?","acceptedAnswer":{"@type":"Answer","text":"You mine with your own DATUM gateway pointed at datum.lazarus-xbt.xyz:28915. Point your miners at that gateway. Username is your payout address (bc1…). stratum+tcp://stratum.lazarus-xbt.xyz:23334 is the donation, validation and fallback endpoint, not a way in to mining. Algorithm is BLAKE2b, not SHA-256d."}},
     {"@type":"Question","name":"What are Lazarus Pool fees?","acceptedAnswer":{"@type":"Answer","text":"0% if you run your own DATUM gateway (plus a bonus from the public-stratum fee). The public stratum is a donation, validation and fallback endpoint at 100%, with 50 points to DATUM gateways and 50 to the pool, and a 24 h / 96 h grace at 25% (12.5 points to DATUM gateways during the grace), then 100%."}},
     {"@type":"Question","name":"Is XBT the same as SHA-256 Bitcoin?","acceptedAnswer":{"@type":"Answer","text":"No. This is the BLAKE2b Bitcoin chain (also called BTCB2 / XBT on this network). It keeps Bitcoin’s monetary rules but not SHA-256d proof-of-work. Coins live on this chain and trade as BTCB2 on Neoxa and NonKYC."}},
     {"@type":"Question","name":"What is BIP-110, and is it the same as the BLAKE2b change?","acceptedAnswer":{"@type":"Answer","text":"They are two separate events. BIP-110 is a proposal to restrict non-financial data in transactions; it needed 55% of hashrate, peaked near 2.6%, and its nodes began rejecting blocks that did not signal at height 961,632 on 8 August 2026 — that split the chain, and this chain is the BIP-110 branch. The proof-of-work change came later: on 30 August 2026 this branch moved from SHA-256d to BLAKE2b with a Sia-style header, with block 961,639 the last SHA-256d block and 961,640 the first BLAKE2b one. People use BIP-110 as the name for the chain, but BLAKE2b is what decides your hardware."}},
@@ -167,8 +167,8 @@
 
       <div class="fee-lede" aria-labelledby="fees-title">
         <div class="fee-lede-head">
-          <h2 id="fees-title" data-i18n="hero.feesTitle">Two ways in · one gets paid extra</h2>
-          <p id="fee-lede-body">Run a node and a DATUM gateway and you choose the transactions in the block. Point a miner at us and we choose them. Same window, same payout — but DATUM work pays no fee <em>and</em> is handed <span id="lede-rebate-pts">50 points</span> of the public stratum’s 100% fee on every block, with a 24 h / 96 h grace at 25%, then 100%.</p>
+          <h2 id="fees-title" data-i18n="hero.feesTitle">One way in: DATUM</h2>
+          <p id="fee-lede-body">You mine with your own node and a DATUM gateway. You choose the transactions in the block, you pay no fee, and you are handed <span id="lede-rebate-pts">50 points</span> of the donation endpoint’s 100% fee on every block, with a 24 h / 96 h grace at 25%, then 100%. The stratum port is not a way in. It is the donation, validation and fallback endpoint.</p>
         </div>
         <div class="fee-lede-rates">
           <a class="fee-lede-rate reco" href="#connect" data-tab="tab-datum">
@@ -185,7 +185,7 @@
         </div>
         <p class="fee-lede-cta">
           <strong data-i18n="hero.ctaStrong">Set up a DATUM gateway.</strong>
-          <span data-i18n-html="hero.ctaBody">Run a gateway from <a href="#gw-pick">our measured list</a> so a block you find pays the whole window — and every block anyone finds credits you the bonus.</a> so a block you find pays the whole window — and every block anyone finds credits you the bonus.</span>
+          <span data-i18n-html="hero.ctaBody">Run a gateway from <a href="#gw-pick">our measured list</a> so a block you find pays the whole window — and every block anyone finds credits you the bonus.</span>
           <a class="fee-lede-setup" href="#gw-pick" data-i18n="hero.whichGw">Which gateway</a>
         </p>
       </div>
@@ -365,12 +365,12 @@
       <header class="section-head">
         <p class="eyebrow" data-i18n="connect.eyebrow">Get connected</p>
         <h2 id="connect-title" data-i18n="connect.title">One username: your address.</h2>
-        <p class="section-lede" data-i18n="connect.lede">Two ways in, one rule. Your stratum username is the address that gets paid.</p>
+        <p class="section-lede" data-i18n="connect.lede">One way in: a DATUM gateway you run. Your username is the address that gets paid.</p>
       </header>
 
       <div class="fee-schema" data-i18n-aria="connect.feeAria" aria-label="Fee schedule">
         <div class="fee-card reco" data-tab="tab-datum" role="button" tabindex="0">
-          <p class="fee-kicker" data-i18n="connect.datumKicker">Recommended · no fee · paid the bonus</p>
+          <p class="fee-kicker" data-i18n="connect.datumKicker">The way in · no fee · paid the bonus</p>
           <p class="fee-title" data-i18n="connect.datumTitle">Your own DATUM gateway</p>
           <p class="fee-rate"><span id="fee-datum">0%</span><small class="fee-bonus" id="fee-datum-bonus" hidden></small></p>
           <p class="fee-copy"><span data-i18n="connect.datumCopy">Your node builds the block and picks the transactions. Lazarus only dictates the coinbase split and verifies your shares. </span><span id="fee-datum-copy">On top of your full share, every block credits you a cut of the public stratum’s fee.</span></p>
@@ -380,7 +380,7 @@
           <p class="fee-kicker" data-i18n="connect.stratumKicker">Confirm it connects, or fall back</p>
           <p class="fee-title" data-i18n="connect.stratumTitle">Donation, validation and fallback</p>
           <p class="fee-rate"><span id="fee-stratum">100%</span></p>
-          <p class="fee-copy"><span data-i18n="connect.stratumCopy">This endpoint is the donation, validation and fallback endpoint. Point a miner at it to confirm it connects and submits shares while your own node and DATUM gateway are still coming online, or as a fallback if your own gateway goes down. Same TIDES window — switch to a gateway later and your accepted work comes with you. </span><span id="fee-stratum-copy">50 points of the fee goes to DATUM gateways and the rest to the pool, with a 24 h / 96 h grace at 25%, then 100%. Run a gateway and you are on the receiving end.</span></p>
+          <p class="fee-copy"><span data-i18n="connect.stratumCopy">This endpoint is the donation, validation and fallback endpoint, not a way in to mining. Point a miner at it to confirm it connects and submits shares while your own node and DATUM gateway are still coming online, or as a fallback if your own gateway goes down. </span><span id="fee-stratum-copy">50 points of the fee goes to DATUM gateways and the rest to the pool, with a 24 h / 96 h grace at 25%, then 100%. Run a gateway and you are on the receiving end.</span></p>
           <p class="fee-cta" data-i18n="connect.setupBelow">Setup below</p>
         </div>
         <div class="fee-card" data-tab="tab-solo" role="button" tabindex="0" id="fee-card-solo" hidden>
@@ -394,7 +394,7 @@
 
       <div class="gw-pick card" id="gw-pick">
         <h3 class="kicker" id="gw-pick-title" data-i18n="connect.whichTitle">Which DATUM gateway</h3>
-        <p class="note" data-i18n="connect.whichNote">If you run your own node, pick one of these. All four speak BLAKE2b and connect here with no patch. Skip this if you use the donation, validation and fallback endpoint.</p>
+        <p class="note" data-i18n="connect.whichNote">Pick one of these. All four speak BLAKE2b and connect here with no patch.</p>
         <ol class="gw-rank" aria-labelledby="gw-pick-title">
           <li class="reco" data-gw="iohzrd">
             <span class="n" aria-hidden="true">1</span>
@@ -430,7 +430,7 @@
       </div>
 
       <div class="tabs" data-tabs>
-        <div class="tablist" role="tablist" data-i18n-aria="connect.paths" aria-label="Mining paths">
+        <div class="tablist" role="tablist" data-i18n-aria="connect.paths" aria-label="Connect">
           <button class="tab" role="tab" type="button" id="tab-stratum" aria-controls="pane-stratum" aria-selected="true">
             <span class="tab-title"><span data-i18n="connect.tabStratum">Donation, validation and fallback</span> <span class="tab-fee" id="tab-fee-stratum">100%</span></span>
             <span class="tab-sub" data-i18n="connect.tabStratumSub">Confirm it connects, or fall back if your gateway is down</span>
@@ -761,7 +761,7 @@
         <li class="how-step">
           <span class="how-n" aria-hidden="true">01</span>
           <h3 data-i18n="how.s1t">You hash, the pool counts</h3>
-          <p class="copy" data-i18n="how.s1">Point a miner at the public stratum, or at a DATUM gateway you run. Either way your username is your Bitcoin address. Every share you send is rebuilt into a full BLAKE2b header and hashed by Prime; accepted work is credited to your address in the TIDES window.</p>
+          <p class="copy" data-i18n="how.s1">You mine by pointing your machines at a DATUM gateway you run. Your username is your Bitcoin address. The stratum port is the donation, validation and fallback endpoint, not a way in to mining. Every share is rebuilt into a full BLAKE2b header and hashed by Prime; accepted work is credited to your address in the TIDES window.</p>
         </li>
         <li class="how-step">
           <span class="how-n" aria-hidden="true">02</span>
