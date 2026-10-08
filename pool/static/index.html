@@ -127,15 +127,6 @@
 
 <main>
 
-  <aside class="softfork urgent" id="stratumnotice" role="alert" aria-labelledby="stratumnotice-title">
-    <div class="softfork-row">
-      <p class="kicker" id="stratumnotice-title" data-i18n="stratumnotice.kicker">Urgent · stratum miners: move to your own DATUM gateway</p>
-      <p class="softfork-text" data-i18n-html="stratumnotice.text">The public stratum endpoint <b>is</b> the <b>donation, validation and fallback endpoint</b>: point a miner at it to confirm it connects and submits shares while your own node and DATUM gateway are still coming online, or as a fallback if your own gateway goes down. The fee is <b>100%</b>, and that fee <b>is both the pool donation and the DATUM subsidy</b> (half to the pool address, half to DATUM gateways). <b>Grace:</b> from a payout address's first share here it pays the earlier terms (25% fee, 12.5 points to DATUM gateways) for <b>24 hours</b>, or <b>96 hours</b> if the address mined through a DATUM gateway on Lazarus in the 30 days before. After the grace the fee is 100%. The clock does not pause, and a new one starts only after 7 days away. Addresses already here were counted from 6 October, so theirs ends at the switch. A pool that relays its stratum hashers through its own gateway is stratum: 100%, no grace. The network nodes will not tolerate stratum hashing. During the current 45-day coinbase maturity window, <b>all stratum rewards on any pool are 100% invalidated</b>. To be paid, run your own Bitcoin Knots node and DATUM gateway (<a href="#connect">guides</a>): 0% fee, and accepted work comes with you.</p>
-      <p class="softfork-links"><a href="#connect" data-i18n="stratumnotice.setup">Set up a DATUM gateway</a> · <a href="https://github.com/bitcoinknots/bitcoin/pull/419" target="_blank" rel="noreferrer" data-i18n="stratumnotice.plan">The Knots plan (long coinbase maturity, part 1 of 3)</a></p>
-      <button type="button" class="promo-dismiss" id="stratumnotice-dismiss" data-i18n-aria="stratumnotice.dismiss" data-i18n-title="stratumnotice.dismiss" aria-label="Dismiss notice">×</button>
-    </div>
-  </aside>
-
   <section class="hero" id="fees" aria-labelledby="hero-title">
     <div class="wrap hero-grid">
       <div class="hero-copy">
@@ -187,9 +178,9 @@
             <span id="top-fee-datum-sub">You keep 100%, you pick the block template, and you collect the DATUM bonus</span>
           </a>
           <a class="fee-lede-rate" href="#connect" data-tab="tab-stratum">
-            <small data-i18n="hero.stratumSmall">Public stratum</small>
+            <small data-i18n="hero.stratumSmall">Donation, validation and fallback</small>
             <b id="top-fee-stratum">100%</b>
-            <span id="top-fee-stratum-sub"><span data-i18n="hero.stratumSub">Point and go · our node, our templates · </span><span id="top-stratum-rebate">50 points of the 100% goes to DATUM gateways (the rest to the pool), with a 24 h / 96 h grace at 25%, then 100%</span></span>
+            <span id="top-fee-stratum-sub"><span data-i18n="hero.stratumSub">Confirm a miner connects, or fall back if your gateway is down · </span><span id="top-stratum-rebate">50 points of the 100% goes to DATUM gateways (the rest to the pool), with a 24 h / 96 h grace at 25%, then 100%</span></span>
           </a>
         </div>
         <p class="fee-lede-cta">
@@ -214,7 +205,7 @@
           <div class="path-hr-chart-wrap">
             <p class="path-hr-title" data-i18n="status.pathChart">Hashrate by path</p>
             <div class="path-hr-chart">
-              <canvas id="path-pie" width="220" height="220" data-i18n-aria="status.pathChartAria" aria-label="Share of live hashrate from DATUM gateways, the public stratum, and solo"></canvas>
+              <canvas id="path-pie" width="220" height="220" data-i18n-aria="status.pathChartAria" aria-label="Share of live hashrate from DATUM gateways, the donation, validation and fallback endpoint, and solo"></canvas>
               <div class="path-hr-center" aria-hidden="true">
                 <b id="path-pie-pct">—</b>
                 <small data-i18n="status.pathCenter">DATUM</small>
@@ -247,7 +238,7 @@
       <p class="note callout" id="overflow-note" hidden></p>
       <ul class="pillars" data-i18n-aria="status.pillarsAria" aria-label="What makes Lazarus different">
         <li data-i18n-html="status.p1"><b>Paid in the block itself.</b> No pool balance, no withdrawals. When a block is found, its coinbase pays your address directly. <a href="#payout">See the next payout</a>.</li>
-        <li><span data-i18n-html="status.p2a"><b>Bring your own gateway, keep 100% — and then some.</b> Run Bitcoin Knots and a stock DATUM gateway: your node builds the block template, the pool only sets the split. Public stratum is </span><span id="pillar-stratum-fee">100%</span><span id="pillar-rebate">, and 50 points of that is credited to DATUM miners on every block, with a 24 h / 96 h grace at 25%, then 100%</span>. <a href="#connect" data-i18n="nav.connect">Connect</a>.</li>
+        <li><span data-i18n-html="status.p2a"><b>Bring your own gateway, keep 100% — and then some.</b> Run Bitcoin Knots and a stock DATUM gateway: your node builds the block template, the pool only sets the split. The donation, validation and fallback endpoint is </span><span id="pillar-stratum-fee">100%</span><span id="pillar-rebate">, and 50 points of that is credited to DATUM miners on every block, with a 24 h / 96 h grace at 25%, then 100%</span>. <a href="#connect" data-i18n="nav.connect">Connect</a>.</li>
         <li data-i18n-html="status.p3"><b>Verifiable end to end.</b> Every share is rebuilt and hashed; every block found is on the <a href="https://mempool.lazarus-xbt.xyz/mining/pool/lazarus" target="_blank" rel="noreferrer">Lazarus Mempool</a>. Source on <a href="https://github.com/AwokenLazarus/Bitcoin" target="_blank" rel="noreferrer">GitHub</a>.</li>
       </ul>
     </div>
@@ -386,10 +377,10 @@
           <p class="fee-cta" data-i18n="connect.setupBelow">Setup below</p>
         </div>
         <div class="fee-card" data-tab="tab-stratum" role="button" tabindex="0">
-          <p class="fee-kicker" data-i18n="connect.stratumKicker">Simplest · point and go</p>
-          <p class="fee-title" data-i18n="connect.stratumTitle">Public stratum</p>
+          <p class="fee-kicker" data-i18n="connect.stratumKicker">Confirm it connects, or fall back</p>
+          <p class="fee-title" data-i18n="connect.stratumTitle">Donation, validation and fallback</p>
           <p class="fee-rate"><span id="fee-stratum">100%</span></p>
-          <p class="fee-copy"><span data-i18n="connect.stratumCopy">Our node, our templates. Any BLAKE2b ASIC or miner. Same TIDES window — switch to a gateway later and your accepted work comes with you. </span><span id="fee-stratum-copy">50 points of the fee goes to DATUM gateways and the rest to the pool, with a 24 h / 96 h grace at 25%, then 100%. Run a gateway and you are on the receiving end.</span></p>
+          <p class="fee-copy"><span data-i18n="connect.stratumCopy">This endpoint is the donation, validation and fallback endpoint. Point a miner at it to confirm it connects and submits shares while your own node and DATUM gateway are still coming online, or as a fallback if your own gateway goes down. Same TIDES window — switch to a gateway later and your accepted work comes with you. </span><span id="fee-stratum-copy">50 points of the fee goes to DATUM gateways and the rest to the pool, with a 24 h / 96 h grace at 25%, then 100%. Run a gateway and you are on the receiving end.</span></p>
           <p class="fee-cta" data-i18n="connect.setupBelow">Setup below</p>
         </div>
         <div class="fee-card" data-tab="tab-solo" role="button" tabindex="0" id="fee-card-solo" hidden>
@@ -403,7 +394,7 @@
 
       <div class="gw-pick card" id="gw-pick">
         <h3 class="kicker" id="gw-pick-title" data-i18n="connect.whichTitle">Which DATUM gateway</h3>
-        <p class="note" data-i18n="connect.whichNote">If you run your own node, pick one of these. All four speak BLAKE2b and connect here with no patch. Skip this if you use the public stratum.</p>
+        <p class="note" data-i18n="connect.whichNote">If you run your own node, pick one of these. All four speak BLAKE2b and connect here with no patch. Skip this if you use the donation, validation and fallback endpoint.</p>
         <ol class="gw-rank" aria-labelledby="gw-pick-title">
           <li class="reco" data-gw="iohzrd">
             <span class="n" aria-hidden="true">1</span>
@@ -441,8 +432,8 @@
       <div class="tabs" data-tabs>
         <div class="tablist" role="tablist" data-i18n-aria="connect.paths" aria-label="Mining paths">
           <button class="tab" role="tab" type="button" id="tab-stratum" aria-controls="pane-stratum" aria-selected="true">
-            <span class="tab-title"><span data-i18n="connect.tabStratum">Public stratum</span> <span class="tab-fee" id="tab-fee-stratum">100%</span></span>
-            <span class="tab-sub" data-i18n="connect.tabStratumSub">Point and go · our node builds the block</span>
+            <span class="tab-title"><span data-i18n="connect.tabStratum">Donation, validation and fallback</span> <span class="tab-fee" id="tab-fee-stratum">100%</span></span>
+            <span class="tab-sub" data-i18n="connect.tabStratumSub">Confirm it connects, or fall back if your gateway is down</span>
           </button>
           <button class="tab" role="tab" type="button" id="tab-datum" aria-controls="pane-datum" aria-selected="false">
             <span class="tab-title"><span data-i18n="connect.tabDatum">Your own DATUM gateway</span> <span class="tab-fee reco" id="tab-fee-datum">0%</span><span class="tab-fee bonus" id="tab-bonus-datum" hidden></span></span>

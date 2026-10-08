@@ -75,11 +75,6 @@
   const promoDismissed = () => {
     try { return localStorage.getItem(PROMO_DISMISS_KEY) === "1"; } catch (e) { return false; }
   };
-  try { if (localStorage.getItem("lazarus.stratum100.v9.dismissed") === "1") { const el = $("stratumnotice"); if (el) el.hidden = true; } } catch (e) { /* private mode */ }
-  $("stratumnotice-dismiss")?.addEventListener("click", () => {
-    try { localStorage.setItem("lazarus.stratum100.v9.dismissed", "1"); } catch (e) { /* private mode */ }
-    const el = $("stratumnotice"); if (el) el.hidden = true;
-  });
   $("promo-dismiss")?.addEventListener("click", () => {
     try { localStorage.setItem(PROMO_DISMISS_KEY, "1"); } catch (e) { /* private mode */ }
     const el = $("datum-promo");
