@@ -81,7 +81,7 @@
     if (el) el.hidden = true;
   });
 
-  const NOTICE_DISMISS_KEY = "lazarus.gatewayupdate.v1.dismissed";
+  const NOTICE_DISMISS_KEY = "lazarus.gatewayupdate.v2.dismissed";
   try { if (localStorage.getItem(NOTICE_DISMISS_KEY) === "1") { const el = $("gatewaynotice"); if (el) el.hidden = true; } } catch (e) { /* private mode */ }
   $("gatewaynotice-dismiss")?.addEventListener("click", () => {
     try { localStorage.setItem(NOTICE_DISMISS_KEY, "1"); } catch (e) { /* private mode */ }

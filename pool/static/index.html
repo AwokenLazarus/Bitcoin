@@ -64,7 +64,7 @@
 <link rel="preload" as="style" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;1,400&family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,500;1,6..72,400;1,6..72,500&display=swap">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;1,400&family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,500;1,6..72,400;1,6..72,500&display=swap" media="print" onload="this.media='all'">
 <noscript><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;1,400&family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,500;1,6..72,400;1,6..72,500&display=swap"></noscript>
-<link rel="stylesheet" href="/static/pool.css?v=gw1">
+<link rel="stylesheet" href="/static/pool.css?v=gw2">
 <link rel="stylesheet" href="/static/app.css?v=ask2">
 <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
 <link rel="icon" href="/static/favicon-48.png" sizes="48x48" type="image/png">
@@ -125,16 +125,16 @@
   </aside>
 </div>
 
-<main>
+<aside class="softfork urgent" id="gatewaynotice" role="alert" aria-labelledby="gatewaynotice-title">
+  <div class="softfork-row">
+    <p class="softfork-head"><span class="softfork-tag" data-i18n="gatewaynotice.kicker">Action needed</span><strong class="softfork-title" id="gatewaynotice-title" data-i18n="gatewaynotice.title">Gateway operators: update your DATUM gateway</strong></p>
+    <p class="softfork-text" data-i18n-html="gatewaynotice.text">Some gateways on this pool run an <b>out-of-date DATUM gateway</b>. A block found through one can pay the whole reward to the pool address instead of paying each miner directly. Nobody loses that reward, but the pool has to hold those funds and pay every miner their share itself, as a <b>make-good</b>, once the block matures (about 45 days). <b>If you run a gateway, update it to a current build</b> so your blocks pay miners directly. Questions? <b>Join our Discord and ask for help.</b></p>
+    <p class="softfork-actions"><a class="btn small" href="#connect" data-tab="tab-datum" data-i18n="gatewaynotice.setup">Update your gateway →</a> <a class="btn small ghost" href="https://discord.gg/fD33dJXnzz" target="_blank" rel="noreferrer" data-i18n="gatewaynotice.discord">Ask for help on Discord</a></p>
+    <button type="button" class="promo-dismiss" id="gatewaynotice-dismiss" data-i18n-aria="gatewaynotice.dismiss" data-i18n-title="gatewaynotice.dismiss" aria-label="Dismiss notice" title="Dismiss notice">×</button>
+  </div>
+</aside>
 
-  <aside class="softfork" id="gatewaynotice" role="status" aria-labelledby="gatewaynotice-title">
-    <div class="softfork-row">
-      <p class="kicker" id="gatewaynotice-title" data-i18n="gatewaynotice.kicker">Notice · gateway operators: update your DATUM gateway</p>
-      <p class="softfork-text" data-i18n-html="gatewaynotice.text">Some gateways on this pool run an <b>out-of-date DATUM gateway</b>. A block found through one can pay the whole reward to the pool address instead of paying each miner directly. Nobody loses that reward, but the pool has to hold those funds and pay every miner their share itself, as a <b>make-good</b>, once the block matures (about 45 days). <b>If you run a gateway, update it to a current build</b> so your blocks pay miners directly. Questions? <b>Join our Discord and ask for help.</b></p>
-      <p class="softfork-links"><a href="#connect" data-i18n="gatewaynotice.setup">Current gateway builds and setup</a> · <a href="https://discord.gg/fD33dJXnzz" target="_blank" rel="noreferrer" data-i18n="gatewaynotice.discord">Join Discord</a></p>
-      <button type="button" class="promo-dismiss" id="gatewaynotice-dismiss" data-i18n-aria="gatewaynotice.dismiss" data-i18n-title="gatewaynotice.dismiss" aria-label="Dismiss notice" title="Dismiss notice">×</button>
-    </div>
-  </aside>
+<main>
 
   <section class="hero" id="fees" aria-labelledby="hero-title">
     <div class="wrap hero-grid">
@@ -961,12 +961,12 @@
 </nav>
 
 <script src="/static/i18n.js?v=seo1"></script>
-<script src="/static/i18n/en.js?v=gw1"></script>
-<script src="/static/i18n/zh-CN.js?v=gw1"></script>
+<script src="/static/i18n/en.js?v=gw2"></script>
+<script src="/static/i18n/zh-CN.js?v=gw2"></script>
 <script>LZ_I18N.boot();</script>
 <script src="/static/shared.js?v=grace1"></script>
 <script src="/static/app.js?v=rent2"></script>
-<script src="/static/pool.js?v=gw1"></script>
+<script src="/static/pool.js?v=gw2"></script>
 <script src="/static/chart.js?v=app4"></script>
 </body>
 </html>
