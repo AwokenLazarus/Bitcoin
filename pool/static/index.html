@@ -64,7 +64,7 @@
 <link rel="preload" as="style" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;1,400&family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,500;1,6..72,400;1,6..72,500&display=swap">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;1,400&family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,500;1,6..72,400;1,6..72,500&display=swap" media="print" onload="this.media='all'">
 <noscript><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;1,400&family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,500;1,6..72,400;1,6..72,500&display=swap"></noscript>
-<link rel="stylesheet" href="/static/pool.css?v=gw3">
+<link rel="stylesheet" href="/static/pool.css?v=gw4">
 <link rel="stylesheet" href="/static/app.css?v=ask2">
 <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
 <link rel="icon" href="/static/favicon-48.png" sizes="48x48" type="image/png">
@@ -403,35 +403,28 @@
 
       <div class="gw-pick card" id="gw-pick">
         <h3 class="kicker" id="gw-pick-title" data-i18n="connect.whichTitle">Which DATUM gateway</h3>
-        <p class="note" data-i18n-html="connect.whichNote">Pick one of these. All four speak BLAKE2b and connect here with no patch. Whichever you run, keep it current: C builds from before 6&nbsp;September 2026 can pay only part of the window, or only the pool.</p>
+        <p class="note" data-i18n-html="connect.whichNote">Pick one of these. All three speak BLAKE2b and connect here with no patch. Keep whichever you run up to date.</p>
         <ol class="gw-rank" aria-labelledby="gw-pick-title">
-          <li class="reco" data-gw="fte">
+          <li class="reco" data-gw="convoy">
             <span class="n" aria-hidden="true">1</span>
             <div>
               <span class="tag" data-i18n="connect.reco">Recommended</span>
-              <strong><a href="https://github.com/FlyTheElephant1/datum_gateway" target="_blank" rel="noreferrer">FlyTheElephant</a></strong>
-              <small data-i18n-html="connect.fly">Master <code>280cf54</code> (7&nbsp;October 2026): CONVOY’s BLAKE2b code plus FlyTheElephant’s own work. Every miner gets the whole split coinbase, fitted to the block’s weight and sigop limits, so a found block pays the whole window. On our test chain on 9&nbsp;October, blocks found by an Antminer A3 and by a generic miner each paid all 60 miners in the window. Like every C gateway, for about 20&nbsp;ms after each new block, and for as long as a pool’s split is late, it can hand out a job that pays only the pool; a one-file patch closes that. <a href="/flytheelephant">Setup guide and test results</a>.</small>
+              <strong><a href="https://github.com/CONVOYMining/datum_gateway" target="_blank" rel="noreferrer">CONVOY</a></strong>
+              <small data-i18n-html="connect.convoy">The reference BLAKE2b DATUM gateway, and the most actively maintained. Every miner gets the whole split, so a found block pays the whole window.</small>
             </div>
           </li>
-          <li data-gw="convoy">
+          <li data-gw="fte">
             <span class="n" aria-hidden="true">2</span>
             <div>
-              <strong><a href="https://github.com/CONVOYMining/datum_gateway" target="_blank" rel="noreferrer">CONVOY</a></strong>
-              <small data-i18n-html="connect.convoy">Master <code>971af86</code> (9&nbsp;October 2026). The firmware size classes are gone: since <code>4d0a045</code> (6&nbsp;September) every miner gets the whole split, and the coinbase is fitted to the block’s weight and sigop limits. On our test chain on 9&nbsp;October, blocks found by an Antminer A3 and by a generic miner each paid all 60 miners in the window; the older <code>b9ea7dc</code> paid 18 of them from a generic miner and only the pool from an A3, so update a build older than 6&nbsp;September. Master also has fixes the other C builds have not picked up yet, one of them for miners handed a pool-only coinbase although the split had arrived. Like the other C builds, for about 20&nbsp;ms after each new block, and for as long as a pool’s split is late, it can hand out a job that pays only the pool.</small>
-            </div>
-          </li>
-          <li data-gw="iohzrd">
-            <span class="n" aria-hidden="true">3</span>
-            <div>
-              <strong><a href="https://github.com/iohzrd/datum_gateway" target="_blank" rel="noreferrer">iohzrd</a></strong>
-              <small data-i18n-html="connect.iohzrd">Master <code>76d748e</code> (5&nbsp;September 2026); StartOS <code>pow_0.4.1_23</code> ships the older <code>7491a50</code>. Every miner gets the whole split, fitted to the block’s weight and sigop limits: on our test chain on 9&nbsp;October, blocks found by an Antminer A3 and by a generic miner each paid all 60 miners in the window. Its weight and sigop fixes are now in CONVOY too, and it has not changed since, so it lacks CONVOY’s later fixes. The one to pick for the StartOS package. Like the other C builds, for about 20&nbsp;ms after each new block, and for as long as a pool’s split is late, it can hand out a job that pays only the pool.</small>
+              <strong><a href="https://github.com/FlyTheElephant1/datum_gateway" target="_blank" rel="noreferrer">FlyTheElephant</a></strong>
+              <small data-i18n-html="connect.fly">CONVOY’s code plus FlyTheElephant’s own work. Every miner gets the whole split, so a found block pays the whole window. <a href="/flytheelephant">Setup guide</a>.</small>
             </div>
           </li>
           <li data-gw="ratum">
-            <span class="n" aria-hidden="true">4</span>
+            <span class="n" aria-hidden="true">3</span>
             <div>
               <strong><a href="/ratum">Ratum</a></strong>
-              <small data-i18n-html="connect.ratum">iohzrd’s Rust gateway, <code>ratum-gateway</code>: one binary for Linux, macOS and Windows, same config file. Every split output in the coinbase, and at most 0.006% of the time on a pool-only job, tested release by release against our Prime. When it loses the pool it keeps serving unpooled work for 12–26&nbsp;s, which pays <code>mining.pool_address</code>, so set that to your own address. <a href="/ratum">Setup guide</a>.</small>
+              <small data-i18n-html="connect.ratum">iohzrd’s Rust gateway: one binary for Linux, macOS and Windows, with the same config file. Set <code>mining.pool_address</code> to your own address. <a href="/ratum">Setup guide</a>.</small>
             </div>
           </li>
         </ol>
@@ -873,7 +866,7 @@
             <span class="pill pool-state" data-pool-state hidden></span>
           </div>
           <p class="pool-fee" data-i18n-html="pools.iohzrdFee"><b>0%</b> DATUM · <b>10%</b> their public gateway</p>
-          <p class="pool-copy" data-i18n-html="pools.iohzrd">Omega Pool, run by iohzrd, the author of the <a href="https://github.com/iohzrd/datum_gateway" target="_blank" rel="noreferrer">iohzrd gateway</a> and of Ratum. Own gateway is 0%; their public gateway is 10%. Miners connect through <a href="/ratum">ratum-gateway</a> or CONVOY and are paid from a TIDES window of eight times difficulty.</p>
+          <p class="pool-copy" data-i18n-html="pools.iohzrd">Omega Pool, run by iohzrd, the author of <a href="/ratum">Ratum</a>. Own gateway is 0%; their public gateway is 10%. Miners connect through <a href="/ratum">ratum-gateway</a> or CONVOY and are paid from a TIDES window of eight times difficulty.</p>
           <dl class="pool-facts">
             <dt data-i18n="connect.dtStratum">Stratum</dt><dd><span class="mono">stratum+tcp://gateway.iohzrd.tech:23334</span> <span class="faint" data-i18n="pools.theirGw">· their public gateway</span></dd>
             <dt data-i18n="pools.dtDatum">DATUM</dt><dd>config on <a href="https://pool.iohzrd.tech/" target="_blank" rel="noreferrer">pool.iohzrd.tech</a></dd>
@@ -961,12 +954,12 @@
 </nav>
 
 <script src="/static/i18n.js?v=seo1"></script>
-<script src="/static/i18n/en.js?v=gw3"></script>
-<script src="/static/i18n/zh-CN.js?v=gw3"></script>
+<script src="/static/i18n/en.js?v=gw4"></script>
+<script src="/static/i18n/zh-CN.js?v=gw4"></script>
 <script>LZ_I18N.boot();</script>
 <script src="/static/shared.js?v=grace1"></script>
 <script src="/static/app.js?v=rent2"></script>
-<script src="/static/pool.js?v=gw3"></script>
+<script src="/static/pool.js?v=gw4"></script>
 <script src="/static/chart.js?v=app4"></script>
 </body>
 </html>
