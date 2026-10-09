@@ -1,22 +1,29 @@
 {
- "_doc": "DATUM gateway builds the site recommends, best first. This file is the only place the order lives: server.py orders the 'Which DATUM gateway' list (index.html items with data-gw=ID; their copy is connect.<i18n> in static/i18n/*.js), writes the llms.txt section, and serves the file at /api/gateway-builds for the MCP. reco marks the first entry Recommended; the Omega Pool card calls iohzrd 'the gateway we recommend' (pools.iohzrd in i18n), which stays true only while iohzrd is first. summary is the English line llms.txt and the MCP use. Evidence: XBT-084 (~/xbt-rnd/xbt-084/results, C builds) and XBT-082 (~/xbt-rnd/xbt-082, Ratum). When FlyTheElephant1/datum_gateway master carries lazarus/patches/datum-gateway-fte-late-coinbaser.patch, move the fte entry to the top with reco true (drop reco from iohzrd), say so in its summary, and edit pools.iohzrd, connect.fly and the /flytheelephant guide's last paragraph to match.",
- "updated": "2026-09-28",
+ "_doc": "DATUM gateway builds the site recommends, best first. This file is the only place the order lives: server.py orders the 'Which DATUM gateway' list (index.html items with data-gw=ID; their copy is connect.<i18n> in static/i18n/*.js), writes the llms.txt section, and serves the file at /api/gateway-builds for the MCP. reco marks the first entry Recommended. summary is the English line llms.txt and the MCP use. Order set 2026-10-09: FlyTheElephant first by Mike's decision; CONVOY second because its master gives every miner the whole split (the '~17 miners' line was wrong for ac9b70c) and carries fixes the others lack. Evidence: ~/xbt-rnd/xbt-133/results (CONVOY 971af86 vs b9ea7dc) and ~/xbt-rnd/gw-review/results (FTE 280cf54, iohzrd 76d748e), same harness; XBT-084 (C builds, late split) and XBT-082 (Ratum). The pool-only window after a new block and the late-split case are from XBT-084.",
+ "updated": "2026-10-09",
  "gateways": [
-  {
-   "id": "iohzrd",
-   "name": "iohzrd datum_gateway",
-   "repo": "https://github.com/iohzrd/datum_gateway",
-   "i18n": "connect.iohzrd",
-   "reco": true,
-   "summary": "Master c031568; StartOS pow_0.4.1_23 ships 7491a50. Every miner gets the whole split, fitted to block weight and sigops. Measured: for ~20 ms after each new block, and for as long as the pool's split is late, it can hand out a job that pays only the pool."
-  },
   {
    "id": "fte",
    "name": "FlyTheElephant datum_gateway",
    "repo": "https://github.com/FlyTheElephant1/datum_gateway",
    "i18n": "connect.fly",
    "guide": "/flytheelephant",
-   "summary": "Master a5f28aa: CONVOY's BLAKE2b code plus FlyTheElephant's fixes; every miner gets the whole split, fitted to block weight and sigops. Measured the same as iohzrd: a pool-only job for ~20 ms after each new block and while the pool's split is late; lazarus/patches/datum-gateway-fte-late-coinbaser.patch removes that (0 pool-only jobs in the same test). No StartOS package; source build or its Dockerfile."
+   "reco": true,
+   "summary": "Master 280cf54 (7 Oct 2026): CONVOY's BLAKE2b code plus FlyTheElephant's own work; every miner gets the whole split, fitted to block weight and sigops. Regtest 9 Oct 2026 against our Prime, 60 miners in the window: blocks found by an Antminer A3 and by a generic miner each paid all 60. Like every C build, a pool-only job for ~20 ms after each new block and while the pool's split is late; lazarus/patches/datum-gateway-fte-late-coinbaser.patch removes that and still applies to master. No StartOS package; source build or its Dockerfile."
+  },
+  {
+   "id": "convoy",
+   "name": "CONVOY datum_gateway",
+   "repo": "https://github.com/CONVOYMining/datum_gateway",
+   "i18n": "connect.convoy",
+   "summary": "Master 971af86 (9 Oct 2026). Firmware size classes are gone since 4d0a045 (6 Sep 2026): every miner gets the whole split, fitted to block weight and sigops. Regtest 9 Oct 2026 against our Prime, 60 miners in the window: blocks found by an Antminer A3 and by a generic miner each paid all 60. The older b9ea7dc paid 18 from a generic miner and only the pool from an A3, so update a build older than 6 Sep. Master has fixes the other C builds lack, among them e190597 (miners handed a pool-only coinbase although the split had arrived), 695d035 and d8ff316. Same ~20 ms pool-only job after each new block and while the pool's split is late."
+  },
+  {
+   "id": "iohzrd",
+   "name": "iohzrd datum_gateway",
+   "repo": "https://github.com/iohzrd/datum_gateway",
+   "i18n": "connect.iohzrd",
+   "summary": "Master 76d748e (5 Sep 2026); StartOS pow_0.4.1_23 ships 7491a50. Every miner gets the whole split, fitted to block weight and sigops. Regtest 9 Oct 2026 against our Prime, 60 miners in the window: blocks found by an Antminer A3 and by a generic miner each paid all 60. Its two own commits are now in CONVOY master and it has not changed since, so it lacks CONVOY's later fixes. The one with a StartOS package. Same ~20 ms pool-only job after each new block and while the pool's split is late."
   },
   {
    "id": "ratum",
@@ -25,13 +32,6 @@
    "i18n": "connect.ratum",
    "guide": "/ratum",
    "summary": "iohzrd's Rust gateway: one binary for Linux, macOS and Windows, reading the C gateway's config file. Tested on regtest against our Prime on releases 0.1.28, 0.1.39, 0.1.53, master 0.1.54 and the B2Pool and P2Block forks: every found block booked split with every payee paid, and pool-only full work at most 0.006% of the time. Defect on every release: when the pool drops it keeps serving unpooled work, paying mining.pool_address, for 12-26 s before it disconnects miners, so set pool_address to your own address."
-  },
-  {
-   "id": "convoy",
-   "name": "CONVOY datum_gateway",
-   "repo": "https://github.com/CONVOYMining/datum_gateway",
-   "i18n": "connect.convoy",
-   "summary": "Master ac9b70c. Firmware size classes still apply to miners it recognises (Antminer A3 among them), so a block they find can pay only the first ~17 miners; like the other C builds, a pool-only job for ~20 ms after each new block and while the pool's split is late."
   }
  ]
 }
