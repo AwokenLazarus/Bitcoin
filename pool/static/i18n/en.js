@@ -59,10 +59,11 @@ window.LZ_I18N_DICTS["en"] = {
     "text": "The public stratum is a donation, validation and fallback endpoint at {fee}, with a 24 h / 96 h grace at 25%, then 100%. {Pts} goes to DATUM gateways and the rest stays with the pool, on every block the pool finds — pro rata by your DATUM work, whether or not you made that coinbase."
   },
   "gatewaynotice": {
-    "kicker": "Notice · gateway operators: update your DATUM gateway",
+    "kicker": "Action needed",
+    "title": "Gateway operators: update your DATUM gateway",
     "text": "Some gateways on this pool run an <b>out-of-date DATUM gateway</b>. A block found through one can pay the whole reward to the pool address instead of paying each miner directly. Nobody loses that reward, but the pool has to hold those funds and pay every miner their share itself, as a <b>make-good</b>, once the block matures (about 45 days). <b>If you run a gateway, update it to a current build</b> so your blocks pay miners directly. Questions? <b>Join our Discord and ask for help.</b>",
-    "setup": "Current gateway builds and setup",
-    "discord": "Join Discord",
+    "setup": "Update your gateway →",
+    "discord": "Ask for help on Discord",
     "dismiss": "Dismiss notice"
   },
   "hero": {
