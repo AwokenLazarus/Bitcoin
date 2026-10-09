@@ -58,6 +58,13 @@ window.LZ_I18N_DICTS["zh-CN"] = {
     "liveTitle": "DATUM 工作占窗口 {datumPct}，公共 stratum 占 {stratumPct}，因此从 stratum 工作里拿出的 {pts}，对 DATUM 工作相当于 {uplift}。",
     "text": "公共 stratum 是捐赠、验证与后备端点，费率为 {fee}，并有 24 小时 / 96 小时、费率为 25%、之后为 100% 的宽限期。其中 {Pts} 给 DATUM 网关，其余归矿池；矿池每找到一个区块，都按 DATUM 工作比例记给窗口里持有 DATUM 工作的矿工——不论该 coinbase 是否由你打出。"
   },
+  "gatewaynotice": {
+    "kicker": "通知 · 网关运营者：请更新你的 DATUM 网关",
+    "text": "本矿池上有部分网关运行的是<b>过时的 DATUM 网关</b>。通过这类网关挖出的区块，可能把全部奖励付给矿池地址，而不是直接付给每位矿工。这笔奖励不会丢失，但矿池必须代为保管这些资金，并在区块成熟后（约 45 天）以<b>补付</b>的方式把每位矿工应得的份额付给他们。<b>如果你运行网关，请更新到当前版本</b>，让你的区块直接付给矿工。有疑问？<b>请加入我们的 Discord 寻求帮助。</b>",
+    "setup": "当前网关版本与搭建方法",
+    "discord": "加入 Discord",
+    "dismiss": "关闭公告"
+  },
   "hero": {
     "eyebrow": "比特币（XBT / BTCB2）· BLAKE2b · DATUM · TIDES · ",
     "title": "挖比特币（XBT）。<br><em>在区块里直接拿到钱。</em><br>为去中心化网络出力，还能多赚。",

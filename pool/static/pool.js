@@ -81,6 +81,13 @@
     if (el) el.hidden = true;
   });
 
+  const NOTICE_DISMISS_KEY = "lazarus.gatewayupdate.v1.dismissed";
+  try { if (localStorage.getItem(NOTICE_DISMISS_KEY) === "1") { const el = $("gatewaynotice"); if (el) el.hidden = true; } } catch (e) { /* private mode */ }
+  $("gatewaynotice-dismiss")?.addEventListener("click", () => {
+    try { localStorage.setItem(NOTICE_DISMISS_KEY, "1"); } catch (e) { /* private mode */ }
+    const el = $("gatewaynotice"); if (el) el.hidden = true;
+  });
+
   // ------------------------------------------------------------ formatting
   // Formatters and the trend chart live in shared.js (window.LZ), shared with /miner/<addr>.
   const { blockMarks, esc, fmtHr, num, bigNum, short, shortHash, pct, pctSmart, ago, agoS, dur, when, clock, sig4, amt, amtSats, amtExact, kindPill, statusPill, chartLegend, draw, pathLabel, isPrimePath, sessCell, winShareCell, feePct, poolLink, payStatus, minerCard, showMinerTab, MINER_TABS, t: _t } = window.LZ;
