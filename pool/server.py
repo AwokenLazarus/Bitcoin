@@ -1714,6 +1714,21 @@ _cache_refreshing = set()
 _BG_REFRESH = threading.BoundedSemaphore(4)
 
 
+# How long a request waits for another thread's build of its key (or of a key on the same lock)
+# before it gives up. Under the 20 s the socket and the Pages worker allow, so a builder that
+# never returns costs each request this long and no more.
+_COMPUTE_WAIT_S = 10.0
+# Set while this thread runs a builder for cached(): a cached() call made from inside one is
+# nested, and must not wait for a compute lock.
+_cache_tls = threading.local()
+_cache_busy_logged = [0.0]
+
+
+class CacheBusy(Exception):
+    """The build of this key did not finish within _COMPUTE_WAIT_S and there is no older copy
+    to give instead. Answered as a 503."""
+
+
 def _compute_lock(key):
     return _cache_compute_locks[hash(key) % len(_cache_compute_locks)]
 
@@ -1749,6 +1764,15 @@ def cached(key, ttl, fn):
 
     If the rebuild raises, the last good payload is returned rather than an error: an old answer
     is better than none, and the failure is logged so a stuck builder is visible.
+
+    Builders call cached() for other keys (`pool` reads `overflow`, a miner page reads `solo`),
+    and 64 locks are shared by every key. A thread therefore only ever waits for a compute lock
+    while it holds none: a nested call takes its lock if it is free and builds without it if
+    not. Waiting there hung the reader on 2026-10-08, when the inner key hashed to the lock
+    the thread already held, and two threads holding one lock each and wanting the other's
+    would hang the same way. Building without the lock can build one payload twice, which is
+    only wasted work. The wait that remains is bounded: past _COMPUTE_WAIT_S the last good
+    payload goes out, or CacheBusy if there is none.
     """
     now = time.time()
     with _resp_cache_lock:
@@ -1783,12 +1807,27 @@ def cached(key, ttl, fn):
                 else:
                     _BG_REFRESH.release()
         return stale
-    with _compute_lock(key):
+    lock = _compute_lock(key)
+    depth = getattr(_cache_tls, "building", 0)
+    if depth:
+        locked = lock.acquire(blocking=False)
+    else:
+        locked = lock.acquire(timeout=_COMPUTE_WAIT_S)
+        if not locked:
+            now = time.time()
+            if now - _cache_busy_logged[0] > 10:
+                _cache_busy_logged[0] = now
+                print("cache", key, f"waited {_COMPUTE_WAIT_S:.0f}s for its compute lock: a builder is stuck or slow", flush=True)
+            if last_good is None:
+                raise CacheBusy(key)
+            return last_good
+    try:
         now = time.time()
         with _resp_cache_lock:
             hit = _resp_cache.get(key)
             if hit and now - hit[0] < ttl:
                 return hit[1]
+        _cache_tls.building = depth + 1
         try:
             return _cache_store(key, fn())
         except Exception as e:
@@ -1796,6 +1835,11 @@ def cached(key, ttl, fn):
                 raise
             print("cache", key, "rebuild failed, serving copy aged %.0fs:" % age, e, flush=True)
             return last_good
+        finally:
+            _cache_tls.building = depth
+    finally:
+        if locked:
+            lock.release()
 
 
 # BLAKE2b BTC (ticker BTCB2) USD: volume-weighted average of the two live listings.
@@ -6343,6 +6387,8 @@ class Handler(BaseHTTPRequestHandler):
             self._get()
         except (BrokenPipeError, ConnectionResetError, TimeoutError):
             raise
+        except CacheBusy:
+            self.send_json({"error": "busy"}, 503)
         except Exception as e:
             print("request", self.path[:120].encode("ascii", "replace").decode(), type(e).__name__, str(e)[:160], flush=True)
             try:
