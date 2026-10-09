@@ -6,7 +6,7 @@
 // security findings). Figures that move (fees, bonus, minimum output) are given with the date they
 // were true and a pointer to the live tool, so an assistant never presents them as permanent.
 
-export const FAQ_VERSION = "2026-10-09.1";
+export const FAQ_VERSION = "2026-10-09.2";
 
 const S = "https://pool.lazarus-xbt.xyz";
 const E = "https://mempool.lazarus-xbt.xyz";
@@ -70,8 +70,8 @@ export const FAQ = [
     keywords: ["gateway", "datum", "build", "builds", "which", "should", "run", "best", "recommend", "recommended", "fork", "convoy", "flytheelephant", "fte", "datum_gateway", "version"],
     answer:
       "Several gateway builds connect to Lazarus with no patch. The pool ranks them by what it measures against its own Prime (whether a found block pays the whole window, and how often a gateway hands miners a job whose coinbase pays only the pool); " +
-      "the ranked list, best first, is connection_info.gateway_builds and the 'Which DATUM gateway' list on the Connect page. As of 9 Oct 2026 FlyTheElephant's build is the recommended one, then CONVOY, iohzrd and Ratum. Current masters of all three C builds (FlyTheElephant 280cf54, CONVOY 971af86, iohzrd 76d748e) give every miner the whole split: on regtest, blocks found by an Antminer A3 and by a generic miner each paid all 60 miners in the window. C builds from before 6 Sep 2026 (CONVOY b9ea7dc and older) can pay only part of the window or only the pool, so update them. " +
-      "Every C build can still hand out a pool-only job for about 20 ms after each new block and for as long as the pool's split is late; a small patch closes that for FlyTheElephant's build (see 'flytheelephant'). ratum-gateway, iohzrd's Rust gateway, is also on the list (see 'ratum'). Whatever the build, run it against Bitcoin Knots 29.4.2 (see 'node-version').",
+      "the ranked list, best first, is connection_info.gateway_builds and the 'Which DATUM gateway' list on the Connect page. As of 9 Oct 2026 CONVOY's build is the recommended one, then FlyTheElephant's (see 'flytheelephant'). Current masters of both (CONVOY 971af86, FlyTheElephant 280cf54) give every miner the whole split: on regtest, blocks found by an Antminer A3 and by a generic miner each paid all 60 miners in the window. Keep whichever build you run up to date. " +
+      "ratum-gateway, iohzrd's Rust gateway, is also on the list (see 'ratum'). Whatever the build, run it against Bitcoin Knots 29.4.2 (see 'node-version').",
     links: [`${S}/connect`, `${S}/flytheelephant`, `${S}/ratum`],
   },
   {
@@ -79,7 +79,7 @@ export const FAQ = [
     title: "Mining with FlyTheElephant's datum_gateway",
     keywords: ["flytheelephant", "fly", "elephant", "fte", "flytheelephant1", "yuge", "gateway", "guide", "setup"],
     answer:
-      "FlyTheElephant1/datum_gateway (master 280cf54, 7 Oct 2026), the build the pool recommends first, is CONVOY's BLAKE2b code plus FlyTheElephant's fixes: every miner gets the whole split coinbase, fitted to the block's weight and sigop limits. " +
+      "FlyTheElephant1/datum_gateway (master 280cf54, 7 Oct 2026), second on the pool's list after CONVOY, is CONVOY's BLAKE2b code plus FlyTheElephant's fixes: every miner gets the whole split coinbase, fitted to the block's weight and sigop limits. " +
       "Build it with cmake, set pool_host datum.lazarus-xbt.xyz, pool_port 28915 and the pool pubkey (connection_info), pool_address to your own address, stratum.vardiff_min 4096, and pooled_mining_only true; point machines at the gateway with username address.worker. " +
       "Tested against the pool on regtest: handshake, pubkey pinning, split blocks paying the whole window, usernames, the 0% DATUM fee, reconnects and the pool's template checks all pass. Like every C build it can briefly serve a pool-only job after a new block; " +
       "lazarus/patches/datum-gateway-fte-late-coinbaser.patch fixes that; it is not in master yet and still applies to 280cf54. The full guide, with a complete config and troubleshooting, is the page linked here.",
