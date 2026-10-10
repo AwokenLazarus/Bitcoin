@@ -105,6 +105,21 @@ pub fn decode_script(addr: &str, net: Network) -> Option<Vec<u8>> {
     Some(script)
 }
 
+/// Whether `s` is an address on some network: a bech32/bech32m segwit address of any prefix
+/// or a base58check one carrying a 20-byte hash. It says nothing about whether the pool could
+/// pay it. Used to tell an address from a worker name in a username, where the network a
+/// gateway's miners use is not known and a wrong guess only costs a label.
+pub fn looks_like_address(s: &str) -> bool {
+    let s = s.trim();
+    if s.len() < 14 || s.len() > 90 {
+        return false;
+    }
+    if bech32::segwit::decode(s).is_ok() {
+        return true;
+    }
+    bs58::decode(s).with_check(None).into_vec().is_ok_and(|raw| raw.len() == 21)
+}
+
 fn segwit_script(ver: Fe32, prog: &[u8]) -> Vec<u8> {
     let v = ver.to_u8();
     let mut s = Vec::with_capacity(2 + prog.len());

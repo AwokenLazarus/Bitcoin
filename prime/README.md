@@ -550,7 +550,10 @@ the bare address. A gateway forwards worker names only with `pool_pass_workers` 
 `pool_pass_full_users` on; with both off everything arrives under one empty name.
 
 Names are self-declared, so they are bounded and never trusted: a name is what follows the first
-`.`, up to a `~`, cut to 32 printable ASCII characters (anything else becomes `_`); an identity
+`.`, up to a `~`, cut to 32 printable ASCII characters (anything else becomes `_`). A gateway in
+`pool_pass_workers` mode sends `<pool_address>.<what the miner typed>` and ASICs type
+`address.worker`, so an address in front of the name (with its `~modifier`) is dropped: `addr.A301`
+is `A301` and a bare address is no name. An identity
 keeps 256 names per session and a session 1024. Past a limit the name least recently seen makes
 room and its tally moves to `workers_overflow` for its identity (an empty `identity` there is
 for identities that no longer hold a name), so a session's rows always add up to its `work`. The

@@ -30,14 +30,30 @@ const BUCKETS: usize = 10;
 pub const RECENT_SECS: u64 = BUCKET_SECS * BUCKETS as u64;
 
 /// The worker part of a share username: what follows the first `.`, up to a `~` modifier.
-/// Empty when there is none. Anything that is not printable ASCII becomes `_`, and the name is
-/// cut to [`MAX_NAME_LEN`] characters.
+/// Empty when there is none.
+///
+/// A gateway that passes workers but not full usernames (`pool_pass_workers`) sends
+/// `<its pool_address>.<whatever the miner typed>`, and ASIC firmware makes miners type
+/// `address.worker`, so the name arrives as `address.worker` or just `address`. An address in
+/// front of the name is not part of it and is dropped (`address.A301` is `A301`, a bare address
+/// is no name), along with its `~modifier`.
+///
+/// Anything that is not printable ASCII becomes `_`, and the name is cut to [`MAX_NAME_LEN`]
+/// characters.
 pub fn worker_of(username: &str) -> Cow<'_, str> {
     let u = username.trim();
     let Some(dot) = u.find('.') else {
         return Cow::Borrowed("");
     };
-    let raw = &u[dot + 1..];
+    let mut raw = &u[dot + 1..];
+    let head_end = raw.find(['.', '~']).unwrap_or(raw.len());
+    if crate::address::looks_like_address(&raw[..head_end]) {
+        raw = &raw[head_end..];
+        if raw.starts_with('~') {
+            raw = &raw[raw.find('.').unwrap_or(raw.len())..];
+        }
+        raw = raw.strip_prefix('.').unwrap_or(raw);
+    }
     let raw = &raw[..raw.find('~').unwrap_or(raw.len())];
     if raw.len() <= MAX_NAME_LEN && raw.bytes().all(|b| b.is_ascii_graphic()) {
         return Cow::Borrowed(raw);
@@ -327,6 +343,40 @@ mod tests {
         assert_eq!(worker_of(&long), "x".repeat(MAX_NAME_LEN));
         let wide = format!("bc1qaddr.{}", "é".repeat(4096));
         assert_eq!(worker_of(&wide), "_".repeat(MAX_NAME_LEN));
+    }
+
+    /// What a gateway in `pool_pass_workers` mode sends: its own `mining.pool_address`, a dot, then
+    /// whatever the miner typed, which on most ASICs is `address.worker`.
+    #[test]
+    fn an_address_in_front_of_the_worker_is_not_part_of_the_name() {
+        let bech = "bc1qvchspt9gm5dq0geq3kxx53k3n87znwwvwc30t0";
+        let p2pkh = "1BvBMSEYstWetqTFn5Au4m4GFg7xJaNVN2";
+        let p2sh = "3J98t1WpEZ73CNmQviecrnyiWrnqRhWNLy";
+        let other = "bc1q34aq5drpuwy3wgl9lhup9892qp6svr8ldzyy7c";
+        for (user, want) in [
+            // the pool address, then the miner's own `address.worker`
+            (format!("{bech}.{bech}.A301"), "A301"),
+            (format!("{bech}.{other}.A301"), "A301"),
+            (format!("{bech}.{p2pkh}.rig.7"), "rig.7"),
+            (format!("{bech}.{p2sh}.A301"), "A301"),
+            (format!("{bech}.{other}~mod.A301"), "A301"),
+            // the miner typed only its address, or only a worker
+            (format!("{bech}.{bech}"), ""),
+            (format!("{bech}.{other}"), ""),
+            (format!("{bech}.{other}~mod"), ""),
+            (format!("{bech}.A301"), "A301"),
+            (format!("{bech}.rig.7"), "rig.7"),
+            // not an address: kept whole
+            (format!("{bech}.bc1qnotanaddress.A301"), "bc1qnotanaddress.A301"),
+            (format!("{bech}.1234567890123456.x"), "1234567890123456.x"),
+            // full usernames still read as before
+            (format!("{bech}.A301"), "A301"),
+            (bech.to_string(), ""),
+        ] {
+            assert_eq!(worker_of(&user), want, "{user:?}");
+        }
+        // 42 + 1 + 42 + 1 + 4 characters: the old rule kept the first 32 of the address
+        assert_ne!(worker_of(&format!("{bech}.{bech}.A301")), &bech[..MAX_NAME_LEN]);
     }
 
     #[test]
