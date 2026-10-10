@@ -81,10 +81,10 @@ class PrimeWorkers(unittest.TestCase):
             self.assertEqual((r["window_work"], r["window_percent"], r["window_sats"], r["window_shares"]), (5_000, 2.5, 7_000, 40))
             self.assertEqual(r["credited_hr_ghs"], 30.0)
             self.assertFalse(r.get("worker_names_missing"))
-        # the pool's miners table: one line for the address, two workers, no double window
+        # the pool's miners table: one line for the address, one miner (its workers are on its page), no double window
         self.assertEqual(len(self.rollup), 1)
         one = self.rollup[0]
-        self.assertEqual((one["sessions"], one["via"], one["hr_ghs"], one["window_work"]), (2, "prime", 30.0, 5_000))
+        self.assertEqual((one["sessions"], one["via"], one["hr_ghs"], one["window_work"]), (1, "prime", 30.0, 5_000))
         self.assertEqual(one["shares_lifetime"], 6_000)
 
     def test_an_address_line_never_shows_less_than_its_window_work(self):
@@ -163,6 +163,29 @@ class PrimeWorkers(unittest.TestCase):
         rows = self.rows([client([worker("", ghs=30.0)])], prime=prime, stratum=stratum)
         self.assertEqual([(r["worker"], r["ua"]) for r in rows], [("S19", "cgminer"), ("Farm One", "DATUM gateway")])
         self.assertTrue(rows[1]["worker_names_missing"])
+
+    def test_a_datum_gateway_is_one_miner_on_the_list_however_many_workers(self):
+        rows = self.rows([client([worker("A301", ghs=18.0), worker("A302", ghs=12.0), worker("A303", ghs=5.0)])])
+        self.assertEqual(len([r for r in rows if r["address"] == ADDR]), 3)  # the miner page keeps every worker
+        self.assertEqual(len(self.rollup), 1)
+        self.assertEqual((self.rollup[0]["sessions"], self.rollup[0]["worker"], self.rollup[0]["via"]), (1, "window", "prime"))
+        self.assertEqual(server.count_miners(rows), 1)
+
+    def test_stratum_sessions_still_count_each_and_the_gateway_side_once(self):
+        s19 = {"address": ADDR, "worker": "S19", "hr_ghs": 10.0, "via": "stratum", "host": "1.2.3.4", "ua": "cgminer", "last_share_s": 2.0, "shares_acc": 5}
+        s21 = dict(s19, worker="S21", host="1.2.3.5")
+        prime = {ADDR: info(hr=40.0, stratum_work=1_000)}
+        rows = self.rows([client([worker("A301", ghs=18.0), worker("A302", ghs=12.0)])], prime=prime, stratum=[s19, s21])
+        self.assertEqual(server.count_miners(rows), 3)  # two stratum sessions + the gateway once
+        self.assertEqual(len(self.rollup), 1)
+        self.assertEqual(self.rollup[0]["sessions"], 3)
+        self.assertEqual(self.rollup[0]["via"], "both")
+
+    def test_two_addresses_on_one_gateway_are_two_miners(self):
+        two = [worker("A301", identity=ADDR), worker("B1", identity=OTHER)]
+        rows = self.rows([client(two)], prime={ADDR: info(), OTHER: info()})
+        self.assertEqual(server.count_miners(rows), 2)
+        self.assertEqual(len(self.rollup), 2)
 
     def test_strings_in_both_languages(self):
         for lang in ("en", "zh-CN"):

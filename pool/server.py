@@ -2749,7 +2749,7 @@ def scrape():
     _lby, _lpool = _ledger_hashrate()
     from_clients = sum(float(m.get("hr_ghs") or 0) for m in merged)
     live_hr = _lpool if _lpool > 1e-9 else (from_clients or pool_hr)
-    n_miners = len(merged)
+    n_miners = count_miners(merged)
     if live_hr > 0:
         db(
             "INSERT OR REPLACE INTO pool_samples(ts,hr_ghs,miners,shares_acc,shares_rej) VALUES(?,?,?,?,?)",
@@ -4487,14 +4487,33 @@ def pool_payload():
     }
 
 
+def count_miners(rows):
+    """Miners in a list of online rows: a stratum session each, and a DATUM address once however
+    many workers its gateway names (its prime_worker rows)."""
+    return sum(1 for m in rows if not m.get("prime_worker")) + len(
+        {m.get("address") for m in rows if m.get("prime_worker") and m.get("address")}
+    )
+
+
 def rollup_online_by_address(online):
     """One row per address on the miners list; detail page keeps all sessions."""
     order = []
     by = {}
+    # A DATUM gateway is one miner on the list, however many workers it names: its worker rows
+    # (prime_worker) are folded into one entry per address and count once. The workers are on
+    # the miner's own page (/api/miner keeps every row).
+    stratum_addrs = {m.get("address") for m in online or [] if m.get("address") and not m.get("prime_worker")}
+    prime_seen = set()
     for m in online or []:
         addr = m.get("address") or ""
         if not addr:
             continue
+        extra_worker_row = False
+        if m.get("prime_worker"):
+            m = dict(m)
+            m["worker"] = (m.get("gateway_name") or "gateway") if addr in stratum_addrs else "window"
+            extra_worker_row = addr in prime_seen
+            prime_seen.add(addr)
         if addr not in by:
             by[addr] = dict(m)
             by[addr]["sessions"] = 1
@@ -4503,7 +4522,8 @@ def rollup_online_by_address(online):
         cur = by[addr]
         if _hasher_path(cur) != _hasher_path(m):
             cur["via"] = "both"
-        cur["sessions"] = int(cur.get("sessions") or 1) + 1
+        if not extra_worker_row:
+            cur["sessions"] = int(cur.get("sessions") or 1) + 1
         cur["diff_acc"] = int(cur.get("diff_acc") or 0) + int(m.get("diff_acc") or 0)
         cur["shares_acc"] = int(cur.get("shares_acc") or 0) + int(m.get("shares_acc") or 0)
         cur["shares_session"] = int(cur.get("shares_session") or 0) + int(m.get("shares_session") or 0)
