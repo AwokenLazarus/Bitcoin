@@ -6,6 +6,7 @@ import contextlib
 import gzip
 import html
 import json
+import logging
 import os
 import queue
 import re
@@ -15,6 +16,7 @@ import subprocess
 import sys
 import threading
 import time
+from typing import NamedTuple
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from collections import defaultdict, deque
@@ -36,6 +38,12 @@ STRATUM_PORT = int(CONF.get("stratum_port", 23334))
 DATUM_URL = CONF.get("datum_url", "http://127.0.0.1:7152")
 DATUM_CLIENT_URLS = [(DATUM_URL, "stratum", STRATUM_PORT)]
 MEMPOOL_API = CONF.get("mempool_api", "http://10.21.21.27:8999")
+# Explorer pool slug for the blocks_found drift check. Not the difficulty floor.
+EXPLORER_POOL_SLUG = CONF.get("explorer_pool_slug", "lazarus")
+# The writer loop is about ten seconds. The explorer count is not a ten-second signal,
+# and a full block list is only fetched once a difference has already lasted.
+BLOCKS_FOUND_CHECK_S = 600
+BLOCKS_FOUND_FAIL_S = 60
 COOKIE = Path(CONF.get("cookie_file", "/home/umbrel/umbrel/app-data/bitcoin-knots/data/bitcoin/.cookie"))
 RPC_URL = CONF.get("rpc_url", "http://127.0.0.1:9332")
 AUTH_FILE = Path(CONF.get("datum_auth_file", "/home/umbrel/blake2b/secrets/datum-admin.env"))
@@ -150,6 +158,31 @@ def prime_reachable(stale_after=30.0):
 
 def _datum_prime_pubkey():
     return ((prime_doc().get("pool") or {}).get("pubkey")) or ""
+
+
+def datum_pool_min_diff():
+    """Prime's DATUM share-difficulty floor, from stats.json ``pool.min_diff``.
+
+    That field is the smallest share difficulty Prime accepts and the vardiff floor it
+    sends to gateways. None when this stats document does not include the key, so the
+    API leaves ``datum.min_diff`` out rather than inventing one.
+    """
+    pool = prime_doc().get("pool")
+    if not isinstance(pool, dict) or "min_diff" not in pool:
+        return None
+    raw = pool.get("min_diff")
+    if isinstance(raw, bool) or (isinstance(raw, float) and not raw.is_integer()):
+        print("datum_min_diff_unreadable", raw, flush=True)
+        return None
+    try:
+        n = int(raw)
+    except (TypeError, ValueError):
+        print("datum_min_diff_unreadable", raw, flush=True)
+        return None
+    if n < 1:
+        print("datum_min_diff_unreadable", n, flush=True)
+        return None
+    return n
 
 
 lock = threading.Lock()
@@ -3590,6 +3623,197 @@ def scan_found_blocks():
 state = {"pool_hr_ghs": 0, "shares_acc": 0, "shares_rej": 0, "miners": [], "ts": 0, "prime": {}, "prime_meta": {}}
 
 
+def _meta_get(key):
+    row = db("SELECT value FROM meta WHERE key=?", (key,), one=True)
+    if not row or row["value"] is None or row["value"] == "":
+        return None
+    return str(row["value"])
+
+
+def _meta_set(key, value):
+    db("INSERT OR REPLACE INTO meta(key,value) VALUES(?,?)", (key, str(value)), write=True)
+
+
+def _meta_int(key):
+    raw = _meta_get(key)
+    if raw is None:
+        return None
+    try:
+        return int(raw)
+    except ValueError:
+        return None
+
+
+def blocks_found_guard_view():
+    """(explorer count, unix time of the last successful check). None until a check has succeeded."""
+    return _meta_int("blocks_found_explorer"), _meta_int("blocks_found_checked_at")
+
+
+def _blocks_found_check_due(now):
+    checked = _meta_int("blocks_found_checked_at")
+    if checked is not None and now - checked < BLOCKS_FOUND_CHECK_S:
+        return False
+    failed = _meta_int("blocks_found_check_failed_at")
+    if failed is not None and (checked is None or failed > checked) and now - failed < BLOCKS_FOUND_FAIL_S:
+        return False
+    return True
+
+
+def explorer_pool_count():
+    """Explorer ``blockCount.all`` for our pool. Raises when the document has no such count."""
+    raw = curl(
+        f"{MEMPOOL_API.rstrip('/')}/api/v1/mining/pool/{EXPLORER_POOL_SLUG}",
+        timeout=8,
+    )
+    if not raw:
+        raise RuntimeError("explorer pool summary empty")
+    doc = json.loads(raw)
+    n = (doc.get("blockCount") or {}).get("all") if isinstance(doc, dict) else None
+    if isinstance(n, bool) or not isinstance(n, int):
+        raise RuntimeError("explorer blockCount.all missing")
+    return n
+
+
+def explorer_pool_blocks():
+    """height -> block hash, from the explorer's pool block list, newest page first.
+
+    Raises when a page is missing or the pages stop moving backward, so a short read
+    is not treated as the explorer's whole list.
+    """
+    base = f"{MEMPOOL_API.rstrip('/')}/api/v1/mining/pool/{EXPLORER_POOL_SLUG}/blocks"
+    out = {}
+    url = base
+    prev_floor = None
+    for _ in range(80):
+        raw = curl(url, timeout=20)
+        if not raw:
+            raise RuntimeError("empty explorer block page")
+        page = json.loads(raw)
+        if not isinstance(page, list):
+            raise RuntimeError("explorer block page is not a list")
+        if not page:
+            return out
+        floor = None
+        for b in page:
+            if not isinstance(b, dict):
+                continue
+            h = b.get("height")
+            hid = b.get("id")
+            if isinstance(h, bool) or not isinstance(h, int) or not isinstance(hid, str) or len(hid) != 64:
+                continue
+            out[h] = hid.lower()
+            floor = h if floor is None else min(floor, h)
+        if floor is None:
+            raise RuntimeError("explorer block page had no heights")
+        if prev_floor is not None and floor >= prev_floor:
+            raise RuntimeError("explorer block pages did not move backward")
+        prev_floor = floor
+        if len(page) < 100:
+            return out
+        url = f"{base}/{floor}"
+    raise RuntimeError("explorer block list did not end")
+
+
+def our_found_blocks():
+    """height -> hash of every row in found_blocks."""
+    out = {}
+    for r in db("SELECT height, hash FROM found_blocks") or []:
+        if r["hash"] is None:
+            continue
+        out[int(r["height"])] = str(r["hash"]).lower()
+    return out
+
+
+def blocks_found_height_diff(ours, theirs):
+    """Heights whose hash is missing or different on the other side.
+
+    ``ours`` and ``theirs`` are height -> hash. A height in both with the same hash is
+    in neither list. A height in both with different hashes is in both.
+    """
+    only_ours = sorted(h for h, hx in ours.items() if theirs.get(h) != hx)
+    only_theirs = sorted(h for h, hx in theirs.items() if ours.get(h) != hx)
+    return only_ours, only_theirs
+
+
+def _blocks_found_log():
+    log = logging.getLogger("pool.blocks_found")
+    if not log.handlers:
+        handler = logging.StreamHandler()
+        handler.setFormatter(logging.Formatter("%(levelname)s %(name)s %(message)s"))
+        log.addHandler(handler)
+        log.setLevel(logging.WARNING)
+        log.propagate = False
+    return log
+
+
+def _warn_blocks_found_drift(ours_n, explorer_n, streak):
+    log = _blocks_found_log()
+    try:
+        theirs = explorer_pool_blocks()
+    except Exception as e:
+        log.warning(
+            "blocks_found differs from the explorer for %s checks: ours=%s explorer=%s"
+            " (block list unreadable: %s)",
+            streak,
+            ours_n,
+            explorer_n,
+            e,
+        )
+        return
+    if len(theirs) < explorer_n:
+        log.warning(
+            "blocks_found differs from the explorer for %s checks: ours=%s explorer=%s"
+            " explorer_list=%s (list shorter than the explorer count; heights not compared)",
+            streak,
+            ours_n,
+            explorer_n,
+            len(theirs),
+        )
+        return
+    only_ours, only_theirs = blocks_found_height_diff(our_found_blocks(), theirs)
+    log.warning(
+        "blocks_found differs from the explorer for %s checks: ours=%s explorer=%s"
+        " heights_only_ours=%s heights_only_explorer=%s",
+        streak,
+        ours_n,
+        explorer_n,
+        only_ours,
+        only_theirs,
+    )
+
+
+def check_blocks_found_drift(now=None, force=False):
+    """Compare ``blocks_found`` with the explorer. Record the result. Do not change the count.
+
+    Runs from the writer's loop, not a second process: the loop already owns this database,
+    and a replica (``POOL_UI_NO_WRITE``) must not check or log the same drift again.
+    A difference is logged at warning once it has lasted more than two successful checks.
+    """
+    if NO_WRITE:
+        return
+    now = time.time() if now is None else float(now)
+    if not force and not _blocks_found_check_due(now):
+        return
+    try:
+        explorer_n = explorer_pool_count()
+    except Exception as e:
+        _meta_set("blocks_found_check_failed_at", str(int(now)))
+        print("blocks_found_check_failed", type(e).__name__, str(e)[:160], flush=True)
+        return
+    row = db("SELECT COUNT(*) AS n FROM found_blocks", one=True)
+    ours_n = int(row["n"]) if row else 0
+    _meta_set("blocks_found_explorer", str(explorer_n))
+    _meta_set("blocks_found_checked_at", str(int(now)))
+    if explorer_n == ours_n:
+        _meta_set("blocks_found_mismatch_streak", "0")
+        return
+    streak = int(_meta_get("blocks_found_mismatch_streak") or "0") + 1
+    _meta_set("blocks_found_mismatch_streak", str(streak))
+    if streak <= 2:
+        return
+    _warn_blocks_found_drift(ours_n, explorer_n, streak)
+
+
 def loop():
     global state
     while True:
@@ -3601,6 +3825,7 @@ def loop():
         try:
             restore_unsplit_effort()
             scan_found_blocks()
+            check_blocks_found_drift()
             mature_rounds()
             refresh_gateway_identities()
             learn_gateway_tags()
@@ -4287,6 +4512,22 @@ def _datum_gateway_slices(gateways, datum_hr_ghs):
     return out, n
 
 
+def _public_datum():
+    """The ``datum`` object on ``/api/pool``. ``min_diff`` is added only when Prime publishes it."""
+    doc = {
+        "pool_host": CONF.get("datum_prime_host", STRATUM_HOST),
+        "pool_port": int(CONF.get("datum_prime_port", 28915)),
+        "pool_pubkey": _datum_prime_pubkey(),
+        "pool_pass_workers": True,
+        "pool_pass_full_users": False,
+        "pooled_mining_only": True,
+    }
+    min_diff = datum_pool_min_diff()
+    if min_diff is not None:
+        doc["min_diff"] = min_diff
+    return doc
+
+
 def pool_payload():
     node = node_info()
     miners = online_miners()
@@ -4348,6 +4589,7 @@ def pool_payload():
     )
     win = tides_window_snapshot()
     prime = prime_summary()
+    explorer_n, explorer_at = blocks_found_guard_view()
     # /api/pool is polled every 10s. Full coinbase splits for ~100 blocks were ~900 KB of
     # that payload (and gzipped on every request). Found-by-Lazarus reads /api/payouts.
     prime_pub = {k: v for k, v in prime.items() if k != "blocks"}
@@ -4451,6 +4693,8 @@ def pool_payload():
         "ttf_seconds": ttf_s,
         "block_interval_seconds": interval,
         "blocks_found": nfound,
+        "blocks_found_explorer": explorer_n,
+        "blocks_found_checked_at": explorer_at,
         "blocks_expected": expected,
         # Luck is found / expected over the span the hashrate samples cover (they are kept
         # for a week), at the difficulty in force when each hash was done.
@@ -4461,14 +4705,7 @@ def pool_payload():
         "finder_payout_btc": SUBSIDY * (1 - POOL_FEE / 100.0),
         "payout": payout,
         "payout_scheme": "TIDES",
-        "datum": {
-            "pool_host": CONF.get("datum_prime_host", STRATUM_HOST),
-            "pool_port": int(CONF.get("datum_prime_port", 28915)),
-            "pool_pubkey": _datum_prime_pubkey(),
-            "pool_pass_workers": True,
-            "pool_pass_full_users": False,
-            "pooled_mining_only": True,
-        },
+        "datum": _public_datum(),
         "prime": prime_pub,
         # Network-share valve on the house stratum: over the line, new miners are relayed
         # to other BLAKE2b pools and paid there. Absent when the gateway lacks the feature.
@@ -5348,41 +5585,419 @@ _POOL_TABLE_ZH = """<div class="seo-table"><table>
         </tbody>
       </table></div>"""
 
-_API_TABLE_EN = """<div class="seo-table"><table>
-        <caption>Public endpoints. GET, JSON, no authentication.</caption>
-        <thead><tr><th scope="col">Endpoint</th><th scope="col">What it returns</th></tr></thead>
-        <tbody>
-        <tr><th scope="row"><code>/api/pool</code></th><td>Hashrate by path, network difficulty and share, the TIDES window, the fee split and the live XBT per TH/s per day</td></tr>
-        <tr><th scope="row"><code>/api/coinbaser</code></th><td>The coinbase output list Prime is handing out right now — the next block's payout, before it is found</td></tr>
-        <tr><th scope="row"><code>/api/blocks</code></th><td>Every block the pool has found, with height, time and reward</td></tr>
-        <tr><th scope="row"><code>/api/found/&lt;blockhash&gt;</code></th><td>The coinbase outputs a found block actually paid</td></tr>
-        <tr><th scope="row"><code>/api/miners</code></th><td>Addresses with accepted work in the window, their share of it and their hashrate</td></tr>
-        <tr><th scope="row"><code>/api/gateways</code></th><td>Connected DATUM gateways and what each is contributing</td></tr>
-        <tr><th scope="row"><code>/api/payouts</code></th><td>Coinbase payouts already made, per address</td></tr>
-        <tr><th scope="row"><code>/api/solo</code></th><td>Solo miners and blocks found solo</td></tr>
-        <tr><th scope="row"><code>/api/price</code></th><td>The XBT price the site converts with</td></tr>
-        <tr><th scope="row"><code>/api/hardware</code></th><td>The Siacoin ASIC list with prices and estimated XBT and dollars per day</td></tr>
-        <tr><th scope="row"><code>/api/rentals</code></th><td>BLAKE2b rigs listed on RouteHash, with the rental cost and estimated XBT per day through your own DATUM gateway</td></tr>
-        </tbody>
-      </table></div>"""
+class ApiField(NamedTuple):
+    name: str
+    typ: str
+    unit: str
+    en: str
+    zh: str
+    nullable: bool = False
+    optional: bool = False
 
-_API_TABLE_ZH = """<div class="seo-table"><table>
-        <caption>公开接口。GET、JSON、免鉴权。</caption>
-        <thead><tr><th scope="col">接口</th><th scope="col">返回内容</th></tr></thead>
-        <tbody>
-        <tr><th scope="row"><code>/api/pool</code></th><td>各路径算力、全网难度与占比、TIDES 窗口、手续费拆分，以及实时的每 TH/s 每日 XBT</td></tr>
-        <tr><th scope="row"><code>/api/coinbaser</code></th><td>Prime 此刻正在下发的 coinbase 输出列表——也就是下一个区块在出块之前就定好的支付</td></tr>
-        <tr><th scope="row"><code>/api/blocks</code></th><td>矿池找到的每一个区块，含高度、时间与奖励</td></tr>
-        <tr><th scope="row"><code>/api/found/&lt;区块哈希&gt;</code></th><td>某个已出区块实际支付的 coinbase 输出</td></tr>
-        <tr><th scope="row"><code>/api/miners</code></th><td>窗口内有有效工作量的地址、各自占比与算力</td></tr>
-        <tr><th scope="row"><code>/api/gateways</code></th><td>已连接的 DATUM 网关及各自的贡献</td></tr>
-        <tr><th scope="row"><code>/api/payouts</code></th><td>已完成的 coinbase 支付，按地址列出</td></tr>
-        <tr><th scope="row"><code>/api/solo</code></th><td>单挖矿工与单挖出的区块</td></tr>
-        <tr><th scope="row"><code>/api/price</code></th><td>本站折算所用的 XBT 价格</td></tr>
-        <tr><th scope="row"><code>/api/hardware</code></th><td>Siacoin 矿机列表，含价格与每日 XBT / 美元估算</td></tr>
-        <tr><th scope="row"><code>/api/rentals</code></th><td>RouteHash 上的 BLAKE2b 矿机，含租金，以及走你自己的 DATUM 网关时预计每天的 XBT</td></tr>
-        </tbody>
-      </table></div>"""
+
+class ApiEndpoint(NamedTuple):
+    path: str
+    en: str
+    zh: str
+    fields: tuple
+    query: tuple = ()
+
+
+# One table for the /api page and for GET /api/openapi.json. A field listed here is stable:
+# it is not renamed or removed without a dated notice on that page. Anything not listed may change.
+# `optional` fields are stable when present and are left out when the source does not publish them.
+_API_STABILITY_DAY = "2026-10-10"
+API_CATALOG = (
+    ApiEndpoint(
+        "/api/pool",
+        "Hashrate, the TIDES window, fees, blocks found, and the DATUM connection.",
+        "算力、TIDES 窗口、手续费、已出区块，以及 DATUM 连接参数。",
+        (
+            ApiField("name", "string", "", "Pool name.", "矿池名称。"),
+            ApiField("blocks_found", "integer", "count", "Blocks this pool has recorded. Not rewritten from the explorer.", "本矿池自己记下的区块数。不会按浏览器的数字改写。"),
+            ApiField("blocks_found_explorer", "integer", "count", "The explorer's block count for this pool at the last successful check.", "上次核对成功时，浏览器给本矿池的区块数。", nullable=True),
+            ApiField("blocks_found_checked_at", "integer", "unix seconds", "When that check succeeded.", "那次核对成功的时间。", nullable=True),
+            ApiField("pool_hr_ghs", "number", "GH/s", "Credited pool hashrate.", "记入账的矿池算力。"),
+            ApiField("height", "integer", "blocks", "Chain height last read from the node.", "最近一次从节点读到的链高度。", nullable=True),
+            ApiField("difficulty", "number", "", "Network difficulty last read from the node.", "最近一次从节点读到的全网难度。", nullable=True),
+            ApiField("miners_online", "integer", "count", "Payout addresses with a live session.", "当前有会话的收款地址数。"),
+            ApiField("fees.datum_percent", "number", "percent", "Fee on work that arrives through a miner's own DATUM gateway.", "经矿工自建 DATUM 网关到来的工作量所收的费率。"),
+            ApiField("fees.stratum_percent", "number", "percent", "Fee on work that arrives through the public stratum.", "经公共 stratum 到来的工作量所收的费率。"),
+            ApiField("datum.pool_host", "string", "", "Host a DATUM gateway connects to.", "DATUM 网关要连接的主机。"),
+            ApiField("datum.pool_port", "integer", "port", "Port a DATUM gateway connects to.", "DATUM 网关要连接的端口。"),
+            ApiField("datum.pool_pubkey", "string", "hex", "Pool public key a gateway must pin. Empty until Prime has published one.", "网关必须钉住的矿池公钥。Prime 尚未公布时为空。"),
+            ApiField("datum.min_diff", "integer", "share difficulty", "Smallest share difficulty Prime accepts, and the vardiff floor it sends. Present only when Prime's stats include pool.min_diff.", "Prime 接受的最低份额难度，也是它下发的 vardiff 下限。仅当 Prime 的统计里有 pool.min_diff 时出现。", optional=True),
+            ApiField("payout_scheme", "string", "", "How a found block is paid.", "出块后如何支付。"),
+            ApiField("updated", "integer", "unix seconds", "When this document was built.", "这份文档的生成时间。"),
+        ),
+    ),
+    ApiEndpoint(
+        "/api/coinbaser",
+        "The coinbase output list Prime is handing out for the next block.",
+        "Prime 此刻为下一个区块下发的 coinbase 输出列表。",
+        (
+            ApiField("scheme", "string", "", "Payout scheme this split belongs to.", "这份分配所属的支付方式。"),
+            ApiField("value", "integer", "sats", "Coinbase value the split is computed against.", "计算这份分配所用的 coinbase 金额。"),
+            ApiField("miner_sats", "integer", "sats", "Sum of the miner outputs.", "矿工输出的合计。"),
+            ApiField("pool_sats", "integer", "sats", "The pool output.", "矿池那一笔输出。"),
+            ApiField("fee_sats", "integer", "sats", "Fee inside the pool output.", "矿池输出里的手续费。"),
+            ApiField("fee_percent", "number", "percent", "Fee as a percent of the coinbase value.", "手续费占 coinbase 金额的百分比。"),
+        ),
+    ),
+    ApiEndpoint(
+        "/api/blocks",
+        "Recent blocks on the chain, as the explorer lists them. Not the pool's own found-block list.",
+        "浏览器列出的近期链上区块。不是本矿池自己的出块列表。",
+        (
+            ApiField("blocks[].height", "integer", "blocks", "Block height.", "区块高度。"),
+            ApiField("blocks[].id", "string", "hex", "Block hash.", "区块哈希。"),
+            ApiField("blocks[].timestamp", "integer", "unix seconds", "Block time.", "区块时间。"),
+            ApiField("blocks[].pool", "string", "", "Pool name the explorer assigned.", "浏览器标出的矿池名。"),
+        ),
+    ),
+    ApiEndpoint(
+        "/api/found/{blockhash}",
+        "The coinbase outputs one block the pool found actually paid.",
+        "本矿池所出某个区块实际支付的 coinbase 输出。",
+        (
+            ApiField("hash", "string", "hex", "Block hash asked for.", "所查询的区块哈希。"),
+            ApiField("outputs[].address", "string", "", "Output address.", "输出地址。"),
+            ApiField("outputs[].btc", "number", "XBT", "Amount of this output.", "这笔输出的金额。"),
+            ApiField("outputs[].share", "number", "fraction", "This output's fraction of the coinbase.", "这笔输出占 coinbase 的比例。"),
+            ApiField("outputs[].to", "string", "", "miner or pool.", "miner 或 pool。"),
+        ),
+    ),
+    ApiEndpoint(
+        "/api/miners",
+        "Addresses with a live session or recent accepted work, and their window share.",
+        "有在线会话或近期有效工作量的地址，及其窗口占比。",
+        (
+            ApiField("online[].address", "string", "", "Payout address.", "收款地址。"),
+            ApiField("online[].hr_ghs", "number", "GH/s", "Credited hashrate of that address.", "该地址记入账的算力。"),
+            ApiField("online[].window_percent", "number", "percent", "That address's share of the TIDES window.", "该地址在 TIDES 窗口中的占比。"),
+        ),
+    ),
+    ApiEndpoint(
+        "/api/miner/{address}",
+        "One address: hashrate, window share, what it has been paid, and the last 24 hours.",
+        "单个地址：算力、窗口占比、已支付金额，以及最近 24 小时。",
+        (
+            ApiField("address", "string", "", "The address asked for.", "所查询的地址。"),
+            ApiField("hr_ghs", "number", "GH/s", "Credited hashrate.", "记入账的算力。"),
+            ApiField("window_sats", "integer", "sats", "This address's next coinbase output.", "该地址在下一块 coinbase 中的输出。"),
+            ApiField("paid_btc", "number", "XBT", "Mature coinbase already credited to this address.", "已经成熟、记给该地址的 coinbase。"),
+            ApiField("earned_24h", "object", "", "Earnings from blocks found in the last 24 hours. Null when a coinbase in that window cannot be read. When it is an object, block_sats, makegood_sats and total_sats are sats.", "最近 24 小时所出区块带来的收益。窗口内有读不到的 coinbase 时为 null。为对象时，block_sats、makegood_sats 与 total_sats 的单位是聪。", nullable=True),
+        ),
+    ),
+    ApiEndpoint(
+        "/api/gateways",
+        "DATUM gateways Prime knows, connected or only historic.",
+        "Prime 知道的 DATUM 网关，包括在线的和只在历史里的。",
+        (
+            ApiField("reachable", "boolean", "", "Whether Prime's stats could be read.", "能否读到 Prime 的统计。"),
+            ApiField("gateways[].gateway", "string", "hex", "Gateway signing-key prefix.", "网关签名密钥的前缀。"),
+            ApiField("gateways[].own", "boolean", "", "True when this session is the pool's own public stratum.", "为 true 时，这个会话是矿池自己的公共 stratum。"),
+            ApiField("gateways[].offline", "boolean", "", "True when the gateway is not connected now.", "网关当前未连接时为 true。"),
+        ),
+    ),
+    ApiEndpoint(
+        "/api/payouts",
+        "Coinbase payouts already made, one object per block. Per-address amounts are on /api/found/{blockhash}.",
+        "已经付出的 coinbase，每个区块一个对象。每个地址的金额在 /api/found/{blockhash}。",
+        (
+            ApiField("scheme", "string", "", "Payout scheme.", "支付方式。"),
+            ApiField("payouts[].height", "integer", "blocks", "Block height.", "区块高度。"),
+            ApiField("payouts[].hash", "string", "hex", "Block hash.", "区块哈希。"),
+            ApiField("payouts[].miner_btc", "number", "XBT", "Miner outputs on this block, added together.", "这个区块上矿工输出的合计。"),
+            ApiField("payouts[].output_count", "integer", "", "How many coinbase outputs this block paid.", "这个区块付出了多少笔 coinbase 输出。"),
+        ),
+    ),
+    ApiEndpoint(
+        "/api/solo",
+        "Solo miners and blocks found on the solo endpoints.",
+        "单挖矿工，以及单挖端点出的区块。",
+        (
+            ApiField("enabled", "boolean", "", "Whether a solo endpoint answered.", "是否有单挖端点应答。"),
+            ApiField("blocks_found", "integer", "count", "Solo blocks recorded.", "记下的单挖区块数。"),
+            ApiField("hashrate_ghs", "number", "GH/s", "Solo hashrate the endpoints reported.", "各端点报出的单挖算力。"),
+        ),
+    ),
+    ApiEndpoint(
+        "/api/solo/{address}",
+        "One address on the solo book.",
+        "单挖账本上的一个地址。",
+        (
+            ApiField("address", "string", "", "The address asked for.", "所查询的地址。"),
+            ApiField("found", "boolean", "", "Whether this address is on the solo book.", "该地址是否在单挖账本上。"),
+        ),
+    ),
+    ApiEndpoint(
+        "/api/price",
+        "The XBT price the site converts with.",
+        "本站折算所用的 XBT 价格。",
+        (
+            ApiField("USD", "number", "USD per XBT", "Last price. Null when no book could be read and none is cached.", "最新价。各交易所都读不到、也没有缓存时为 null。", nullable=True),
+            ApiField("time", "integer", "unix seconds", "When the price was read.", "读到价格的时间。"),
+            ApiField("stale", "boolean", "", "True when this is a cached price from a failed refresh.", "刷新失败、沿用缓存时为 true。"),
+            ApiField("pair", "string", "", "Which coin the price is for.", "这个价格对应的币。"),
+        ),
+    ),
+    ApiEndpoint(
+        "/api/v1/prices",
+        "The same price in the shape of a mempool /api/v1/prices document.",
+        "同一价格，形状与 mempool 的 /api/v1/prices 相同。",
+        (
+            ApiField("time", "integer", "unix seconds", "When the price was read.", "读到价格的时间。"),
+            ApiField("USD", "number", "USD per XBT", "Last price, when one is known.", "已知时的最新价。", nullable=True, optional=True),
+        ),
+    ),
+    ApiEndpoint(
+        "/api/hardware",
+        "Siacoin ASIC list with prices and estimated XBT per day.",
+        "Siacoin 矿机列表，含价格与每日 XBT 估算。",
+        (
+            ApiField("source", "string", "", "Where the machine list comes from.", "机器列表的来源。"),
+            ApiField("price_usd", "number", "USD per XBT", "Price used to turn XBT per day into dollars.", "把每日 XBT 折成美元所用的价格。", nullable=True),
+            ApiField("ths_btc_day", "number", "XBT per TH/s per day", "Live estimate through a DATUM gateway, bonus included.", "走 DATUM 网关、含补贴的实时每 TH/s 每日估算。"),
+            ApiField("miners[].ths", "number", "TH/s", "Nameplate hashrate.", "标称算力。"),
+            ApiField("miners[].xbt_day", "number", "XBT per day", "Estimated earnings at ths_btc_day. Null when that rate is unknown.", "按 ths_btc_day 估算的每日收益。该费率未知时为 null。", nullable=True),
+        ),
+    ),
+    ApiEndpoint(
+        "/api/rentals",
+        "BLAKE2b rigs listed for rent, with the estimated XBT per day through your own DATUM gateway.",
+        "在租的 BLAKE2b 矿机，以及走你自己的 DATUM 网关时预计每天的 XBT。",
+        (
+            ApiField("source", "string", "", "Where the rental list comes from.", "租赁列表的来源。"),
+            ApiField("price_usd", "number", "USD per XBT", "Price used for the dollar column.", "美元一栏所用的价格。", nullable=True),
+            ApiField("ths_btc_day", "number", "XBT per TH/s per day", "Rate the estimates use. Null when the pool has not published one.", "估算所用的费率。矿池尚未公布时为 null。", nullable=True),
+            ApiField("rigs", "array", "", "The rigs. The fields inside a rig may change.", "矿机列表。单台矿机内部的字段可能变化。"),
+        ),
+    ),
+    ApiEndpoint(
+        "/api/history",
+        "Pool hashrate over a range, and the blocks the pool found in that range.",
+        "一段时间内的矿池算力，以及这段时间里本矿池出的区块。",
+        (
+            ApiField("range", "string", "", "The range asked for.", "所查询的时间范围。"),
+            ApiField("step_s", "integer", "seconds", "Width of one hashrate point.", "一个算力点的时间宽度。"),
+            ApiField("points", "array", "", "Rows of [unix seconds, GH/s, miner count].", "每行是 [unix 秒, GH/s, 矿工数]。"),
+            ApiField("blocks[].height", "integer", "blocks", "A block the pool found in the range.", "范围内本矿池出的一个区块的高度。"),
+            ApiField("blocks[].hash", "string", "hex", "That block's hash.", "该区块的哈希。"),
+        ),
+        query=(("range", "1h, 6h, 24h, 3d, 7d, 30d or all. Default 24h.", "1h、6h、24h、3d、7d、30d 或 all。默认 24h。", ("1h", "6h", "24h", "3d", "7d", "30d", "all")),),
+    ),
+    ApiEndpoint(
+        "/api/makegoods",
+        "Make-goods the pool owes or has paid, one row per block.",
+        "矿池欠下或已经支付的补差，每个区块一行。",
+        (
+            ApiField("tip", "integer", "blocks", "Chain height used to judge maturity. 0 when the node did not answer.", "用来判断成熟度的链高度。节点未应答时为 0。"),
+            ApiField("pending_sats", "integer", "sats", "Sats still owed.", "仍欠的聪。"),
+            ApiField("blocks", "array", "", "One object per block. Fields inside a block may change.", "每个区块一个对象。对象内部的字段可能变化。"),
+        ),
+    ),
+    ApiEndpoint(
+        "/api/gateway-builds",
+        "Which DATUM gateway builds the site recommends, in the order it recommends them.",
+        "本站推荐的 DATUM 网关版本，按推荐顺序。",
+        (
+            ApiField("gateways[].id", "string", "", "Stable id for that gateway line.", "该网关系列的稳定 id。"),
+            ApiField("gateways[].name", "string", "", "Name shown on the site.", "站上显示的名称。"),
+        ),
+    ),
+    ApiEndpoint(
+        "/api/openapi.json",
+        "This field list as an OpenAPI 3.1 document.",
+        "上述字段列表的 OpenAPI 3.1 文档。",
+        (),
+    ),
+)
+
+
+def _field_meaning(field, lang):
+    text = field.en if lang == "en" else field.zh
+    if field.unit:
+        unit = f" Unit: {field.unit}." if lang == "en" else f" 单位：{field.unit}。"
+        text = text.rstrip("。.") + ("." if lang == "en" else "。") + unit
+    return text
+
+
+def _split_field(name):
+    return name.split(".")
+
+
+def _schema_type(field):
+    if field.nullable:
+        return {"type": [field.typ, "null"]}
+    return {"type": field.typ}
+
+
+def _place_field(props, required, parts, field):
+    head = parts[0]
+    array = head.endswith("[]")
+    key = head[:-2] if array else head
+    if len(parts) == 1:
+        schema = _schema_type(field)
+        schema["description"] = _field_meaning(field, "en")
+        props[key] = schema
+        if not field.optional and key not in required:
+            required.append(key)
+        return
+    if array:
+        node = props.get(key)
+        if node is None:
+            node = {"type": "array", "items": {"type": "object", "properties": {}, "required": [], "additionalProperties": True}}
+            props[key] = node
+            if key not in required:
+                required.append(key)
+        _place_field(node["items"]["properties"], node["items"]["required"], parts[1:], field)
+        return
+    node = props.get(key)
+    if node is None:
+        node = {"type": "object", "properties": {}, "required": [], "additionalProperties": True}
+        props[key] = node
+        if key not in required:
+            required.append(key)
+    _place_field(node["properties"], node["required"], parts[1:], field)
+
+
+def _response_schema(endpoint):
+    props = {}
+    required = []
+    for field in endpoint.fields:
+        _place_field(props, required, _split_field(field.name), field)
+    schema = {"type": "object", "properties": props, "additionalProperties": True}
+    if required:
+        schema["required"] = required
+    return schema
+
+
+def _openapi_path(path):
+    """Catalog paths are the public URLs. OpenAPI parameters use the same {name} spelling."""
+    return path
+
+
+def api_openapi():
+    """OpenAPI 3.1 for the stable fields. Built from API_CATALOG, the same table as the /api page."""
+    paths = {}
+    for ep in API_CATALOG:
+        params = []
+        for name in re.findall(r"\{([a-z]+)\}", ep.path):
+            params.append({
+                "name": name,
+                "in": "path",
+                "required": True,
+                "schema": {"type": "string"},
+            })
+        for name, en, _zh, enum in ep.query:
+            q = {"name": name, "in": "query", "required": False, "description": en, "schema": {"type": "string"}}
+            if enum:
+                q["schema"]["enum"] = list(enum)
+            params.append(q)
+        op = {
+            "summary": ep.en,
+            "responses": {
+                "200": {
+                    "description": ep.en,
+                    "content": {"application/json": {"schema": _response_schema(ep)}},
+                }
+            },
+        }
+        if params:
+            op["parameters"] = params
+        paths[_openapi_path(ep.path)] = {"get": op}
+    return {
+        "openapi": "3.1.0",
+        "info": {
+            "title": "Lazarus Pool",
+            "version": _API_STABILITY_DAY,
+            "description": (
+                f"Stable fields as of {_API_STABILITY_DAY}. "
+                "A stable field is not renamed or removed without a dated notice on https://pool.lazarus-xbt.xyz/api. "
+                "Properties not listed here may change."
+            ),
+        },
+        "servers": [{"url": _PUBLIC_SITE}],
+        "paths": paths,
+    }
+
+
+def api_reference_html(lang):
+    """The /api page's endpoint list and stable-field tables, in en or zh."""
+    zh = lang == "zh"
+    note = (
+        f"稳定字段以 {_API_STABILITY_DAY} 这份清单为准：未经本页注明日期，不会改名或删除。"
+        "注明的日期就是变更写上本页的那一天。各接口未列出的字段都可能变化。"
+        if zh
+        else f"Stable fields, as of {_API_STABILITY_DAY}: they are not renamed or removed without a dated notice on this page. "
+        "The date of the notice is the day the change is written here. Any field an endpoint does not list may change."
+    )
+    col_ep, col_what = ("接口", "返回内容") if zh else ("Endpoint", "What it returns")
+    cap_f, col_field, col_type, col_unit, col_mean = (
+        ("可依赖的字段", "字段", "类型", "单位", "含义") if zh else ("Fields a client may rely on", "Field", "Type", "Unit", "Meaning")
+    )
+    rows = []
+    for ep in API_CATALOG:
+        summary = ep.zh if zh else ep.en
+        rows.append(
+            "<tr><th scope=\"row\"><code>"
+            + html.escape(ep.path)
+            + "</code></th><td>"
+            + html.escape(summary)
+            + "</td></tr>"
+        )
+    parts = [
+        "<p>" + html.escape(note) + "</p>",
+        "<div class=\"seo-table\"><table>",
+        "<caption>" + ("公开接口。GET、JSON、免鉴权。" if zh else "Public endpoints. GET, JSON, no authentication.") + "</caption>",
+        "<thead><tr><th scope=\"col\">" + col_ep + "</th><th scope=\"col\">" + col_what + "</th></tr></thead>",
+        "<tbody>",
+        *rows,
+        "</tbody></table></div>",
+        "<h2>" + html.escape(cap_f) + "</h2>",
+    ]
+    other = "本响应里其余字段都可能变化。" if zh else "Any other field in this response may change."
+    for ep in API_CATALOG:
+        summary = ep.zh if zh else ep.en
+        parts.append("<h3><code>" + html.escape(ep.path) + "</code></h3>")
+        parts.append("<p>" + html.escape(summary) + "</p>")
+        if not ep.fields:
+            continue
+        parts.append("<div class=\"seo-table\"><table>")
+        parts.append("<caption>" + html.escape(cap_f) + "</caption>")
+        parts.append(
+            "<thead><tr><th scope=\"col\">"
+            + col_field
+            + "</th><th scope=\"col\">"
+            + col_type
+            + "</th><th scope=\"col\">"
+            + col_unit
+            + "</th><th scope=\"col\">"
+            + col_mean
+            + "</th></tr></thead><tbody>"
+        )
+        for field in ep.fields:
+            unit = field.unit or ("—" if zh else "—")
+            parts.append(
+                "<tr><th scope=\"row\"><code>"
+                + html.escape(field.name)
+                + "</code></th><td>"
+                + html.escape(field.typ)
+                + "</td><td>"
+                + html.escape(unit)
+                + "</td><td>"
+                + html.escape(field.zh if zh else field.en)
+                + "</td></tr>"
+            )
+        parts.append("</tbody></table></div>")
+        parts.append("<p>" + html.escape(other) + "</p>")
+    return "\n".join(parts)
+
+
+_API_TABLE_EN = api_reference_html("en")
+_API_TABLE_ZH = api_reference_html("zh")
+
 
 # Page-specific opening copy. Every pretty URL serves the same dashboard below, so without this
 # each one is a near-duplicate and Google collapses them into the homepage.
@@ -6424,6 +7039,7 @@ _CHEAP_PATHS = frozenset(
         "/calculator",
         "/blocks",
         "/api",
+        "/api/openapi.json",
         "/robots.txt",
         "/sitemap.xml",
         "/llms.txt",
@@ -6678,6 +7294,9 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json({"error": "not found"}, 404)
                 return
             self.send_json(doc, cache_s=30)
+            return
+        if path == "/api/openapi.json":
+            self.send_json(api_openapi(), cache_s=300)
             return
         if path == "/robots.txt":
             self.send_text(robots_txt(), "text/plain; charset=utf-8", cache_s=3600)
