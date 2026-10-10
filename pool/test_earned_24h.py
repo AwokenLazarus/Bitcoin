@@ -278,6 +278,63 @@ class MinerPayload(unittest.TestCase):
         e = server.miner_payload(A)["earned_24h"]
         self.assertEqual((e["block_sats"], e["makegood_sats"], e["total_sats"], e["blocks"]), (0, 0, 0, 0))
 
+    def test_blocks_this_address_found(self):
+        now = int(time.time())
+        c = self.chain
+        rows = [
+            (910, h(910), now - 300, 3.125),
+            (911, h(911), now - 200, 3.25),
+            (912, h(912), now - 100, 3.5),
+            (913, h(913), now - 50, 3.0),
+        ]
+        log = [
+            {"hash": h(910), "height": 910, "ts": now - 300, "kind": "split", "finder": "BC1QMINERA"},
+            {"hash": h(911), "height": 911, "ts": now - 200, "kind": "partial", "finder": A},
+            {"hash": h(912), "height": 912, "ts": now - 100, "kind": "pool-only", "finder": B},
+            {"hash": h(913), "height": 913, "ts": now - 50, "kind": "orphan:split", "finder": A},
+            {"hash": h(914), "height": 914, "ts": now - 10, "kind": "split", "finder": A},
+        ]
+        for height, hh, _ts, _reward in rows:
+            c.splits[hh] = btc({A: 1_000_000, P: REWARD - 1_000_000})
+        with (c.dir / "blocks.jsonl").open("w") as f:
+            f.writelines(json.dumps(rec) + "\n" for rec in log)
+        server._block_log_latest_cache["sig"] = None
+        with sqlite3.connect(os.environ["POOL_DB"]) as con:
+            con.executemany(
+                "INSERT INTO found_blocks(height,hash,ts,reward_btc) VALUES(?,?,?,?)",
+                rows,
+            )
+        out = server.miner_payload(A)
+        self.assertEqual(out["blocks_onchain"], 2)
+        self.assertEqual([b["height"] for b in out["blocks"]], [911, 910])
+        by_h = {b["height"]: b for b in out["blocks"]}
+        self.assertEqual(by_h[911]["kind"], "partial")
+        self.assertEqual(by_h[911]["reward_btc"], 3.25)
+        self.assertEqual(by_h[911]["hash"], h(911))
+        self.assertEqual(by_h[910]["kind"], "split")
+        self.assertEqual(by_h[910]["reward_btc"], 3.125)
+        bee = server.miner_payload(B)
+        self.assertEqual(bee["blocks_onchain"], 1)
+        self.assertEqual(bee["blocks"][0]["kind"], "pool-only")
+        none = server.miner_payload("bc1qnobody")
+        self.assertEqual(none["blocks"], [])
+        self.assertEqual(none["blocks_onchain"], 0)
+        json.dumps(out)
+
+    def test_unreadable_block_log_is_not_zero_found(self):
+        now = int(time.time())
+        self.chain.splits[h(920)] = btc({A: 1, P: REWARD - 1})
+        with sqlite3.connect(os.environ["POOL_DB"]) as con:
+            con.execute(
+                "INSERT INTO found_blocks(height,hash,ts,reward_btc) VALUES(?,?,?,?)",
+                (920, h(920), now - 10, 3.125),
+            )
+        with mock.patch.object(server, "BLOCKS_LOG", self.chain.dir / "missing.jsonl"):
+            server._block_log_latest_cache["sig"] = None
+            out = server.miner_payload(A)
+        self.assertIsNone(out["blocks"])
+        self.assertIsNone(out["blocks_onchain"])
+
 
 class Page(unittest.TestCase):
     KEYS = ("earned24", "earned24Split", "earned24Note", "earned24Failed", "earned24Since", "earned24Unavailable", "earned24UnavailableSub")
@@ -292,6 +349,27 @@ class Page(unittest.TestCase):
         en, zh = (server._i18n_dict(x)["miner"] for x in ("en", "zh-CN"))
         self.assertNotEqual(en["earned24Unavailable"], zh["earned24Unavailable"])
         self.assertNotIn("0", en["earned24Unavailable"] + zh["earned24Unavailable"], "unavailable is a word, not a zero")
+
+    def test_maturing_coinbase_is_not_called_pending(self):
+        keys = (
+            "pending", "pendingN", "pendingNs", "pendingTitle", "pendingExact",
+            "dtPending", "pendingMaturing", "pendingNone", "pendingIn", "pendingNoneOut",
+            "pendingLabel", "pendingHelp", "maturingTab", "foundHelp", "foundEmpty",
+        )
+
+        def flat(val):
+            if isinstance(val, dict):
+                return " ".join(flat(v) for v in val.values())
+            return str(val)
+
+        en, zh = (server._i18n_dict(x)["miner"] for x in ("en", "zh-CN"))
+        for k in keys:
+            self.assertNotIn("pending", flat(en[k]).lower(), k)
+            self.assertNotIn("待成熟", flat(zh[k]), k)
+        self.assertIn("pending", en["pendingTab"].lower(), "an unpaid make-good is still pending")
+        self.assertIn("待付", zh["pendingTab"])
+        self.assertTrue(en["noBalance"].startswith("The pool keeps no balance"))
+        self.assertIn("矿池不为你保管余额", zh["noBalance"])
 
 
 if __name__ == "__main__":

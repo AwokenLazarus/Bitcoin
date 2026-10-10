@@ -463,7 +463,7 @@
       })
       .join("");
     return `
-        <div>
+        <div${panelAttr("maturingTable")}>
           <p class="kicker table-label">${t("miner.pendingLabel", { n: rows.length })}</p>
           <p class="note">${t("miner.pendingHelp", { need: num(need) })}</p>
           <div class="scroll${ctx.full ? "" : " tall"}"><table class="pending"><thead><tr><th class="num">${t("miner.thBlock")}</th><th class="num">${t("miner.thAmt")}</th><th class="num">${t("miner.thConfs")}</th><th class="num">${t("miner.thLeft")}</th><th>${t("miner.thSpend")}</th><th>${t("miner.thStatus")}</th><th>${t("miner.thFound")}</th></tr></thead><tbody>${body}</tbody></table></div>
@@ -508,7 +508,7 @@
     const pend = makegoodPending(m);
     const pendSats = pend.reduce((a, r) => a + (Number(r.sats) || Math.round(Number(r.btc) * 1e8) || 0), 0);
     return `
-        <div>
+        <div${panelAttr("makegoodTable")}>
           <p class="kicker table-label">${pend.length ? t("miner.mgLabelPending", { n: pend.length, amt: satsExact(pendSats) }) : t("miner.mgLabel")}</p>
           <p class="note">${t("miner.mgHelp", { need: num(m.maturity_confs || 100) })}${m.makegood_long_maturity ? " " + t("miner.mgLongMaturity", { start: num(m.long_maturity_start), release: num(m.long_maturity_release) }) : ""}</p>
           <div class="scroll${ctx.full ? "" : " tall"}"><table class="pending"><thead><tr><th class="num">${t("miner.thBlock")}</th><th class="num">${t("miner.thAmt")}</th><th>${t("miner.thKind")}</th><th class="num">${t("miner.thPayableAt")}</th><th>${t("miner.thLands")}</th><th>${t("miner.thStatus")}</th><th>${t("miner.thTx")}</th></tr></thead><tbody>${body}</tbody></table></div>
@@ -521,9 +521,29 @@
       .map((b) => `<tr><td class="num">${blockLink(b)}</td><td class="num" title="${amtExact(b.miner_btc)}">${amt(b.miner_btc)}${ctx.money ? ctx.money(b.miner_btc) : ""}</td><td class="num">${Number.isFinite(Number(b.share)) ? pct(100 * Number(b.share), 2) : "\u2014"}</td><td>${statusPill(payStatus(b))}</td><td>${when(b.ts)}</td></tr>`)
       .join("");
     return `
-        <div>
+        <div${panelAttr("paidTable")}>
           <p class="kicker table-label">${t("miner.paidLabel")}</p>
           <div class="scroll tall"><table><thead><tr><th class="num">${t("miner.thBlock")}</th><th class="num">${t("miner.thAmt")}</th><th class="num">${t("miner.thOf")}</th><th>${t("miner.thStatus")}</th><th>${t("miner.thFound")}</th></tr></thead><tbody>${body || `<tr><td colspan="5" class="empty">${t("miner.nothingMatured")}</td></tr>`}</tbody></table></div>
+        </div>`;
+  }
+
+  // Blocks this address found (its gateway or its miners). Zero is a line, not an empty
+  // table. A missing list is "unavailable", never a fake zero.
+  function foundSection(m) {
+    if (!Array.isArray(m.blocks)) {
+      return `<p class="note"${panelAttr("foundList")}>${t("miner.foundUnavailable")}</p>`;
+    }
+    if (!m.blocks.length) {
+      return `<p class="note"${panelAttr("foundList")}>${t("miner.foundEmpty")}</p>`;
+    }
+    const body = m.blocks
+      .map((b) => `<tr><td class="num">${blockLink(b)}</td><td>${when(b.ts)}</td><td class="num" title="${amtExact(b.reward_btc)}">${amt(b.reward_btc)}</td><td>${kindPill(b.kind)}</td></tr>`)
+      .join("");
+    return `
+        <div${panelAttr("foundList")}>
+          <p class="kicker table-label">${t("miner.foundLabel")}</p>
+          <p class="note">${t("miner.foundHelp")}</p>
+          <div class="scroll tall"><table><thead><tr><th class="num">${t("miner.thBlock")}</th><th>${t("miner.thFound")}</th><th class="num">${t("miner.thReward")}</th><th>${t("miner.thSplit")}</th></tr></thead><tbody>${body}</tbody></table></div>
         </div>`;
   }
 
@@ -532,6 +552,108 @@
     ["workers", "Workers"],
     ["payouts", "Payouts"],
   ];
+
+  // One localStorage key for which miner-card panels a browser has hidden. The same
+  // choice applies to every address. A blocked or broken store means show everything.
+  const MINER_PANELS = [
+    ["hr", "miner.dtHr", "figure"],
+    ["accepted", "miner.dtAccepted", "figure"],
+    ["session", "miner.dtSession", "figure"],
+    ["window", "miner.dtWindow", "figure"],
+    ["payoutWin", "miner.dtPayoutWin", "figure"],
+    ["est", "miner.dtEst", "figure"],
+    ["bonus", "miner.bonus", "figure"],
+    ["earned", "miner.earned24", "figure"],
+    ["next", "miner.dtNext", "figure"],
+    ["carry", "miner.carry", "figure"],
+    ["makegood", "miner.makegood", "figure"],
+    ["maturing", "miner.dtPending", "figure"],
+    ["paid", "miner.dtPaid", "figure"],
+    ["found", "miner.dtFound", "figure"],
+    ["workers", "miner.panelWorkers", "section"],
+    ["maturingTable", "miner.panelMaturing", "section"],
+    ["makegoodTable", "miner.panelMakegood", "section"],
+    ["paidTable", "miner.panelPaid", "section"],
+    ["foundList", "miner.panelFound", "section"],
+  ];
+  const MINER_PANEL_IDS = new Set(MINER_PANELS.map(([id]) => id));
+  const MINER_PANEL_KEY = "lz.minerPanels";
+
+  function readHiddenPanels() {
+    try {
+      const raw = localStorage.getItem(MINER_PANEL_KEY);
+      if (!raw) return new Set();
+      const data = JSON.parse(raw);
+      const ids = data && Array.isArray(data.hidden) ? data.hidden : [];
+      return new Set(ids.filter((id) => typeof id === "string" && MINER_PANEL_IDS.has(id)));
+    } catch (e) {
+      return new Set();
+    }
+  }
+  function saveHiddenPanels(hidden) {
+    try {
+      localStorage.setItem(MINER_PANEL_KEY, JSON.stringify({ hidden: [...hidden] }));
+    } catch (e) { /* storage blocked: the page still renders */ }
+  }
+  function panelAttr(id) {
+    return ` data-panel="${id}"${readHiddenPanels().has(id) ? " hidden" : ""}`;
+  }
+  function panelBox(id, inner) {
+    if (!inner) return "";
+    return `<div${panelAttr(id)}>${inner}</div>`;
+  }
+  function customizeControl() {
+    const hidden = readHiddenPanels();
+    const opt = ([id, key]) => `<label class="miner-panel-opt"><input type="checkbox" data-panel-toggle="${id}"${hidden.has(id) ? "" : " checked"}>${esc(t(key))}</label>`;
+    const group = (kind) => MINER_PANELS.filter((row) => row[2] === kind).map(opt).join("");
+    return `<div class="miner-customize">
+      <button type="button" class="btn ghost small" data-panels-toggle aria-expanded="false" aria-controls="lz-miner-panels" aria-label="${esc(t("miner.customizeAria"))}">${esc(t("miner.customize"))}</button>
+      <div class="miner-panels" id="lz-miner-panels" data-panels hidden>
+        <div class="miner-panels-grid">
+          <fieldset><legend>${esc(t("miner.customizeFigures"))}</legend>${group("figure")}</fieldset>
+          <fieldset><legend>${esc(t("miner.customizeSections"))}</legend>${group("section")}</fieldset>
+        </div>
+        <button type="button" class="btn ghost small" data-panels-reset>${esc(t("miner.customizeReset"))}</button>
+      </div>
+    </div>`;
+  }
+  document.addEventListener("click", (e) => {
+    const toggle = e.target.closest && e.target.closest("[data-panels-toggle]");
+    if (toggle) {
+      const box = toggle.parentElement && toggle.parentElement.querySelector("[data-panels]");
+      if (!box) return;
+      const willOpen = box.hidden;
+      box.hidden = !willOpen;
+      toggle.setAttribute("aria-expanded", willOpen ? "true" : "false");
+      if (willOpen) {
+        const first = box.querySelector("input, button");
+        if (first) first.focus();
+      }
+      return;
+    }
+    const reset = e.target.closest && e.target.closest("[data-panels-reset]");
+    if (!reset) return;
+    saveHiddenPanels(new Set());
+    const card = reset.closest(".miner-card");
+    if (!card) return;
+    card.querySelectorAll("[data-panel]").forEach((el) => { el.hidden = false; });
+    card.querySelectorAll("[data-panel-toggle]").forEach((input) => { input.checked = true; });
+  });
+  document.addEventListener("change", (e) => {
+    const input = e.target;
+    if (!input || !input.getAttribute || input.getAttribute("data-panel-toggle") == null) return;
+    const id = input.getAttribute("data-panel-toggle");
+    if (!MINER_PANEL_IDS.has(id)) return;
+    const hidden = readHiddenPanels();
+    if (input.checked) hidden.delete(id);
+    else hidden.add(id);
+    saveHiddenPanels(hidden);
+    const card = input.closest(".miner-card");
+    if (!card) return;
+    card.querySelectorAll("[data-panel]").forEach((el) => {
+      if (el.getAttribute("data-panel") === id) el.hidden = !input.checked;
+    });
+  });
 
   // Returns the card's HTML. `ctx`: { fees:{datum,stratum}, money(btc)->" · $x", blockInterval,
   // tab, full, href(tab)->url }. Tabs are anchors when `href` is given (so the URL follows), else buttons.
@@ -633,7 +755,7 @@
     const carryMakegood = mgLatest ? t("miner.carryMakegood", { amt: satsExact(mgLatest.sats != null ? mgLatest.sats : Number(mgLatest.btc) * 1e8), height: num(mgLatest.height) }) : "";
     const carryCell = (m) =>
       carryBtc > 0 || mgLatest
-        ? `<div><dt>${t("miner.carry")}</dt><dd title="${amtExact(carryBtc)}">${amt(carryBtc)}${money(carryBtc)}<small>${t("miner.carrySub")}${carryMakegood}</small></dd></div>`
+        ? panelBox("carry", `<dt>${t("miner.carry")}</dt><dd title="${amtExact(carryBtc)}">${amt(carryBtc)}${money(carryBtc)}<small>${t("miner.carrySub")}${carryMakegood}</small></dd>`)
         : "";
     const makegoodCell = () => {
       if (!mgAll.length) return "";
@@ -643,7 +765,7 @@
       else if (Number(m.makegood_failed_blocks) > 0) sub = t("miner.mgCellFailed");
       else sub = t("miner.mgCellAllPaid", { amt: satsExact(Math.round(mgPaidBtc * 1e8)) });
       const lm = m.makegood_long_maturity ? `<br>${t("miner.mgLongMaturity", { start: num(m.long_maturity_start), release: num(m.long_maturity_release) })}` : "";
-      return `<div><dt>${t("miner.makegood")}</dt><dd title="${amtExact(mgPendBtc)}">${amt(mgPendBtc)}${money(mgPendBtc)}<small>${sub}${lm}</small></dd></div>`;
+      return panelBox("makegood", `<dt>${t("miner.makegood")}</dt><dd title="${amtExact(mgPendBtc)}">${amt(mgPendBtc)}${money(mgPendBtc)}<small>${sub}${lm}</small></dd>`);
     };
     // Earned in the last 24 hours: coinbase outputs and make-goods from blocks found in that
     // time, in sats from the server. Refreshed with every poll. No figure (null, or a server
@@ -652,12 +774,12 @@
     const earnedCell = () => {
       const e = m.earned_24h;
       if (!e || !Number.isFinite(Number(e.total_sats))) {
-        return `<div><dt>${t("miner.earned24")}</dt><dd>${t("miner.earned24Unavailable")}<small>${t("miner.earned24UnavailableSub")}</small></dd></div>`;
+        return panelBox("earned", `<dt>${t("miner.earned24")}</dt><dd>${t("miner.earned24Unavailable")}<small>${t("miner.earned24UnavailableSub")}</small></dd>`);
       }
       const total = Number(e.total_sats) / 1e8;
       const failed = Number(e.makegood_failed_sats) > 0 ? t("miner.earned24Failed", { amt: satsExact(e.makegood_failed_sats) }) : "";
       const note = t("miner.earned24Note", { need: num(m.maturity_confs || 100), a: `<a data-mtab="payouts" href="${esc(payoutsHref)}">`, enda: "</a>" });
-      return `<div><dt>${t("miner.earned24")}</dt><dd title="${esc(t("miner.earned24Since", { amt: amtExact(total), when: when(e.since_ts) }))}">${amt(total)}${money(total)}<small>${t("miner.earned24Split", { n: Number(e.blocks) || 0, blocks: amtSats(e.block_sats), mg: amtSats(e.makegood_sats) })}${failed}<br>${note}</small></dd></div>`;
+      return panelBox("earned", `<dt>${t("miner.earned24")}</dt><dd title="${esc(t("miner.earned24Since", { amt: amtExact(total), when: when(e.since_ts) }))}">${amt(total)}${money(total)}<small>${t("miner.earned24Split", { n: Number(e.blocks) || 0, blocks: amtSats(e.block_sats), mg: amtSats(e.makegood_sats) })}${failed}<br>${note}</small></dd>`);
     };
     // The DATUM bonus for this address. On the gateway path it is money already accruing, so
     // it gets a ticker cell; on the stratum path it is money being left on the table, so it
@@ -669,7 +791,7 @@
     const datumDay = Number(m.est_datum_btc_day) || 0;
     const bonusCell =
       rebatePct > 0 && !onStratum && (Number(m.rebate_btc) > 0 || upliftPct > 0)
-        ? `<div><dt>${t("miner.bonus")}</dt><dd title="${amtExact(m.rebate_btc)}">${amt(m.rebate_btc)}${money(m.rebate_btc)}<small>${t("miner.bonusSub", { uplift: upliftPct > 0 ? t("miner.bonusUplift", { pct: pctSmart(upliftPct) }) : "" })}</small></dd></div>`
+        ? panelBox("bonus", `<dt>${t("miner.bonus")}</dt><dd title="${amtExact(m.rebate_btc)}">${amt(m.rebate_btc)}${money(m.rebate_btc)}<small>${t("miner.bonusSub", { uplift: upliftPct > 0 ? t("miner.bonusUplift", { pct: pctSmart(upliftPct) }) : "" })}</small></dd>`)
         : "";
     // A gateway miner's daily estimate already includes the bonus; a stratum miner's does not,
     // and the pitch below says what it would be worth.
@@ -693,9 +815,21 @@
       if (ctx.href) return `<a role="tab" class="mtab" data-mtab="${key}" aria-selected="${on}" href="${esc(ctx.href(key))}">${inner}</a>`;
       return `<button type="button" role="tab" class="mtab" data-mtab="${key}" aria-selected="${on}">${inner}</button>`;
     };
-    const nPayoutsPending = nPending + mgPend.length;
-    const counts = { workers: nWorkers, payouts: nPayoutsPending ? t("miner.pendingTab", { n: nPayoutsPending }) : "" };
+    // The badge names maturing coinbase outputs and unpaid make-goods apart. "Pending"
+    // is only the make-good that has not been paid yet.
+    let payoutBadge = "";
+    if (nPending && mgPend.length) payoutBadge = t("miner.payoutTabBoth", { maturing: num(nPending), pending: num(mgPend.length) });
+    else if (nPending) payoutBadge = t("miner.maturingTab", { n: nPending });
+    else if (mgPend.length) payoutBadge = t("miner.pendingTab", { n: mgPend.length });
+    const counts = { workers: nWorkers, payouts: payoutBadge };
     const tablist = `<div class="mtabs" role="tablist" aria-label="${esc(t("nav.minerViews"))}">${MINER_TABS.map((tabDef) => tabBtn(tabDef, counts[tabDef[0]])).join("")}${ctx.full ? "" : `<a class="mtab-more" href="/miner/${encodeURIComponent(m.address)}">${t("miner.full")}</a>`}</div>`;
+    const foundCell = () => {
+      if (!Array.isArray(m.blocks)) {
+        return panelBox("found", `<dt>${t("miner.dtFound")}</dt><dd>${t("miner.foundUnavailable")}<small>${t("miner.foundUnavailableSub")}</small></dd>`);
+      }
+      const n = Number.isFinite(Number(m.blocks_onchain)) ? Number(m.blocks_onchain) : m.blocks.length;
+      return panelBox("found", `<dt>${t("miner.dtFound")}</dt><dd>${num(n)}<small>${n ? t("miner.foundSub") : t("miner.foundNone")}</small></dd>`);
+    };
 
     const overview = `
       <div class="mpanel" data-mpanel="overview" ${tab === "overview" ? "" : "hidden"}>
@@ -703,39 +837,43 @@
         ${switchPitch}
         ${windowNote}
         <dl class="ticker">
-          <div><dt>${t("miner.dtHr")}</dt><dd>${fmtHr(m.hr_ghs || 0)}<small>${Number(m.hr_1h_ghs) > 0 ? t("miner.hrAvg", { h1: fmtHr(m.hr_1h_ghs), h24: fmtHr(m.hr_24h_ghs) }) : t("miner.hrBest", { hr: fmtHr(m.best_hr_ghs || 0) })}${t("miner.ofPoolSub", { pct: pctSmart(hp) })}</small></dd></div>
-          <div><dt>${t("miner.dtAccepted")}</dt><dd>${num(m.shares_lifetime ?? m.shares_acc)}<small>${t("miner.acceptedSub")}</small></dd></div>
-          <div><dt>${t("miner.dtSession")}</dt><dd>${sessCell(m.via, m.shares_session)}<small>${isPrimePath(m.via) ? t("miner.sessGw") : t("miner.sessStratum")}</small></dd></div>
-          <div><dt>${t("miner.dtWindow")}</dt><dd>${winShareCell(m)}<small>${Number(m.window_shares) > 0 ? t("miner.winWork", { n: num(m.window_work) }) : t("miner.winNone")}</small></dd></div>
-          <div><dt>${t("miner.dtPayoutWin")}</dt><dd>${pctSmart(wp)}<small>${t("miner.winPay", { n: num(m.window_work) })}</small></dd></div>
-          <div><dt>${t("miner.dtEst")}</dt><dd title="${amtExact(estDay)}">${amt(estDay)}${money(estDay)}<small>${estDayNote}</small></dd></div>
+          ${panelBox("hr", `<dt>${t("miner.dtHr")}</dt><dd>${fmtHr(m.hr_ghs || 0)}<small>${Number(m.hr_1h_ghs) > 0 ? t("miner.hrAvg", { h1: fmtHr(m.hr_1h_ghs), h24: fmtHr(m.hr_24h_ghs) }) : t("miner.hrBest", { hr: fmtHr(m.best_hr_ghs || 0) })}${t("miner.ofPoolSub", { pct: pctSmart(hp) })}</small></dd>`)}
+          ${panelBox("accepted", `<dt>${t("miner.dtAccepted")}</dt><dd>${num(m.shares_lifetime ?? m.shares_acc)}<small>${t("miner.acceptedSub")}</small></dd>`)}
+          ${panelBox("session", `<dt>${t("miner.dtSession")}</dt><dd>${sessCell(m.via, m.shares_session)}<small>${isPrimePath(m.via) ? t("miner.sessGw") : t("miner.sessStratum")}</small></dd>`)}
+          ${panelBox("window", `<dt>${t("miner.dtWindow")}</dt><dd>${winShareCell(m)}<small>${Number(m.window_shares) > 0 ? t("miner.winWork", { n: num(m.window_work) }) : t("miner.winNone")}</small></dd>`)}
+          ${panelBox("payoutWin", `<dt>${t("miner.dtPayoutWin")}</dt><dd>${pctSmart(wp)}<small>${t("miner.winPay", { n: num(m.window_work) })}</small></dd>`)}
+          ${panelBox("est", `<dt>${t("miner.dtEst")}</dt><dd title="${amtExact(estDay)}">${amt(estDay)}${money(estDay)}<small>${estDayNote}</small></dd>`)}
           ${bonusCell}
           ${earnedCell()}
-          <div><dt>${t("miner.dtNext")}</dt><dd title="${amtExact(m.block_payout_btc)}">${amt(m.block_payout_btc)}${money(m.block_payout_btc)}<small>${nextBlockNote(m)}</small></dd></div>
+          ${panelBox("next", `<dt>${t("miner.dtNext")}</dt><dd title="${amtExact(m.block_payout_btc)}">${amt(m.block_payout_btc)}${money(m.block_payout_btc)}<small>${nextBlockNote(m)}</small></dd>`)}
           ${carryCell(m)}
           ${makegoodCell()}
-          <div><dt>${t("miner.dtPending")}</dt><dd title="${amtExact(m.immature_btc)}">${amt(m.immature_btc)}${money(m.immature_btc)}<small>${nPending ? t("miner.pendingMaturing", { n: nPending }) : t("miner.pendingNone")}</small></dd></div>
-          <div><dt>${t("miner.dtPaid")}</dt><dd title="${amtExact(m.paid_btc)}">${amt(m.paid_btc)}${money(m.paid_btc)}<small>${t("miner.paidSub")}</small></dd></div>
+          ${panelBox("maturing", `<dt>${t("miner.dtPending")}</dt><dd title="${amtExact(m.immature_btc)}">${amt(m.immature_btc)}${money(m.immature_btc)}<small>${nPending ? t("miner.pendingMaturing", { n: nPending }) : t("miner.pendingNone")}</small></dd>`)}
+          ${panelBox("paid", `<dt>${t("miner.dtPaid")}</dt><dd title="${amtExact(m.paid_btc)}">${amt(m.paid_btc)}${money(m.paid_btc)}<small>${t("miner.paidSub")}</small></dd>`)}
+          ${foundCell()}
         </dl>
+        ${foundSection(m)}
       </div>`;
 
     const workersPanel = `
       <div class="mpanel" data-mpanel="workers" ${tab === "workers" ? "" : "hidden"}>
+        <div${panelAttr("workers")}>
         ${relayNote}
         ${namesNote}
         <p class="note">${t("miner.workersNote")}</p>
         <div class="scroll tall"><table><thead><tr><th>${t("miner.thWorker")}</th><th>${t("miner.thPath")}</th><th class="num">${t("miner.thHr")}</th><th class="num">${t("miner.thSess")}</th><th class="num">${t("miner.thAcc")}</th><th class="num">${t("miner.thRej")}</th><th class="num">${t("miner.thLast")}</th></tr></thead><tbody>${workers || `<tr><td colspan="7" class="empty">${t("miner.offlineRow")}</td></tr>`}</tbody></table></div>
+        </div>
       </div>`;
 
     const payoutsPanel = `
       <div class="mpanel" data-mpanel="payouts" ${tab === "payouts" ? "" : "hidden"}>
         <dl class="ticker slim ${mgAll.length ? "" : "five"}">
           ${earnedCell()}
-          <div><dt>${t("miner.dtPending")}</dt><dd title="${amtExact(m.immature_btc)}">${amt(m.immature_btc)}${money(m.immature_btc)}<small>${nPending ? t("miner.pendingIn", { n: nPending, need: num(m.maturity_confs || 100) }) : t("miner.pendingNoneOut")}</small></dd></div>
+          ${panelBox("maturing", `<dt>${t("miner.dtPending")}</dt><dd title="${amtExact(m.immature_btc)}">${amt(m.immature_btc)}${money(m.immature_btc)}<small>${nPending ? t("miner.pendingIn", { n: nPending, need: num(m.maturity_confs || 100) }) : t("miner.pendingNoneOut")}</small></dd>`)}
           ${makegoodCell()}
-          <div><dt>${t("miner.dtPaid")}</dt><dd title="${amtExact(m.paid_btc)}">${amt(m.paid_btc)}${money(m.paid_btc)}<small>${t("miner.paidMatured", { n: nPaid })}</small></dd></div>
-          <div><dt>${t("miner.dtNext")}</dt><dd title="${amtExact(m.block_payout_btc)}">${amt(m.block_payout_btc)}${money(m.block_payout_btc)}<small>${t("miner.nextWin", { wp: pctSmart(wp), carry: Number(m.carry_btc) > 0 ? t("miner.plusCarry") : "" })}</small></dd></div>
-          <div><dt>${t("miner.dtEst")}</dt><dd title="${amtExact(estDay)}">${amt(estDay)}${money(estDay)}<small>${withBonus ? t("miner.estFeeBonus", { fee: feePct(billedFee), uplift: pctSmart(upliftPct) }) : t("miner.estFee", { fee: feePct(billedFee) })}</small></dd></div>
+          ${panelBox("paid", `<dt>${t("miner.dtPaid")}</dt><dd title="${amtExact(m.paid_btc)}">${amt(m.paid_btc)}${money(m.paid_btc)}<small>${t("miner.paidMatured", { n: nPaid })}</small></dd>`)}
+          ${panelBox("next", `<dt>${t("miner.dtNext")}</dt><dd title="${amtExact(m.block_payout_btc)}">${amt(m.block_payout_btc)}${money(m.block_payout_btc)}<small>${t("miner.nextWin", { wp: pctSmart(wp), carry: Number(m.carry_btc) > 0 ? t("miner.plusCarry") : "" })}</small></dd>`)}
+          ${panelBox("est", `<dt>${t("miner.dtEst")}</dt><dd title="${amtExact(estDay)}">${amt(estDay)}${money(estDay)}<small>${withBonus ? t("miner.estFeeBonus", { fee: feePct(billedFee), uplift: pctSmart(upliftPct) }) : t("miner.estFee", { fee: feePct(billedFee) })}</small></dd>`)}
         </dl>
         <p class="note callout">${t("miner.noBalance", { n: num(m.maturity_confs || 100), carry: Number(m.carry_btc) > 0 ? t("miner.carryNote", { amt: amt(m.carry_btc) }) : "" })}${mgPend.length ? t("miner.mgNote", { amt: satsExact(mgPendSats), n: mgPend.length, height: num(mgNextAt) }) : ""}</p>
         ${pendingTable(m, ctx)}
@@ -746,7 +884,7 @@
     return `
       <div class="panel miner-card" data-miner="${esc(m.address)}">
         ${addrLine(m.address, m.online ? "ok" : relayed.length ? "warn" : "bad", status)}
-        ${tablist}
+        <div class="miner-bar">${tablist}${customizeControl()}</div>
         ${overview}${workersPanel}${payoutsPanel}
       </div>${hasSolo ? soloCard(m, so) : ""}`;
   }
