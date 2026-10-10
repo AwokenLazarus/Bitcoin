@@ -4555,6 +4555,55 @@ def rollup_online_by_address(online):
     return out
 
 
+def address_found_blocks(address, fb_rows):
+    """On-chain blocks this address found.
+
+    The finder is the gateway or stratum worker primed recorded (a DATUM gateway
+    finds blocks under its pool address), not the first coinbase output. None
+    when primed's block log cannot be read: an empty list would look like this
+    address found nothing.
+    """
+    if not address:
+        return []
+    sig, latest = _block_log_latest()
+    if sig is None:
+        return None
+    key = _addr_key(address)
+    onchain = {}
+    for fb in fb_rows or []:
+        hsh = fb["hash"]
+        if hsh:
+            onchain[hsh] = fb
+    rows = []
+    for hsh, rec in latest.items():
+        if _addr_key(rec.get("finder")) != key:
+            continue
+        kind = str(rec.get("kind") or "")
+        if kind.lower().startswith("orphan"):
+            continue
+        fb = onchain.get(hsh)
+        if fb is None:
+            continue
+        reward = fb["reward_btc"] if "reward_btc" in fb.keys() else None
+        if reward is None:
+            cv = rec.get("coinbase_value")
+            if isinstance(cv, (int, float)) and not isinstance(cv, bool):
+                reward = int(cv) / 1e8
+        height = fb["height"] if fb["height"] is not None else rec.get("height")
+        ts = int(fb["ts"] or 0) or int(rec.get("ts") or 0)
+        rows.append(
+            {
+                "height": int(height) if height is not None else None,
+                "hash": hsh,
+                "ts": ts,
+                "reward_btc": round(float(reward), 8) if reward is not None else None,
+                "kind": kind,
+            }
+        )
+    rows.sort(key=lambda r: -(r["height"] or 0))
+    return rows
+
+
 def miner_payload(address):
     recs = [m for m in online_miners() if m["address"] == address]
     # One sample row per worker per scrape: the address's rate at a scrape is the SUM over
@@ -4629,7 +4678,7 @@ def miner_payload(address):
     tip = rpc("getblockcount") or 0
     # Every block the pool has found: Paid / Immature are lifetime totals. The list
     # itself is trimmed to the most recent 50 below.
-    fb_rows = db("SELECT height, hash, ts FROM found_blocks ORDER BY height DESC") or []
+    fb_rows = db("SELECT height, hash, ts, reward_btc FROM found_blocks ORDER BY height DESC") or []
     payouts = []
     paid_btc = 0.0
     immature_btc = 0.0
@@ -4766,6 +4815,7 @@ def miner_payload(address):
     known = known or bool(makegoods)
     # Null, never zero, when the coinbases could not be read: the page says "unavailable".
     earned_24h = None if splits_unreadable or not address else earned_window(address, fb_rows, makegoods)
+    found_here = address_found_blocks(address, fb_rows)
     out = {
         "address": address if known else "",
         "known": known,
@@ -4854,6 +4904,11 @@ def miner_payload(address):
         "window_multiple": win["window_multiple"],
         "window_fill_percent": win["window_fill_percent"],
         "blocks_found": [dict(r) for r in (payouts or [])],
+        # Blocks this address found (its gateway or its miners), on chain. None when
+        # primed's log could not be read; [] is a real zero. Not the coinbase outputs
+        # in `blocks_found`.
+        "blocks": found_here,
+        "blocks_onchain": None if found_here is None else len(found_here),
         "fee_percent": POOL_FEE,
         # Solo is a separate book: none of it is in `window_work` above, and none of it is
         # owed. Present so one address that mines both ways sees both on one page.
