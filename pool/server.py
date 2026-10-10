@@ -4841,7 +4841,27 @@ def address_found_blocks(address, fb_rows):
     return rows
 
 
-def miner_payload(address):
+# `/api/miner/<addr>` returns the newest PAYOUTS_PAGE coinbase outputs by default. A miner on
+# the 45-day maturity has far more than that waiting, so `payouts_offset` / `payouts_limit`
+# page back through the rest (XBT-143).
+PAYOUTS_PAGE = 50
+PAYOUTS_PAGE_MAX = 200
+
+
+def payouts_page_args(query):
+    """(offset, limit) from a query string; anything unusable falls back to the first page."""
+    q = parse_qs(query or "")
+
+    def num(key, default, lo, hi):
+        try:
+            return max(lo, min(hi, int((q.get(key) or [default])[0])))
+        except (TypeError, ValueError):
+            return default
+
+    return num("payouts_offset", 0, 0, 10_000_000), num("payouts_limit", PAYOUTS_PAGE, 1, PAYOUTS_PAGE_MAX)
+
+
+def miner_payload(address, payouts_offset=0, payouts_limit=PAYOUTS_PAGE):
     recs = [m for m in online_miners() if m["address"] == address]
     # One sample row per worker per scrape: the address's rate at a scrape is the SUM over
     # its workers; the minute bucket then averages the scrapes that fell in it. (A plain
@@ -4957,14 +4977,18 @@ def miner_payload(address):
         else:
             paid_btc += amt
     immature_blocks = sum(1 for p in (payouts or []) if p.get("status") == "immature")
+    payouts_total = None
     if used_chain and payouts is not None:
-        payouts = payouts[:50]
+        payouts_total = len(payouts)
+        payouts = payouts[payouts_offset:payouts_offset + payouts_limit]
     if not used_chain:
         payouts = db(
             "SELECT r.height, r.hash, r.closed_ts AS ts, p.amount_btc AS miner_btc, p.share, p.work, p.status, r.status AS round_status "
-            "FROM round_payouts p JOIN rounds r ON r.id=p.round_id WHERE p.address=? ORDER BY r.height DESC LIMIT 50",
-            (address,),
+            "FROM round_payouts p JOIN rounds r ON r.id=p.round_id WHERE p.address=? ORDER BY r.height DESC LIMIT ? OFFSET ?",
+            (address, payouts_limit, payouts_offset),
         )
+        counted = db("SELECT COUNT(*) AS n FROM round_payouts WHERE address=?", (address,), one=True)
+        payouts_total = int(counted["n"]) if counted else None
         earned = db(
             "SELECT COALESCE(SUM(amount_btc),0) AS s FROM round_payouts WHERE address=? AND status IN ('paid','unpaid')",
             (address,),
@@ -5141,6 +5165,10 @@ def miner_payload(address):
         "window_multiple": win["window_multiple"],
         "window_fill_percent": win["window_fill_percent"],
         "blocks_found": [dict(r) for r in (payouts or [])],
+        # `blocks_found` is one page of this many rows, newest first; see payouts_page_args.
+        "payouts_total": payouts_total,
+        "payouts_offset": payouts_offset,
+        "payouts_limit": payouts_limit,
         # Blocks this address found (its gateway or its miners), on chain. None when
         # primed's log could not be read; [] is a real zero. Not the coinbase outputs
         # in `blocks_found`.
@@ -5741,6 +5769,10 @@ API_CATALOG = (
             ApiField("hr_ghs", "number", "GH/s", "Credited hashrate.", "记入账的算力。"),
             ApiField("window_sats", "integer", "sats", "This address's next coinbase output.", "该地址在下一块 coinbase 中的输出。"),
             ApiField("paid_btc", "number", "XBT", "Mature coinbase already credited to this address.", "已经成熟、记给该地址的 coinbase。"),
+            ApiField("blocks_found", "array", "", "Coinbase outputs paid to this address, newest first, one page. Page with ?payouts_offset=N&payouts_limit=M (M up to 200, default 50).", "付给该地址的 coinbase 输出，从新到旧，一次一页。用 ?payouts_offset=N&payouts_limit=M 翻页（M 最大 200，默认 50）。"),
+            ApiField("payouts_total", "integer", "blocks", "How many rows blocks_found has in all. Null when it could not be counted.", "blocks_found 的总行数；无法统计时为 null。", nullable=True),
+            ApiField("payouts_offset", "integer", "blocks", "Offset of this page.", "本页的偏移量。"),
+            ApiField("payouts_limit", "integer", "blocks", "Page size used.", "本页的行数上限。"),
             ApiField("earned_24h", "object", "", "Earnings from blocks found in the last 24 hours. Null when a coinbase in that window cannot be read. When it is an object, block_sats, makegood_sats and total_sats are sats.", "最近 24 小时所出区块带来的收益。窗口内有读不到的 coinbase 时为 null。为对象时，block_sats、makegood_sats 与 total_sats 的单位是聪。", nullable=True),
         ),
     ),
@@ -7292,7 +7324,9 @@ class Handler(BaseHTTPRequestHandler):
             if not _ADDRESS_RE.match(addr):
                 self.send_json({"error": "not found"}, 404)
                 return
-            self.send_json(cached(("miner", addr), 5.0, lambda: public_view(miner_payload(addr))), cache_s=5)
+            off, lim = payouts_page_args(u.query)
+            key = ("miner", addr) if (off, lim) == (0, PAYOUTS_PAGE) else ("miner", addr, off, lim)
+            self.send_json(cached(key, 5.0, lambda: public_view(miner_payload(addr, off, lim))), cache_s=5)
             return
         if path == "/api/history":
             rng = (parse_qs(u.query).get("range") or ["24h"])[0]

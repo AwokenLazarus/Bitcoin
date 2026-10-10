@@ -527,6 +527,76 @@
         </div>`;
   }
 
+  // Older coinbase outputs, fetched a page at a time with "Show older" (XBT-143). The API
+  // sends the newest page; the 10-second refresh brings only that page again, so the older
+  // rows are kept here per address and merged back in on every render.
+  const PAYOUTS_OLDER_PAGE = 200;
+  const olderPayouts = { addr: "", rows: [], total: null, busy: false, failed: false, last: null };
+  const payoutKey = (b) => String(b.hash || b.height);
+  function withOlderPayouts(m) {
+    if (olderPayouts.addr !== m.address) {
+      Object.assign(olderPayouts, { addr: m.address, rows: [], total: null, busy: false, failed: false, last: null });
+    }
+    if (Number.isFinite(Number(m.payouts_total))) olderPayouts.total = Number(m.payouts_total);
+    if (!olderPayouts.rows.length) return m;
+    const have = new Set((m.blocks_found || []).map(payoutKey));
+    const extra = olderPayouts.rows.filter((b) => !have.has(payoutKey(b)));
+    return extra.length ? Object.assign({}, m, { blocks_found: (m.blocks_found || []).concat(extra) }) : m;
+  }
+  function payoutsMore(m) {
+    const shown = (m.blocks_found || []).length;
+    const total = olderPayouts.total;
+    if (!Number.isFinite(total) || total <= 0) return "";
+    if (shown >= total) {
+      return olderPayouts.rows.length ? `<p class="note payouts-more">${t("miner.payoutsAll", { total: num(total) })}</p>` : "";
+    }
+    return `<p class="note payouts-more">${t("miner.payoutsShown", { n: num(shown), total: num(total) })}
+          <button type="button" class="btn small ghost" data-payouts-more="${esc(m.address)}"${olderPayouts.busy ? " disabled" : ""}>${t(olderPayouts.busy ? "miner.payoutsLoading" : "miner.payoutsOlder")}</button>${olderPayouts.failed ? ` <span class="bad" role="status">${t("miner.payoutsFailed")}</span>` : ""}</p>`;
+  }
+  function payoutTables(m, ctx) {
+    return `<div data-payouts-tables>${pendingTable(m, ctx)}${makegoodTable(m, ctx)}${paidTable(m, ctx)}${payoutsMore(m)}</div>`;
+  }
+  // Redraw only the payout tables of the card on screen, from the last payload it was drawn with.
+  function redrawPayoutTables() {
+    const last = olderPayouts.last;
+    if (!last) return;
+    const m = withOlderPayouts(last.m);
+    document.querySelectorAll(".miner-card").forEach((card) => {
+      if (card.getAttribute("data-miner") !== m.address) return;
+      card.querySelectorAll("[data-payouts-tables]").forEach((box) => { box.outerHTML = payoutTables(m, last.ctx); });
+    });
+  }
+  document.addEventListener("click", (e) => {
+    const btn = e.target.closest && e.target.closest("[data-payouts-more]");
+    if (!btn || olderPayouts.busy) return;
+    const addr = btn.getAttribute("data-payouts-more");
+    if (addr !== olderPayouts.addr || !olderPayouts.last) return;
+    // rows the server has already given us: its first page plus what was loaded since
+    const offset = (olderPayouts.last.m.blocks_found || []).length + olderPayouts.rows.length;
+    olderPayouts.busy = true;
+    olderPayouts.failed = false;
+    redrawPayoutTables();
+    fetch(`/api/miner/${encodeURIComponent(addr)}?payouts_offset=${offset}&payouts_limit=${PAYOUTS_OLDER_PAGE}`)
+      .then((r) => { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); })
+      .then((d) => {
+        if (olderPayouts.addr !== addr) return;
+        const have = new Set(olderPayouts.rows.map(payoutKey));
+        (d.blocks_found || []).forEach((b) => {
+          if (have.has(payoutKey(b))) return;
+          // confirmations move with the tip; let the table work them out from the live height
+          const row = Object.assign({}, b);
+          delete row.confirmations;
+          delete row.blocks_to_mature;
+          olderPayouts.rows.push(row);
+        });
+        if (Number.isFinite(Number(d.payouts_total))) olderPayouts.total = Number(d.payouts_total);
+        // an empty page means there is nothing older, whatever the count said
+        if (!(d.blocks_found || []).length) olderPayouts.total = offset;
+      })
+      .catch(() => { if (olderPayouts.addr === addr) olderPayouts.failed = true; })
+      .then(() => { if (olderPayouts.addr === addr) { olderPayouts.busy = false; redrawPayoutTables(); } });
+  });
+
   // Blocks this address found (its gateway or its miners). Zero is a line, not an empty
   // table. A missing list is "unavailable", never a fake zero.
   function foundSection(m) {
@@ -659,6 +729,9 @@
   // tab, full, href(tab)->url }. Tabs are anchors when `href` is given (so the URL follows), else buttons.
   function minerCard(m, ctx) {
     ctx = ctx || {};
+    const fresh = m;
+    m = withOlderPayouts(m);
+    olderPayouts.last = { m: fresh, ctx };
     const so = m.solo;
     const hasSolo = !!so;
     const hasPool = !!(m.via || Number(m.window_work) > 0 || Number(m.shares_lifetime) > 0 || Number(m.round_share) > 0);
@@ -876,9 +949,7 @@
           ${panelBox("est", `<dt>${t("miner.dtEst")}</dt><dd title="${amtExact(estDay)}">${amt(estDay)}${money(estDay)}<small>${withBonus ? t("miner.estFeeBonus", { fee: feePct(billedFee), uplift: pctSmart(upliftPct) }) : t("miner.estFee", { fee: feePct(billedFee) })}</small></dd>`)}
         </dl>
         <p class="note callout">${t("miner.noBalance", { n: num(m.maturity_confs || 100), carry: Number(m.carry_btc) > 0 ? t("miner.carryNote", { amt: amt(m.carry_btc) }) : "" })}${mgPend.length ? t("miner.mgNote", { amt: satsExact(mgPendSats), n: mgPend.length, height: num(mgNextAt) }) : ""}</p>
-        ${pendingTable(m, ctx)}
-        ${makegoodTable(m, ctx)}
-        ${paidTable(m, ctx)}
+        ${payoutTables(m, ctx)}
       </div>`;
 
     return `

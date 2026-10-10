@@ -2330,3 +2330,6 @@
   .site-mast { backdrop-filter: none; -webkit-backdrop-filter: none; }
   .reveal { opacity: 1; transform: none; }
 }
+
+/* "Show older" under the miner payout tables (XBT-143) */
+.payouts-more { display: flex; flex-wrap: wrap; align-items: center; gap: 0.6rem; margin-top: 0.8rem; }

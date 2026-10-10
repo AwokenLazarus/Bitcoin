@@ -1077,6 +1077,11 @@ window.LZ_I18N_DICTS["en"] = {
     "thStatus": "Status",
     "thFound": "Found",
     "paidLabel": "Paid · matured coinbase outputs",
+    "payoutsShown": "Showing the newest {n} of {total} blocks that paid this address.",
+    "payoutsOlder": "Show older",
+    "payoutsLoading": "Loading…",
+    "payoutsAll": "All {total} blocks that paid this address are listed.",
+    "payoutsFailed": "Older blocks could not load. Try again.",
     "thOf": "Of block",
     "nothingMatured": "Nothing matured yet",
     "s": "s"

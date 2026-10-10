@@ -1074,6 +1074,11 @@ window.LZ_I18N_DICTS["zh-CN"] = {
     "thStatus": "状态",
     "thFound": "找到于",
     "paidLabel": "已支付 · 已成熟的 coinbase 输出",
+    "payoutsShown": "已显示最近 {n} 个，共 {total} 个付款到此地址的区块。",
+    "payoutsOlder": "查看更早",
+    "payoutsLoading": "加载中…",
+    "payoutsAll": "付款到此地址的 {total} 个区块已全部列出。",
+    "payoutsFailed": "更早的区块加载失败，请重试。",
     "thOf": "占区块",
     "nothingMatured": "尚无已成熟输出",
     "s": "秒"

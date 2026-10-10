@@ -278,6 +278,47 @@ class MinerPayload(unittest.TestCase):
         e = server.miner_payload(A)["earned_24h"]
         self.assertEqual((e["block_sats"], e["makegood_sats"], e["total_sats"], e["blocks"]), (0, 0, 0, 0))
 
+    def test_payouts_page_back_past_the_first_fifty(self):
+        # XBT-143: a miner with more than one page of coinbase outputs can read all of them.
+        now = int(time.time())
+        c = self.chain
+        heights = list(range(2000, 2130))  # 130 blocks, every one pays A
+        for height in heights:
+            c.splits[h(height)] = btc({A: 1_000_000, P: REWARD - 1_000_000})
+        with sqlite3.connect(str(server.DB)) as con:
+            con.executemany(
+                "INSERT INTO found_blocks(height,hash,ts,reward_btc) VALUES(?,?,?,?)",
+                [(height, h(height), now - (3000 - height), 3.125) for height in heights],
+            )
+        first = server.miner_payload(A)
+        self.assertEqual(first["payouts_limit"], 50)
+        self.assertEqual(first["payouts_offset"], 0)
+        self.assertEqual(len(first["blocks_found"]), 50)
+        total = first["payouts_total"]
+        self.assertGreaterEqual(total, 130)
+        seen = [b["height"] for b in first["blocks_found"]]
+        offset = 50
+        while offset < total:
+            page = server.miner_payload(A, offset, 200)
+            self.assertLessEqual(len(page["blocks_found"]), 200)
+            self.assertEqual(page["payouts_total"], total)
+            seen += [b["height"] for b in page["blocks_found"]]
+            offset += 200
+        self.assertEqual(len(seen), total)
+        self.assertEqual(len(set(seen)), total, "a page repeated a block")
+        self.assertEqual(seen, sorted(seen, reverse=True), "pages are newest first")
+        self.assertTrue(set(heights) <= set(seen))
+        self.assertEqual(server.miner_payload(A, total + 5, 50)["blocks_found"], [])
+        # the totals do not depend on which page was asked for
+        self.assertEqual(server.miner_payload(A, 50, 10)["immature_btc"], first["immature_btc"])
+
+    def test_payouts_page_args_are_clamped(self):
+        self.assertEqual(server.payouts_page_args(""), (0, 50))
+        self.assertEqual(server.payouts_page_args("payouts_offset=100&payouts_limit=200"), (100, 200))
+        self.assertEqual(server.payouts_page_args("payouts_limit=99999"), (0, 200))
+        self.assertEqual(server.payouts_page_args("payouts_limit=0&payouts_offset=-4"), (0, 1))
+        self.assertEqual(server.payouts_page_args("payouts_limit=abc&payouts_offset=x"), (0, 50))
+
     def test_blocks_this_address_found(self):
         now = int(time.time())
         c = self.chain
@@ -299,7 +340,7 @@ class MinerPayload(unittest.TestCase):
         with (c.dir / "blocks.jsonl").open("w") as f:
             f.writelines(json.dumps(rec) + "\n" for rec in log)
         server._block_log_latest_cache["sig"] = None
-        with sqlite3.connect(os.environ["POOL_DB"]) as con:
+        with sqlite3.connect(str(server.DB)) as con:
             con.executemany(
                 "INSERT INTO found_blocks(height,hash,ts,reward_btc) VALUES(?,?,?,?)",
                 rows,
@@ -324,7 +365,7 @@ class MinerPayload(unittest.TestCase):
     def test_unreadable_block_log_is_not_zero_found(self):
         now = int(time.time())
         self.chain.splits[h(920)] = btc({A: 1, P: REWARD - 1})
-        with sqlite3.connect(os.environ["POOL_DB"]) as con:
+        with sqlite3.connect(str(server.DB)) as con:
             con.execute(
                 "INSERT INTO found_blocks(height,hash,ts,reward_btc) VALUES(?,?,?,?)",
                 (920, h(920), now - 10, 3.125),
