@@ -23,8 +23,12 @@ _made_cfg = not _cfg.exists()
 if _made_cfg:
     _cfg.write_text(json.dumps({"public_url": "https://pool.lazarus-xbt.xyz"}))
 TMP = Path(tempfile.mkdtemp(prefix="earned-"))
-os.environ["POOL_DB"] = str(TMP / "pool.sqlite")
-os.environ["POOL_UI_NO_WRITE"] = "1"
+# Pytest imports every test module into one process. The first import owns the
+# database and creates its tables. Pointing POOL_DB at a new empty file after
+# that leaves this module writing somewhere `server` never opened.
+if "server" not in sys.modules:
+    os.environ["POOL_DB"] = str(TMP / "pool.sqlite")
+    os.environ["POOL_UI_NO_WRITE"] = "1"
 sys.path.insert(0, str(POOL))
 try:
     import server
@@ -234,7 +238,7 @@ class MinerPayload(unittest.TestCase):
         self.wipe()
 
     def wipe(self):
-        with sqlite3.connect(os.environ["POOL_DB"]) as con:
+        with sqlite3.connect(server.DB) as con:
             con.execute("DELETE FROM found_blocks")
 
     def found(self):
@@ -246,7 +250,7 @@ class MinerPayload(unittest.TestCase):
         c.block(902, now - 600, {P: REWARD}, kind="pool-only", split=split, owed=REWARD, job="pending")
         with (c.dir / "blocks.jsonl").open("w") as f:
             f.writelines(json.dumps(rec) + "\n" for rec in c.log)
-        with sqlite3.connect(os.environ["POOL_DB"]) as con:
+        with sqlite3.connect(server.DB) as con:
             con.executemany("INSERT INTO found_blocks(height,hash,ts) VALUES(:height,:hash,:ts)", c.fb_rows)
         return now
 

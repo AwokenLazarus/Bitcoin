@@ -33,6 +33,9 @@ try:
 finally:
     if _made_cfg:
         _cfg.unlink()
+# NO_WRITE is fixed when server is first imported. An earlier module may have
+# imported it read-only, so clearing the env var above does not turn writes back on.
+server.NO_WRITE = False
 import backfill_found_blocks as backfill
 
 A = "bc1qminera"
@@ -325,6 +328,48 @@ class ScannerHoldsTaggedBlocks(unittest.TestCase):
         n.down = ()
         server.scan_found_blocks()
         self.assertEqual(n.found(), {1001: h})
+
+    def test_block_seen_before_the_block_log_is_not_skipped(self):
+        """Regression for 975444: the site saw the block before primed's log had the hash.
+
+        scan_height moves on. A later pass still books the block once the log has it,
+        instead of skipping it for good.
+        """
+        n = Node(self, 1000)
+        h = n.mine(1001, "Lazarus", SPLIT)
+        server.scan_found_blocks()
+        n.mine(1002)
+        server.scan_found_blocks()
+        self.assertEqual(n.found(), {}, "not counted while the log lacks the hash")
+        self.assertEqual(n.pending(), {1001: h})
+        n.prime_logs(1001, h)
+        server.scan_found_blocks()
+        self.assertEqual(n.found(), {1001: h})
+        self.assertEqual(
+            server.db("SELECT COUNT(*) AS n FROM found_blocks", one=True)["n"],
+            1,
+        )
+
+    def test_block_that_lost_its_height_is_not_counted(self):
+        """Regression for 967169: a tagged block that loses its height is not blocks_found.
+
+        The block is held, then another block takes the height, then primed logs the
+        loser. The loser is not inserted and does not add to the count.
+        """
+        n = Node(self, 1000)
+        lost = n.mine(1001, "Lazarus", SPLIT)
+        server.scan_found_blocks()
+        self.assertEqual(n.pending(), {1001: lost})
+        n.mine(1001, fork=1)
+        n.mine(1002)
+        n.prime_logs(1001, lost)
+        server.scan_found_blocks()
+        self.assertEqual(n.found(), {})
+        self.assertEqual(n.pending(), {})
+        self.assertEqual(
+            server.db("SELECT COUNT(*) AS n FROM found_blocks", one=True)["n"],
+            0,
+        )
 
     def test_pool_only_block_keeps_the_round_work(self):
         n = Node(self, 1000)
