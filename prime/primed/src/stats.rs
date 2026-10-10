@@ -12,6 +12,7 @@ use tokio::net::TcpListener;
 use crate::address;
 use crate::config::Config;
 use crate::state::{now, Shared};
+use crate::workers::{Row, WorkerBook};
 
 /// Display only: `gateway` is the 16 digits of the key that stats show, so a configured key is
 /// compared over those. What a session is trusted with is decided on its whole key
@@ -53,6 +54,36 @@ fn stale_doc(shared: &Shared, w: &tides::Window, ts: u64) -> Value {
         "held_sats": w.total_held(),
         "holds": w.holds(),
     })
+}
+
+/// The worker names a session's credited shares carried, and the tallies of names its limits
+/// evicted (`workers.rs`). `name` is empty for work sent under the bare address. Self-declared
+/// and for display: the work in these rows is the work `window.miners` already credits.
+fn workers_doc(book: &WorkerBook, ts: u64) -> (Value, Value) {
+    let row = |r: &Row<'_>| {
+        json!({
+            "identity": r.identity,
+            "name": r.name,
+            "work": r.work,
+            "shares": r.shares,
+            "last_share_s": ts.saturating_sub(r.last_ts),
+            "hashrate_ghs": r.recent_work as f64 * HASHES_PER_WORK / r.recent_secs as f64 / 1e9,
+        })
+    };
+    let workers: Vec<Value> = book.rows(ts).iter().map(row).collect();
+    let overflow: Vec<Value> = book
+        .overflow(ts)
+        .iter()
+        .map(|r| {
+            let mut j = row(r);
+            if let Some(o) = j.as_object_mut() {
+                o.remove("name");
+                o.insert("names".into(), json!(r.names));
+            }
+            j
+        })
+        .collect();
+    (json!(workers), json!(overflow))
 }
 
 pub fn build(shared: &Shared) -> Value {
@@ -151,6 +182,11 @@ pub fn build(shared: &Shared) -> Value {
                     // Session counter resets on restart; the log is the lifetime count.
                     o.insert("block_candidates".into(), json!(finds.get(&c.gateway).map(|f| f.found).unwrap_or(0)));
                     o.insert("offline".into(), json!(false));
+                    if let Some(book) = &c.workers {
+                        let (workers, overflow) = workers_doc(book, ts);
+                        o.insert("workers".into(), workers);
+                        o.insert("workers_overflow".into(), overflow);
+                    }
                 }
                 j
             })

@@ -205,6 +205,11 @@ pub struct ClientInfo {
     /// Coinbasers issued to this session held to that budget.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub class_budget_replies: Option<u64>,
+    /// Worker names this session's credited shares carried, per identity, for display only
+    /// (`workers.rs`). `None` for the house gateway, whose workers the pool site already has
+    /// from the gateway itself. Written into the row by `stats::build`.
+    #[serde(skip)]
+    pub workers: Option<crate::workers::WorkerBook>,
 }
 
 #[derive(Default)]
@@ -852,6 +857,61 @@ mod tests {
         let after = shared.coinbaser_base();
         assert_eq!(carry_in(&after, who), 0, "the snapshot still offers carry the block already paid");
         assert!(!Arc::ptr_eq(&before, &after));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// What `stats.json` says of a session's workers: a row per name with its identity, the
+    /// bare address as an empty name, and the names a limit evicted as a tally per identity.
+    #[test]
+    fn stats_list_a_session_s_workers_and_what_its_limits_evicted() {
+        use crate::workers::{WorkerBook, MAX_PER_IDENTITY};
+        let (shared, dir) = test_shared("workers");
+        let who = "bc1qvchspt9gm5dq0geq3kxx53k3n87znwwvwc30t0";
+        let ts = now();
+        let mut named = WorkerBook::default();
+        named.note(who, &format!("{who}.A301"), 600, ts - 20);
+        named.note(who, &format!("{who}.A302"), 300, ts - 10);
+        named.note(who, who, 100, ts - 5);
+        let mut flooded = WorkerBook::default();
+        for i in 0..MAX_PER_IDENTITY + 3 {
+            flooded.note(who, &format!("{who}.n{i:04}"), 2, ts);
+        }
+        {
+            let mut c = shared.clients.lock().unwrap();
+            c.insert(1, ClientInfo { id: 1, workers: Some(named), ..Default::default() });
+            c.insert(2, ClientInfo { id: 2, workers: Some(flooded), ..Default::default() });
+            c.insert(3, ClientInfo { id: 3, ..Default::default() });
+        }
+        let doc = crate::stats::build(&shared);
+        let c = &doc["clients"];
+        let rows: Vec<(&str, &str, u64, u64)> = c[0]["workers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|w| {
+                (
+                    w["identity"].as_str().unwrap(),
+                    w["name"].as_str().unwrap(),
+                    w["work"].as_u64().unwrap(),
+                    w["shares"].as_u64().unwrap(),
+                )
+            })
+            .collect();
+        assert_eq!(rows, [(who, "", 100, 1), (who, "A301", 600, 1), (who, "A302", 300, 1)]);
+        // 600 difficulty-1 shares over the 30-second floor
+        let ghs = c[0]["workers"][1]["hashrate_ghs"].as_f64().unwrap();
+        assert!((ghs - 600.0 * 4_294_967_296.0 / 30.0 / 1e9).abs() < 1e-6, "{ghs}");
+        assert!(c[0]["workers"][1]["last_share_s"].as_u64().unwrap().abs_diff(20) <= 2);
+        assert_eq!(c[0]["workers_overflow"], serde_json::json!([]));
+
+        assert_eq!(c[1]["workers"].as_array().unwrap().len(), MAX_PER_IDENTITY);
+        let over = &c[1]["workers_overflow"];
+        assert_eq!(over.as_array().unwrap().len(), 1, "{over}");
+        assert_eq!((&over[0]["identity"], &over[0]["names"], &over[0]["work"]), (&who.into(), &3.into(), &6.into()));
+        assert!(over[0].get("name").is_none());
+
+        // a session with no book (the house gateway) has neither key
+        assert!(c[2].get("workers").is_none() && c[2].get("workers_overflow").is_none(), "{}", c[2]);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

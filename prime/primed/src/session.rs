@@ -906,6 +906,7 @@ pub async fn run(shared: Arc<Shared>, mut stream: TcpStream, remote: SocketAddr)
         held_split: held_build.is_some(),
         class_budget_bytes: class_budget.as_ref().map(|_| None),
         class_budget_replies: class_budget.as_ref().map(|_| 0),
+        workers: (!house).then(Default::default),
         ..Default::default()
     };
     shared.totals.add(&shared.totals.connections, 1);
@@ -1868,6 +1869,12 @@ impl Session {
             c.accepted += 1;
             if !solo {
                 c.work += v.work;
+                // Display only: which machine a share named. Nothing reads it but the stats.
+                if v.work > 0 {
+                    if let Some(w) = c.workers.as_mut() {
+                        w.note(&identity, &s.username, v.work, ts);
+                    }
+                }
             }
             c.last_share_ts = ts;
             c.identity = identity.clone();

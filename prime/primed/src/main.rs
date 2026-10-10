@@ -14,6 +14,7 @@ mod solo;
 mod state;
 mod stats;
 mod validity;
+mod workers;
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64};

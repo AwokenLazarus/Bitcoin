@@ -550,11 +550,20 @@
     // A row's own rate: the firmware figure for a stratum session, the path's share for the
     // gateway side of an address that is also on the stratum, else the credited figure.
     const workerHr = (w) => (w.via === "stratum" ? (Number(w.firmware_hr_ghs) > 0 ? w.firmware_hr_ghs : null) : Number(w.path_hr_ghs) > 0 ? w.path_hr_ghs : w.hr_ghs);
+    // Behind a DATUM gateway: the name its machine sent, or the row for work sent under the
+    // bare address, or the one for names past what Prime keeps per address.
+    const workerCell = (w) =>
+      Number(w.worker_overflow) > 0
+        ? `<span class="faint">${t("miner.workerMore", { n: num(w.worker_overflow) })}</span>`
+        : w.worker_unnamed
+          ? `<span class="faint">${t("miner.workerUnnamed")}</span>`
+          : esc(w.worker || "\u2014");
+    const namesNote = m.worker_names_missing ? `<p class="note callout">${t("miner.workerNamesMissing")}</p>` : "";
     const relayed = m.relayed || [];
     const workers = (m.workers || [])
       .map(
         (w) =>
-          `<tr><td>${esc(w.worker || "\u2014")}</td><td>${pathLabel(w.via, w.gateway_name || m.gateway_name)}</td><td class="num">${fmtHr(workerHr(w))}</td><td class="num">${sessCell(w.via, w.shares_session)}</td><td class="num">${num(w.shares_lifetime ?? w.shares_acc ?? w.window_work)}</td><td class="num">${num(w.shares_rej)}</td><td class="num">${Number.isFinite(Number(w.last_share_s)) ? Number(w.last_share_s).toFixed(0) + t("miner.s") : "\u2014"}</td></tr>`
+          `<tr><td>${workerCell(w)}</td><td>${pathLabel(w.via, w.gateway_name || m.gateway_name)}</td><td class="num">${fmtHr(workerHr(w))}</td><td class="num">${sessCell(w.via, w.shares_session)}</td><td class="num">${num(w.shares_lifetime ?? w.shares_acc ?? w.window_work)}</td><td class="num">${num(w.shares_rej)}</td><td class="num">${Number.isFinite(Number(w.last_share_s)) ? Number(w.last_share_s).toFixed(0) + t("miner.s") : "\u2014"}</td></tr>`
       )
       .concat(
         relayed.map(
@@ -713,6 +722,7 @@
     const workersPanel = `
       <div class="mpanel" data-mpanel="workers" ${tab === "workers" ? "" : "hidden"}>
         ${relayNote}
+        ${namesNote}
         <p class="note">${t("miner.workersNote")}</p>
         <div class="scroll tall"><table><thead><tr><th>${t("miner.thWorker")}</th><th>${t("miner.thPath")}</th><th class="num">${t("miner.thHr")}</th><th class="num">${t("miner.thSess")}</th><th class="num">${t("miner.thAcc")}</th><th class="num">${t("miner.thRej")}</th><th class="num">${t("miner.thLast")}</th></tr></thead><tbody>${workers || `<tr><td colspan="7" class="empty">${t("miner.offlineRow")}</td></tr>`}</tbody></table></div>
       </div>`;

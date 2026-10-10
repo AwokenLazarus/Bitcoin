@@ -529,6 +529,34 @@ budget](#class-budgets) applies), `blocks`, `owed`, `totals`, and with `class-bu
 `carry_reserved` the fee wallet holds back. `/ledger.json` is the previous Prime's credits view for the UI's
 hashrate graph; `/healthz` returns `ok`.
 
+### Worker names
+
+A share's username is `address[~modifier][.worker]`. The address is the identity, and is all
+that crediting, the coinbase and payouts read. The worker part is kept per session so a miner
+can see its own machines: each DATUM gateway's row in `clients` has
+
+```json
+"workers": [
+  { "identity": "bc1q…", "name": "A301", "work": 4000, "shares": 40, "last_share_s": 3, "hashrate_ghs": 28.6 }
+],
+"workers_overflow": [
+  { "identity": "bc1q…", "names": 12, "work": 90, "shares": 9, "last_share_s": 700, "hashrate_ghs": 0.0 }
+]
+```
+
+`work` and `shares` count the session's credited window work under that name since it connected,
+and `hashrate_ghs` is that work over the last ten minutes. `name` is empty for work sent under
+the bare address. A gateway forwards worker names only with `pool_pass_workers` or
+`pool_pass_full_users` on; with both off everything arrives under one empty name.
+
+Names are self-declared, so they are bounded and never trusted: a name is what follows the first
+`.`, up to a `~`, cut to 32 printable ASCII characters (anything else becomes `_`); an identity
+keeps 256 names per session and a session 1024. Past a limit the name least recently seen makes
+room and its tally moves to `workers_overflow` for its identity (an empty `identity` there is
+for identities that no longer hold a name), so a session's rows always add up to its `work`. The
+pool's own gateway (`fee_path: "stratum"`) has neither key: the pool site reads its workers from
+the gateway itself. See `primed/src/workers.rs`.
+
 ## Tests
 
 ```bash

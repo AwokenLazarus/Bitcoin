@@ -1366,8 +1366,15 @@ def attach_share_fields(rec):
     addr = rec.get("address") or ""
     worker = rec.get("worker") or ""
     life_a, life_r, _ = address_share_totals(addr)
-    wrow = db("SELECT lifetime_acc FROM worker_shares WHERE address=? AND worker=?", (addr, worker), one=True)
-    rec["shares_lifetime"] = int(wrow["lifetime_acc"]) if wrow else life_a
+    # A worker behind a DATUM gateway (prime_worker_records) carries Prime's own count for that
+    # name. worker_shares is the house stratum's book: a stratum session of the same name is
+    # a different machine.
+    own_counts = bool(rec.get("prime_worker"))
+    if own_counts:
+        rec["shares_lifetime"] = int(rec.get("shares_lifetime") or 0)
+    else:
+        wrow = db("SELECT lifetime_acc FROM worker_shares WHERE address=? AND worker=?", (addr, worker), one=True)
+        rec["shares_lifetime"] = int(wrow["lifetime_acc"]) if wrow else life_a
     rec["shares_session"] = int(rec.get("shares_session") if rec.get("shares_session") is not None else (rec.get("shares_acc") or 0))
     rec["shares_acc"] = rec["shares_lifetime"] or rec["shares_session"]
     rec["shares_rej"] = life_r if rec.get("shares_rej") is None else rec.get("shares_rej")
@@ -1387,7 +1394,7 @@ def attach_share_fields(rec):
     # below becomes the address-level credited rate, so keep the first (true) value.
     if "firmware_hr_ghs" not in rec:
         rec["firmware_hr_ghs"] = float(rec.get("hr_ghs") or 0)
-    if rec.get("via") in ("gateway", "prime") or rec.get("ua") in ("DATUM gateway", "Prime window"):
+    if not own_counts and (rec.get("via") in ("gateway", "prime") or rec.get("ua") in ("DATUM gateway", "Prime window")):
         ww = int(info.get("window_work") or rec.get("window_work") or 0)
         if ww and int(rec.get("shares_lifetime") or 0) < ww:
             rec["shares_lifetime"] = ww
@@ -1398,7 +1405,7 @@ def attach_share_fields(rec):
         display = float(rec.get("path_hr_ghs") or 0)
     if display > 1e-6:
         rec["hr_ghs"] = display
-        if gwh > 1e-6 and rec.get("last_share_s") is not None:
+        if (gwh > 1e-6 or own_counts) and rec.get("last_share_s") is not None:
             pass
         elif info.get("last_share_s") is not None:
             rec["last_share_s"] = _share_age_s(info.get("last_share_s"), missing=0.0)
@@ -1470,11 +1477,160 @@ def datum_side_record(addr, gw, info, path_hr, last_s=None):
     }
 
 
+# A worker name is whatever a miner typed into its machine, relayed by its gateway and cut to
+# 32 printable characters by primed. Cut again here: this is the last stop before a page.
+PRIME_WORKER_NAME_MAX = 32
+# A worker is listed while primed still counts work for it: its rate is over ten minutes.
+PRIME_WORKER_LIVE_S = 600
+
+
+def _prime_worker_row(w, client):
+    """One entry of a primed client's `workers` / `workers_overflow`, or None if it is not one."""
+    if not isinstance(w, dict):
+        return None
+    ident = str(w.get("identity") or "").strip()
+    if not ident:
+        return None
+    try:
+        row = {
+            "identity": ident,
+            "name": "".join(ch if 33 <= ord(ch) < 127 else "_" for ch in str(w.get("name") or ""))[:PRIME_WORKER_NAME_MAX],
+            "hr_ghs": min(max(float(w.get("hashrate_ghs") or 0), 0.0), _PRIME_HR_CAP_GHS),
+            "work": max(int(w.get("work") or 0), 0),
+            "shares": max(int(w.get("shares") or 0), 0),
+            "last_share_s": max(float(w.get("last_share_s") or 0), 0.0),
+            "names": max(int(w.get("names") or 0), 0),
+        }
+    except (TypeError, ValueError):
+        return None
+    row["gateway"] = str(client.get("gateway") or "")
+    row["gateway_name"] = str(client.get("secondary_tag") or client.get("name") or "").strip()[:40]
+    return row
+
+
+def prime_workers_by_address(clients=None):
+    """address -> {"named": [...], "unnamed": [...], "more": [...]} from primed's client rows.
+
+    `named` are the workers a DATUM gateway forwarded for that address, `unnamed` is work sent
+    under the bare address, and `more` is what primed evicted past its limits (a count of
+    names and their work). An address is absent when no connected DATUM gateway reports
+    workers for it: an older primed, or an address only on the house stratum, whose workers
+    come from the gateway itself. Display only; nothing here feeds a payout.
+    """
+    if clients is None:
+        clients = (state.get("prime_meta") or {}).get("clients") or []
+    out = {}
+    for c in clients or []:
+        if not isinstance(c, dict) or c.get("offline") or _is_own_gateway(c):
+            continue
+        workers = c.get("workers")
+        if not isinstance(workers, list):
+            continue
+        for key, source in (("named", workers), ("more", c.get("workers_overflow") or [])):
+            for w in source if isinstance(source, list) else []:
+                row = _prime_worker_row(w, c)
+                if row is None:
+                    continue
+                book = out.setdefault(row["identity"], {"named": [], "unnamed": [], "more": []})
+                book["unnamed" if key == "named" and not row["name"] else key].append(row)
+    return out
+
+
+def _prime_worker_live(row):
+    return row["hr_ghs"] > 1e-6 and row["last_share_s"] < PRIME_WORKER_LIVE_S
+
+
+def prime_worker_records(addr, info, book, fallback_gw=None):
+    """Miner rows for the workers hashing for `addr` through DATUM gateways, one per name.
+
+    Empty when no named worker is live: the caller then shows the single gateway row it always
+    has. Work under the bare address and work primed evicted each get one row beside the named
+    ones, so the rows still add up. The window fields are the address's, as on every row.
+    """
+    book = book or {}
+    named = sorted((w for w in book.get("named") or [] if _prime_worker_live(w)), key=lambda w: (w["name"], w["gateway"]))
+    if not named:
+        return []
+    fallback_gw = fallback_gw or {}
+    ww = int(info.get("window_work") or 0)
+
+    def record(w, worker, **extra):
+        rec = {
+            "address": addr,
+            "worker": worker,
+            "user": f"{addr}.{worker}" if w["name"] else addr,
+            "host": "",
+            "hr_ghs": w["hr_ghs"],
+            # attach_share_fields rewrites hr_ghs to the address's credited rate; this is the row's own
+            "path_hr_ghs": w["hr_ghs"],
+            "vdiff": 0,
+            # accepted difficulty and share count since this gateway session began
+            "diff_acc": w["work"],
+            "shares_acc": w["work"],
+            "shares_session": w["shares"],
+            "shares_lifetime": w["work"],
+            "diff_rej": 0,
+            "shares_rej": 0,
+            "last_share_s": w["last_share_s"],
+            "ua": "DATUM gateway",
+            "online": True,
+            "via": "prime",
+            "prime_worker": True,
+            "gateway_name": w["gateway_name"] or fallback_gw.get("name") or "",
+            "gateway": w["gateway"] or fallback_gw.get("gateway") or "",
+            "window_work": ww,
+            "window_percent": float(info.get("window_percent") or 0),
+            "window_sats": int(info.get("window_sats") or 0),
+            "window_shares": int(info.get("window_shares") or info.get("credits") or 0),
+        }
+        rec.update(extra)
+        return rec
+
+    def together(rows):
+        live = [w for w in rows if _prime_worker_live(w)]
+        if not live:
+            return None
+        first = live[0]
+        return {
+            "identity": addr,
+            "name": "",
+            "hr_ghs": sum(w["hr_ghs"] for w in live),
+            "work": sum(w["work"] for w in live),
+            "shares": sum(w["shares"] for w in live),
+            "last_share_s": min(w["last_share_s"] for w in live),
+            "names": sum(w["names"] for w in live),
+            "gateway": first["gateway"] if all(w["gateway"] == first["gateway"] for w in live) else "",
+            "gateway_name": first["gateway_name"] if all(w["gateway_name"] == first["gateway_name"] for w in live) else "",
+        }
+
+    recs = [record(w, w["name"]) for w in named]
+    bare = together(book.get("unnamed") or [])
+    if bare:
+        recs.append(record(bare, "", worker_unnamed=True))
+    more = together(book.get("more") or [])
+    if more:
+        recs.append(record(more, "", worker_overflow=more["names"]))
+    return recs
+
+
+def prime_worker_names_missing(addr, book):
+    """True when a DATUM gateway is hashing for `addr` and forwards no worker name for it.
+
+    Either the gateway has both `pool_pass_workers` and `pool_pass_full_users` off, or the
+    machines are set up with the bare address. False when primed does not report workers at
+    all (nothing to say), and when any named worker is live."""
+    book = book or {}
+    if any(_prime_worker_live(w) for w in book.get("named") or []):
+        return False
+    return any(_prime_worker_live(w) for w in book.get("unnamed") or [])
+
+
 def merge_prime_online(miners):
     by = state.get("prime") or {}
     if not isinstance(by, dict):
         by = {}
     have = {m.get("address") for m in miners}
+    workers = prime_workers_by_address()
     for m in miners:
         addr = m.get("address") or ""
         info = by.get(addr) or prime_info_for(addr)
@@ -1506,12 +1662,24 @@ def merge_prime_online(miners):
             continue
         if names is None:
             names = gateway_names_by_address()
+        named = prime_worker_records(addr, info, workers.get(addr), names.get(addr))
+        if named:
+            extras.extend(attach_share_fields(rec) for rec in named)
+            continue
         rec = datum_side_record(addr, names.get(addr) or {}, info, dhr, last_s=info.get("last_share_s"))
+        rec["worker_names_missing"] = prime_worker_names_missing(addr, workers.get(addr))
         attach_share_fields(rec)
         extras.append(rec)
     for addr, info in by.items():
         if addr in have:
             continue
+        if _prime_is_live(info):
+            if names is None:
+                names = gateway_names_by_address()
+            named = prime_worker_records(addr, info, workers.get(addr), names.get(addr))
+            if named:
+                extras.extend(attach_share_fields(rec) for rec in named)
+                continue
         last_s = _share_age_s(info.get("last_share_s"), missing=0.0)
         ww = int(info.get("window_work") or 0)
         rec = {
@@ -1535,6 +1703,7 @@ def merge_prime_online(miners):
             "window_percent": float(info.get("window_percent") or 0),
             "window_sats": int(info.get("window_sats") or 0),
             "window_shares": int(info.get("window_shares") or info.get("credits") or 0),
+            "worker_names_missing": prime_worker_names_missing(addr, workers.get(addr)),
         }
         attach_share_fields(rec)
         rec["online"] = rec.get("online") or _prime_is_live(rec)
@@ -4356,6 +4525,12 @@ def rollup_online_by_address(online):
         rec = by[addr]
         if int(rec.get("sessions") or 1) > 1 and not rec.get("worker"):
             rec["worker"] = f"{rec['sessions']} sessions"
+        if rec.get("prime_worker") and rec.get("via") == "prime":
+            # Worker rows count from when their gateway session began. The address's figure
+            # was its window work before there were worker rows, and is never less than it.
+            floor = int(rec.get("window_work") or 0)
+            for k in ("shares_lifetime", "shares_acc", "diff_acc"):
+                rec[k] = max(int(rec.get(k) or 0), floor)
         out.append(rec)
     return out
 
@@ -4586,7 +4761,14 @@ def miner_payload(address):
         "window_percent": float(pinfo.get("window_percent") or 0),
         "window_sats": int(pinfo.get("window_sats") or 0),
         "window_shares": int(pinfo.get("window_shares") or pinfo.get("credits") or 0),
-        "diff_acc": (recs[0].get("diff_acc", 0) if recs else 0) or (stored["diff_acc"] if stored and "diff_acc" in stored.keys() else 0),
+        "diff_acc": (
+            (int(pinfo.get("window_work") or 0) if recs and recs[0].get("prime_worker") else 0)
+            or (recs[0].get("diff_acc", 0) if recs else 0)
+            or (stored["diff_acc"] if stored and "diff_acc" in stored.keys() else 0)
+        ),
+        # A DATUM gateway is hashing for this address and sends no worker name with it, so
+        # the Workers tab has one row for the gateway and says how to get a row per machine.
+        "worker_names_missing": any(m.get("worker_names_missing") for m in recs),
         "first_seen": stored["first_ts"] if stored else None,
         "last_seen": stored["last_ts"] if stored else None,
         "best_hr_ghs": best if stored or recs else hr,
