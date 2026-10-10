@@ -42,7 +42,7 @@
  "datePublished": "2026-10-07",
  "dateModified": "2026-10-10",
  "inLanguage": "en",
- "author": { "@type": "Organization", "name": "Lightning Stream", "url": "https://github.com/AwokenLazarus/Bitcoin-Stream" },
+ "author": { "@type": "Organization", "name": "Lightning Stream", "url": "https://github.com/AwokenLazarus/Lightning-Stream" },
  "publisher": { "@id": "https://lazarus-xbt.xyz/#org" },
  "isPartOf": { "@id": "https://lazarus-xbt.xyz/#website" },
  "about": ["payment channels", "x402", "AI agents", "streaming payments", "XBT"]
@@ -66,7 +66,7 @@
 <section class="hero wrap">
   <h1><span class="kicker">Whitepaper · XBT</span>Lightning Stream: pay as it <em>arrives</em></h1>
   <p class="lede">A way for people and AI agents to pay for a service piece by piece, while it is being delivered: an answer token by token, a file chunk by chunk, an API call by call. Each piece costs one signature. Stop at any moment and nothing more is owed.</p>
-  <p class="note">Draft 3 · 10 October 2026 · Lightning Stream (<a href="https://github.com/AwokenLazarus/Bitcoin-Stream" rel="noopener">source</a>). Working on test networks only; not yet on XBT mainnet. An outside review found issues and the work on them is not finished; see <a href="#status">Status</a>.</p>
+  <p class="note">Draft 3 · 10 October 2026 · Lightning Stream (<a href="https://github.com/AwokenLazarus/Lightning-Stream" rel="noopener">source</a>). Working on test networks only; not yet on XBT mainnet. An outside review found issues and the work on them is not finished; see <a href="#status">Status</a>.</p>
   <p class="note"><strong>What the name means.</strong> A Stream channel is a direct one-way payment channel between one buyer and one seller. It is not a Lightning channel, and Lightning nodes do not route it. The name is there because the same wallet also pays XBT Lightning invoices (BOLT&nbsp;11) and offers (BOLT&nbsp;12) under the same spending policy. A bridge between the two is designed, not built; see <a href="#lightning">Beside Lightning</a>.</p>
   <nav class="toc" aria-label="On this page">
     <p class="category">On this page</p>
@@ -310,7 +310,7 @@
       </table>
     </div>
     <p>A Stream channel wins on the hot path: many small, fast payments from one buyer to one seller, such as a metered API or a model's tokens. Lightning wins at everything a network is for: reaching many sellers, receiving from ordinary wallets, moving money both ways. So the plan is to use Lightning for reach and to fund Stream channels, and to keep the direct channel for repeat buyer–seller pairs. The Lightning bridge comes before more hub work.</p>
-    <p>What exists today is the wallet's Lightning payer. It pays BOLT&nbsp;11 invoices, and that code is in the public tree. Paying BOLT&nbsp;12 offers is built: in our lab the wallet paid offers through a Lightning Fork node on regtest. That code is not in the public tree yet and has not been reviewed outside the project. Offers fit owner-approved budgets and subscriptions, though not per-call metering. The bridge, a service that would let a Stream channel pay a Lightning seller, is designed and not built.</p>
+    <p>What exists today is the wallet's Lightning payer. It pays BOLT&nbsp;11 invoices, and that code is in the public tree. Paying BOLT&nbsp;12 offers is built too, and that code is in the public tree: in our lab the wallet paid offers through a Lightning Fork node on regtest. It has not been reviewed outside the project. Offers fit owner-approved budgets and subscriptions, though not per-call metering. The bridge, a service that would let a Stream channel pay a Lightning seller, is designed and not built.</p>
 
     <h2 id="prior"><span class="n">9</span>Prior art</h2>
     <p>Lightning Stream is not a new kind of channel. It is Jeremy Spilman's one-way payment channel (2013), in the <code>CHECKLOCKTIMEVERIFY</code> form that BIP&nbsp;65 gives as its example, bound to HTTP 402 and to an agent's spending policy. The policy wallet is the part we think is most useful.</p>
@@ -335,9 +335,9 @@
     <h2 id="status"><span class="n">11</span>Status and limits</h2>
     <dl class="status">
       <dt>Works</dt><dd>Open, pay, stream, close and refund, plus experimental hub routing, on XBT's regtest and a private test network. A Claude agent given only the wallet's tools bought an analytics API, refused a tampered chunk, and the seller received exactly the 8,500 sat it charged.</dd>
-      <dt>Reviewed</dt><dd>There has been no independent audit. Our internal review found three critical and four high-severity issues. We changed the code for each and added tests; a summary is not published yet. An outside review of the published code (October 2026) then found more serious issues: in the agent wallet's budget accounting, the hub, the pay-with-work audit and the HTTP layer. Fixes for its findings are in the public tree. Our own follow-up audit of those fixes found that some were incomplete. We have written and tested further fixes for what it found. They are not in the public tree yet, and that work is not finished. None of these fixes, public or not, has been re-reviewed by anyone outside the project. Until that happens, treat every issue above as possibly still open.</dd>
+      <dt>Reviewed</dt><dd>There has been no independent audit. Our internal review found three critical and four high-severity issues. We changed the code for each and added tests; a summary is not published yet. An outside review of the published code (October 2026) then found more serious issues: in the agent wallet's budget accounting, the hub, the pay-with-work audit and the HTTP layer. Fixes for its findings are in the public tree. Our own follow-up audit of those fixes found that some were incomplete. Further fixes for what it found are in the public tree as well, and a third round is being written. That work is not finished. None of these fixes, public or not, has been re-reviewed by anyone outside the project. Until that happens, treat every issue above as possibly still open.</dd>
       <dt>Experimental</dt><dd>Hub routing. Do not put real funds through a hub.</dd>
-      <dt>Not yet</dt><dd>XBT mainnet, deliberately on hold: test networks only. An independent audit. A published specification. The Python reference implementations. BOLT&nbsp;12 pay in the public tree. The Lightning bridge, which is designed and not built. Apps for Umbrel and StartOS are being tested on the real platforms.</dd>
+      <dt>Not yet</dt><dd>XBT mainnet, deliberately on hold: test networks only. An independent audit. A published specification. The Python reference implementations. The Lightning bridge, which is designed and not built. Apps for Umbrel and StartOS are being tested on the real platforms.</dd>
       <dt>Trade-offs</dt><dd>Funds are locked per channel until it closes. Money flows one way per channel. The seller must close, with a fee high enough to confirm, before expiry. Opening and closing are public transactions.</dd>
     </dl>
 
