@@ -4466,7 +4466,7 @@ def pool_payload():
             "pool_port": int(CONF.get("datum_prime_port", 28915)),
             "pool_pubkey": _datum_prime_pubkey(),
             "pool_pass_workers": True,
-            "pool_pass_full_users": True,
+            "pool_pass_full_users": False,
             "pooled_mining_only": True,
         },
         "prime": prime_pub,

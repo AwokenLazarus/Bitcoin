@@ -481,7 +481,7 @@
           <ol class="steps">
             <li data-i18n-html="connect.step1">Run Bitcoin Knots for this chain with <code>server=1</code> and a cookie or RPC user the gateway can read.</li>
             <li data-i18n-html="connect.step2">Build the gateway, merge the <code>stratum</code> and <code>datum</code> sections above into its config, and set <code>mining.pool_address</code> to <em>your</em> payout address. Leftover value the split does not name goes there. Stock DATUM defaults <code>stratum.vardiff_min</code> to 16384 if you omit it — that is the floor <em>and</em> the start, and Prime cannot lower it. Set 4096 so new sessions start there; vardiff still climbs for faster boxes.</li>
-            <li data-i18n-html="connect.step3">Point miners at your gateway’s stratum (usually <code>stratum+tcp://127.0.0.1:23334</code>). Username <code>address.worker</code>: the part before the first <code>.</code> is who gets paid and must be an address this chain accepts.</li>
+            <li data-i18n-html="connect.step3">Point miners at your gateway’s stratum (usually <code>stratum+tcp://127.0.0.1:23334</code>). Username: the machine’s name only, e.g. <code>rig1</code>. Payout goes to <code>mining.pool_address</code>, and the name shows as that machine’s row under Miners. Do not put an address in the username here: it would end up as part of the worker name.</li>
             <li data-i18n-html="connect.step4">Watch your gateway appear under <a href="#gateways">Gateways</a> and your address under <a href="#miners">Miners</a>. Stock builds can still publish a job whose coinbase omits the window: current iohzrd, CONVOY, and FlyTheElephant only if the pool split is late. Older FlyTheElephant / OCEAN-lineage <code>v0.4.1-beta</code> builds (no <code>+lazarus-split</code>) still do it on the first job of every height. Prime accepts that work and, if such a job found a block, records what the pool then owes the window.</li>
             <li data-i18n-html="connect.step5">For a longer Knots + DATUM walkthrough than these four steps, use <a href="https://convoy.xyz/getstarted" target="_blank" rel="noreferrer">CONVOY’s get-started guide</a> (also in <a href="https://convoy.xyz/getstarted?lang=zh" target="_blank" rel="noreferrer">中文</a>), then come back here for the Lazarus host, port, pubkey, and config snippet. Running Ratum? Its <a href="/ratum">own guide</a> has the whole config, pointed here.</li>
           </ol>
@@ -492,12 +492,12 @@
                 <thead><tr><th data-i18n="connect.thSetting">Gateway setting</th><th data-i18n="connect.thUser">Username the pool receives</th><th data-i18n="connect.thPaid">Paid to</th></tr></thead>
                 <tbody>
                   <tr>
-                    <td class="wrapcell" data-i18n-html="connect.row1td"><code>pool_pass_full_users: true</code><br>(the config above)</td>
+                    <td class="wrapcell" data-i18n-html="connect.row1td"><code>pool_pass_full_users: true</code></td>
                     <td class="wrapcell" data-i18n="connect.row1user">the miner’s own stratum username, unchanged</td>
                     <td class="wrapcell" data-i18n="connect.row1paid">each miner’s address, so miners behind one gateway are paid separately</td>
                   </tr>
                   <tr>
-                    <td class="wrapcell" data-i18n-html="connect.row2td"><code>pool_pass_workers: true</code><br><code>pool_pass_full_users: false</code></td>
+                    <td class="wrapcell" data-i18n-html="connect.row2td"><code>pool_pass_workers: true</code><br><code>pool_pass_full_users: false</code><br>(the config above)</td>
                     <td class="wrapcell" data-i18n-html="connect.row2user">the gateway’s <code>mining.pool_address</code>, then <code>.</code> and the miner username</td>
                     <td class="wrapcell" data-i18n="connect.row2paid">the gateway address; the worker name still reaches the pool</td>
                   </tr>
@@ -954,12 +954,12 @@
 </nav>
 
 <script src="/static/i18n.js?v=seo1"></script>
-<script src="/static/i18n/en.js?v=wk1"></script>
-<script src="/static/i18n/zh-CN.js?v=wk1"></script>
+<script src="/static/i18n/en.js?v=wk2"></script>
+<script src="/static/i18n/zh-CN.js?v=wk2"></script>
 <script>LZ_I18N.boot();</script>
 <script src="/static/shared.js?v=wk1"></script>
 <script src="/static/app.js?v=rent2"></script>
-<script src="/static/pool.js?v=gw4"></script>
+<script src="/static/pool.js?v=wk2"></script>
 <script src="/static/chart.js?v=app4"></script>
 </body>
 </html>

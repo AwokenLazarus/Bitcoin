@@ -683,7 +683,7 @@
           pool_port: port,
           pool_pubkey: pubkey || "<primed pubkey>",
           pool_pass_workers: true,
-          pool_pass_full_users: true,
+          pool_pass_full_users: false,
           pooled_mining_only: true,
         },
       }, null, 2);
