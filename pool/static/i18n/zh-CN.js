@@ -1037,7 +1037,7 @@ window.LZ_I18N_DICTS["zh-CN"] = {
     "plusCarry": " · 有空间时外加结转",
     "estFeeBonus": "{fee} 手续费及 {uplift} 奖励，按当前难度",
     "estFee": "扣除 {fee} 手续费，按当前难度",
-    "noBalance": "没有矿池余额，也没有需要提取的东西。矿池找到的每个区块都在其 coinbase 里直接付给此地址；输出满 {n} 个确认后可花费。{carry}",
+    "noBalance": "矿池不为你保管余额，也没有需要提取的东西。矿池找到的每个区块都在其 coinbase 里直接付给此地址；输出满 {n} 个确认后可花费。唯一的例外是部分分账或仅矿池区块：找到该区块的网关未把部分矿工写进 coinbase 时，他们的份额会进入矿池的输出，待该输出成熟后由矿池补付。{carry}",
     "carryNote": " 你在更早区块挣得的 <strong>{amt}</strong> 未达最低输出，已结转：会加在下一笔跨过门槛的输出上，从矿池份额中支付。",
     "pendingLabel": {
       "one": "待成熟 · {n} 块正在成熟",

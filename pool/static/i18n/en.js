@@ -1040,7 +1040,7 @@ window.LZ_I18N_DICTS["en"] = {
     "plusCarry": " · plus carry as room allows",
     "estFeeBonus": "{fee} fee and the {uplift} bonus, at current difficulty",
     "estFee": "after the {fee} fee at current difficulty",
-    "noBalance": "There is no pool balance and nothing to withdraw. Every block the pool finds pays this address directly in its coinbase; the output becomes spendable once it has {n} confirmations.{carry}",
+    "noBalance": "The pool keeps no balance for you and there is nothing to withdraw. Every block the pool finds pays this address directly in its coinbase; the output becomes spendable once it has {n} confirmations. The one exception is a partial or pool-only block: when the gateway that finds it leaves miners out of its coinbase, their share lands in the pool's output and the pool pays it on once that output matures.{carry}",
     "carryNote": " <strong>{amt}</strong> you earned in earlier blocks was under the minimum output and is carried forward: it is added to your next output that clears the floor, paid out of the pool's share.",
     "pendingLabel": {
       "one": "Pending · {n} block maturing",
