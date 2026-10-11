@@ -40,7 +40,7 @@
  "url": "https://lazarus-xbt.xyz/stream/",
  "image": "https://lazarus-xbt.xyz/assets/og.png",
  "datePublished": "2026-10-07",
- "dateModified": "2026-10-10",
+ "dateModified": "2026-10-11",
  "inLanguage": "en",
  "author": { "@type": "Organization", "name": "Lightning Stream", "url": "https://github.com/AwokenLazarus/Lightning-Stream" },
  "publisher": { "@id": "https://lazarus-xbt.xyz/#org" },
@@ -66,7 +66,7 @@
 <section class="hero wrap">
   <h1><span class="kicker">Whitepaper · XBT</span>Lightning Stream: pay as it <em>arrives</em></h1>
   <p class="lede">A way for people and AI agents to pay for a service piece by piece, while it is being delivered: an answer token by token, a file chunk by chunk, an API call by call. Each piece costs one signature. Stop at any moment and nothing more is owed.</p>
-  <p class="note">Draft 3 · 11 October 2026 · Lightning Stream (<a href="https://github.com/AwokenLazarus/Lightning-Stream" rel="noopener">source</a>). Working on test networks only; not yet on XBT mainnet. An outside review found issues and the work on them is not finished; see <a href="#status">Status</a>.</p>
+  <p class="note">Draft 3 · 11 October 2026 · Lightning Stream (<a href="https://github.com/AwokenLazarus/Lightning-Stream" rel="noopener">source</a>). Working on test networks only; not yet on XBT mainnet. An outside review found serious issues; six rounds of fixes followed, and what remains is listed as stated limits and two open items; see <a href="#status">Status</a>.</p>
   <p class="note"><strong>What the name means.</strong> Lightning Stream works beside Lightning, not inside it. A Stream channel is a direct one-way payment channel anchored on the chain. It is not a Lightning channel, and Lightning nodes do not route it. The two meet in the wallet, which pays over both under one spending policy, and in the hub, which is meant to run beside a Lightning node. How they fit together, where they stay apart and why is in <a href="#lightning">Beside Lightning</a>.</p>
   <nav class="toc" aria-label="On this page">
     <p class="category">On this page</p>
@@ -82,7 +82,7 @@
     <h2 id="problem"><span class="n">1</span>The problem</h2>
     <p>More and more of what we buy arrives over time: the tokens of a model's answer, the minutes of a stream, the pages of a dataset, the thousandth call to an API. Machines are now the buyers as often as people, and the prices are tiny: fractions of a cent, thousands of times an hour.</p>
     <p>Most ways to pay for that ask someone to trust someone. Pay up front and you trust the seller to deliver. Pay afterwards and the seller trusts you. A subscription or an API key trusts a company with your card. An on-chain payment for each piece is honest but far too slow and too costly.</p>
-    <p>Lightning Stream removes the trust from the middle. Buyer and seller settle continuously, in amounts as small as the service itself, and either can walk away at any moment having lost at most one piece.</p>
+    <p>Lightning Stream removes the trust from the middle. Buyer and seller settle continuously, in amounts as small as the service itself, and either can walk away at any moment having lost at most one piece per request. (Two small exceptions: a channel's first payment is at least 546 sat, and a request whose answer is lost on the way is still paid for.)</p>
 
     <h2 id="idea"><span class="n">2</span>The idea</h2>
     <p>Lock coins once. For every piece delivered, the buyer signs a slightly larger running total. Settle once, at the end, for the last total signed.</p>
@@ -155,7 +155,7 @@
       <dt>Nothing to revoke</dt><dd>An old state pays the seller less, so it has no reason to publish one, and the buyer cannot publish anything without the seller's signature. There are no penalty transactions and no watchtowers.</dd>
       <dt>The buyer can go offline</dt><dd>After it signs, the buyer has nothing to watch. If the seller disappears, the refund path returns everything once the expiry height passes.</dd>
       <dt>The seller has one duty</dt><dd>Close before expiry. Software does this with a safety margin of a day (144 blocks) and the newest state in hand. This is the one place the seller can lose: if fees spike and the close does not confirm before expiry, the buyer can take the refund. The close fee must be bumped as expiry nears.</dd>
-      <dt>One round trip to open</dt><dd>The seller publishes one key. Each channel uses a fresh key derived from it, the buyer's key and the expiry, so no two channels look alike on chain and the seller does not need to be asked first.</dd>
+      <dt>One round trip to open</dt><dd>The seller publishes one key. Each channel uses a fresh key derived from it, the buyer's key and the expiry, so no two channels look alike on chain. The seller is asked before the buyer funds (a preflight) and again when the funded channel is opened.</dd>
       <dt>Bound to XBT</dt><dd>XBT is Bitcoin on BLAKE2b proof of work. Up to block 961,640 it has the same history as the SHA-256 chain, and it keeps the same address format and network magic, so a <code>bc1…</code> address is valid on both chains. Every Lightning Stream signature uses XBT's <code>SIGHASH_ALL|UNIFIED</code> (0x21), under which the signed digest differs from the one the SHA-256 chain computes for the same transaction. A signature made here does not verify there, so a state cannot be replayed on the SHA-256 chain.</dd>
     </dl>
 
@@ -188,7 +188,7 @@
       <figcaption><b>Figure 3.</b> The 402 step happens once. After that every request simply carries the next signature, and the price check is one signature verification. The seller saves the new state to disk before it answers. For timings, and what a reader can and cannot reproduce today, see <a href="#numbers">Numbers</a>.</figcaption>
     </figure>
 
-    <p>On a direct channel, each receipt is signed by the seller and bound to the hash of the request it paid for. A buyer that checks every receipt can prove what it bought, and the seller cannot charge one request twice. Both conditions matter. A client that does not check its receipts has neither guarantee, and a call routed through a hub carries no receipt of its own.</p>
+    <p>On a direct channel, each receipt is signed by the seller and bound to the hash of the request it paid for. A buyer that checks every receipt can prove what it bought, and the seller cannot charge one request twice. Both conditions matter. A client that does not check its receipts has neither guarantee, and a call routed through a hub carries no receipt of its own. An answer lost on the way is paid for, and a refusal (a 402) is not signed.</p>
     <p>On the wire this is x402 v2. Networks are named in CAIP-2 form. Because XBT and the SHA-256 chain share a genesis block, XBT mainnet is keyed to its fork block, 961,640, instead of genesis: <code>bip122:0000000000000050c1e5f69672f45929</code>.</p>
 
     <h2 id="fair"><span class="n">5</span>Paying only for what checks out</h2>
@@ -256,11 +256,11 @@
         <text class="t-s" x="546" y="182">Stream · Lightning</text>
         <path class="ln-brass" d="M470 168H524" marker-end="url(#a5)"/>
       </svg>
-      <figcaption><b>Figure 5.</b> The model sees tools such as <i>quote</i>, <i>pay</i> and <i>balance</i>. The wallet is built so that an agent held to those tools, even a prompt-injected one, can spend only what the policy allows.</figcaption>
+      <figcaption><b>Figure 5.</b> The model sees tools such as <i>quote</i>, <i>pay</i> and <i>balance</i>. The wallet is built so that an agent held to those tools, even a prompt-injected one, can spend only what the policy allows, with the exceptions listed below.</figcaption>
     </figure>
 
     <p>The wallet speaks MCP, the protocol AI agents already use for tools, so any agent that can call a tool can pay. Each seller gets its own channel sized to that seller's budget. Payments above the owner's threshold wait for the owner's signature from another device. The policy itself is signed by the owner, so the agent cannot rewrite it.</p>
-    <p>The scope of that claim is narrow. It covers an agent whose only way to the wallet is the MCP tools. Software that can open the wallet's signer socket directly is outside it, so the socket must stay out of the agent's reach. The policy also limits how much an allowed seller can be paid, not what else that seller does. And the outside review found faults in this very part, the wallet's budget accounting; see <a href="#status">Status</a> for where that stands.</p>
+    <p>The scope of that claim is narrow. It covers an agent whose only way to the wallet is the MCP tools. Software that can open the wallet's signer socket directly is outside it, so the socket must stay out of the agent's reach. The policy also limits how much an allowed seller can be paid, not what else that seller does. Three things sit outside the budgets: a channel's first payment is at least 546 sat whatever the price; funding a channel and its on-chain fees are not counted as spending; and after a lost answer the wallet signs one call's price on the seller's unsigned word that it served the call. And the outside review found faults in this very part, the wallet's budget accounting; see <a href="#status">Status</a> for where that stands.</p>
 
     <h2 id="hubs"><span class="n">7</span>Hubs <small class="note">(experimental)</small></h2>
     <p>A direct channel is ideal for a seller you use often. To reach many sellers with one channel, a buyer can pay through a hub.</p>
@@ -290,7 +290,7 @@
     </figure>
 
     <p>The lock is an adaptor signature: the buyer's state for the hub is incomplete until the seller signs for the matching payment, and that signature is what completes it. There is no new script and no hash puzzle.</p>
-    <p>The hub is experimental. The buyer's side holds, since the hub cannot collect without paying the seller. The hub's own side is harder: an outside review found two ways a hub can lose a forwarded payment when a channel closes or is replaced while a payment is in flight. One-way channels with no revocation give the hub nothing to fall back on, and that is the problem Lightning's commitment protocol was built to solve. Fixes for both are in the public tree, but no one outside the project has re-reviewed them, and our own follow-up audit found some of the review's fixes incomplete; see <a href="#status">Status</a>. Do not put real funds through a hub. A bridge to Lightning comes before the hub goes any further.</p>
+    <p>The hub is experimental. The hub cannot collect from a buyer without paying the seller. A buyer does trust its hub for one payment: a hub that lies about a payment being stuck can get one extra payment signed, at most 50,510 sat with the wallet's default settings. The hub's own side is harder: an outside review found two ways a hub can lose a forwarded payment when a channel closes or is replaced while a payment is in flight. One-way channels with no revocation give the hub nothing to fall back on, and that is the problem Lightning's commitment protocol was built to solve. Fixes for both are in the public tree, and four follow-up audits of our own have checked them, but no one outside the project has re-reviewed them; see <a href="#status">Status</a>. Do not put real funds through a hub. Making the hub ready, and easy to run beside a Lightning node, is the current work.</p>
 
     <h2 id="lightning"><span class="n">8</span>Beside Lightning</h2>
     <p>Lightning is a network for sending a payment to anyone on it. A Stream channel is a direct line for paying one seller continuously, piece by piece. They do different jobs on the same chain, and Lightning Stream is built to sit next to Lightning without changing it.</p>
@@ -321,7 +321,7 @@
         <thead><tr><th></th><th>Direct Stream channel</th><th>Lightning (L402, keysend or a prepaid balance)</th></tr></thead>
         <tbody>
           <tr><td>Per-call latency</td><td>The payment rides in the request header. No extra round trip.</td><td>An HTLC round per hop for each payment. L402 adds an invoice round trip unless a balance is prepaid.</td></tr>
-          <tr><td>The seller runs</td><td>A key, Electrum access and a watcher. No node, no inbound liquidity.</td><td>A node with inbound liquidity, online to receive.</td></tr>
+          <tr><td>The seller runs</td><td>A key, a full node and a watcher. No inbound liquidity. (The light backend is for the buyer's wallet.)</td><td>A node with inbound liquidity, online to receive.</td></tr>
           <tr><td>Trust per call</td><td>One call of credit (the seller serves, then is paid).</td><td>None per payment. With a prepaid balance, the prepaid amount.</td></tr>
           <tr><td>Granularity</td><td>A running total; the first state must pay at least 546 sat (the dust limit).</td><td>Millisatoshis. Dust limits only in-flight HTLCs, not settled balances.</td></tr>
           <tr><td>Setup cost</td><td>An on-chain open and close for each buyer–seller pair, with funds locked until expiry.</td><td>One channel reaches every seller.</td></tr>
@@ -332,7 +332,7 @@
       </table>
     </div>
     <p>A Stream channel wins on the hot path: many small, fast payments from one buyer to one seller, such as a metered API or a model's tokens. Lightning wins at everything a network is for: reaching many sellers, receiving from ordinary wallets, moving money both ways. So they are used side by side: Lightning to pay anyone on it, and a Stream channel, direct or through a hub, for a service that is paid as it arrives.</p>
-    <p>What exists today is the wallet's Lightning payer. It pays BOLT&nbsp;11 invoices, and that code is in the public tree. Paying BOLT&nbsp;12 offers is built too, and that code is in the public tree: in our lab the wallet paid offers through a Lightning Fork node on regtest. It has not been reviewed outside the project. Offers fit owner-approved budgets and subscriptions, though not per-call metering. The wallet does not receive over Lightning. Running a hub beside a Lightning node is being designed.</p>
+    <p>What exists today is the wallet's Lightning payer. It pays BOLT&nbsp;11 invoices, and that code is in the public tree. Paying BOLT&nbsp;12 offers is built too, and that code is in the public tree: in our lab the wallet paid offers through a Lightning Fork node on regtest. It has not been reviewed outside the project. The wallet pays over Lightning only through channels whose funding it can prove exists on XBT alone, and one channel on the node that fails that proof stops every BOLT&nbsp;12 payment. Offers fit owner-approved budgets and subscriptions, though not per-call metering. The wallet does not receive over Lightning. Running a hub beside a Lightning node is being designed.</p>
 
     <h2 id="prior"><span class="n">9</span>Prior art</h2>
     <p>Lightning Stream is not a new kind of channel. It is Jeremy Spilman's one-way payment channel (2013), in the <code>CHECKLOCKTIMEVERIFY</code> form that BIP&nbsp;65 gives as its example, bound to HTTP 402 and to an agent's spending policy. The policy wallet is the part we think is most useful.</p>
@@ -356,15 +356,15 @@
 
     <h2 id="status"><span class="n">11</span>Status and limits</h2>
     <dl class="status">
-      <dt>Works</dt><dd>Open, pay, stream, close and refund, plus experimental hub routing, on XBT's regtest and a private test network. A Claude agent given only the wallet's tools bought an analytics API, refused a tampered chunk, and the seller received exactly the 8,500 sat it charged.</dd>
-      <dt>Reviewed</dt><dd>There has been no independent audit. Our internal review found three critical and four high-severity issues. We changed the code for each and added tests; a summary is not published yet. An outside review of the published code (October 2026) then found more serious issues: in the agent wallet's budget accounting, the hub, the pay-with-work audit and the HTTP layer. Fixes for its findings are in the public tree. Our own follow-up audit of those fixes found that some were incomplete. Further fixes for what it found are in the public tree as well, and a third round is being written. That work is not finished. None of these fixes, public or not, has been re-reviewed by anyone outside the project. Until that happens, treat every issue above as possibly still open.</dd>
+      <dt>Works</dt><dd>Open, pay, stream, close and refund, plus experimental hub routing, on XBT's regtest. A Claude agent given only the wallet's tools bought an analytics API, refused a tampered chunk, and the seller received exactly what it charged.</dd>
+      <dt>Reviewed</dt><dd>There has been no independent audit. Our internal review found three critical and five high-severity issues; we changed the code for each and added tests. An outside review of the published code (October 2026) then found more serious issues: in the agent wallet's budget accounting, the hub, the pay-with-work audit and the HTTP layer. Six rounds of fixes are in the public tree. Four follow-up audits of our own checked them: the first found 14 items (3 high), the second 20 (6 high), the third 23 (none high, 11 medium), the fourth 18 (none high, 9 medium). After the sixth round every finding is fixed or ends as a stated limit, and two items are open: buying a streamed result on a channel that is one call behind, and a rail of the Python reference wallet that is off by default. The source tree's <a href="https://github.com/AwokenLazarus/Lightning-Stream/blob/main/docs/LIMITS.md" rel="noopener"><code>docs/LIMITS.md</code></a> lists every limit, the open items and what nobody has reviewed. None of this has been re-reviewed by anyone outside the project. Until that happens, treat it as unaudited software.</dd>
       <dt>Experimental</dt><dd>Hub routing. Do not put real funds through a hub.</dd>
       <dt>Not yet</dt><dd>XBT mainnet, deliberately on hold: test networks only. An independent audit. A published specification. The Python reference implementations. A hub packaged to run beside a Lightning node. Apps for Umbrel and StartOS are being tested on the real platforms.</dd>
       <dt>Trade-offs</dt><dd>Funds are locked per channel until it closes. Money flows one way per channel. The seller must close, with a fee high enough to confirm, before expiry. Opening and closing are public transactions.</dd>
     </dl>
 
     <div class="callout">
-      <p><strong>In one sentence.</strong> Lock once, sign a bigger number for every piece you receive, settle once: a buyer can pay for anything that arrives over time, a seller is paid for exactly what it delivered, and neither has to trust the other for more than one piece.</p>
+      <p><strong>In one sentence.</strong> Lock once, sign a bigger number for every piece you receive, settle once: a buyer can pay for anything that arrives over time, a seller is paid for exactly what it delivered, and neither has to trust the other for more than one piece per request.</p>
     </div>
 
   </div>
