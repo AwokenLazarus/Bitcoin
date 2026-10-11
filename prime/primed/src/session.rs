@@ -1084,10 +1084,8 @@ impl Session {
                         return Err(SessionError::Idle);
                     }
                     if self.last_send.elapsed() > KEEPALIVE {
-                        // an empty INFO frame: 4 bytes, logged by nobody, resets the
-                        // gateway's nothing-from-server watchdog
-                        let h = Header::new(cmd::INFO, 0);
-                        write_frame(&mut self.stream, &h, &[], &mut self.send_keys).await?;
+                        let (h, payload) = keepalive_frame(&mut self.channel);
+                        write_frame(&mut self.stream, &h, &payload, &mut self.send_keys).await?;
                         self.last_send = Instant::now();
                     }
                     self.pending_blocks.retain(|_, v| {
@@ -2641,6 +2639,21 @@ async fn read_frame(
     Ok((h, payload))
 }
 
+/// The keep-alive: an empty ping, encrypted on the session channel (4 header bytes and the
+/// 16-byte MAC). It resets the gateway's nothing-from-server watchdog and is logged by nobody.
+///
+/// It has to be on the channel. Ratum closes the session on any frame from the pool that is
+/// neither channel-encrypted nor sealed, and excuses only a plain empty ping, and that only
+/// since 0.1.57. The C gateways open a channel frame, count it as heard from the server and
+/// do nothing for a ping. An INFO frame would do for them, but Ratum logs every INFO, empty
+/// or not.
+fn keepalive_frame(channel: &mut Channel) -> (Header, Vec<u8>) {
+    let payload = channel.encrypt(&[]);
+    let mut h = Header::new(cmd::PING, payload.len());
+    h.channel = true;
+    (h, payload)
+}
+
 async fn write_frame(
     stream: &mut TcpStream,
     h: &Header,
@@ -2657,6 +2670,49 @@ async fn write_frame(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A pool channel and the gateway's end of it.
+    fn channel_pair() -> (Channel, Channel) {
+        let pool = Identity::generate();
+        let gateway = Identity::generate();
+        let (to_gateway, from_gateway) = crypto::session_nonces(0x1234_5678, &gateway.sign_pk());
+        (
+            Channel::new(pool.precompute(&gateway.box_pk()), to_gateway, from_gateway),
+            Channel::new(gateway.precompute(&pool.box_pk()), from_gateway, to_gateway),
+        )
+    }
+
+    #[test]
+    fn the_keepalive_is_an_empty_ping_on_the_channel() {
+        let (mut pool, _) = channel_pair();
+        let (h, payload) = keepalive_frame(&mut pool);
+        assert_eq!(h.cmd, cmd::PING);
+        // Ratum refuses a frame from the pool with neither flag, and one with both
+        assert!(h.channel && !h.sealed);
+        assert!(!h.signed);
+        // nothing but the MAC of an empty message
+        assert_eq!(payload.len(), crypto::MAC);
+        assert_eq!(h.len as usize, payload.len());
+        // what goes on the wire reads back as the same header
+        let (mut send, mut recv) = (KeyStream(7), KeyStream(7));
+        assert_eq!(Header::decode(h.encode(&mut send), &mut recv).unwrap(), h);
+    }
+
+    #[test]
+    fn a_gateway_opens_the_keepalive_and_stays_in_step_with_what_follows() {
+        let (mut pool, mut gateway) = channel_pair();
+        for _ in 0..3 {
+            let (_, mut payload) = keepalive_frame(&mut pool);
+            assert!(gateway.decrypt_in_place(&mut payload).unwrap().is_empty());
+        }
+        // each keep-alive spent one nonce at both ends, so the next mining frame still opens
+        let mut next = pool.encrypt(b"work");
+        assert_eq!(gateway.decrypt_in_place(&mut next).unwrap(), b"work");
+        // and a keep-alive is not one a third party can write: a wrong MAC does not open
+        let (_, mut forged) = keepalive_frame(&mut pool);
+        forged[0] ^= 1;
+        assert!(gateway.decrypt_in_place(&mut forged).is_err());
+    }
 
     fn payee(identity: &str, sats: u64, carry: u64, tag: u8) -> Payee {
         Payee { identity: identity.into(), work: 1, sats, carry, script: vec![0x00, 0x14, tag] }

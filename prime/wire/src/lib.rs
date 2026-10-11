@@ -37,8 +37,10 @@ pub const MAX_CMD_LEN: usize = 1 << 22;
 /// Protocol-level command numbers (5-bit field in the frame header).
 pub mod cmd {
     /// Client → server: handshake init (sealed to the pool key, signed by the client).
-    /// Server → client: ping.
     pub const HELLO: u8 = 1;
+    /// Server → client: ping, the same number as the hello. Every gateway reads it and does
+    /// nothing with it, which makes it the keep-alive.
+    pub const PING: u8 = HELLO;
     /// Server → client: handshake reply (sealed to the client session key, signed by the pool).
     pub const HELLO_REPLY: u8 = 2;
     /// Both directions: mining sub-commands, encrypted on the session channel.
