@@ -10,6 +10,10 @@ blockreconstructionextratxn=1000000
 # 800000 is the consensus limit; leave ~64k weight for Prime's TIDES coinbase (<=14000 bytes)
 blockmaxweight=736000
 blockmaxsize=300000
+# Spam filter (policy only, not consensus): stock Knots 29.4.2 relays and mines the large
+# fake-multisig data transactions (590-byte witnesses, hundreds of inputs). 589 refuses them.
+# It also declines very large multisig spends (about 5-of-7 and up); other nodes still mine those.
+maxscriptsize=589
 rpcuser=<redacted>
 rpcpassword=<redacted>
 rpcbind=127.0.0.1
