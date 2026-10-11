@@ -730,6 +730,8 @@ struct Session {
     /// payout it is configured with that and left there while no other mines on it; see
     /// `held_script`.
     held: Option<HeldPayout>,
+    /// When this session last said what a coinbase it refused paid; see `note_refused_coinbase`.
+    refused_coinbase_warned: Option<Instant>,
     /// What `class-budget` has learned of this gateway's coinbase sections; `None` without the
     /// key, and for a session it does not apply to (`class_budget_applies`, the house gateway,
     /// a held-split build).
@@ -950,6 +952,7 @@ pub async fn run(shared: Arc<Shared>, mut stream: TcpStream, remote: SocketAddr)
         configured_as_gateway: false,
         split_ready: false,
         held: held_build.map(|_| HeldPayout::default()),
+        refused_coinbase_warned: None,
         class_budget,
         last_split_prev: None,
         resume_token: {
@@ -1282,6 +1285,35 @@ impl Session {
             self.send_configure_script(&script, true).await?;
         }
         Ok(())
+    }
+
+    /// Say, once a minute, what a coinbase refused as bad-coinbase-outputs paid.
+    ///
+    /// The receipt carries a code and the debug line a job number, and neither says which
+    /// output was the trouble: a script nobody issued, a listed payee paid past its amount, or
+    /// a job naming a reply this session never sent. A gateway refused on every share hangs up
+    /// after 30 s and comes back, so the question is asked of the journal long after the shares
+    /// are gone.
+    fn note_refused_coinbase(&mut self, s: &PowSubmit, coinbaser_id: u8, cb: &coinbase::Coinbase, policy: &Policy) {
+        if self.refused_coinbase_warned.is_some_and(|t| t.elapsed() < DEAD_WORK_WARN_EVERY) {
+            return;
+        }
+        self.refused_coinbase_warned = Some(Instant::now());
+        let reply = match policy.issued {
+            Some(iss) => format!("coinbaser {coinbaser_id}, issued here with {} outputs", iss.len()),
+            None => format!("coinbaser {coinbaser_id}, which this session did not issue for that block"),
+        };
+        log::warn!(
+            "[{}] {} {} ua={:?}: refused as bad-coinbase-outputs: job {} section {} names {reply}, and its coinbase \
+             pays {}",
+            self.id,
+            self.remote,
+            self.gateway_hex,
+            self.hello.user_agent,
+            s.job_id,
+            JobSlot::coinbase_id_for(s),
+            refused_coinbase(cb, policy),
+        );
     }
 
     /// Encrypt (and optionally sign with the session key) a mining payload and send it.
@@ -1750,7 +1782,14 @@ impl Session {
         };
         let v = match verify::verify(&mut self.slots[job_id], &s, &policy) {
             Ok(v) => v,
-            Err(code) => return self.reject(&s, code).await,
+            Err(code) => {
+                if code == mining::REJECT_BAD_COINBASE_OUTPUTS {
+                    if let Some(cb) = verify::coinbase_of(&self.slots[job_id], &s) {
+                        self.note_refused_coinbase(&s, coinbaser_id, &cb, &policy);
+                    }
+                }
+                return self.reject(&s, code).await;
+            }
         };
         // One credit per hash, pool-wide and for as long as the height is live: the set is
         // shared, keyed by height, and never cleared by anything a gateway can send. A share
@@ -2548,6 +2587,47 @@ impl Session {
 }
 
 /// Stop crediting a gateway whose template our node found invalid; see `validity::Faults`.
+/// What a coinbase refused as bad-coinbase-outputs pays, set against what Prime would have taken:
+/// the pool's script, the gateway's own (if a payout is known for it), the list its job named,
+/// and whatever is left, with the first such script in full.
+fn refused_coinbase(cb: &coinbase::Coinbase, p: &Policy) -> String {
+    let listed = |script: &[u8]| p.issued.is_some_and(|iss| iss.iter().any(|i| i.script == script));
+    let gateway = p.gateway_script.filter(|g| !g.is_empty() && *g != p.pool_script);
+    let (mut to_pool, mut to_gateway, mut to_list, mut to_others) = (0u64, 0u64, (0usize, 0u64), (0usize, 0u64));
+    let mut burned = 0u64;
+    let mut first_other = None;
+    for o in &cb.outputs {
+        if o.is_op_return() {
+            burned = burned.saturating_add(o.value);
+        } else if o.script == p.pool_script {
+            to_pool = to_pool.saturating_add(o.value);
+        } else if gateway == Some(o.script.as_slice()) {
+            to_gateway = to_gateway.saturating_add(o.value);
+        } else if listed(&o.script) {
+            to_list = (to_list.0 + 1, to_list.1.saturating_add(o.value));
+        } else {
+            to_others = (to_others.0 + 1, to_others.1.saturating_add(o.value));
+            first_other.get_or_insert(o);
+        }
+    }
+    let own = match gateway {
+        Some(g) if listed(g) => format!("{to_gateway} to the gateway's own script, which the list pays too"),
+        Some(_) => format!("{to_gateway} to the gateway's own script, which the list does not pay"),
+        None => "nothing to a script of the gateway's own, as no payout is known for it".to_string(),
+    };
+    let other =
+        first_other.map_or(String::new(), |o| format!(" (the first: {} sats to {})", o.value, hex::encode(&o.script)));
+    format!(
+        "{} sats: {to_pool} to the pool, {own}, {} to {} listed scripts, {} to {} scripts neither the list nor the \
+         session names{other}, {burned} in OP_RETURNs",
+        cb.total_output_value(),
+        to_list.1,
+        to_list.0,
+        to_others.1,
+        to_others.0,
+    )
+}
+
 fn mark_faulted(
     shared: &Shared,
     id: u64,
@@ -3135,6 +3215,60 @@ mod tests {
         }
         let (bytes, _, _) = coinbase::build(966_267, b"Lazarus", &outs, 0);
         coinbase::parse(&bytes).unwrap()
+    }
+
+    /// What the journal is told of a coinbase refused as bad-coinbase-outputs: where its reward
+    /// went, by the scripts the session would have taken.
+    #[test]
+    fn a_refused_coinbase_is_told_by_where_its_reward_went() {
+        fn policy<'a>(pool: &'a [u8], issued: Option<&'a [Output]>, gateway: Option<&'a [u8]>) -> Policy<'a> {
+            Policy {
+                pool_script: pool,
+                issued,
+                tolerance: 2,
+                now: 0,
+                min_pot: 0,
+                gateway_script: gateway,
+                empty_solo_fee_bps: 0,
+                trusted_target: false,
+                uncommitted_pot: 20,
+                held_split: false,
+            }
+        }
+        let (pool, gw, payee, stranger) = (wpkh(1), tr(2), wpkh(3), wpkh(4));
+        let list = [
+            Output { sats: 700_000, script: payee.clone() },
+            Output { sats: 200_000, script: gw.clone() },
+            Output { sats: 100_000, script: pool.clone() },
+        ];
+        // Section 0 of a job made while the gateway was configured with its own script, the
+        // gateway a listed payee.
+        let section_zero = convoy_class(&list, 0, 1_000_000, &gw);
+        let known = policy(&pool, Some(&list), Some(&gw));
+        assert_eq!(
+            refused_coinbase(&section_zero, &known),
+            "1000000 sats: 0 to the pool, 1000000 to the gateway's own script, which the list pays too, 0 to 0 \
+             listed scripts, 0 to 0 scripts neither the list nor the session names, 0 in OP_RETURNs"
+        );
+        // The same coinbase on a job naming no reply of this session, from a gateway with no
+        // payout on record: all of it to a script nobody here issued, which is given in full.
+        let blind = policy(&pool, None, None);
+        assert_eq!(
+            refused_coinbase(&section_zero, &blind),
+            format!(
+                "1000000 sats: 0 to the pool, nothing to a script of the gateway's own, as no payout is known for \
+                 it, 0 to 0 listed scripts, 1000000 to 1 scripts neither the list nor the session names (the first: \
+                 1000000 sats to {}), 0 in OP_RETURNs",
+                hex::encode(&gw)
+            )
+        );
+        // One payee of the list, the rest to a stranger, by a gateway the list does not pay.
+        let diverted = convoy_class(&list[..1], 100, 1_000_000, &stranger);
+        let unlisted = policy(&pool, Some(&list[..1]), Some(&gw));
+        let told = refused_coinbase(&diverted, &unlisted);
+        assert!(told
+            .starts_with("1000000 sats: 0 to the pool, 0 to the gateway's own script, which the list does not pay, "));
+        assert!(told.contains("700000 to 1 listed scripts, 300000 to 1 scripts neither"), "{told}");
     }
 
     fn pool_params() -> SplitParams {

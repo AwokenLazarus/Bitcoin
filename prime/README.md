@@ -505,6 +505,37 @@ published a section without it; if it carried none, the gateway never got a spli
 the reason: a reply over a second logs a warning while there is still margin against the
 gateway's five-second deadline.
 
+### A gateway refused on every share hangs up, and what the journal says of it
+
+A stock C gateway watches for accepted shares, not for answers. `datum_protocol_share_response`
+moves its clock on `ACCEPTED` and `ACCEPTED_TENTATIVELY` only, and the protocol thread leaves
+("No share acceptance response for > 30 seconds. Exiting protocol thread to retry.") once its
+latest submit is 30 s past that clock. A refusal is a reply and does not count. The first submit
+of a session sets the clock itself, as does one sent more than 25 s after the last. So a gateway
+whose every share is refused, for any reason, lasts from its first share to 30 s after it, comes
+back 5 to 20 s later, and does it again: a row of 30 to 45 s sessions in the journal, each with
+shares answered and none accepted. Prime answers every share it can parse; the line in the
+gateway's log is about what the answers were.
+
+For `bad-coinbase-outputs` the receipt carries the code alone, and by the time anyone looks the
+shares are gone. So a session says, at most once a minute, what the coinbase it refused paid
+(an example of the line, not one from the live pool):
+
+```
+[41] 198.51.100.7:51040 1a2b3c4d5e6f7081 ua="v0.4.1-beta/971af86…": refused as bad-coinbase-outputs:
+job 2 section 0 names coinbaser 1, issued here with 108 outputs, and its coinbase pays 312538966 sats:
+0 to the pool, 312538966 to the gateway's own script, which the list pays too, 0 to 0 listed scripts,
+0 to 0 scripts neither the list nor the session names, 0 in OP_RETURNs
+```
+
+Read it by where the reward went. All of it on the gateway's own script, on a job naming a reply
+that lists the gateway: section 0 of a job made while it was configured with its own payout (a
+listed payee paid past its amount is refused; the same coinbase from a gateway the list does not
+pay is its solo work). Scripts "neither the list nor the session names" on a job naming a reply
+"this session did not issue": work built in an earlier session, which a reconnect should have
+replaced within seconds. Listed scripts short or over: a list from another reply than the one the
+job names.
+
 ### On disk (`data-dir`)
 
 | File | What |

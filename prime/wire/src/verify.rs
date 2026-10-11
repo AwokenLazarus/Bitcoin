@@ -462,6 +462,18 @@ fn classify_outputs(
     CoinbaseKind::Foreign
 }
 
+/// The coinbase a share was mined on, as [`verify`] reads it: the section the share names, on
+/// the job in `slot`, with the share's own difficulty where the scriptSig carries one.
+///
+/// For a session that wants to say what a coinbase it refused paid. `slot` must already have
+/// absorbed the share. None without the job or the section, or if the section does not parse.
+pub fn coinbase_of(slot: &JobSlot, s: &PowSubmit) -> Option<Coinbase> {
+    let job = slot.job.as_ref()?;
+    let sect = slot.coinbases.get(&JobSlot::coinbase_id_for(s))?;
+    let legacy = coinbase::assemble(&sect.coinb1, &sect.coinb2, usize::from(job.target_byte_index), s.target_pot);
+    coinbase::parse(&legacy).ok()
+}
+
 /// Rebuild the header from the share and check the work and the coinbase.
 ///
 /// `slot` must already have absorbed the share. On `Err` the code is a DATUM reject reason.
@@ -1754,6 +1766,23 @@ mod tests {
         let all: Vec<TxOut> = listed.iter().map(pay).collect();
         assert_eq!(kind_of(&[all, vec![wc()]].concat(), &pl), Ok(CoinbaseKind::Split));
         assert_eq!(kind_of(&[pay(&listed[0]), to_gw(VALUE - listed[0].sats), wc()], &pl), foreign);
+    }
+
+    /// What a session is given to describe a coinbase it refused is the coinbase `verify` judged.
+    #[test]
+    fn the_coinbase_of_a_share_is_the_one_verify_reads() {
+        let pool = pool_script();
+        let iss = split();
+        let outs = gateway_outputs(&iss, &pool, VALUE);
+        let mut slot = JobSlot::default();
+        let mut s = share(0, 4, 1, &outs, &txids(2), 1, [0; 8], [0; 8]);
+        assert!(coinbase_of(&slot, &s).is_none(), "no job in the slot yet");
+        grind(&mut slot, &mut s);
+        let v = check(&mut slot, &s, &policy(&iss, &pool)).unwrap();
+        assert_eq!(coinbase_of(&slot, &s), Some(v.coinbase));
+        // a section the share does not name
+        s.coinbase_id = 5;
+        assert!(coinbase_of(&slot, &s).is_none());
     }
 
     /// The issued list with the pool's fee last and the gateway's own address as its third
