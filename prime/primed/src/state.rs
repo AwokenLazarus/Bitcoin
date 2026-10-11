@@ -196,6 +196,11 @@ pub struct ClientInfo {
     /// rows it always has.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub held_split: bool,
+    /// Its shares showed a job that kept the gateway's own script from before the split for it
+    /// arrived (`Session::pins_script`), so this session is left on the pool's script through
+    /// every tip. Left out of the row when false.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub pins_script: bool,
     /// The payee bytes `class-budget` holds this session's coinbasers to, and null until its
     /// shares have shown one (see `session::ClassBudget`). Both fields are left out of the row
     /// for a session the key does not apply to, so a Prime without it writes the rows it always
@@ -501,6 +506,9 @@ pub struct Shared {
     /// Last known payout script per gateway signing key (64 hex chars). Survives reconnect
     /// so the first empty job of a returning gateway already pays them.
     pub gateway_payouts: Mutex<HashMap<String, GatewayPayout>>,
+    /// Gateway keys whose jobs keep the script they were made under; see
+    /// [`Shared::remember_pinned_script`].
+    pub pinned_scripts: Mutex<HashSet<String>>,
     /// Parents gateways build on that are not our tip, as our node judges them.
     pub parents: crate::validity::ParentBook,
     /// Gateways whose templates our node found invalid; their shares earn nothing until one passes.
@@ -730,6 +738,25 @@ impl Shared {
         drop(map);
     }
 
+    /// Whether this gateway has shown, since Prime started, that its jobs keep the script they
+    /// were made under.
+    pub fn pins_script(&self, key_hex: &str) -> bool {
+        self.pinned_scripts.lock().unwrap_or_else(|e| e.into_inner()).contains(key_hex)
+    }
+
+    /// Remember that for the gateway's later sessions, which then open on the pool's script
+    /// and do not have to show it again. Kept in memory only: after a restart a gateway shows
+    /// it with its first share on such a job, and nothing on disk says so of a gateway that has
+    /// since been upgraded. A session gets here only with a payout known for its key, which
+    /// took a share with work, and past the cap a new key is not remembered: its sessions
+    /// each learn it for themselves.
+    pub fn remember_pinned_script(&self, key_hex: &str) {
+        let mut keys = self.pinned_scripts.lock().unwrap_or_else(|e| e.into_inner());
+        if keys.len() < MAX_REMEMBERED_GATEWAYS {
+            keys.insert(key_hex.to_string());
+        }
+    }
+
     pub fn load_gateway_payouts(dir: &std::path::Path) -> HashMap<String, GatewayPayout> {
         let p = dir.join("gateway-scripts.json");
         std::fs::read_to_string(p).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default()
@@ -825,6 +852,7 @@ mod tests {
             next_client_id: AtomicU64::new(1),
             coinbaser_base: Mutex::new(None),
             gateway_payouts: Mutex::new(Default::default()),
+            pinned_scripts: Mutex::new(Default::default()),
             parents: Default::default(),
             faults: crate::validity::Faults::with_ttl(cfg.quarantine_max_hours.saturating_mul(3600)),
             class_budget_held_off: AtomicBool::new(false),

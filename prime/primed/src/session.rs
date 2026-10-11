@@ -730,6 +730,12 @@ struct Session {
     /// payout it is configured with that and left there while no other mines on it; see
     /// `held_script`.
     held: Option<HeldPayout>,
+    /// The gateway keeps, for each job, the script it was configured with when the job was made,
+    /// and not the one in force when the split for it lands (CONVOY from `695d035`). Learned
+    /// from a share ([`Session::shows_pinned_script`]) or from an earlier session of the same
+    /// key. Such a session is never configured with its own payout: see
+    /// [`Session::solo_script`].
+    pins_script: bool,
     /// When this session last said what a coinbase it refused paid; see `note_refused_coinbase`.
     refused_coinbase_warned: Option<Instant>,
     /// What `class-budget` has learned of this gateway's coinbase sections; `None` without the
@@ -873,6 +879,13 @@ pub async fn run(shared: Arc<Shared>, mut stream: TcpStream, remote: SocketAddr)
         if front { " (another pool's stratum front)" } else { "" },
         if hello.resume_token.is_some() { " (asked to resume; declined)" } else { "" }
     );
+    let pins_script = shared.pins_script(&gateway_key);
+    if pins_script {
+        log::info!(
+            "[{id}] {remote} gateway={gateway_hex} kept its own script on a job in an earlier session: opened on the \
+             pool's script and left there through every tip"
+        );
+    }
     // The pool's own gateway carries every stratum miner, and is never left paying itself.
     let held_build = if house { None } else { held_split_build(&shared.cfg.held_split_builds, &hello.user_agent) };
     if let Some(build) = held_build {
@@ -906,6 +919,7 @@ pub async fn run(shared: Arc<Shared>, mut stream: TcpStream, remote: SocketAddr)
         connected_ts: now(),
         fee_path: fee_path.into(),
         held_split: held_build.is_some(),
+        pins_script,
         class_budget_bytes: class_budget.as_ref().map(|_| None),
         class_budget_replies: class_budget.as_ref().map(|_| 0),
         workers: (!house).then(Default::default),
@@ -952,6 +966,7 @@ pub async fn run(shared: Arc<Shared>, mut stream: TcpStream, remote: SocketAddr)
         configured_as_gateway: false,
         split_ready: false,
         held: held_build.map(|_| HeldPayout::default()),
+        pins_script,
         refused_coinbase_warned: None,
         class_budget,
         last_split_prev: None,
@@ -1103,7 +1118,7 @@ impl Session {
                         std::future::pending::<()>().await;
                     }
                 } => {
-                    if let Some(script) = self.gateway_script.clone() {
+                    if let Some(script) = self.solo_script() {
                         self.send_configure_script(&script, true).await?;
                     }
                     self.restore_script_at = None;
@@ -1158,12 +1173,28 @@ impl Session {
     }
 
     async fn send_configure(&mut self) -> Result<(), SessionError> {
-        if let Some(script) = self.gateway_script.clone() {
+        if let Some(script) = self.solo_script() {
             self.send_configure_script(&script, true).await
         } else {
             let pool = self.shared.pool_script.clone();
             self.send_configure_script(&pool, false).await
         }
+    }
+
+    /// The script a session is turned to while a tip has no split yet: the gateway's own payout,
+    /// so that the empty and late jobs it publishes meanwhile are its own solo work.
+    ///
+    /// None for a gateway that keeps a job's script from when the job was made
+    /// ([`Session::pins_script`]). The first full job of a tip is made before the split for it
+    /// arrives, so on such a gateway it pays the gateway everything a section does not place,
+    /// for as long as that job is out: nothing where the whole list is placed, and the whole
+    /// reward on section 0, which its miners are handed when the reply is late. That is refused
+    /// where the gateway is a window payee, and uncredited solo work where it is not. Left on
+    /// the pool's script it is the session every gateway has before Prime knows its payout: the
+    /// empty job and a late section 0 pay the pool, credited and owed back to the window, and
+    /// the full job pays the split.
+    fn solo_script(&self) -> Option<Vec<u8>> {
+        self.gateway_script.clone().filter(|_| !self.pins_script)
     }
 
     fn stay_on_gateway(&self) -> bool {
@@ -1230,7 +1261,12 @@ impl Session {
             // section it mines.
             return;
         }
-        if changed && !self.split_ready && !self.configured_as_gateway && self.restore_script_at.is_none() {
+        if changed
+            && !self.pins_script
+            && !self.split_ready
+            && !self.configured_as_gateway
+            && self.restore_script_at.is_none()
+        {
             self.restore_script_at = Some(tokio::time::Instant::now());
         }
     }
@@ -1281,10 +1317,21 @@ impl Session {
         self.split_ready = false;
         self.last_split_prev = None;
         self.restore_script_at = None;
-        if let Some(script) = self.gateway_script.clone() {
+        if let Some(script) = self.solo_script() {
             self.send_configure_script(&script, true).await?;
         }
         Ok(())
+    }
+
+    /// Whether a share Prime refused as bad-coinbase-outputs, or took as the gateway's solo
+    /// work, was mined on a job that kept the gateway's own script from before its split
+    /// arrived ([`verify::remainder_on_gateway`]).
+    ///
+    /// Not asked of a session Prime itself leaves on its own script past a reply (a held-split
+    /// build, or `stock-full-pool-only = "gateway-solo"` after a pool-only full job): there the
+    /// same coinbase is what Prime configured.
+    fn shows_pinned_script(&self, cb: &coinbase::Coinbase, policy: &Policy) -> bool {
+        !self.pins_script && self.held.is_none() && !self.stay_on_gateway() && verify::remainder_on_gateway(cb, policy)
     }
 
     /// Say, once a minute, what a coinbase refused as bad-coinbase-outputs paid.
@@ -1314,6 +1361,42 @@ impl Session {
             JobSlot::coinbase_id_for(s),
             refused_coinbase(cb, policy),
         );
+    }
+
+    /// Leave a gateway that keeps a job's script on the pool's, for this session and its later
+    /// ones, and have it make fresh jobs now.
+    ///
+    /// The job that showed it stays out until the gateway's next one, 40 s by default
+    /// (`work_update_seconds`), and a stock gateway hangs up after 30 s in which shares went out
+    /// and none was accepted: a refusal does not count as an answer there
+    /// (`datum_protocol.c`, "No share acceptance response"). So where the shares are refused the
+    /// gateway is likely to hang up once more, and what matters is that its next session opens
+    /// on the pool's script and that no later tip turns it back. The block-notify is for the
+    /// gateway that can use it: one with no tip on record from its fallback notifier
+    /// (`notify_fallback` off) publishes a job from its current configuration about four seconds
+    /// later, and any other ignores a notify that brings no new block.
+    async fn hold_on_pool_script(&mut self) -> Result<(), SessionError> {
+        self.pins_script = true;
+        self.restore_script_at = None;
+        self.shared.remember_pinned_script(&self.gateway_key_hex());
+        self.shared.client_update(self.id, |c| c.pins_script = true);
+        log::warn!(
+            "[{}] {} {} ua={:?}: a job of its kept the gateway's own script from before the split for that job \
+             arrived, and paid it what its coinbase did not place from the list (a CONVOY gateway from 695d035 \
+             fixes a job's script when the job is made; section 0, handed out when the split is late, then pays \
+             that script the whole reward). Shares on such a job are refused where the gateway is a window payee, \
+             and are its own uncredited solo work where it is not. From here on it is left on the pool's script \
+             through every tip, in this session and its later ones.",
+            self.id,
+            self.remote,
+            self.gateway_hex,
+            self.hello.user_agent,
+        );
+        if self.configured_as_gateway {
+            let pool = self.shared.pool_script.clone();
+            self.send_configure_script(&pool, false).await?;
+        }
+        self.send_mining(&mining::block_notify(), false).await
     }
 
     /// Encrypt (and optionally sign with the session key) a mining payload and send it.
@@ -1783,14 +1866,23 @@ impl Session {
         let v = match verify::verify(&mut self.slots[job_id], &s, &policy) {
             Ok(v) => v,
             Err(code) => {
-                if code == mining::REJECT_BAD_COINBASE_OUTPUTS {
-                    if let Some(cb) = verify::coinbase_of(&self.slots[job_id], &s) {
-                        self.note_refused_coinbase(&s, coinbaser_id, &cb, &policy);
-                    }
+                let refused = (code == mining::REJECT_BAD_COINBASE_OUTPUTS)
+                    .then(|| verify::coinbase_of(&self.slots[job_id], &s))
+                    .flatten();
+                let pinned = refused.as_ref().is_some_and(|cb| self.shows_pinned_script(cb, &policy));
+                if let Some(cb) = &refused {
+                    self.note_refused_coinbase(&s, coinbaser_id, cb, &policy);
                 }
-                return self.reject(&s, code).await;
+                self.reject(&s, code).await?;
+                if pinned {
+                    self.hold_on_pool_script().await?;
+                }
+                return Ok(());
             }
         };
+        if v.coinbase_kind == CoinbaseKind::GatewaySolo && self.shows_pinned_script(&v.coinbase, &policy) {
+            self.hold_on_pool_script().await?;
+        }
         // One credit per hash, pool-wide and for as long as the height is live: the set is
         // shared, keyed by height, and never cleared by anything a gateway can send. A share
         // that earned nothing (credited by hash alone, and its hash fell short) has no credit
@@ -3241,10 +3333,11 @@ mod tests {
             Output { sats: 200_000, script: gw.clone() },
             Output { sats: 100_000, script: pool.clone() },
         ];
-        // Section 0 of a job made while the gateway was configured with its own script, the
-        // gateway a listed payee.
+        // Section 0 of a job that kept the gateway's own script, the gateway a listed payee: the
+        // shape a session learns from.
         let section_zero = convoy_class(&list, 0, 1_000_000, &gw);
         let known = policy(&pool, Some(&list), Some(&gw));
+        assert!(verify::remainder_on_gateway(&section_zero, &known));
         assert_eq!(
             refused_coinbase(&section_zero, &known),
             "1000000 sats: 0 to the pool, 1000000 to the gateway's own script, which the list pays too, 0 to 0 \
@@ -3253,6 +3346,7 @@ mod tests {
         // The same coinbase on a job naming no reply of this session, from a gateway with no
         // payout on record: all of it to a script nobody here issued, which is given in full.
         let blind = policy(&pool, None, None);
+        assert!(!verify::remainder_on_gateway(&section_zero, &blind));
         assert_eq!(
             refused_coinbase(&section_zero, &blind),
             format!(
@@ -3265,6 +3359,7 @@ mod tests {
         // One payee of the list, the rest to a stranger, by a gateway the list does not pay.
         let diverted = convoy_class(&list[..1], 100, 1_000_000, &stranger);
         let unlisted = policy(&pool, Some(&list[..1]), Some(&gw));
+        assert!(!verify::remainder_on_gateway(&diverted, &unlisted));
         let told = refused_coinbase(&diverted, &unlisted);
         assert!(told
             .starts_with("1000000 sats: 0 to the pool, 0 to the gateway's own script, which the list does not pay, "));

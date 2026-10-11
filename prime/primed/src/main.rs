@@ -330,6 +330,7 @@ fn run(cfg: Config) -> i32 {
         next_client_id: AtomicU64::new(1),
         coinbaser_base: Mutex::new(None),
         gateway_payouts: Mutex::new(Shared::load_gateway_payouts(&cfg.data_dir)),
+        pinned_scripts: Mutex::new(Default::default()),
         parents: Default::default(),
         faults: crate::validity::Faults::with_ttl(cfg.quarantine_max_hours.saturating_mul(3600)),
         class_budget_held_off: AtomicBool::new(false),

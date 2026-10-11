@@ -536,6 +536,38 @@ pay is its solo work). Scripts "neither the list nor the session names" on a job
 replaced within seconds. Listed scripts short or over: a list from another reply than the one the
 job names.
 
+### Gateways that keep the script a job was made with
+
+Every tip, and every session of a gateway whose payout Prime knows, opens with the gateway
+configured with its own script, so that the empty job it publishes before the split arrives is
+its own solo work; the reply that carries the split turns it back to the pool's. That relies on
+the gateway reading the script again when the reply lands. CONVOY from `695d035` ("Avoid
+mutating jobs during hashing", live as `971af86`) does not: a job keeps the script it was made
+with. Measured against that build on regtest (`~/xbt-rnd/xbt-146/repro.py`, lists of 60 and 440
+payees), the section that places the whole list leaves nothing over and is a Split whatever
+script the job kept. What the kept script does get is everything a section does *not* place:
+the whole reward on section 0, which miners are handed when the split is not in within five
+seconds of the job, and the dropped part of a class cut short by a full template. With a split
+5 s late, such a job's coinbase paid the gateway's own address all 25 XBT.
+
+From a gateway the list does not pay, that is `GatewaySolo`: accepted and credited to nobody,
+for as long as the job is out (40 s by default). From a gateway that is also a window payee it
+is a listed payee paid past its amount, refused, and 30 s of that
+[ends the session](#a-gateway-refused-on-every-share-hangs-up-and-what-the-journal-says-of-it).
+
+When a share shows it (a coinbase built from one of this session's replies that pays the
+gateway's own script, nothing to the pool, and no script the list does not name, and which was
+refused or taken as solo work), the session stops configuring the gateway with its own script:
+`clients[].pins_script` is true, the journal says so once, and later sessions of the same key
+open on the pool's script (remembered in memory, so after a Prime restart each such gateway
+shows it once more). From there it is the session any gateway has before Prime knows its
+payout: the empty job and a late section 0 pay the pool, credited and owed back to the window,
+and the full job pays the split. Not learned from a held-split build, nor under
+`stock-full-pool-only = "gateway-solo"`, where Prime itself leaves the gateway on its script.
+
+A job that names no reply of the session (the gateway gave up on the split altogether) is not
+this shape and is left as it was: solo work from a gateway whose payout Prime knows.
+
 ### On disk (`data-dir`)
 
 | File | What |
@@ -555,7 +587,8 @@ pool UI reads: `pool` (pubkey, fee, window multiple, advertise address, uptime),
 `work`, `shares`, `hashrate_ghs`, `share_percent`, `payout_sats` at the current reward),
 `clients` (per gateway: generation, user agent, accepted/rejected, last reject reason,
 `pool_only_shares`, `held_split: true` for a [held-split build](#held-split-builds), absent
-otherwise, and `class_budget_bytes` / `class_budget_replies` where a [class
+otherwise, `pins_script: true` for a [gateway that keeps a job's
+script](#gateways-that-keep-the-script-a-job-was-made-with), absent otherwise, and `class_budget_bytes` / `class_budget_replies` where a [class
 budget](#class-budgets) applies), `blocks`, `owed`, `totals`, and with `class-budget` the
 `carry_reserved` the fee wallet holds back. `/ledger.json` is the previous Prime's credits view for the UI's
 hashrate graph; `/healthz` returns `ok`.
@@ -597,6 +630,7 @@ the gateway itself. See `primed/src/workers.rs`.
 cargo test                                  # wire (44), tides (11), primed (12)
 cargo test --release -p primed --test replay_e2e -- --ignored --nocapture   # hostile gateway vs a real primed
 cargo test --release -p primed --test held_split_e2e -- --ignored --nocapture   # a held-split build's section 0, listed
+cargo test --release -p primed --test pinned_script_e2e -- --ignored --nocapture # a kept-script section 0, unlisted
 cargo test --release -p primed --test class_budget_e2e -- --ignored --nocapture # Partial(16) three times, then a full split
 scripts/regtest-e2e.sh convoy               # or fte | iohzrd | startos: real C gateway + real Knots on regtest
 MINER_CMD='...' scripts/regtest-divergence.sh fte   # two nodes with different mempools and tips

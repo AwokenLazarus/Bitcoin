@@ -474,6 +474,38 @@ pub fn coinbase_of(slot: &JobSlot, s: &PowSubmit) -> Option<Coinbase> {
     coinbase::parse(&legacy).ok()
 }
 
+/// Whether a coinbase built from one of Prime's replies pays the gateway's own script what the
+/// issued list did not get: an output to the gateway, none to the pool, and nothing the list
+/// does not name.
+///
+/// A CONVOY gateway from `695d035` fixes the script a job's remainder goes to when the job is
+/// made, not when the reply for it lands. So a job made while the gateway was configured with
+/// its own payout (the step every tip and every session of a known gateway opens with) keeps
+/// paying it whatever a section does not place from the list. The section that places the whole
+/// list leaves nothing over and is a Split all the same. Section 0, which the gateway hands its
+/// miners when the reply was not in within five seconds of the job, pays that script the whole
+/// reward, and a class cut short by a full template pays it everything the class dropped, the
+/// pool's output included. [`classify_coinbase`] makes either the gateway's solo work, or
+/// Foreign where the list also pays the gateway as a window miner. This only names the shape,
+/// for a session that wants to know why; nothing here is a verdict.
+pub fn remainder_on_gateway(cb: &Coinbase, p: &Policy) -> bool {
+    let (Some(issued), Some(gw)) = (p.issued, p.gateway_script) else {
+        return false;
+    };
+    if gw.is_empty() || gw == p.pool_script {
+        return false;
+    }
+    let mut to_gateway = false;
+    for o in cb.outputs.iter().filter(|o| !o.is_op_return()) {
+        if o.script == gw {
+            to_gateway = true;
+        } else if o.script == p.pool_script || !issued.iter().any(|i| i.script == o.script) {
+            return false;
+        }
+    }
+    to_gateway
+}
+
 /// Rebuild the header from the share and check the work and the coinbase.
 ///
 /// `slot` must already have absorbed the share. On `Err` the code is a DATUM reject reason.
@@ -1783,6 +1815,53 @@ mod tests {
         // a section the share does not name
         s.coinbase_id = 5;
         assert!(coinbase_of(&slot, &s).is_none());
+    }
+
+    /// A job made while the gateway was configured with its own script, on a gateway that keeps
+    /// that script for the job (CONVOY from `695d035`): its section 0 and a class cut short are
+    /// told apart from every section a gateway on the pool's script builds from the same list.
+    #[test]
+    fn a_remainder_paid_to_the_gateways_own_script_is_told_from_every_other_section() {
+        let pool = pool_script();
+        let gw = gw_script();
+        let pay = |o: &Output| TxOut { value: o.sats, script: o.script.clone() };
+        let to = |script: &[u8], value: u64| TxOut { value, script: script.to_vec() };
+        let shape = |outs: &[TxOut], p: &Policy| {
+            let mut slot = JobSlot::default();
+            let s = share(0, 4, 1, outs, &txids(2), 1, [0; 8], [0; 8]);
+            slot.absorb(&s).unwrap();
+            remainder_on_gateway(&coinbase_of(&slot, &s).expect("the section parses"), p)
+        };
+        for listed in [false, true] {
+            let mut iss = if listed { listing_the_gateway(&pool, &gw) } else { split() };
+            if !listed {
+                let fee = VALUE - iss.iter().map(|o| o.sats).sum::<u64>();
+                iss.push(Output { sats: fee, script: pool.clone() });
+            }
+            let mut p = policy(&iss, &pool);
+            p.gateway_script = Some(&gw);
+            // section 0, and a size class that kept one payee: what they left goes to the gateway
+            let section_zero = [to(&gw, VALUE), wc()];
+            let prefix = [pay(&iss[0]), to(&gw, VALUE - iss[0].sats), wc()];
+            assert!(shape(&section_zero, &p) && shape(&prefix, &p), "listed={listed}");
+            let refused = Err(mining::REJECT_BAD_COINBASE_OUTPUTS);
+            let verdict = if listed { refused } else { Ok(CoinbaseKind::GatewaySolo) };
+            assert_eq!(kind_of(&section_zero, &p), verdict, "listed={listed}");
+            assert_eq!(kind_of(&prefix, &p), verdict, "listed={listed}");
+            // the same sections with the pool's script where the job kept it, and the whole list
+            let whole: Vec<TxOut> = iss.iter().map(pay).chain([wc()]).collect();
+            let on_pool = [pay(&iss[0]), to(&pool, VALUE - iss[0].sats), wc()];
+            assert!(!shape(&whole, &p) && !shape(&on_pool, &p) && !shape(&[to(&pool, VALUE), wc()], &p));
+            // an output the list does not name is somebody else's coinbase
+            let stranger = [to(&gw, VALUE - 5_000), to(&p2wpkh(0x99), 5_000), wc()];
+            assert!(!shape(&stranger, &p));
+            // no reply to have built it from, or no payout known for the gateway
+            let mut blind = policy(&iss, &pool);
+            assert!(!shape(&section_zero, &blind));
+            blind.gateway_script = Some(&gw);
+            blind.issued = None;
+            assert!(!shape(&section_zero, &blind));
+        }
     }
 
     /// The issued list with the pool's fee last and the gateway's own address as its third
