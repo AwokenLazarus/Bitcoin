@@ -12,7 +12,7 @@
 //   ut      on the pool's miner list with no gateway tag (a hint, not proof)
 // Endpoints and fields checked 2026-10-06.
 
-import { ACTIVE_SEC, MEMORY_SEC, buildLists, poolVerdict } from "./naughtylist.js";
+import { ACTIVE_SEC, MEMORY_SEC, buildLists, derive, poolVerdict } from "./naughtylist.js";
 
 const B2 = "https://b2pool.io/api/v1";
 const DX = "https://www.dxpool.com/api/address-mining";
@@ -241,9 +241,9 @@ export const POOLS = [
   { pool: "Rabid Pool", site: "https://pool.rabidmining.com", stratum: "no",
     reads: "DATUM only for this chain: its summary reports no stratum endpoint." },
   { pool: "Mining-Dutch", site: "https://www.mining-dutch.nl/", stratum: "only",
-    reads: "Stratum only, with accounts and wallet payouts. Its API has pool totals and no addresses, so only the pool's own coinbase address can be listed." },
+    reads: "Stratum only, with accounts and wallet payouts. Its API has pool totals and no addresses, so only the pool's own payout address can be listed." },
   { pool: "CTRL", site: "https://ctrlpool.com", stratum: "front",
-    reads: "Not a pool on this chain any more: a stratum front. ctrlpool, formerly xbtpool. Its own DATUM pool found its last block at 974658. Since then its XBT stratum port (4333) sits in front of a gateway ctrlpool runs itself, pointed at another pool's DATUM window: its site says so and does not say whose. Since 2 October 2026 the server behind that port is connected to Lazarus as a gateway, so ctrlpool's hashers are paid by Lazarus's coinbase while ctrlpool's node builds their blocks. All five of its regional hosts hand out the same jobs, so that one gateway carries everything it has. It hides its miner list; the addresses listed are the ones seen behind that gateway." },
+    reads: "Not a pool on this chain any more: a stratum front. ctrlpool, formerly xbtpool. Its own DATUM pool found its last block at 974658. Since then its XBT stratum port (4333) sits in front of a gateway ctrlpool runs itself, pointed at another pool's DATUM window: its site says so and does not say whose. From 2 October 2026 the server behind that port was connected to Lazarus as a gateway, so ctrlpool's hashers were paid by Lazarus's coinbase while ctrlpool's node built their blocks. It hides its miner list; the addresses listed are the ones seen behind that gateway, each with the time it was last seen there." },
   { pool: "Pow.re", site: "https://pow.re", stratum: "unknown",
     reads: "A hashrate desk with no pool pages or API. Its blocks pay one or two outputs." },
 ];
@@ -254,9 +254,9 @@ export const poolInfo = (name) => POOLS.find((p) => p.pool === name) || null;
  * Run the readers that are due. Each gets its own slice of the request budget and fails alone:
  * a pool that does not answer keeps what it said last time, and the page says when that was.
  */
-export async function refreshPools(state, { get, getText, now, budget = 16 }) {
+export async function refreshPools(state, { get, getText, now, budget = 16, derived = derive(state, now) }) {
   const ext = state.ext || (state.ext = {});
-  const known = Object.keys(state.addrs || {});
+  const known = Object.keys(derived.addrs);
   const due = POOLS.filter((p) => p.run && now - ((ext[p.pool] && ext[p.pool].tried) || 0) >= (p.every || 0));
   const rotating = due.filter((p) => !p.every).length || 1;
   const report = {};
@@ -264,7 +264,7 @@ export async function refreshPools(state, { get, getText, now, budget = 16 }) {
   await Promise.all(due.map(async (p) => {
     const x = ext[p.pool] || (ext[p.pool] = { m: {} });
     if (!x.m) x.m = {};
-    const candidates = known.filter((a) => state.addrs[a].ps && state.addrs[a].ps[p.pool]);
+    const candidates = known.filter((a) => derived.addrs[a].ps[p.pool]);
     try {
       await p.run(x, { get, getText, now, budget: Math.floor(budget / rotating), candidates, known, chainKind });
       x.ok = now;
@@ -293,13 +293,13 @@ export async function askPools(address, { get, now, chainKind = () => null }) {
       }
       const hr = Math.round(num(d.hashrate && d.hashrate.h1) / 1e9);
       out.push({ pool: "B2Pool", hrGhs: hr, lastShare: secs(d.last_share_at), stratumBlock: e.sb || null, gatewayBlock: e.db || null, blocksFound: num(d.blocks_found) });
-    })().catch(() => {}),
+    })().catch(() => { out.push({ pool: "B2Pool", failed: true }); }),
     (async () => {
       const d = await get(`${DX}/xbt/miner/${address}/info`);
       const hr = Math.round(num(d && d.hashrate && d.hashrate.data) / 1e9);
       const paid = num(d && d.paid);
       if (hr > 0 || paid > 0) out.push({ pool: "dxpool", hrGhs: hr, paidXbt: paid, stratumProduct: true, at: now });
-    })().catch(() => {}),
+    })().catch(() => { out.push({ pool: "dxpool", failed: true }); }),
   ]);
   return out;
 }
@@ -309,8 +309,9 @@ export async function askPools(address, { get, now, chainKind = () => null }) {
  * is in the table when we have checked it or when it has three blocks in the window, so a pool
  * nobody has looked at yet still shows up, marked not checked.
  */
-export function buildView(state, miners, gateways, now) {
-  const lists = buildLists(state, miners, now, gateways);
+export function buildView(state, miners, gateways, now, extra = {}) {
+  const derived = derive(state, now);
+  const lists = buildLists(state, miners, now, gateways, derived);
   const ext = state.ext || {};
   const count = (rows) => { const t = {}; for (const r of rows) t[r.pool] = (t[r.pool] || 0) + 1; return t; };
   const confirmed = count(lists.naughty), suspected = count(lists.suspects);
@@ -318,6 +319,14 @@ export function buildView(state, miners, gateways, now) {
   // A lone miner's own gateway also tags its coinbase; only something that pays a split, or
   // takes blocks whole, is a pool.
   for (const w of Object.values(lists.windows)) if (w.blocks >= 3 && w.pooled) names.add(w.pool);
+  // When another pool's gateway was on our DATUM port: first and last time the watcher saw it.
+  const fronts = {};
+  for (const g of Object.values((state.via && state.via.gateways) || {})) {
+    if (!g || !g.pool) continue;
+    const f = fronts[g.pool] || (fronts[g.pool] = { first: g.first || 0, last: g.last || 0 });
+    f.first = Math.min(f.first || Infinity, g.first || Infinity);
+    f.last = Math.max(f.last, g.last || 0);
+  }
   const pools = [...names].map((name) => {
     const info = poolInfo(name) || { pool: name, stratum: "unknown" };
     const w = lists.windows[name] || { s: 0, d: 0, c: 0, blocks: 0 };
@@ -329,6 +338,7 @@ export function buildView(state, miners, gateways, now) {
       own: x && x.w ? x.w : x && x.stratumBlocks != null ? { s: x.stratumBlocks, d: null } : null,
       confirmed: confirmed[name] || 0, suspects: suspected[name] || 0,
       hosted: lists.hosted[name] || null,
+      front: fronts[name] || null,
       ok: name === "Lazarus" ? (miners && miners.length ? now : null) : (x && x.ok) || null,
       err: (x && x.err) || "",
     };
@@ -336,8 +346,11 @@ export function buildView(state, miners, gateways, now) {
   return {
     asOf: now,
     tip: state.tip || null,
-    scannedTo: state.scannedTo || null,
-    windowDone: !!state.windowDone,
+    // Blocks of the fourteen-day window whose coinbase has been read, and how many there are.
+    coverage: extra.coverage || null,
+    windowDone: extra.coverage ? extra.coverage.have >= extra.coverage.of : true,
+    // The passive stratum listener behind the pool-run gateway proofs: when it last published.
+    watch: state.watch || null,
     poolWalletsHidden: lists.poolWallets,
     naughty: lists.naughty,
     suspects: lists.suspects,

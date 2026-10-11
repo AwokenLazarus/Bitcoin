@@ -28,6 +28,13 @@ SEED += [f"{h}.ctrlpool.com:4333" for h in ("stratum", "us.stratum", "asia.strat
 # block and nothing about the name.
 GENERIC = {"", "datum user", "datum gateway", "gateway", "datum"}
 JOB_MEMORY = 3 * 3600
+# One port can sit in front of several gateways (eu1.alphapool.tech:7333 has handed out the jobs
+# of two different gateway names), and a session only hears the one it landed on. A second
+# session on the seed ports hears more of them. Still no share is ever submitted.
+SEED_SESSIONS = 2
+# Jobs heard are written here every pass and read back at start, so a restart does not forget
+# the work a block found in the next minutes was built from.
+RESTART_GAP = 180
 # Another pool's gateway inside our own window: its stratum hashers reach Lazarus as DATUM miners
 # while that pool's node builds their blocks. Found by address: a gateway connected to our DATUM
 # port from the same IP that serves another pool's public stratum port. Keys seen that way are
@@ -40,6 +47,7 @@ REPUBLISH = 1800
 STATE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "hosted.json") if "--state" not in sys.argv else sys.argv[sys.argv.index("--state") + 1]
 UA = {"User-Agent": "lazarus-hosted-watch/0.1 (+https://lazarus-xbt.xyz/naughtylist/)"}
 USER = "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4.watch"
+JOBS = os.path.join(os.path.dirname(STATE), "jobs.json")
 
 lock = threading.Lock()
 jobs = {}        # h2 hex -> [first seen, set of endpoints]
@@ -121,6 +129,27 @@ def listen(endpoint, stop):
         except Exception as e:  # a port that is down is news, not a crash
             st["error"] = str(e)[:100]
         stop.wait(30)
+
+
+def save_jobs(since, now):
+    with lock:
+        data = {"saved": now, "since": since, "jobs": {k: [v[0], sorted(v[1])] for k, v in jobs.items()}}
+    tmp = JOBS + ".tmp"
+    with open(tmp, "w") as f: json.dump(data, f, separators=(",", ":"))
+    os.replace(tmp, JOBS)
+
+
+def load_jobs(now):
+    """Jobs a previous run heard, if it stopped less than RESTART_GAP ago. Returns the time that
+    run began listening, or `now` when there is nothing recent enough to carry on from."""
+    try: d = json.load(open(JOBS))
+    except (OSError, ValueError): return now
+    if now - d.get("saved", 0) > RESTART_GAP: return now
+    with lock:
+        for k, (first, eps) in d.get("jobs", {}).items():
+            if now - first <= JOB_MEMORY: jobs[k] = [first, set(eps)]
+    log(f"carried on from a run that stopped {now - d['saved']}s ago: {len(jobs)} jobs remembered")
+    return d.get("since", now)
 
 
 def directory_endpoints():
@@ -215,16 +244,17 @@ def main():
     until = time.time() + float(sys.argv[sys.argv.index("--once-secs") + 1]) if "--once-secs" in sys.argv else None
     state, stop, threads, next_dir = load(), threading.Event(), {}, 0
     unsent = False  # a put that failed is tried again on the next pass
-    started = time.time()
+    started = load_jobs(int(time.time()))
     while until is None or time.time() < until:
         now = int(time.time())
         if now >= next_dir:
             eps = {e: ("CTRL" if "ctrlpool" in e else "AlphaPool") for e in SEED}; eps.update(directory_endpoints()); next_dir = now + 3600
             for e in eps:
-                if e not in threads:
-                    threads[e] = threading.Thread(target=listen, args=(e, stop), daemon=True); threads[e].start()
+                for i in range(SEED_SESSIONS if e in SEED else 1):
+                    if (e, i) not in threads:
+                        threads[e, i] = threading.Thread(target=listen, args=(e, stop), daemon=True); threads[e, i].start()
             state["endpointPools"] = eps
-            log(f"listening on {len(threads)} ports")
+            log(f"listening on {len(eps)} ports, {len(threads)} sessions")
         changed = False
         try:
             page = get(f"{EXPLORER}/v1/blocks")
@@ -244,6 +274,9 @@ def main():
         with lock:
             for k in [k for k, v in jobs.items() if now - v[0] > JOB_MEMORY]: del jobs[k]
         state["asOf"] = now
+        state["since"] = int(started)
+        try: save_jobs(int(started), now)
+        except OSError as e: log("jobs:", e)
         state["endpoints"] = {e: {k: v for k, v in s.items() if v is not None} for e, s in listening.items()}
         if len(state["blocks"]) > 4000:
             for h in sorted(state["blocks"], key=int)[:-4000]: del state["blocks"][h]

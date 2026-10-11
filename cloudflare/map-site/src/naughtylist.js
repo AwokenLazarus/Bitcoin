@@ -26,16 +26,19 @@ import { coinbaseTags, poolName, POOL_LINKS } from "./galaxy.js";
 
 export const ACTIVE_SEC = 14 * 86400;
 export const MEMORY_SEC = 30 * 86400;
-export const PAYS_CAP = 40;
 
 // A split's payees are suspects, not confirmed, and only where the pool built at least this share
 // of its split blocks itself in the window, over at least this many blocks. Below that a payee
 // is more likely on a gateway than on stratum, and the page does not guess.
 export const SUSPECT_SHARE = 0.5;
 export const SUSPECT_MIN_BLOCKS = 5;
-// A payee on this share of a pool's pool-built blocks is the pool's own wallet, not a hasher.
+// A payee on this share of a pool's pool-built blocks may be the pool's own wallet, not a hasher.
+// A steady miner is on every split of a TIDES window too, so presence singles out a wallet only
+// where few addresses have it: with more than POOL_WALLET_MAX of them it says nothing, and
+// nobody is hidden. (Measured 2026-10-11: AlphaPool 119 such addresses, B2Pool 69, CONVOY 3.)
 export const POOL_WALLET_SHARE = 0.8;
 export const POOL_WALLET_MIN_BLOCKS = 8;
+export const POOL_WALLET_MAX = 3;
 
 const fold = (s) => String(s || "").toLowerCase().replace(/[^a-z0-9]/g, "");
 
@@ -46,179 +49,167 @@ function sameParty(a, b) {
   return x.includes(y) || y.includes(x);
 }
 
+/** A gateway as `hosted` names it: the folded primary tag, then the secondary tag as written. */
+export const gatewayKey = (primary, secondary) => `${fold(primary)}|${secondary || ""}`;
+
+/**
+ * How the watcher ties a block to a pool-run gateway. 2: this very block matches a job a public
+ * stratum port handed out. 1: the block carries a gateway name proved that way by another block.
+ */
+export function hostedProof(hosted, height, key) {
+  if (!hosted) return 0;
+  if (hosted.blocks && hosted.blocks[height]) return 2;
+  return key && hosted.tags && hosted.tags[key] ? 1 : 0;
+}
+export const isHosted = (hosted, height, key) => hostedProof(hosted, height, key) > 0;
+
 /**
  * "datum" — a gateway's own tag is on the coinbase. The finder has a node. The other
  * outputs are just who got paid, not proof that each of them runs a node.
  * "stratum" — the pool wrote a split. On a stratum pool those payees are the hashers.
- * "custodial" — a known pool took the whole coinbase (one or two outputs). The block is
- * entirely naughty: every output is the pool's stratum, and the hashers are not named.
- * "skip" — a solo miner took one or two outputs. That is their own node, not stratum.
+ * "custodial" — a known pool took the whole coinbase in one output. The block is the pool's
+ * stratum, and the one address is the pool's wallet: the hashers are not named.
+ * "skip" — a solo miner took one to three outputs. That is their own node, not stratum.
+ * A known pool's block with two or three outputs is a small split (a finder and a fee, say): it
+ * is counted as a split, and its payees are judged like any other split's, not called custodial.
+ * `tags` is what galaxy.js coinbaseTags returns.
  */
-/** A gateway as `hosted` names it: the folded primary tag, then the secondary tag as written. */
-export const gatewayKey = (primary, secondary) => `${fold(primary)}|${secondary || ""}`;
-
-/** Whether the watcher proved this block, or this gateway name, to be the pool's own. */
-export function isHosted(hosted, height, key) {
-  if (!hosted) return false;
-  return !!((hosted.blocks && hosted.blocks[height]) || (key && hosted.tags && hosted.tags[key]));
-}
-
-export function classifyCoinbase(scriptHex, outputCount, explorerPool = "", hosted = null, height = 0) {
-  const t = coinbaseTags(scriptHex);
-  // Some pools put the name in a later push ("/mined on B2Pool.io/"), which this parser does not
-  // read. The explorer's pool name is the same fallback the galaxy map uses.
+export function classifyTags(tags, outputCount, explorerPool = "", hosted = null, height = 0) {
+  const t = tags || {};
+  // Some pools put the name in a later push ("/mined on B2Pool.io/"), which the tag parser does
+  // not read. The explorer's pool name is the same fallback the galaxy map uses.
   const pool = poolName(t.primary || "") || poolName(explorerPool || "") || "Unknown";
   const gateway = t.layout === "datum" && t.secondary && !sameParty(pool, t.secondary) && !sameParty(t.primary, t.secondary);
   if (gateway) {
     const key = gatewayKey(t.primary, t.secondary);
-    if (isHosted(hosted, height, key)) return { kind: "stratum", pool, key, hosted: true };
+    const proof = hostedProof(hosted, height, key);
+    if (proof) return { kind: "stratum", pool, key, hosted: proof };
     return { kind: "datum", pool, key };
   }
   if (outputCount > 3) return { kind: "stratum", pool };
-  if (POOL_LINKS[pool] && outputCount >= 1) return { kind: "custodial", pool };
+  if (POOL_LINKS[pool] && outputCount === 1) return { kind: "custodial", pool };
+  if (POOL_LINKS[pool] && outputCount > 1) return { kind: "stratum", pool };
   return { kind: "skip", pool };
 }
 
+export const classifyCoinbase = (scriptHex, outputCount, explorerPool = "", hosted = null, height = 0) =>
+  classifyTags(coinbaseTags(scriptHex), outputCount, explorerPool, hosted, height);
+
+// state.blk[height] = [time, pool, kind, outputs, gateway key, proof, block id, coinbase txid]
+//   kind   "d" a gateway tag, "s" a split the pool built, "c" paid to the pool alone
+//   proof  0, or how a gateway block was tied to the pool (see hostedProof); then kind is "s"
+// state.skip[height] = block id of a block that is nobody's pool (so it is not read again)
+// state.pays[address] = [height, vout, sats, height, vout, sats, ...] for every block in state.blk
+// state.seen[address] = { s, d, at } what Lazarus's live sessions showed (the nice list needs it)
+// Everything a row says about an address is worked out from these each time (see derive), so a
+// reorg, a re-judged gateway or a block leaving the window cannot leave a stale count behind.
 export function emptyState() {
-  return { v: 2, asOf: 0, tip: 0, scannedTo: null, pools: {}, ingested: {}, addrs: {}, blk: {}, ext: {} };
+  return { v: 3, asOf: 0, tip: 0, blk: {}, skip: {}, pays: {}, seen: {}, ext: {} };
 }
 
 /**
- * Bring a stored v1 document up to v2. `blk` is one entry per classified block; a v1 document
- * never kept it, so it is rebuilt from the payouts each address remembers.
+ * Bring a stored document up to v3. Earlier versions kept at most 40 payouts an address and
+ * running counts; v3 keeps every payout in the window, so the chain part is read again. What the
+ * pools said, what the watcher saw and who was once on Lazarus's stratum carry over.
  */
 export function migrate(state) {
-  if (!state.ext) state.ext = {};
-  if (!state.blk) {
-    state.blk = {};
-    for (const a of Object.values(state.addrs || {})) {
-      for (const p of a.pays || []) if (!state.blk[p.h]) state.blk[p.h] = [p.t || 0, p.pool, p.k];
-    }
+  if (state && state.v === 3) {
+    for (const k of ["blk", "skip", "pays", "seen", "ext"]) if (!state[k]) state[k] = {};
+    return state;
   }
-  state.v = 2;
-  return state;
+  const out = emptyState();
+  if (!state) return out;
+  out.ext = state.ext || {};
+  if (state.via) out.via = state.via;
+  for (const [address, a] of Object.entries(state.addrs || {})) {
+    if (a.wasS || a.wasD) out.seen[address] = { s: a.wasS ? 1 : 0, d: a.wasD ? 1 : 0, at: state.asOf || 0 };
+  }
+  return out;
 }
 
-function addrOf(state, address) {
-  return state.addrs[address] || (state.addrs[address] = {
-    sh: 0, st: 0, sp: "", sn: 0, dh: 0, dt: 0, dp: "", dn: 0, ps: {}, pays: [],
-  });
+/** Forget one height: the block entry and every payout from it. For a reorg. */
+export function dropBlock(state, height) {
+  const h = Number(height);
+  delete state.skip[h];
+  if (!state.blk[h]) return;
+  delete state.blk[h];
+  for (const [address, p] of Object.entries(state.pays)) {
+    let j = 0;
+    for (let i = 0; i < p.length; i += 3) {
+      if (p[i] === h) continue;
+      if (j !== i) { p[j] = p[i]; p[j + 1] = p[i + 1]; p[j + 2] = p[i + 2]; }
+      j += 3;
+    }
+    if (j !== p.length) p.length = j;
+    if (!p.length) delete state.pays[address];
+  }
 }
 
-/** Record one block's coinbase outputs. A height already recorded with the same id is skipped. */
+/**
+ * Record one block's coinbase outputs. `block.tags` is the parsed coinbase tag (or pass
+ * `block.script`). A height already recorded with the same id is skipped; with another id the
+ * old block was orphaned, so it is dropped first.
+ */
 export function noteBlock(state, block, hosted = null) {
   const id = String(block.id || "");
-  const prev = state.ingested[block.h];
-  if (prev && prev === id) return { kind: "dup" };
+  const h = Number(block.h);
+  const prev = state.blk[h] ? state.blk[h][6] : state.skip[h];
+  if (prev != null) {
+    if (prev === id) return { kind: "dup" };
+    dropBlock(state, h);
+  }
   const outputs = (block.outputs || []).filter((o) => o && o.address);
-  const cls = classifyCoinbase(block.script || "", outputs.length, block.explorerPool || "", hosted, block.h);
-  state.ingested[block.h] = id;
-  if (block.h > (state.tip || 0)) state.tip = block.h;
-  if (cls.kind === "skip") return cls;
-  const pools = state.pools[cls.pool] || (state.pools[cls.pool] = { s: 0, d: 0, c: 0 });
-  const tally = cls.kind === "datum" ? "d" : cls.kind === "custodial" ? "c" : "s";
-  pools[tally]++;
-  // [time, pool, tally, outputs, gateway key ("" when there is no gateway tag), pool-run gateway]
-  (state.blk || (state.blk = {}))[block.h] = [block.t || 0, cls.pool, tally, outputs.length, cls.key || "", cls.hosted ? 1 : 0];
+  const tags = block.tags || coinbaseTags(block.script || "");
+  const cls = classifyTags(tags, outputs.length, block.explorerPool || "", hosted, h);
+  if (h > (state.tip || 0)) state.tip = h;
+  if (cls.kind === "skip") { state.skip[h] = id; return cls; }
+  const kind = cls.kind === "datum" ? "d" : cls.kind === "custodial" ? "c" : "s";
+  state.blk[h] = [block.t || 0, cls.pool, kind, outputs.length, cls.key || "", cls.hosted || 0, id, block.txid || ""];
   const seen = new Set();
   for (const o of outputs) {
     if (seen.has(o.address)) continue;
     seen.add(o.address);
-    const a = addrOf(state, o.address);
-    const key = cls.kind === "datum" ? "d" : cls.kind === "custodial" ? "c" : "s";
-    if (cls.kind === "datum") {
-      if (block.h >= a.dh) { a.dh = block.h; a.dt = block.t || 0; a.dp = cls.pool; }
-      a.dn++;
-    } else {
-      if (block.h >= a.sh) { a.sh = block.h; a.st = block.t || 0; a.sp = cls.pool; }
-      a.sn++;
-      if (key === "s") a.ps[cls.pool] = (a.ps[cls.pool] || 0) + 1;
-    }
-    const pay = { h: block.h, t: block.t || 0, tx: block.txid || "", v: o.vout, sats: o.sats, pool: cls.pool, k: key };
-    if (cls.hosted) pay.g = 1;
-    a.pays.push(pay);
-    if (a.pays.length > PAYS_CAP) a.pays.splice(0, a.pays.length - PAYS_CAP);
+    (state.pays[o.address] || (state.pays[o.address] = [])).push(h, o.vout, o.sats);
   }
   return cls;
 }
 
 /**
- * Gateway blocks noted before block entries kept the gateway key: [height, block id]. The caller
- * reads each coinbase again and hands the key to `setGatewayKey`. Newest first.
- */
-export function blocksMissingKey(state, limit = 20) {
-  const out = [];
-  for (const h of Object.keys(state.blk || {}).sort((a, b) => b - a)) {
-    const e = state.blk[h];
-    if (e[2] !== "d" || e.length > 4 || !state.ingested[h]) continue;
-    out.push([Number(h), state.ingested[h]]);
-    if (out.length >= limit) break;
-  }
-  return out;
-}
-
-export function setGatewayKey(state, height, scriptHex) {
-  const e = state.blk && state.blk[height];
-  if (!e || e.length > 4) return;
-  const t = coinbaseTags(scriptHex);
-  e[4] = t.layout === "datum" ? gatewayKey(t.primary, t.secondary) : "";
-  e[5] = 0;
-}
-
-/**
- * Re-judge the gateway blocks already noted against what the watcher has proved since: a name is
- * proved by one block and then covers every block under it. Returns how many blocks moved from
- * DATUM to the pool's own. Nothing moves back: a proof is a block on chain.
+ * Judge every gateway block again against what the watcher has proved: a name is proved by one
+ * block and then covers every block under it. Returns how many blocks changed. A missing
+ * `hosted` document changes nothing: a proof is a block on chain and is not taken back because
+ * the watcher's document could not be read.
  */
 export function applyHosted(state, hosted) {
   if (!hosted) return 0;
-  const moved = new Map();
-  for (const [h, e] of Object.entries(state.blk || {})) {
-    if (e[2] !== "d" || e.length < 5 || !isHosted(hosted, h, e[4])) continue;
+  let moved = 0;
+  for (const [h, e] of Object.entries(state.blk)) {
+    if (!e[4]) continue;
+    const proof = hostedProof(hosted, h, e[4]);
+    if (proof === e[5]) continue;
+    if (!proof && e[5]) continue;
+    e[5] = proof;
     e[2] = "s";
-    e[5] = 1;
-    const n = state.pools[e[1]] || (state.pools[e[1]] = { s: 0, d: 0, c: 0 });
-    n.d = Math.max(0, n.d - 1);
-    n.s++;
-    moved.set(Number(h), e[1]);
+    moved++;
   }
-  if (!moved.size) return 0;
-  for (const a of Object.values(state.addrs || {})) {
-    let touched = false;
-    for (const p of a.pays || []) {
-      if (p.k !== "d" || !moved.has(p.h)) continue;
-      p.k = "s";
-      p.g = 1;
-      a.dn = Math.max(0, (a.dn || 0) - 1);
-      a.sn = (a.sn || 0) + 1;
-      a.ps[p.pool] = (a.ps[p.pool] || 0) + 1;
-      if (p.h >= (a.sh || 0)) { a.sh = p.h; a.st = p.t || 0; a.sp = p.pool; }
-      touched = true;
-    }
-    // Its newest DATUM payout may have been one of the blocks that moved.
-    if (touched && moved.has(a.dh)) {
-      const d = (a.pays || []).filter((p) => p.k === "d").sort((x, y) => y.h - x.h)[0];
-      a.dh = d ? d.h : 0;
-      a.dt = d ? d.t || 0 : 0;
-      a.dp = d ? d.pool : "";
-    }
-  }
-  return moved.size;
+  return moved;
 }
 
 /**
- * Per pool, over the active window: blocks built on gateways the pool runs itself, blocks under
- * other gateway names, and the names proved. Only pools with at least one proved block.
+ * Per pool, over the active window: gateway blocks tied to the pool by the job itself (`direct`),
+ * by a proved gateway name (`named`), and the gateway blocks under other names. Only pools with
+ * at least one proved block.
  */
 export function hostedWindows(state, now) {
   const out = {};
   for (const e of Object.values(state.blk || {})) {
-    const [t, pool, k] = e;
-    if ((t && now - t > ACTIVE_SEC) || (k !== "d" && !e[5])) continue;
-    const p = out[pool] || (out[pool] = { hostedBlocks: 0, otherGatewayBlocks: 0, names: {} });
-    if (e[5]) {
+    const [t, pool, , , key, proof] = e;
+    if (!key || (t && now - t > ACTIVE_SEC)) continue;
+    const p = out[pool] || (out[pool] = { hostedBlocks: 0, direct: 0, named: 0, otherGatewayBlocks: 0, names: {} });
+    if (proof) {
       p.hostedBlocks++;
-      const name = String(e[4] || "").split("|").slice(1).join("|");
+      if (proof === 2) p.direct++; else p.named++;
+      const name = String(key).split("|").slice(1).join("|");
       if (name) p.names[name] = (p.names[name] || 0) + 1;
     } else p.otherGatewayBlocks++;
   }
@@ -243,28 +234,87 @@ export function outputsOf(tx) {
   return out;
 }
 
-/** Drop payees and height marks older than the memory window. Counts are left: they only ever grow. */
+/** Drop blocks older than the active window with their payouts, and sessions past the memory window. */
 export function prune(state, now) {
-  const cut = now - MEMORY_SEC;
-  const floorH = state.tip ? state.tip - 4000 : 0;
-  for (const h of Object.keys(state.ingested)) if (Number(h) < floorH) delete state.ingested[h];
-  for (const [h, b] of Object.entries(state.blk || {})) if (b[0] && b[0] < now - ACTIVE_SEC) delete state.blk[h];
-  for (const [address, a] of Object.entries(state.addrs)) {
-    a.pays = (a.pays || []).filter((p) => !p.t || p.t >= now - ACTIVE_SEC);
-    const last = Math.max(a.st || 0, a.dt || 0);
-    if (last && last < cut && !a.pays.length) delete state.addrs[address];
+  const cut = now - ACTIVE_SEC;
+  const floorH = state.tip ? state.tip - 6000 : 0;
+  for (const h of Object.keys(state.skip)) if (Number(h) < floorH) delete state.skip[h];
+  let aged = false;
+  for (const [h, b] of Object.entries(state.blk)) if (b[0] && b[0] < cut) { delete state.blk[h]; aged = true; }
+  if (aged) {
+    for (const [address, p] of Object.entries(state.pays)) {
+      let j = 0;
+      for (let i = 0; i < p.length; i += 3) {
+        if (!state.blk[p[i]]) continue;
+        if (j !== i) { p[j] = p[i]; p[j + 1] = p[i + 1]; p[j + 2] = p[i + 2]; }
+        j += 3;
+      }
+      if (j !== p.length) p.length = j;
+      if (!p.length) delete state.pays[address];
+    }
   }
+  for (const [address, s] of Object.entries(state.seen)) if ((s.at || 0) < now - MEMORY_SEC) delete state.seen[address];
   state.asOf = now;
 }
 
-export function poolWallets(state) {
+const blankAgg = () => ({ sh: 0, st: 0, sp: "", sn: 0, dh: 0, dt: 0, dp: "", dn: 0, ps: {}, sl: {}, gn: {}, gl: {}, c: null });
+
+/**
+ * What the stored blocks say about each address, worked out fresh:
+ *   sh/st/sp, dh/dt/dp  newest pool-built and newest gateway-tagged block that paid it
+ *   ps[pool], sl[pool]  splits from that pool that paid it, and the newest [height, time]
+ *   gn[pool], gl[pool]  the same for blocks built on gateways the pool runs itself
+ *   c                   newest block that paid it alone as the pool: { pool, h, t, n }
+ * and per pool the blocks of each kind (`pools`).
+ */
+export function derive(state, now) {
+  const addrs = {};
+  const pools = {};
+  const live = {};
+  for (const [h, e] of Object.entries(state.blk || {})) {
+    if (e[0] && now - e[0] > ACTIVE_SEC) continue;
+    live[h] = e;
+    const n = pools[e[1]] || (pools[e[1]] = { s: 0, d: 0, c: 0 });
+    n[e[2]]++;
+  }
+  for (const [address, p] of Object.entries(state.pays || {})) {
+    let a = null;
+    for (let i = 0; i < p.length; i += 3) {
+      const h = p[i], e = live[h];
+      if (!e) continue;
+      if (!a) a = addrs[address] = blankAgg();
+      const [t, pool, kind, , , proof] = e;
+      if (kind === "d") {
+        if (h >= a.dh) { a.dh = h; a.dt = t; a.dp = pool; }
+        a.dn++;
+        continue;
+      }
+      if (h >= a.sh) { a.sh = h; a.st = t; a.sp = pool; }
+      a.sn++;
+      if (kind === "c") {
+        if (!a.c || a.c.pool !== pool) a.c = { pool, h, t, n: 1 };
+        else { a.c.n++; if (h > a.c.h) { a.c.h = h; a.c.t = t; } }
+        continue;
+      }
+      a.ps[pool] = (a.ps[pool] || 0) + 1;
+      if (!a.sl[pool] || h > a.sl[pool][0]) a.sl[pool] = [h, t];
+      if (proof) {
+        a.gn[pool] = (a.gn[pool] || 0) + 1;
+        if (!a.gl[pool] || h > a.gl[pool][0]) a.gl[pool] = [h, t];
+      }
+    }
+  }
+  return { addrs, pools };
+}
+
+/** Payees on most of a pool's splits in the window, where that is rare enough to mean a wallet. */
+export function poolWallets(derived) {
   const out = new Set();
-  for (const [pool, n] of Object.entries(state.pools || {})) {
+  for (const [pool, n] of Object.entries(derived.pools || {})) {
     if (!n.s || n.s < POOL_WALLET_MIN_BLOCKS) continue;
     const need = Math.ceil(n.s * POOL_WALLET_SHARE);
-    for (const [address, a] of Object.entries(state.addrs)) {
-      if ((a.ps && a.ps[pool]) >= need) out.add(address);
-    }
+    const often = Object.keys(derived.addrs).filter((address) => (derived.addrs[address].ps[pool] || 0) >= need);
+    if (often.length <= POOL_WALLET_MAX) for (const address of often) out.add(address);
   }
   return out;
 }
@@ -323,14 +373,12 @@ export function ownNodeDatum(miners, gateways) {
  */
 export function observeLive(state, miners, now) {
   let changed = false;
+  const seen = state.seen || (state.seen = {});
   for (const [address, L] of liveByAddress(miners)) {
-    const a = addrOf(state, address);
-    if (L.stratum) {
-      if (!a.wasS) { a.wasS = 1; a.st = a.st || now; a.sp = a.sp || "Lazarus"; changed = true; }
-    } else if (L.datum && !a.wasD) {
-      a.wasD = 1;
-      changed = true;
-    }
+    const m = seen[address] || (seen[address] = { s: 0, d: 0, at: now });
+    if (L.stratum && !m.s) { m.s = 1; changed = true; }
+    if (!L.stratum && L.datum && !m.d) { m.d = 1; changed = true; }
+    m.at = now;
   }
   return changed;
 }
@@ -343,11 +391,11 @@ export function observeLive(state, miners, now) {
  */
 export function poolWindows(state, now) {
   const out = {};
-  for (const [t, pool, k, outs] of Object.values(state.blk || {})) {
+  for (const [t, pool, k, outs, key] of Object.values(state.blk || {})) {
     if (t && now - t > ACTIVE_SEC) continue;
     const p = out[pool] || (out[pool] = { pool, s: 0, d: 0, c: 0, pooled: false });
     p[k]++;
-    if (k !== "d" || outs > 3) p.pooled = true;
+    if (!key || outs > 3) p.pooled = true;
   }
   for (const p of Object.values(out)) p.blocks = p.s + p.d + p.c;
   return out;
@@ -396,8 +444,9 @@ export function poolVerdict(e, now) {
  *   gateway blocks. None is proof, and each row says what it rests on.
  * Nice: an address we saw on stratum that the same source now shows on its own node.
  */
-export function buildLists(state, miners, now, gateways) {
-  const wallets = poolWallets(state);
+export function buildLists(state, miners, now, gateways, derived = derive(state, now)) {
+  const wallets = poolWallets(derived);
+  const memory = state.seen || {};
   const live = liveByAddress(miners);
   const ownNode = ownNodeDatum(miners, gateways);
   const windows = poolWindows(state, now);
@@ -406,8 +455,7 @@ export function buildLists(state, miners, now, gateways) {
   const suspects = [];
   const nice = [];
   const seen = new Set();
-  const recent = (p) => !p.t || now - p.t <= ACTIVE_SEC;
-  const blank = () => ({ sh: 0, st: 0, sp: "", dh: 0, dt: 0, dp: "", ps: {}, pays: [] });
+  const blank = blankAgg;
   // A pool whose own block list says at least SUSPECT_SHARE of its blocks came over stratum.
   const odds = {};
   for (const [pool, x] of Object.entries(ext)) {
@@ -436,6 +484,7 @@ export function buildLists(state, miners, now, gateways) {
     item.host = "Lazarus";
     item.gatewayKey = v.gateway || "";
     item.firstSeen = v.first || null;
+    item.seenTs = v.last || null;
     item.lastSeen = v.last || null;
     // on our pool it shows as DATUM; what it is doing is hashing on the other pool's stratum
     item.live = now - (v.last || 0) <= VIA_LIVE_SEC ? "stratum" : null;
@@ -461,6 +510,8 @@ export function buildLists(state, miners, now, gateways) {
     item.why = c.v.why;
     item.live = null;
     item.hrGhs = null;
+    // When the pool's data last showed it: the block it found, or our last good read of the pool.
+    item.seenTs = c.v.why === "pool-stratum-block" ? c.e.st || null : c.e.at || null;
     if (c.v.why === "pool-stratum-block") {
       item.evidenceHeight = c.e.sb;
       item.lastStratumHeight = c.e.sb;
@@ -472,26 +523,29 @@ export function buildLists(state, miners, now, gateways) {
     return item;
   };
 
-  for (const [address, a] of Object.entries(state.addrs || {})) {
+  const addresses = new Set([...Object.keys(derived.addrs), ...Object.keys(memory)]);
+  for (const address of addresses) {
+    const a = derived.addrs[address] || blank();
     seen.add(address);
     const L = live.get(address);
     const v = behind(address);
     if (v) { naughty.push(behindRow(address, a, L, v)); continue; }
     const hashingStratum = !!(L && L.stratum);
     const onOwnNode = ownNode.has(address);
-    const custodial = (a.pays || []).find((p) => p.k === "c" && recent(p));
+    const custodial = a.c;
     const { confirmed, cleared, untagged, moved } = fromPools(address);
     if (hashingStratum) {
       const item = row(address, a, L, "naughty");
       item.pool = "Lazarus";
       item.why = "stratum-endpoint";
+      item.seenTs = now;
       naughty.push(item);
       continue;
     }
     if (confirmed) { naughty.push(confirmedRow(address, a, L, confirmed)); continue; }
     if (wallets.has(address) && !custodial) continue;
     if (onOwnNode) {
-      if (a.wasS) nice.push({ ...row(address, a, L, "nice"), pool: "Lazarus" });
+      if (memory[address] && memory[address].s) nice.push({ ...row(address, a, L, "nice"), pool: "Lazarus" });
       continue;
     }
     if (custodial) {
@@ -500,6 +554,9 @@ export function buildLists(state, miners, now, gateways) {
       item.why = "custodial-block";
       item.live = null;
       item.hrGhs = null;
+      item.blocks = custodial.n;
+      item.lastStratumHeight = custodial.h;
+      item.seenTs = custodial.t || null;
       naughty.push(item);
       continue;
     }
@@ -514,14 +571,11 @@ export function buildLists(state, miners, now, gateways) {
       continue;
     }
     // A split's payees, where the pool's own block list makes stratum the likelier answer.
-    const paid = {};
-    for (const p of a.pays || []) {
-      if (p.k !== "s" || !recent(p) || !odds[p.pool] || cleared.has(p.pool)) continue;
-      const n = paid[p.pool] || (paid[p.pool] = { pool: p.pool, blocks: 0, lastHeight: 0, lastTs: 0 });
-      n.blocks++;
-      if (p.h > n.lastHeight) { n.lastHeight = p.h; n.lastTs = p.t || 0; }
-    }
-    const best = Object.values(paid).sort((x, y) => y.blocks - x.blocks || y.lastHeight - x.lastHeight)[0];
+    const newest = (counts, last, ok) => Object.keys(counts)
+      .filter((pool) => ok[pool] && !cleared.has(pool) && !(a.c && a.c.pool === pool))
+      .map((pool) => ({ pool, blocks: counts[pool], lastHeight: last[pool][0], lastTs: last[pool][1] || 0 }))
+      .sort((x, y) => y.blocks - x.blocks || y.lastHeight - x.lastHeight)[0];
+    const best = newest(a.ps, a.sl, odds);
     if (best) {
       suspects.push({
         address, list: "suspect", pool: best.pool, why: "split-payee",
@@ -531,20 +585,13 @@ export function buildLists(state, miners, now, gateways) {
       continue;
     }
     // Payees of blocks built on the pool's own gateways.
-    const run = {};
-    for (const p of a.pays || []) {
-      if (!p.g || !recent(p) || !hostedOdds[p.pool] || cleared.has(p.pool)) continue;
-      const n = run[p.pool] || (run[p.pool] = { pool: p.pool, blocks: 0, lastHeight: 0, lastTs: 0 });
-      n.blocks++;
-      if (p.h > n.lastHeight) { n.lastHeight = p.h; n.lastTs = p.t || 0; }
-    }
-    const top = Object.values(run).sort((x, y) => y.blocks - x.blocks || y.lastHeight - x.lastHeight)[0];
+    const top = newest(a.gn, a.gl, hostedOdds);
     if (top) {
       const o = hostedOdds[top.pool];
       suspects.push({
         address, list: "suspect", pool: top.pool, why: "hosted-gateway",
         paidBlocks: top.blocks, lastStratumHeight: top.lastHeight, lastStratumTs: top.lastTs,
-        share: o.share, hostedBlocks: o.hostedBlocks, otherGatewayBlocks: o.otherGatewayBlocks, gatewayNames: o.names.slice(0, 6),
+        share: o.share, hostedBlocks: o.hostedBlocks, directBlocks: o.direct, otherGatewayBlocks: o.otherGatewayBlocks, gatewayNames: o.names.slice(0, 6),
       });
     }
   }
@@ -560,6 +607,7 @@ export function buildLists(state, miners, now, gateways) {
     const item = row(address, blank(), L, "naughty");
     item.pool = "Lazarus";
     item.why = "stratum-endpoint";
+    item.seenTs = now;
     naughty.push(item);
   }
   // A pool can show an address the chain walk has no payout for.
@@ -574,7 +622,7 @@ export function buildLists(state, miners, now, gateways) {
       else if (untagged) suspects.push({ address, list: "suspect", pool: untagged.pool, why: "no-gateway-tag", lastStratumHeight: null });
     }
   }
-  const byHr = (x, y) => (y.hrGhs || 0) - (x.hrGhs || 0) || (y.lastStratumHeight || 0) - (x.lastStratumHeight || 0);
+  const byHr = (x, y) => (y.live ? 1 : 0) - (x.live ? 1 : 0) || (y.hrGhs || 0) - (x.hrGhs || 0) || (y.seenTs || 0) - (x.seenTs || 0) || (y.lastStratumHeight || 0) - (x.lastStratumHeight || 0);
   naughty.sort(byHr);
   suspects.sort((x, y) => (y.share || 0) - (x.share || 0) || (y.paidBlocks || 0) - (x.paidBlocks || 0) || (y.lastStratumHeight || 0) - (x.lastStratumHeight || 0));
   nice.sort((x, y) => (y.hrGhs || 0) - (x.hrGhs || 0));
@@ -597,21 +645,29 @@ export function validAddress(s) {
   return ADDR.test(String(s || ""));
 }
 
-/** Coinbase outputs we indexed for one address, marked unspent when the explorer's UTXO set says so. */
+/** Every coinbase output in the window for one address, marked unspent when the explorer's UTXO set says so. */
 export function addressPays(state, address, utxos) {
-  const a = state.addrs && state.addrs[address];
+  const p = (state.pays && state.pays[address]) || [];
   const unspent = new Set((utxos || []).map((u) => `${u.txid}:${u.vout}`));
   // Lazarus outputs earned while the address sat behind another pool's gateway on Lazarus.
   const v = state.via && state.via.addrs && state.via.addrs[address];
   // From when that pool's gateway first connected to us, not from when this address was first
   // noticed behind it: the watcher sees one address per pass, the gateway carried them all along.
-  const since = v ? Math.min(v.first || Infinity, ...Object.values((state.via && state.via.gateways) || {}).filter((g) => g && g.pool === v.pool).map((g) => g.first || Infinity)) : 0;
-  const pays = (a && a.pays ? a.pays : []).map((p) => ({
-    height: p.h, ts: p.t, txid: p.tx, vout: p.v, sats: p.sats, pool: p.pool,
-    kind: p.k === "d" ? "datum-block" : p.k === "c" ? "custodial" : "stratum",
-    via: v && p.pool === "Lazarus" && (p.t || 0) >= since ? v.pool : null,
-    unspent: !!(p.tx && unspent.has(`${p.tx}:${p.v}`)),
-  }));
+  const gateways = Object.values((state.via && state.via.gateways) || {}).filter((g) => g && v && g.pool === v.pool);
+  const since = v ? Math.min(v.first || Infinity, ...gateways.map((g) => g.first || Infinity)) : 0;
+  const until = v ? Math.max(v.last || 0, ...gateways.map((g) => g.last || 0)) + VIA_LIVE_SEC : 0;
+  const pays = [];
+  for (let i = 0; i < p.length; i += 3) {
+    const e = state.blk[p[i]];
+    if (!e) continue;
+    const [t, pool, kind, , , proof, , txid] = e;
+    pays.push({
+      height: p[i], ts: t, txid, vout: p[i + 1], sats: p[i + 2], pool,
+      kind: kind === "d" ? "datum-block" : kind === "c" ? "custodial" : proof ? "pool-gateway" : "stratum",
+      via: v && pool === "Lazarus" && t >= since && t <= until ? v.pool : null,
+      unspent: !!(txid && unspent.has(`${txid}:${p[i + 1]}`)),
+    });
+  }
   pays.sort((x, y) => y.height - x.height);
   return pays;
 }

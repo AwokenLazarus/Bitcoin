@@ -2,9 +2,10 @@
 // DATUM payee must not stay on the naughty list, and a live stratum worker must.
 //
 //   node scripts/test-naughtylist.mjs
-import { addressPays, applyHosted, blocksMissingKey, buildLists, classifyCoinbase, emptyState, gatewayKey, hostedWindows, setGatewayKey, migrate, noteBlock, observeLive, outputsOf, poolVerdict, rememberStratum, validAddress } from "../src/naughtylist.js";
+import { addressPays, applyHosted, buildLists, classifyCoinbase, derive, dropBlock, emptyState, gatewayKey, hostedWindows, migrate, noteBlock, observeLive, outputsOf, poolVerdict, prune, rememberStratum, validAddress } from "../src/naughtylist.js";
 import { buildView, refreshPools } from "../src/pools.js";
-import { renderAddress, renderList } from "../src/naughtypage.js";
+import { renderAddress, renderList, staleness } from "../src/naughtypage.js";
+import { ingestNaughty } from "../src/worker.js";
 
 let failures = 0;
 const assert = (cond, msg) => { if (!cond) throw new Error(msg); };
@@ -109,7 +110,7 @@ await test("the same block id is not counted twice", async () => {
   const block = { h: 5, t: 10, id: "same", txid: "t", script: stratumScript, outputs: outs(6, "z") };
   noteBlock(state, block);
   noteBlock(state, block);
-  assert(state.addrs.z0.sn === 1, `stratum count ${state.addrs.z0.sn}`);
+  assert(state.pays.z0.length === 3 && derive(state, 20).addrs.z0.sn === 1, `payouts ${state.pays.z0}`);
 });
 
 await test("coinbase outputs keep the address and the value", async () => {
@@ -210,14 +211,6 @@ await test("one pool failing leaves the others read, and says so", async () => {
   assert(buildLists(state, [], NOW).naughty.length === 1, "the pool that answered was not used");
 });
 
-await test("a v1 document gains its block index from the payouts it remembers", async () => {
-  const state = emptyState();
-  noteBlock(state, { h: 7, t: NOW - 100, id: "s", txid: "t", script: stratumScript, outputs: outs(6, "m") });
-  delete state.blk; delete state.ext; state.v = 1;
-  migrate(state);
-  assert(state.v === 2 && state.blk[7] && state.blk[7][1] === "Lazarus" && state.blk[7][2] === "s", JSON.stringify(state.blk));
-});
-
 await test("the page is whole without a script, and escapes what pools and coinbases say", async () => {
   const state = emptyState();
   const evil = '<img src=x onerror=alert(1)>';
@@ -239,7 +232,7 @@ await test("the page is whole without a script, and escapes what pools and coinb
   const bad = renderAddress({ error: "that is not an address", address: '"><script>alert(1)</script>' });
   assert(!bad.includes("<script>alert"), "the address field is not escaped");
   const page = renderAddress({ address: A1, listed: view.naughty.find((r) => r.address === A1), stored: [], asked: [{ pool: "dxpool", hrGhs: 0, paidXbt: 1.5 }], pays: [{ height: 5, ts: NOW, sats: 1e8, pool: evil, kind: "stratum", unspent: true }], unspentSats: 1e8, unspentCount: 1, explorer: "https://mempool.lazarus-xbt.xyz/address/" + A1 });
-  assert(page.includes("Confirmed on stratum at RIPTIDE") && page.includes("1 XBT") && !page.includes("<img src=x"), "address page");
+  assert(page.includes("On stratum now at RIPTIDE") && page.includes("1 XBT") && !page.includes("<img src=x"), "address page");
 });
 
 // A pool that runs the gateways itself: the tag says DATUM, the watcher's proof says otherwise.
@@ -254,7 +247,7 @@ await test("a block under a gateway name proved to be the pool's own is the pool
   assert(classifyCoinbase(own, 160, "", HOSTED, 901).kind === "datum", "another gateway on the same pool was swept up");
   assert(classifyCoinbase(gw("Lazarus", "Soggy Waffle"), 100, "", HOSTED, 902).kind === "datum", "the same name on another pool was swept up");
   // a stock name proves the block it was seen on and nothing about the name
-  assert(classifyCoinbase(generic, 160, "", HOSTED, 950).hosted === true, "a proved block was not listed");
+  assert(classifyCoinbase(generic, 160, "", HOSTED, 950).hosted === 2, "a proved block was not listed");
   assert(classifyCoinbase(generic, 160, "", HOSTED, 951).kind === "datum", "a stock name was treated as proved");
 });
 
@@ -270,8 +263,10 @@ await test("payees of pool-run gateway blocks are suspects once those are most o
   assert(row && row.why === "hosted-gateway" && row.pool === "AlphaPool" && row.paidBlocks === 6, JSON.stringify(row));
   assert(!lists.naughty.some((r) => r.pool === "AlphaPool"), "a split payee is not proof of anything");
   assert(!lists.nice.some((r) => r.address === "hasher3"), "a pool-run gateway block made someone nice");
-  const html = renderList(buildView(state, [], [], now));
-  assert(html.includes("built on gateways the pool runs itself (Soggy Waffle)") && html.includes("6 of 8"), "the page does not say what the row rests on");
+  const html = renderList(buildView(state, [], [], now), { now });
+  assert(html.includes("under the names Soggy Waffle") && html.includes("6 of 8"), "the page does not say what the group rests on");
+  // HOSTED proves the name, and none of these six blocks by its own job: the page must not claim more
+  assert(w.direct === 0 && w.named === 6 && html.includes("0 of those are tied to a job"), "proof by name was passed off as proof by job");
   assert(html.includes("6 of its 8 gateway blocks (75%) were built on gateways it runs itself, under the names Soggy Waffle."), "the pool's own row does not say what was proved");
 });
 
@@ -280,31 +275,138 @@ await test("a name proved later re-judges the blocks already noted, once", async
   const soggy = gw("AlphaPool", "Soggy Waffle"), own = gw("AlphaPool", "nine009");
   for (let h = 1; h <= 6; h++) noteBlock(state, { h, t: now - 1000 + h, id: "s" + h, txid: "t" + h, script: soggy, outputs: outs(5, "hasher") });
   noteBlock(state, { h: 7, t: now - 100, id: "o7", txid: "t7", script: own, outputs: [{ address: "hasher0", vout: 0, sats: 1 }, { address: "owner", vout: 1, sats: 1 }] });
-  assert(state.pools.AlphaPool.d === 7 && state.addrs.hasher1.dn === 6 && state.addrs.hasher1.sn === 0, "setup");
+  let d = derive(state, now);
+  assert(d.pools.AlphaPool.d === 7 && d.addrs.hasher1.dn === 6 && d.addrs.hasher1.sn === 0, "setup");
   assert(!buildLists(state, [], now, []).suspects.length, "nothing is proved yet");
   assert(applyHosted(state, HOSTED) === 6, "six blocks should move");
   assert(applyHosted(state, HOSTED) === 0, "and only once");
-  assert(state.pools.AlphaPool.d === 1 && state.pools.AlphaPool.s === 6, JSON.stringify(state.pools));
-  const a = state.addrs.hasher1;
-  assert(a.dn === 0 && a.sn === 6 && a.dh === 0 && a.sh === 6 && a.ps.AlphaPool === 6 && a.pays.every((p) => p.k === "s" && p.g === 1), JSON.stringify(a));
+  assert(applyHosted(state, null) === 0 && state.blk[1][5] === 1, "an unreadable watcher document took a proof back");
+  d = derive(state, now);
+  assert(d.pools.AlphaPool.d === 1 && d.pools.AlphaPool.s === 6, JSON.stringify(d.pools));
+  const a = d.addrs.hasher1;
+  assert(a.dn === 0 && a.sn === 6 && a.dh === 0 && a.sh === 6 && a.ps.AlphaPool === 6 && a.gn.AlphaPool === 6, JSON.stringify(a));
   // paid by a real gateway's block too: that payout is still its newest DATUM one
-  assert(state.addrs.hasher0.dh === 7 && state.addrs.hasher0.dn === 1, JSON.stringify(state.addrs.hasher0));
-  assert(state.addrs.owner.dn === 1 && !state.addrs.owner.sn, "the owner of a real gateway was touched");
+  assert(d.addrs.hasher0.dh === 7 && d.addrs.hasher0.dn === 1, JSON.stringify(d.addrs.hasher0));
+  assert(d.addrs.owner.dn === 1 && !d.addrs.owner.sn, "the owner of a real gateway was touched");
   assert(buildLists(state, [], now, []).suspects.some((r) => r.address === "hasher1" && r.why === "hosted-gateway"), "the re-judged payees are not listed");
+  assert(addressPays(state, "hasher1", []).every((p) => p.kind === "pool-gateway"), "the address page still calls a pool-run gateway block a miner's own");
 });
 
-await test("blocks noted before the gateway name was kept are read again", async () => {
+await test("every payout in the window is kept, and a block that ages out takes its payouts with it", async () => {
   const now = 2_000_000_000, state = emptyState();
-  const soggy = gw("AlphaPool", "Soggy Waffle");
-  for (let h = 1; h <= 3; h++) noteBlock(state, { h, t: now - 100, id: "id" + h, txid: "t" + h, script: soggy, outputs: outs(5, "hasher") });
-  for (const e of Object.values(state.blk)) e.length = 4; // as an older Worker stored them
-  assert(applyHosted(state, HOSTED) === 0, "a block with no name on file cannot be judged");
-  const todo = blocksMissingKey(state, 2);
-  assert(todo.length === 2 && todo[0][0] === 3 && todo[0][1] === "id3", JSON.stringify(todo));
-  for (const [h] of blocksMissingKey(state, 9)) setGatewayKey(state, h, soggy);
-  assert(!blocksMissingKey(state, 9).length && applyHosted(state, HOSTED) === 3, "the names were not kept");
+  for (let h = 1; h <= 120; h++) noteBlock(state, { h, t: now - 86400 + h, id: "b" + h, txid: "t" + h, script: plainScript("B2Pool"), explorerPool: "B2Pool", outputs: outs(6, "payee") });
+  noteBlock(state, { h: 0, t: now - 15 * 86400, id: "old", txid: "told", script: plainScript("B2Pool"), explorerPool: "B2Pool", outputs: outs(6, "payee") });
+  assert(addressPays(state, "payee2", []).length === 121, "payouts were capped");
+  prune(state, now);
+  const pays = addressPays(state, "payee2", [{ txid: "t7", vout: 2 }]);
+  assert(pays.length === 120 && !state.blk[0] && pays.filter((p) => p.unspent).length === 1, `kept ${pays.length}`);
+  assert(derive(state, now).addrs.payee2.ps.B2Pool === 120, "the count is not the window's");
 });
 
+await test("a reorg replaces a block: the orphan's payouts and tally go", async () => {
+  const now = 2_000_000_000, state = emptyState();
+  noteBlock(state, { h: 5, t: now - 50, id: "orphan", txid: "ta", script: plainScript("B2Pool"), explorerPool: "B2Pool", outputs: outs(6, "loser") });
+  noteBlock(state, { h: 5, t: now - 40, id: "winner", txid: "tb", script: datumScript, outputs: outs(6, "keeper") });
+  const d = derive(state, now);
+  assert(!state.pays.loser0 && !d.pools.B2Pool && d.pools.Lazarus.d === 1 && d.addrs.keeper0.dn === 1, JSON.stringify(d.pools));
+  dropBlock(state, 5);
+  assert(!Object.keys(state.pays).length && !state.blk[5], "dropBlock left something behind");
+});
+
+await test("a known pool's two or three output block is a small split, not custody", async () => {
+  const now = 2_000_000_000, state = emptyState();
+  const script = plainScript("PyBLOCK");
+  assert(classifyCoinbase(script, 1, "PyBLOCK").kind === "custodial" && classifyCoinbase(script, 3, "PyBLOCK").kind === "stratum", "kinds");
+  noteBlock(state, { h: 9, t: now - 60, id: "p9", txid: "t9", script, explorerPool: "PyBLOCK", outputs: [{ address: "poolvanity", vout: 0, sats: 5 }, { address: "devfee", vout: 1, sats: 5 }, { address: "finder", vout: 2, sats: 900 }] });
+  const lists = buildLists(state, [], now, []);
+  assert(!lists.naughty.length && !lists.suspects.length, "a finder paid by a three-output block was listed with nothing from the pool to back it");
+});
+
+await test("presence on every split hides a wallet only where few addresses have it", async () => {
+  const now = 2_000_000_000;
+  const build = (steady) => {
+    const state = emptyState();
+    state.ext = { B2Pool: { w: { s: 10, d: 0 }, m: {} } };
+    for (let h = 1; h <= 10; h++) noteBlock(state, { h, t: now - 1000 + h, id: "id" + h, txid: "t" + h, script: plainScript("B2Pool"), explorerPool: "B2Pool", outputs: [...outs(steady, "steady"), ...outs(4, "once" + h)] });
+    return buildLists(state, [], now, []);
+  };
+  assert(!build(2).suspects.some((r) => r.address === "steady0"), "a lone always-paid address was not treated as the wallet");
+  const many = build(8);
+  assert(many.suspects.filter((r) => r.address.startsWith("steady")).length === 8 && many.poolWallets === 0, "eight steady miners were hidden as wallets");
+});
+
+// ---- the cron: what it reads is the difference between the block record and the store ----
+function fakeKv(seed = {}) {
+  const data = new Map(Object.entries(seed).map(([k, v]) => [k, JSON.stringify(v)]));
+  return { data, get: async (k, type) => (data.has(k) ? (type === "json" ? JSON.parse(data.get(k)) : data.get(k)) : null), put: async (k, v) => { data.set(k, v); } };
+}
+const rec = (h, now, extra = {}) => ({ h, id: "id" + h, t: now - 3600 + h, l: 0, p: "B2Pool", s: "", x: "B2Pool", ...extra });
+function fakeExplorer({ fail = new Set(), miners = true } = {}) {
+  const calls = { coinbase: 0 };
+  globalThis.fetch = async (url) => {
+    const u = String(url);
+    const m = u.match(/\/api\/block\/([^/]+)\/txs\/0$/);
+    if (m) {
+      calls.coinbase++;
+      if (fail.has(m[1])) return new Response("busy", { status: 503 });
+      return new Response(JSON.stringify([{ txid: "tx-" + m[1], vout: Array.from({ length: 6 }, (_, i) => ({ scriptpubkey_address: `${m[1]}-payee${i}`, value: 100 + i })) }]));
+    }
+    if (u.endsWith("/api/miners")) return miners ? new Response(JSON.stringify({ online: [] })) : new Response("down", { status: 502 });
+    if (u.endsWith("/api/gateways")) return new Response(JSON.stringify({ gateways: [] }));
+    return new Response("nope", { status: 404 });
+  };
+  return calls;
+}
+
+await test("the cron fills a hole left by an outage and retries a coinbase the explorer failed on", async () => {
+  const now = 2_000_000_000, realFetch = globalThis.fetch, realError = console.error;
+  console.error = () => {};
+  try {
+    const recs = Array.from({ length: 40 }, (_, i) => rec(100 + i, now));
+    const kv = fakeKv({ naughtyview: { old: true } });
+    const env = { GALAXY: kv };
+    // first run: only the newest ten blocks exist yet, and one coinbase fails
+    fakeExplorer({ fail: new Set(["id135"]) });
+    let r = await ingestNaughty(env, 139, recs.slice(30), now);
+    assert(r.noted === 9 && r.failed === 1 && r.coverage.have === 9 && r.coverage.of === 10, JSON.stringify(r));
+    assert(r.viewKept && JSON.parse(kv.data.get("naughtyview")).old, "a list missing a tenth of its blocks replaced the published one");
+    // later the record has thirty older blocks the cron never saw (an outage): all are read, and 135 again
+    const calls = fakeExplorer();
+    r = await ingestNaughty(env, 139, recs, now);
+    assert(calls.coinbase === 31 && r.noted === 31 && r.coverage.have === 40 && !r.viewKept, JSON.stringify(r));
+    const state = JSON.parse(kv.data.get("naughtylist"));
+    assert(Object.keys(state.blk).length === 40 && state.blk[135][7] === "tx-id135" && state.pays["id100-payee0"].length === 3, "the store does not match the record");
+    // a reorg at the tip: same height, another id
+    fakeExplorer();
+    r = await ingestNaughty(env, 139, [...recs.slice(0, 39), rec(139, now, { id: "fork139" })], now);
+    const after = JSON.parse(kv.data.get("naughtylist"));
+    assert(r.dropped === 1 && r.noted === 1 && after.blk[139][6] === "fork139" && !after.pays["id139-payee0"] && after.pays["fork139-payee0"], JSON.stringify(r));
+    // the pool's API is down: the published list is not replaced with one that has lost every live row
+    fakeExplorer({ miners: false });
+    const before = kv.data.get("naughtyview");
+    r = await ingestNaughty(env, 139, [...recs.slice(0, 39), rec(139, now, { id: "fork139" })], now);
+    assert(r.viewKept && kv.data.get("naughtyview") === before, "the list was republished without the pool's live sessions");
+  } finally { globalThis.fetch = realFetch; console.error = realError; }
+});
+
+await test("a stored v2 document carries over what cannot be read again", async () => {
+  const v2 = { v: 2, asOf: 99, addrs: { a: { wasS: 1, pays: [{ h: 1 }] }, b: { pays: [] } }, blk: { 1: [1, "X", "s"] }, ext: { RIPTIDE: { m: { a: { was: 1 } } } }, via: { addrs: {} } };
+  const s = migrate(v2);
+  assert(s.v === 3 && s.seen.a.s === 1 && !s.seen.b && s.ext.RIPTIDE.m.a.was === 1 && s.via && !Object.keys(s.blk).length && !Object.keys(s.pays).length, JSON.stringify(s));
+  assert(migrate(null).v === 3, "no document");
+});
+
+await test("the page says what is out of date", async () => {
+  const now = 2_000_000_000;
+  const fresh = { asOf: now - 120, coverage: { have: 10, of: 10 }, watch: { asOf: now - 600 }, pools: [{ pool: "RIPTIDE", reader: true, ok: now - 300, err: "" }], naughty: [], suspects: [], nice: [] };
+  assert(staleness(fresh, now).length === 0, JSON.stringify(staleness(fresh, now)));
+  const stale = { ...fresh, asOf: now - 3600, coverage: { have: 4, of: 10 }, watch: { asOf: now - 4 * 3600 }, pools: [{ pool: "RIPTIDE", reader: true, ok: now - 3 * 3600, err: "HTTP 502" }] };
+  const says = staleness(stale, now);
+  assert(says.length === 4 && says[3].startsWith("RIPTIDE did not answer"), JSON.stringify(says));
+  const html = renderList(stale, { now });
+  assert(html.includes("Not fully up to date") && html.includes("4 of the 10 blocks"), "the page does not show the warning");
+  assert(!renderList(fresh, { now }).includes("Not fully up to date"), "a fresh page warns");
+});
 
 await test("an address behind another pool's gateway on Lazarus is confirmed, and its Lazarus payouts are marked", async () => {
   const now = 2_000_000_000, state = emptyState();
@@ -329,12 +431,21 @@ await test("an address behind another pool's gateway on Lazarus is confirmed, an
   assert(addressPays(state, A, []).every((p) => p.via === "CTRL"), "an output paid after the gateway connected was not marked");
   state.via.gateways["097b7017ccfd7669"].first = first;
   assert(addressPays(state, B, []).every((p) => p.via === null), "an honest address's payouts were marked");
+  // once the gateway has gone, later Lazarus payouts are the address's own again
+  state.via.addrs[A].last = now - 3 * 86400;
+  assert(addressPays(state, A, []).find((p) => p.height === 11).via === null, "a payout long after the gateway left was still marked");
+  state.via.addrs[A].last = now - 60;
   const view = buildView(state, miners, gateways, now);
-  const html = renderList(view);
+  const html = renderList(view, { now });
   assert(/Fake pool: a stratum front for another pool(&#39;|&#x27;|')s window/.test(html), "ctrlpool is not marked as a front");
-  assert(/Hashing on CTRL(&#39;|&#x27;|')s stratum/.test(html) && html.includes("gateway 097b7017ccfd7669"), "the list does not say what the row rests on");
-  const page = renderAddress({ address: A, listed: view.naughty.find((r) => r.address === A), stored: [], asked: [], pays, unspentCount: 1, unspentSats: 800 });
-  assert(page.includes("Confirmed on stratum at CTRL") && page.includes("Earned on CTRL's stratum, behind its gateway on Lazarus"), "the address page does not mark the outputs");
+  assert(/Behind CTRL(&#39;|&#x27;|')s own gateway on Lazarus/.test(html) && html.includes("live-now"), "the list does not say what the row rests on");
+  const page = renderAddress({ address: A, listed: view.naughty.find((r) => r.address === A), stored: [], asked: [{ pool: "dxpool", failed: true }], pays, utxosRead: true, unspentCount: 1, unspentSats: 800 }, { now });
+  assert(page.includes("On stratum now at CTRL") && /Hashing on CTRL(&#39;|&#x27;|')s stratum/.test(page) && page.includes("gateway 097b7017ccfd7669") && page.includes("Earned on CTRL's stratum, behind its gateway on Lazarus"), "the address page does not mark the outputs");
+  assert(page.includes("dxpool, asked just now.</strong> Did not answer in time"), "a pool that timed out is passed over in silence");
+  // seen there days ago: still confirmed for the window, but not shown as hashing now
+  for (const v of Object.values(state.via.addrs)) v.last = now - 3 * 86400;
+  const gone = buildLists(state, [], now, []).naughty.find((r) => r.address === A);
+  assert(gone && gone.live === null && gone.hrGhs === null && gone.seenTs === now - 3 * 86400, JSON.stringify(gone));
 });
 
 console.log(failures ? `\n${failures} failing` : "\nall passing");

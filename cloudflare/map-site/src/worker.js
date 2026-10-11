@@ -4,7 +4,7 @@
 //   blocks  compact record of every block since the fork (see galaxy.js blockRecord)
 //   galaxy  the built model the page draws
 import { blockRecord, buildGalaxy, FORK_HEIGHT } from "./galaxy.js";
-import { addressPays, applyHosted, blocksMissingKey, emptyState, migrate, noteBlock, observeLive, outputsOf, prune, rememberStratum, setGatewayKey, validAddress } from "./naughtylist.js";
+import { ACTIVE_SEC, addressPays, applyHosted, dropBlock, migrate, noteBlock, observeLive, outputsOf, prune, rememberStratum, validAddress } from "./naughtylist.js";
 import { askPools, buildView, refreshPools, storedEvidence } from "./pools.js";
 import { renderAddress, renderList } from "./naughtypage.js";
 import { fillHub, renderMapTable } from "./hubfill.js";
@@ -30,8 +30,8 @@ const etagOf = (s) => {
   return `W/"${s.length.toString(36)}-${h.toString(36)}"`;
 };
 
-async function getJSON(url) {
-  const r = await fetch(url, { headers: { "User-Agent": UA, Accept: "application/json" }, signal: AbortSignal.timeout(20000) });
+async function getJSON(url, ms = 20000) {
+  const r = await fetch(url, { headers: { "User-Agent": UA, Accept: "application/json" }, signal: AbortSignal.timeout(ms) });
   if (!r.ok) throw new Error(`${url} -> HTTP ${r.status}`);
   return r.json();
 }
@@ -106,154 +106,148 @@ export async function refresh(env) {
   await env.GALAXY.put("galaxy", JSON.stringify(galaxy));
   let naughty = null;
   try {
-    naughty = await ingestNaughty(env, tip);
+    naughty = await ingestNaughty(env, tip, recs);
   } catch (e) {
     console.error("naughty list ingest failed", e.message);
   }
   return { tip, blocks: recs.length, added: recs.length - stored.length, pages, stored: changed, coverage: Math.round(coverage * 1000) / 10, naughty };
 }
 
-// How many new blocks one cron reads coinbases for. Fourteen days is a few hours of crons.
-const INGEST_BLOCKS = 48;
-const INGEST_WINDOW_SEC = 14 * 86400;
-
-async function noteExplorerBlock(state, b, hosted) {
-  const id = b.id;
-  if (state.ingested && state.ingested[b.height] === id) return false;
-  let outputs = [];
-  let txid = "";
-  try {
-    const txs = await getJSON(`${EXPLORER}/api/block/${id}/txs/0`);
-    const coinbase = Array.isArray(txs) ? txs[0] : null;
-    if (coinbase) {
-      txid = coinbase.txid || "";
-      outputs = outputsOf(coinbase);
-    }
-  } catch (e) {
-    console.error("coinbase tx", b.height, e.message);
-  }
-  if (!outputs.length) {
-    const extras = b.extras || {};
-    const addrs = Array.isArray(extras.coinbaseAddresses) ? extras.coinbaseAddresses : [];
-    outputs = addrs.filter(Boolean).map((address, vout) => ({ address, vout, sats: null }));
-  }
-  noteBlock(state, {
-    h: b.height, t: b.timestamp, id, txid,
-    script: (b.extras && b.extras.coinbaseRaw) || "",
-    explorerPool: (b.extras && b.extras.pool && b.extras.pool.name) || "",
-    outputs,
-  }, hosted);
-  return true;
-}
-
-// Coinbases one cron reads again to learn an older block's gateway name.
-const REKEY_BLOCKS = 20;
+// How many coinbases one cron reads, and how many at once. A cold start (2,300 blocks in fourteen
+// days) is a few hours of crons; scripts/naughty-backfill.mjs does it in one go.
+const INGEST_BLOCKS = 60;
+const INGEST_PARALLEL = 6;
 
 // Requests one cron may spend on the pools' own APIs, shared by the readers that ask per address.
 const POOL_BUDGET = 16;
 
-/**
- * Walk back through coinbases a slice per cron, read what each pool publishes about its miners,
- * and store both the working document (`naughtylist`) and the small one the page reads
- * (`naughtyview`), so a page view never parses the working document.
- */
-export async function ingestNaughty(env, tip) {
-  const now = Math.floor(Date.now() / 1000);
-  const state = migrate((await env.GALAXY.get("naughtylist", "json")) || emptyState());
-  // Gateway names proved to be a pool's own (scripts/hosted-watch.py). Absent: nothing is proved.
-  const hosted = await env.GALAXY.get("hostedgateways", "json").catch(() => null);
-  let noted = 0;
-  let pages = 0;
-  // The chain grew: read the tip page so a block found since the last cron is not skipped.
-  if (state.scannedTo == null || tip > (state.tip || 0)) {
-    const page = await getJSON(`${EXPLORER}/api/v1/blocks/${tip}`);
-    pages++;
-    if (Array.isArray(page) && page.length) {
-      for (const b of page) {
-        if (!b || b.height < FORK_HEIGHT || noted >= INGEST_BLOCKS) break;
-        if (b.timestamp && now - b.timestamp > INGEST_WINDOW_SEC) { state.windowDone = true; break; }
-        if (await noteExplorerBlock(state, b, hosted)) noted++;
-      }
-      if (state.scannedTo == null) state.scannedTo = page[page.length - 1].height;
-    }
+// Below this share of the window's coinbases read, a list built from them would be missing rows,
+// so the last published one stays up.
+const PUBLISH_COVERAGE = 0.97;
+
+/** The coinbase outputs of one block, or null if the explorer did not give them this time. */
+async function coinbaseOf(id) {
+  try {
+    const txs = await getJSON(`${EXPLORER}/api/block/${id}/txs/0`, 10000);
+    const coinbase = Array.isArray(txs) ? txs[0] : null;
+    if (!coinbase || !coinbase.txid) return null;
+    return { txid: coinbase.txid, outputs: outputsOf(coinbase) };
+  } catch (e) {
+    console.error("coinbase tx", id, e.message);
+    return null;
   }
-  while (!state.windowDone && noted < INGEST_BLOCKS && pages < 6 && state.scannedTo - 1 >= FORK_HEIGHT) {
-    const page = await getJSON(`${EXPLORER}/api/v1/blocks/${state.scannedTo - 1}`);
-    pages++;
-    if (!Array.isArray(page) || !page.length) break;
-    let aged = false;
-    for (const b of page) {
-      if (!b || b.height < FORK_HEIGHT || noted >= INGEST_BLOCKS) break;
-      if (b.timestamp && now - b.timestamp > INGEST_WINDOW_SEC) { aged = true; break; }
-      if (await noteExplorerBlock(state, b, hosted)) noted++;
-    }
-    state.scannedTo = page[page.length - 1].height;
-    if (aged) state.windowDone = true;
+}
+
+/**
+ * Keep the naughty list's block store equal to the last fourteen days of `recs` (the record
+ * refresh() keeps of every block), read what each pool publishes about its miners, and store
+ * both the working document (`naughtylist`) and the small one the page reads (`naughtyview`).
+ *
+ * What to read is the difference between `recs` and the store, so nothing depends on a cursor:
+ * a block missed during an outage is read on a later run, a block that was orphaned is dropped,
+ * and a coinbase the explorer failed to return is simply still missing next time.
+ */
+export async function ingestNaughty(env, tip, recs, nowSec) {
+  const now = nowSec || Math.floor(Date.now() / 1000);
+  const state = migrate(await env.GALAXY.get("naughtylist", "json"));
+  // Gateway names proved to be a pool's own (scripts/hosted-watch.py). Absent: nothing new is proved.
+  const hosted = await env.GALAXY.get("hostedgateways", "json").catch(() => null);
+  const window = recs.filter((r) => r.t >= now - ACTIVE_SEC && r.h <= tip);
+  const byHeight = new Map(window.map((r) => [r.h, r]));
+  let dropped = 0;
+  for (const [h, e] of Object.entries(state.blk)) {
+    const r = byHeight.get(Number(h));
+    if (Number(h) > tip || (r && r.id !== e[6])) { dropBlock(state, h); dropped++; }
+  }
+  for (const [h, id] of Object.entries(state.skip)) {
+    const r = byHeight.get(Number(h));
+    if (Number(h) > tip || (r && r.id !== id)) delete state.skip[h];
+  }
+  const missing = window.filter((r) => !state.blk[r.h] && state.skip[r.h] == null).reverse();
+  const batch = missing.slice(0, INGEST_BLOCKS);
+  let noted = 0, failed = 0;
+  for (let i = 0; i < batch.length; i += INGEST_PARALLEL) {
+    const slice = batch.slice(i, i + INGEST_PARALLEL);
+    const got = await Promise.all(slice.map((r) => coinbaseOf(r.id)));
+    slice.forEach((r, k) => {
+      if (!got[k]) { failed++; return; }
+      noteBlock(state, {
+        h: r.h, t: r.t, id: r.id, txid: got[k].txid, outputs: got[k].outputs,
+        tags: { layout: r.l ? "datum" : "other", primary: r.p || "", secondary: r.s || "" },
+        explorerPool: r.x || "",
+      }, hosted);
+      noted++;
+    });
   }
   state.tip = tip;
+  const coverage = { have: window.length - (missing.length - noted), of: window.length };
+  const rejudged = applyHosted(state, hosted);
+  // Addresses behind another pool's gateway on our own DATUM port, as the watcher last saw them.
+  if (hosted && hosted.lazarus) state.via = hosted.lazarus;
+  if (hosted) {
+    const eps = Object.values(hosted.endpoints || {});
+    state.watch = { asOf: hosted.asOf || 0, ports: eps.length, heard: eps.filter((e) => e.last && (hosted.asOf || 0) - e.last < 1800).length, proved: Object.keys(hosted.blocks || {}).length };
+  }
   // A run that is still catching up on coinbases leaves the pools for the next one.
-  const pools = noted > 8 ? {} : await refreshPools(state, { get: getJSON, getText, now, budget: POOL_BUDGET });
+  const pools = noted > 12 ? {} : await refreshPools(state, { get: getJSON, getText, now, budget: POOL_BUDGET });
   const [miners, gateways] = await Promise.all([
     getJSON(`${POOL}/api/miners`).catch(() => null),
     getJSON(`${POOL}/api/gateways`).catch(() => null),
   ]);
-  // Gateway blocks noted before entries kept their gateway name: read a few coinbases again each
-  // run, then re-judge every noted block against what has been proved since.
-  let rekeyed = 0;
-  if (hosted && noted <= 8) {
-    for (const [h, id] of blocksMissingKey(state, REKEY_BLOCKS)) {
-      const b = await getJSON(`${EXPLORER}/api/v1/block/${id}`).catch(() => null);
-      if (!b || !b.extras) break;
-      setGatewayKey(state, h, b.extras.coinbaseRaw || "");
-      rekeyed++;
-    }
-  }
-  const rejudged = applyHosted(state, hosted);
-  // Addresses behind another pool's gateway on our own DATUM port, as the watcher last saw them.
-  if (hosted && hosted.lazarus) state.via = hosted.lazarus;
   const online = (miners && miners.online) || [];
   observeLive(state, online, now);
   rememberStratum(state, now);
   prune(state, now);
-  const view = buildView(state, online, (gateways && gateways.gateways) || [], now);
+  const view = buildView(state, online, (gateways && gateways.gateways) || [], now, { coverage });
   // The Lazarus rows come from live sessions. If the pool did not answer, the last view still has
-  // them and a new one would silently drop every one, so the old view stays up.
-  const keepOld = !miners && (await env.GALAXY.get("naughtyview")) != null;
+  // them and a new one would silently drop every one, so the old view stays up. The same goes
+  // for a store that does not cover the window yet.
+  const thin = coverage.of > 0 && coverage.have / coverage.of < PUBLISH_COVERAGE;
+  const keepOld = (!miners || thin) && (await env.GALAXY.get("naughtyview")) != null;
   await Promise.all([
     env.GALAXY.put("naughtylist", JSON.stringify(state)),
     keepOld ? null : env.GALAXY.put("naughtyview", JSON.stringify(view)),
   ]);
-  return { noted, rekeyed, rejudged, scannedTo: state.scannedTo, windowDone: !!state.windowDone, naughty: view.naughty.length, suspects: view.suspects.length, nice: view.nice.length, pools, viewKept: keepOld };
+  return { noted, failed, dropped, rejudged, coverage, naughty: view.naughty.length, suspects: view.suspects.length, nice: view.nice.length, pools, viewKept: keepOld };
 }
 
 async function naughtyView(env) {
   const view = await env.GALAXY.get("naughtyview", "json");
   if (view) return view;
   // Before the first cron after a deploy there is no view yet: build one from the working document.
-  const state = migrate((await env.GALAXY.get("naughtylist", "json")) || emptyState());
+  const state = migrate(await env.GALAXY.get("naughtylist", "json"));
   return buildView(state, [], [], Math.floor(Date.now() / 1000));
 }
+
+// A pool asked while someone waits for the page gets this long. Past it the page says the pool
+// did not answer, which is better than a page that hangs on someone else's server.
+const ASK_MS = 2500;
 
 async function naughtyAddress(env, address) {
   if (!validAddress(address)) return { error: "that is not an address", address };
   const now = Math.floor(Date.now() / 1000);
-  const [stored, view, utxos] = await Promise.all([
-    env.GALAXY.get("naughtylist", "json").catch(() => null),
+  // The other servers are asked while the stored document is read; the answers are judged
+  // against it afterwards (chainKind is only called once a pool has replied).
+  let state = null;
+  const chainKind = (h) => (state && state.blk[h] ? state.blk[h][2] : null);
+  const [stored, view, utxos, asked] = await Promise.all([
+    env.GALAXY.get("naughtylist", "json").catch(() => null).then((d) => { state = migrate(d); return d; }),
     naughtyView(env).catch(() => null),
-    getJSON(`${EXPLORER}/api/address/${encodeURIComponent(address)}/utxo`).catch(() => []),
+    getJSON(`${EXPLORER}/api/address/${encodeURIComponent(address)}/utxo`, 6000).catch(() => null),
+    askPools(address, { get: (url) => getJSON(url, ASK_MS), now, chainKind }).catch(() => []),
   ]);
-  const state = migrate(stored || emptyState());
-  const chainKind = (h) => (state.blk[h] ? state.blk[h][2] : null);
-  const asked = await askPools(address, { get: getJSON, now, chainKind }).catch(() => []);
+  if (!state) state = migrate(stored);
   const pays = addressPays(state, address, Array.isArray(utxos) ? utxos : []);
   const unspent = pays.filter((p) => p.unspent);
   const listed = view ? [...view.naughty, ...view.suspects, ...view.nice].find((r) => r.address === address) || null : null;
   return {
     address,
+    asOf: view ? view.asOf : null,
     listed,
     stored: storedEvidence(state, address, now),
     asked,
     pays,
+    utxosRead: Array.isArray(utxos),
     unspentSats: unspent.reduce((s, p) => s + (Number(p.sats) || 0), 0),
     unspentCount: unspent.length,
     explorer: `https://mempool.lazarus-xbt.xyz/address/${address}`,
@@ -266,7 +260,8 @@ const PAGE_CSP = "default-src 'self'; script-src 'self' https://static.cloudflar
 async function naughtyPage(request, env, ctx, url) {
   const a = (url.searchParams.get("a") || "").trim();
   const pool = (url.searchParams.get("pool") || "").slice(0, 64);
-  const key = new Request(`${url.origin}/naughtylist/?${a ? `a=${encodeURIComponent(a.slice(0, 100))}` : `pool=${encodeURIComponent(pool)}`}`);
+  const all = url.searchParams.get("all") === "1";
+  const key = new Request(`${url.origin}/naughtylist/?${a ? `a=${encodeURIComponent(a.slice(0, 100))}${all ? "&all=1" : ""}` : `pool=${encodeURIComponent(pool)}`}`);
   const cache = caches.default;
   const hit = await cache.match(key);
   if (hit) return withHeaders(hit, { "X-Edge-Cache": "HIT" });
@@ -274,7 +269,7 @@ async function naughtyPage(request, env, ctx, url) {
   if (a) {
     const d = await naughtyAddress(env, a);
     if (d.error) status = 400;
-    html = renderAddress(d);
+    html = renderAddress(d, { all });
   } else {
     html = renderList(await naughtyView(env), { pool });
   }

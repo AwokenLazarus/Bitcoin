@@ -1,16 +1,19 @@
-// One walk of the last 14 days of coinbases into a naughtylist KV document.
-// The cron does the same walk 48 blocks at a time; this fills it in one go.
+// Fill a v3 naughtylist document in one go: every coinbase of the last 14 days. The cron does the
+// same 60 blocks at a time, which from empty takes a few hours; this takes a couple of minutes.
 //
-//   node scripts/naughty-backfill.mjs > /tmp/naughtylist.json
+//   node scripts/naughty-backfill.mjs blocks.json [naughtylist.json] [hostedgateways.json] > new.json
+//
+// blocks.json is the map Worker's KV key `blocks`. naughtylist.json is the stored document, if
+// there is one: what the pools said and who was once on stratum carry over from it.
+// Progress is saved to SAVE, so an interrupted run picks up where it stopped.
 import { readFileSync, writeFileSync, existsSync } from "node:fs";
-import { emptyState, noteBlock, outputsOf, prune } from "../src/naughtylist.js";
-import { FORK_HEIGHT } from "../src/galaxy.js";
+import { ACTIVE_SEC, applyHosted, migrate, noteBlock, outputsOf, prune } from "../src/naughtylist.js";
 
-const SAVE = "/tmp/naughtylist-state.json";
-
+const [blocksFile, stateFile, hostedFile] = process.argv.slice(2);
+if (!blocksFile) { console.error("usage: naughty-backfill.mjs blocks.json [naughtylist.json] [hostedgateways.json]"); process.exit(2); }
+const SAVE = process.env.SAVE || "/tmp/naughtylist-v3-state.json";
 const EXPLORER = "https://mempool.lazarus-xbt.xyz";
-const WINDOW = 14 * 86400;
-const UA = { "User-Agent": "lazarus-naughtylist/0.1", Accept: "application/json" };
+const UA = { "User-Agent": "lazarus-naughtylist/0.2", Accept: "application/json" };
 
 async function get(url) {
   let last;
@@ -27,46 +30,30 @@ async function get(url) {
   throw last;
 }
 
-async function pool(items, n, fn) {
-  const out = new Array(items.length);
-  let i = 0;
-  async function worker() {
-    while (i < items.length) {
-      const k = i++;
-      out[k] = await fn(items[k], k);
-    }
-  }
-  await Promise.all(Array.from({ length: n }, worker));
-  return out;
-}
-
 const now = Math.floor(Date.now() / 1000);
-const tip = Number(await get(`${EXPLORER}/api/blocks/tip/height`));
-const state = existsSync(SAVE) ? JSON.parse(readFileSync(SAVE, "utf8")) : emptyState();
-let cursor = state.scannedTo == null ? tip : state.scannedTo - 1;
-let aged = false;
-while (!aged && cursor >= FORK_HEIGHT) {
-  const page = await get(`${EXPLORER}/api/v1/blocks/${cursor}`);
-  if (!Array.isArray(page) || !page.length) break;
-  const fresh = page.filter((b) => b && b.height >= FORK_HEIGHT && !(b.timestamp && now - b.timestamp > WINDOW));
-  if (fresh.length < page.length) aged = true;
-  await pool(fresh, 4, async (b) => {
-    const txs = await get(`${EXPLORER}/api/block/${b.id}/txs/0`);
-    const coinbase = Array.isArray(txs) ? txs[0] : null;
-    const outputs = coinbase ? outputsOf(coinbase) : [];
+const recs = JSON.parse(readFileSync(blocksFile, "utf8"));
+const hosted = hostedFile ? JSON.parse(readFileSync(hostedFile, "utf8")) : null;
+const state = existsSync(SAVE) ? JSON.parse(readFileSync(SAVE, "utf8")) : migrate(stateFile ? JSON.parse(readFileSync(stateFile, "utf8")) : null);
+const window = recs.filter((r) => r.t >= now - ACTIVE_SEC);
+const missing = window.filter((r) => !state.blk[r.h] && state.skip[r.h] == null).reverse();
+console.error(`${window.length} blocks in the window, ${missing.length} to read`);
+for (let i = 0; i < missing.length; i += 6) {
+  const slice = missing.slice(i, i + 6);
+  const txs = await Promise.all(slice.map((r) => get(`${EXPLORER}/api/block/${r.id}/txs/0`)));
+  slice.forEach((r, k) => {
+    const coinbase = Array.isArray(txs[k]) ? txs[k][0] : null;
+    if (!coinbase || !coinbase.txid) throw new Error(`no coinbase for ${r.h}`);
     noteBlock(state, {
-      h: b.height, t: b.timestamp, id: b.id, txid: coinbase && coinbase.txid || "",
-      script: (b.extras && b.extras.coinbaseRaw) || "",
-      explorerPool: (b.extras && b.extras.pool && b.extras.pool.name) || "",
-      outputs,
-    });
+      h: r.h, t: r.t, id: r.id, txid: coinbase.txid, outputs: outputsOf(coinbase),
+      tags: { layout: r.l ? "datum" : "other", primary: r.p || "", secondary: r.s || "" },
+      explorerPool: r.x || "",
+    }, hosted);
   });
-  cursor = page[page.length - 1].height - 1;
-  state.scannedTo = cursor + 1;
-  writeFileSync(SAVE, JSON.stringify(state));
-  console.error(`through ${state.scannedTo} addresses ${Object.keys(state.addrs).length}`);
+  if (i % 300 === 0) { writeFileSync(SAVE, JSON.stringify(state)); console.error(`read ${i + slice.length} of ${missing.length}`); }
 }
-state.tip = tip;
-state.windowDone = true;
+state.tip = window.length ? window[window.length - 1].h : state.tip;
+applyHosted(state, hosted);
 prune(state, now);
+writeFileSync(SAVE, JSON.stringify(state));
+console.error(`blocks ${Object.keys(state.blk).length}, skipped ${Object.keys(state.skip).length}, addresses ${Object.keys(state.pays).length}`);
 process.stdout.write(JSON.stringify(state));
