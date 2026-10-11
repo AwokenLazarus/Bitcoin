@@ -188,6 +188,26 @@ impl Gateway {
         self.stream.write_all(&out).unwrap();
     }
 
+    /// How long a read waits for the Prime (10 s unless set).
+    pub fn set_read_timeout(&mut self, wait: Duration) {
+        self.stream.set_read_timeout(Some(wait)).unwrap();
+    }
+
+    /// The next frame's header and its opened body, whatever the command. A frame that is not
+    /// on the channel is a panic: a gateway may drop the session for one.
+    pub fn next_frame(&mut self) -> (Header, Vec<u8>) {
+        let mut hb = [0u8; Header::SIZE];
+        self.stream.read_exact(&mut hb).expect("read header");
+        let h = Header::decode(hb, &mut self.recv_keys).unwrap();
+        let mut payload = vec![0u8; h.len as usize];
+        if h.len > 0 {
+            self.stream.read_exact(&mut payload).unwrap();
+        }
+        assert!(h.channel && !h.sealed, "a frame after the handshake that is not on the channel: {h:?}");
+        let body = self.channel.decrypt_in_place(&mut payload).unwrap().to_vec();
+        (h, body)
+    }
+
     /// Next decrypted mining body (signature stripped), skipping keepalives.
     pub fn next_mining(&mut self) -> Vec<u8> {
         loop {
@@ -198,11 +218,12 @@ impl Gateway {
             if h.len > 0 {
                 self.stream.read_exact(&mut payload).unwrap();
             }
+            // a keep-alive is on the channel too: open it, or the nonces fall out of step
+            assert!(h.channel);
+            let body = self.channel.decrypt_in_place(&mut payload).unwrap();
             if h.cmd != cmd::MINING {
                 continue;
             }
-            assert!(h.channel);
-            let body = self.channel.decrypt_in_place(&mut payload).unwrap();
             let body = if h.signed { &body[..body.len() - crypto::SIG] } else { &body[..] };
             return body.to_vec();
         }
