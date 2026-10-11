@@ -66,8 +66,8 @@
 <section class="hero wrap">
   <h1><span class="kicker">Whitepaper · XBT</span>Lightning Stream: pay as it <em>arrives</em></h1>
   <p class="lede">A way for people and AI agents to pay for a service piece by piece, while it is being delivered: an answer token by token, a file chunk by chunk, an API call by call. Each piece costs one signature. Stop at any moment and nothing more is owed.</p>
-  <p class="note">Draft 3 · 10 October 2026 · Lightning Stream (<a href="https://github.com/AwokenLazarus/Lightning-Stream" rel="noopener">source</a>). Working on test networks only; not yet on XBT mainnet. An outside review found issues and the work on them is not finished; see <a href="#status">Status</a>.</p>
-  <p class="note"><strong>What the name means.</strong> A Stream channel is a direct one-way payment channel between one buyer and one seller. It is not a Lightning channel, and Lightning nodes do not route it. The name is there because the same wallet also pays XBT Lightning invoices (BOLT&nbsp;11) and offers (BOLT&nbsp;12) under the same spending policy. A bridge between the two is designed, not built; see <a href="#lightning">Beside Lightning</a>.</p>
+  <p class="note">Draft 3 · 11 October 2026 · Lightning Stream (<a href="https://github.com/AwokenLazarus/Lightning-Stream" rel="noopener">source</a>). Working on test networks only; not yet on XBT mainnet. An outside review found issues and the work on them is not finished; see <a href="#status">Status</a>.</p>
+  <p class="note"><strong>What the name means.</strong> Lightning Stream works beside Lightning, not inside it. A Stream channel is a direct one-way payment channel anchored on the chain. It is not a Lightning channel, and Lightning nodes do not route it. The two meet in the wallet, which pays over both under one spending policy, and in the hub, which is meant to run beside a Lightning node. How they fit together, where they stay apart and why is in <a href="#lightning">Beside Lightning</a>.</p>
   <nav class="toc" aria-label="On this page">
     <p class="category">On this page</p>
     <a href="#problem">The problem</a><a href="#idea">The idea</a><a href="#channel">The channel</a><a href="#http">Paying over HTTP</a><a href="#fair">Paying only for what checks out</a><a href="#wallet">A wallet for agents</a><a href="#hubs">Hubs</a><a href="#lightning">Beside Lightning</a><a href="#prior">Prior art</a><a href="#numbers">Numbers</a><a href="#status">Status and limits</a>
@@ -293,7 +293,29 @@
     <p>The hub is experimental. The buyer's side holds, since the hub cannot collect without paying the seller. The hub's own side is harder: an outside review found two ways a hub can lose a forwarded payment when a channel closes or is replaced while a payment is in flight. One-way channels with no revocation give the hub nothing to fall back on, and that is the problem Lightning's commitment protocol was built to solve. Fixes for both are in the public tree, but no one outside the project has re-reviewed them, and our own follow-up audit found some of the review's fixes incomplete; see <a href="#status">Status</a>. Do not put real funds through a hub. A bridge to Lightning comes before the hub goes any further.</p>
 
     <h2 id="lightning"><span class="n">8</span>Beside Lightning</h2>
-    <p>Lightning is a network; a Stream channel is a direct line to one seller. Lightning nodes do not see or route a Stream channel, and a Stream channel cannot pay a Lightning invoice. What joins them today is the wallet: it pays both, under the same budgets. The fair comparison is a direct Stream channel against Lightning used the way metered APIs use it today: L402, keysend, or a prepaid balance.</p>
+    <p>Lightning is a network for sending a payment to anyone on it. A Stream channel is a direct line for paying one seller continuously, piece by piece. They do different jobs on the same chain, and Lightning Stream is built to sit next to Lightning without changing it.</p>
+    <h3>Where they meet</h3>
+    <dl>
+      <dt>One wallet</dt><dd>The agent wallet pays over both. It pays XBT Lightning invoices (BOLT&nbsp;11) and offers (BOLT&nbsp;12) through the owner's Lightning node, and it opens and pays Stream channels. One owner policy covers both: the same budgets, approvals and receipts. For each seller the wallet uses what that seller's offer accepts. This part is built.</dd>
+      <dt>One operator</dt><dd>A hub is meant to run beside a Lightning node: on the same machine, on the same XBT node, funded from the same coins and known by the same name. Someone who already runs a Lightning node is online and holds capital, which is what a hub needs. This part is planned, not built; hubs are still experimental (see <a href="#hubs">Hubs</a>).</dd>
+      <dt>One chain</dt><dd>Both settle on XBT and both can use the same XBT node. Coins move between a Lightning node and a Stream channel the ordinary way, with an on-chain transaction.</dd>
+    </dl>
+    <h3>Where they stay apart</h3>
+    <dl>
+      <dt>Lightning nodes do not route Stream payments</dt><dd>A Stream payment goes from the buyer to the seller, or through one hub. It never crosses a Lightning channel.</dd>
+      <dt>A Stream channel is not opened, funded or closed over Lightning</dt><dd>It opens and closes with a transaction on the chain.</dd>
+      <dt>A Stream channel does not pay Lightning invoices</dt><dd>The wallet pays those from the Lightning node. Nothing converts one kind of payment into the other.</dd>
+    </dl>
+    <h3>Why</h3>
+    <p>Three things a Stream channel promises would not survive being carried over Lightning.</p>
+    <dl>
+      <dt>Stop any time, and the rest is never paid</dt><dd>This holds because the buyer's coins sit in an output on the chain that needs both signatures to spend, with a timed refund to the buyer. Each signed state is a claim on that output. Lightning has nowhere to hold coins under such a lock for the length of a session: a Lightning payment either completes or does not. Funding a session with a Lightning payment would mean trusting whoever received it for the unspent part.</dd>
+      <dt>Paying per piece</dt><dd>A Stream payment is one signature riding in the request, and through a hub a piece can cost less than one satoshi. A Lightning payment is locked and released hop by hop, takes a moment on each hop, and in practice has a floor well above one piece of a metered service. Sending each piece over Lightning would turn pay-per-piece into pay-per-batch.</dd>
+      <dt>A plain channel</dt><dd>A Stream channel runs one way and has no old states to punish, so neither side needs a watchtower or needs to stay online. A Lightning channel runs both ways and depends on revocation. A Lightning node routes only channels that speak its protocol, so making it carry a Stream channel would mean changing Lightning itself.</dd>
+    </dl>
+    <p>We looked at a bridge that pays Lightning invoices from a Stream channel, and at funding Stream sessions with Lightning payments. Each gives up one of the promises above, so neither is planned. To reach many sellers with one channel and keep paying per piece, the answer is a hub.</p>
+    <h3>Side by side</h3>
+    <p>The fair comparison is a direct Stream channel against Lightning used the way metered APIs use it today: L402, keysend, or a prepaid balance.</p>
     <div class="table-wrap prose-table">
       <table>
         <thead><tr><th></th><th>Direct Stream channel</th><th>Lightning (L402, keysend or a prepaid balance)</th></tr></thead>
@@ -309,8 +331,8 @@
         </tbody>
       </table>
     </div>
-    <p>A Stream channel wins on the hot path: many small, fast payments from one buyer to one seller, such as a metered API or a model's tokens. Lightning wins at everything a network is for: reaching many sellers, receiving from ordinary wallets, moving money both ways. So the plan is to use Lightning for reach and to fund Stream channels, and to keep the direct channel for repeat buyer–seller pairs. The Lightning bridge comes before more hub work.</p>
-    <p>What exists today is the wallet's Lightning payer. It pays BOLT&nbsp;11 invoices, and that code is in the public tree. Paying BOLT&nbsp;12 offers is built too, and that code is in the public tree: in our lab the wallet paid offers through a Lightning Fork node on regtest. It has not been reviewed outside the project. Offers fit owner-approved budgets and subscriptions, though not per-call metering. The bridge, a service that would let a Stream channel pay a Lightning seller, is designed and not built.</p>
+    <p>A Stream channel wins on the hot path: many small, fast payments from one buyer to one seller, such as a metered API or a model's tokens. Lightning wins at everything a network is for: reaching many sellers, receiving from ordinary wallets, moving money both ways. So they are used side by side: Lightning to pay anyone on it, and a Stream channel, direct or through a hub, for a service that is paid as it arrives.</p>
+    <p>What exists today is the wallet's Lightning payer. It pays BOLT&nbsp;11 invoices, and that code is in the public tree. Paying BOLT&nbsp;12 offers is built too, and that code is in the public tree: in our lab the wallet paid offers through a Lightning Fork node on regtest. It has not been reviewed outside the project. Offers fit owner-approved budgets and subscriptions, though not per-call metering. The wallet does not receive over Lightning. Running a hub beside a Lightning node is being designed.</p>
 
     <h2 id="prior"><span class="n">9</span>Prior art</h2>
     <p>Lightning Stream is not a new kind of channel. It is Jeremy Spilman's one-way payment channel (2013), in the <code>CHECKLOCKTIMEVERIFY</code> form that BIP&nbsp;65 gives as its example, bound to HTTP 402 and to an agent's spending policy. The policy wallet is the part we think is most useful.</p>
@@ -337,7 +359,7 @@
       <dt>Works</dt><dd>Open, pay, stream, close and refund, plus experimental hub routing, on XBT's regtest and a private test network. A Claude agent given only the wallet's tools bought an analytics API, refused a tampered chunk, and the seller received exactly the 8,500 sat it charged.</dd>
       <dt>Reviewed</dt><dd>There has been no independent audit. Our internal review found three critical and four high-severity issues. We changed the code for each and added tests; a summary is not published yet. An outside review of the published code (October 2026) then found more serious issues: in the agent wallet's budget accounting, the hub, the pay-with-work audit and the HTTP layer. Fixes for its findings are in the public tree. Our own follow-up audit of those fixes found that some were incomplete. Further fixes for what it found are in the public tree as well, and a third round is being written. That work is not finished. None of these fixes, public or not, has been re-reviewed by anyone outside the project. Until that happens, treat every issue above as possibly still open.</dd>
       <dt>Experimental</dt><dd>Hub routing. Do not put real funds through a hub.</dd>
-      <dt>Not yet</dt><dd>XBT mainnet, deliberately on hold: test networks only. An independent audit. A published specification. The Python reference implementations. The Lightning bridge, which is designed and not built. Apps for Umbrel and StartOS are being tested on the real platforms.</dd>
+      <dt>Not yet</dt><dd>XBT mainnet, deliberately on hold: test networks only. An independent audit. A published specification. The Python reference implementations. A hub packaged to run beside a Lightning node. Apps for Umbrel and StartOS are being tested on the real platforms.</dd>
       <dt>Trade-offs</dt><dd>Funds are locked per channel until it closes. Money flows one way per channel. The seller must close, with a fee high enough to confirm, before expiry. Opening and closing are public transactions.</dd>
     </dl>
 
