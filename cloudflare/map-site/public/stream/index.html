@@ -156,7 +156,7 @@
       <dt>The buyer can go offline</dt><dd>After it signs, the buyer has nothing to watch. If the seller disappears, the refund path returns everything once the expiry height passes.</dd>
       <dt>The seller has one duty</dt><dd>Close before expiry. Software does this with a safety margin of a day (144 blocks) and the newest state in hand. This is the one place the seller can lose: if fees spike and the close does not confirm before expiry, the buyer can take the refund. The close fee must be bumped as expiry nears.</dd>
       <dt>One round trip to open</dt><dd>The seller publishes one key. Each channel uses a fresh key derived from it, the buyer's key and the expiry, so no two channels look alike on chain and the seller does not need to be asked first.</dd>
-      <dt>Bound to XBT</dt><dd>XBT shares its history, address format and network magic with Bitcoin, so a <code>bc1…</code> address is valid on both. Every Lightning Stream signature uses XBT's <code>SIGHASH_ALL|UNIFIED</code> (0x21), under which XBT signs a different digest from the one SHA-256 Bitcoin computes for the same transaction. A signature made here does not verify there, so a state cannot be replayed on the SHA-256 chain.</dd>
+      <dt>Bound to XBT</dt><dd>XBT is Bitcoin on BLAKE2b proof of work. Up to block 961,640 it has the same history as the SHA-256 chain, and it keeps the same address format and network magic, so a <code>bc1…</code> address is valid on both chains. Every Lightning Stream signature uses XBT's <code>SIGHASH_ALL|UNIFIED</code> (0x21), under which the signed digest differs from the one the SHA-256 chain computes for the same transaction. A signature made here does not verify there, so a state cannot be replayed on the SHA-256 chain.</dd>
     </dl>
 
     <h2 id="http"><span class="n">4</span>Paying over HTTP</h2>
@@ -189,7 +189,7 @@
     </figure>
 
     <p>On a direct channel, each receipt is signed by the seller and bound to the hash of the request it paid for. A buyer that checks every receipt can prove what it bought, and the seller cannot charge one request twice. Both conditions matter. A client that does not check its receipts has neither guarantee, and a call routed through a hub carries no receipt of its own.</p>
-    <p>On the wire this is x402 v2. Networks are named in CAIP-2 form. Because XBT and Bitcoin share a genesis block, XBT mainnet is keyed to its fork block, 961,640, instead of genesis: <code>bip122:0000000000000050c1e5f69672f45929</code>.</p>
+    <p>On the wire this is x402 v2. Networks are named in CAIP-2 form. Because XBT and the SHA-256 chain share a genesis block, XBT mainnet is keyed to its fork block, 961,640, instead of genesis: <code>bip122:0000000000000050c1e5f69672f45929</code>.</p>
 
     <h2 id="fair"><span class="n">5</span>Paying only for what checks out</h2>
     <p>Paying per piece only helps if a bad piece can be caught. For content that exists before it is sold, such as a file, a dataset or a recorded stream, the seller first signs a <em>manifest</em>: the Merkle root of every chunk it promises to send. Then the stream begins.</p>
