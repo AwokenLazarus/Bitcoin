@@ -43,9 +43,18 @@ case "$SITE" in
 esac
 
 if [ "$SITE" = pool ] && [ "$BRANCH" = main ] && [ "${ALLOW_DRIFT:-}" != 1 ]; then
-  if ! diff -rq "$HERE/pool-site/dist/static" "$HERE/../pool/static" >/dev/null; then
+  # The raw template is no longer published; compare it directly so excluding it below
+  # does not weaken the source-drift check.
+  python3 - "$ORIGIN" "$HERE/../pool/static/index.html" <<'PYTHON'
+import sys, urllib.request
+from pathlib import Path
+with urllib.request.urlopen(sys.argv[1] + "/static/index.html", timeout=30) as response:
+    if response.read() != Path(sys.argv[2]).read_bytes():
+        raise SystemExit("refusing a production deploy: node's pool template differs from this tree")
+PYTHON
+  if ! diff -rq -x index.html "$HERE/pool-site/dist/static" "$HERE/../pool/static" >/dev/null; then
     echo "refusing a production deploy: the node's /static differs from pool/static in this tree:" >&2
-    diff -rq "$HERE/pool-site/dist/static" "$HERE/../pool/static" >&2 || true
+    diff -rq -x index.html "$HERE/pool-site/dist/static" "$HERE/../pool/static" >&2 || true
     echo "pull main on the node and restart server.py (or ALLOW_DRIFT=1)" >&2
     exit 3
   fi

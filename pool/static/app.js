@@ -133,7 +133,10 @@
     box.innerHTML = "";
     for (const [id, key] of items) {
       const a = document.createElement("a");
-      a.href = "#" + (id === "fees" ? "top" : id);
+      const topic = { connect: "/connect", hardware: "/hardware", rentals: "/rentals",
+        calc: "/calculator", blocks: "/blocks", how: "/how", pools: "/pools" }[id];
+      const prefix = /^\/zh(\/|$)/.test(location.pathname) ? "/zh" : "";
+      a.href = topic && topic !== pagePath ? prefix + topic : "#" + (id === "fees" ? "top" : id);
       a.dataset.sub = id;
       a.textContent = window.LZ_I18N ? window.LZ_I18N.t(key) : id;
       box.appendChild(a);

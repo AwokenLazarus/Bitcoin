@@ -49,14 +49,8 @@
 </script>
 <script>
 (function () {
-  var q = new URLSearchParams(location.search).get("lang");
-  var c = (document.cookie.match(/(?:^|; )lz_lang=([^;]*)/) || [])[1];
-  var p = /^\/zh(\/|$)/.test(location.pathname);
-  var n = (q || decodeURIComponent(c || "") || "").replace("_", "-");
-  var zh = p || n === "zh" || /^zh-/i.test(n);
-  if (!q && !p && !c) zh = /^zh\b/i.test(navigator.language || (navigator.languages && navigator.languages[0]) || "");
-  if (q === "en" || /^en-/i.test(n) && q) zh = false;
-  if (zh) { document.documentElement.lang = "zh-CN"; document.documentElement.classList.add("lang-zh"); }
+  // The rendered URL owns its language; preferences must not rewrite canonical pages.
+  if (document.documentElement.lang === "zh-CN") document.documentElement.classList.add("lang-zh");
 })();
 </script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -84,12 +78,12 @@
   <div class="topbar wrap">
     <a class="wordmark" href="/">Lazarus <em>Pool</em></a>
     <nav class="nav views" data-i18n-aria="nav.sections" aria-label="Sections">
-      <a href="#top" data-view-link="home" data-i18n="app.nav.home">Pool</a>
-      <a href="#connect" data-view-link="mine" data-i18n="app.nav.mine">Start mining</a>
-      <a href="#payout" data-view-link="payouts" data-i18n="app.nav.payouts">Payouts &amp; blocks</a>
+      <a href="/" data-view-link="home" data-i18n="app.nav.home">Pool</a>
+      <a href="/connect" data-view-link="mine" data-i18n="app.nav.mine">Start mining</a>
+      <a href="/blocks" data-view-link="payouts" data-i18n="app.nav.payouts">Payouts &amp; blocks</a>
       <a href="#miners" data-view-link="network" data-i18n="app.nav.network">Miners</a>
       <a href="#dashboard" data-view-link="me" data-i18n="app.nav.me">My stats</a>
-      <a href="#learn" data-view-link="learn" data-i18n="app.nav.learn">Learn</a>
+      <a href="/how" data-view-link="learn" data-i18n="app.nav.learn">Learn</a>
       <a href="#dashboard" id="nav-payouts" hidden data-i18n="nav.payouts">Payouts</a>
       <a href="#solo" id="nav-solo" hidden data-i18n="nav.solo">Solo</a>
       <span class="nav-out">
@@ -946,19 +940,19 @@
 </footer>
 
 <nav class="tabbar" data-i18n-aria="nav.sections" aria-label="Sections">
-  <a href="#top" data-view-link="home"><i class="tb-ico tb-home" aria-hidden="true"></i><span data-i18n="app.nav.home">Pool</span></a>
-  <a href="#connect" data-view-link="mine"><i class="tb-ico tb-mine" aria-hidden="true"></i><span data-i18n="app.nav.mine">Start mining</span></a>
-  <a href="#payout" data-view-link="payouts"><i class="tb-ico tb-pay" aria-hidden="true"></i><span data-i18n="app.nav.payouts">Payouts &amp; blocks</span></a>
+  <a href="/" data-view-link="home"><i class="tb-ico tb-home" aria-hidden="true"></i><span data-i18n="app.nav.home">Pool</span></a>
+  <a href="/connect" data-view-link="mine"><i class="tb-ico tb-mine" aria-hidden="true"></i><span data-i18n="app.nav.mine">Start mining</span></a>
+  <a href="/blocks" data-view-link="payouts"><i class="tb-ico tb-pay" aria-hidden="true"></i><span data-i18n="app.nav.payouts">Payouts &amp; blocks</span></a>
   <a href="#dashboard" data-view-link="me"><i class="tb-ico tb-me" aria-hidden="true"></i><span data-i18n="app.nav.me">My stats</span></a>
-  <a href="#learn" data-view-link="learn"><i class="tb-ico tb-learn" aria-hidden="true"></i><span data-i18n="app.nav.learn">Learn</span></a>
+  <a href="/how" data-view-link="learn"><i class="tb-ico tb-learn" aria-hidden="true"></i><span data-i18n="app.nav.learn">Learn</span></a>
 </nav>
 
-<script src="/static/i18n.js?v=seo1"></script>
+<script src="/static/i18n.js?v=seo2"></script>
 <script src="/static/i18n/en.js?v=x143"></script>
 <script src="/static/i18n/zh-CN.js?v=x143"></script>
 <script>LZ_I18N.boot();</script>
 <script src="/static/shared.js?v=x143"></script>
-<script src="/static/app.js?v=rent2"></script>
+<script src="/static/app.js?v=seo1"></script>
 <script src="/static/pool.js?v=wk2"></script>
 <script src="/static/chart.js?v=app4"></script>
 </body>
