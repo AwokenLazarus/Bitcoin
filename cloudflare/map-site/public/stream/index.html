@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Lightning Stream: Pay As It Arrives — An XBT Whitepaper</title>
-<meta name="description" content="Lightning Stream lets people and AI agents pay for a service piece by piece as it arrives, over ordinary XBT Lightning channels: a few small payments are locked ahead, each request releases one, and the unused ones come back.">
+<meta name="description" content="Lightning Stream lets people and AI agents pay Lightning node runners for a service piece by piece as it arrives, over ordinary XBT Lightning channels: a few small payments are locked ahead, each request releases one, and the unused ones come back. For pieces too small to pay one by one, a fair lottery pays the exact price on average.">
 <link rel="canonical" href="https://lazarus-xbt.xyz/stream/">
 <meta property="og:type" content="article">
 <meta property="og:site_name" content="Lazarus · Bitcoin BLAKE2b">
@@ -36,16 +36,16 @@
  "@type": "TechArticle",
  "@id": "https://lazarus-xbt.xyz/stream/#article",
  "headline": "Lightning Stream: pay as it arrives",
- "description": "Lightning Stream lets people and AI agents pay for a service piece by piece as it arrives, over ordinary XBT Lightning channels, with stream tickets.",
+ "description": "Lightning Stream lets people and AI agents pay Lightning node runners for a service piece by piece as it arrives, over ordinary XBT Lightning channels, with stream tickets, and with a lottery for amounts smaller than a ticket.",
  "url": "https://lazarus-xbt.xyz/stream/",
  "image": "https://lazarus-xbt.xyz/assets/og.png",
  "datePublished": "2026-10-07",
- "dateModified": "2026-10-11",
+ "dateModified": "2026-10-12",
  "inLanguage": "en",
  "author": { "@type": "Organization", "name": "Lightning Stream", "url": "https://github.com/AwokenLazarus/Lightning-Stream" },
  "publisher": { "@id": "https://lazarus-xbt.xyz/#org" },
  "isPartOf": { "@id": "https://lazarus-xbt.xyz/#website" },
- "about": ["Lightning Network", "hold invoices", "x402", "AI agents", "streaming payments", "XBT"]
+ "about": ["Lightning Network", "hold invoices", "x402", "AI agents", "streaming payments", "probabilistic payments", "XBT"]
 }
 </script>
 </head>
@@ -65,12 +65,13 @@
 
 <section class="hero wrap">
   <h1><span class="kicker">Whitepaper · XBT</span>Lightning Stream: pay as it <em>arrives</em></h1>
-  <p class="lede">A way for people and AI agents to pay for a service piece by piece, while it is being delivered: an answer token by token, a file chunk by chunk, an API call by call. It is an upgrade to Lightning. A few small payments are locked ahead of the service, each request releases one, and the ones not used come back.</p>
-  <p class="note">Draft 4 · 11 October 2026 · Lightning Stream (<a href="https://github.com/AwokenLazarus/Lightning-Stream" rel="noopener">source</a>). The direction on this page is decided and in design. Stream tickets have been tested in a lab on a test network; they are not built into the wallet yet. Nothing here runs on XBT mainnet. An outside review of the earlier design found serious issues; see <a href="#earlier">The earlier design</a> and <a href="#status">Status</a>.</p>
-  <p class="note"><strong>What the name means.</strong> Lightning Stream is built on Lightning, not beside it. It adds one thing to ordinary XBT Lightning channels, the stream ticket, and uses Lightning's own routing, liquidity and nodes for everything else. It is not a separate channel system. An earlier draft of this paper described one, with its own channel on the chain and its own hub; what became of it is in <a href="#earlier">The earlier design</a>.</p>
+  <p class="lede">The people who run Lightning nodes should be able to connect any service they want to offer to the network (a file or media server, AI compute, storage, software of their own) and be paid for it piece by piece, by anyone. Sometimes that is one buyer and one seller, as with a streamed film. Sometimes it is many sellers at once, as in a torrent swarm, or people lending their hardware for AI.</p>
+  <p class="lede">Lightning Stream is an upgrade to Lightning built for that: a way for people and AI agents to pay for a service while it is being delivered, an answer token by token, a file chunk by chunk, an API call by call. A few small payments are locked ahead of the service, each request releases one, and the ones not used come back. For pieces too small to be worth a payment of their own, a fair roll decides which pieces are paid, and the average comes out at the exact price.</p>
+  <p class="note">Draft 5 · 12 October 2026 · Lightning Stream (<a href="https://github.com/AwokenLazarus/Lightning-Stream" rel="noopener">source</a>). The direction on this page is decided and in design. Stream tickets have been tested in a lab on a test network; they are not built into the wallet yet. The lottery for amounts smaller than a ticket has been designed and measured in the same kind of lab; it is not built either, and one of its two forms waits for an outside review. Nothing here runs on XBT mainnet. An outside review of the earlier design found serious issues; see <a href="#earlier">The earlier design</a> and <a href="#status">Status</a>.</p>
+  <p class="note"><strong>What the name means.</strong> Lightning Stream is built on Lightning, not beside it. It adds the stream ticket to ordinary XBT Lightning channels, with a lottery for amounts smaller than a ticket, and uses Lightning's own routing, liquidity and nodes for everything else. It is not a separate channel system. An earlier draft of this paper described one, with its own channel on the chain and its own hub; what became of it is in <a href="#earlier">The earlier design</a>.</p>
   <nav class="toc" aria-label="On this page">
     <p class="category">On this page</p>
-    <a href="#problem">The problem</a><a href="#idea">The idea</a><a href="#ticket">How a ticket works</a><a href="#cost">What it gives and what it costs</a><a href="#http">Paying over HTTP</a><a href="#fair">Paying only for what checks out</a><a href="#wallet">A wallet for agents</a><a href="#built">Built and not built</a><a href="#earlier">The earlier design</a><a href="#prior">Prior art</a><a href="#numbers">Numbers</a><a href="#status">Status and limits</a>
+    <a href="#problem">The problem</a><a href="#idea">The idea</a><a href="#ticket">How a ticket works</a><a href="#cost">What it gives and what it costs</a><a href="#lottery">Smaller than a ticket: the lottery</a><a href="#session">How it comes together</a><a href="#many">Many sellers at once</a><a href="#costs">The costs, stated plainly</a><a href="#http">Paying over HTTP</a><a href="#fair">Paying only for what checks out</a><a href="#wallet">A wallet for agents</a><a href="#built">Built and not built</a><a href="#earlier">The earlier design</a><a href="#prior">Prior art</a><a href="#numbers">Numbers</a><a href="#status">Status and limits</a>
   </nav>
 </section>
 
@@ -190,7 +191,7 @@
     <h3>What it gives</h3>
     <dl>
       <dt>No extra round trip per request</dt><dd>The secret rides in the request. The seller's check took 0.93&nbsp;ms (median) and collecting the ticket 3.5&nbsp;ms (measured on a three-node regtest lab, one hop).</dd>
-      <dt>Pieces metered to the millisatoshi</dt><dd>Pieces are counted in millisatoshis, while money moves a ticket at a time: 1,000&nbsp;sat by default, and never less than 1&nbsp;sat. The part of the last ticket that was not used is trusted to the seller.</dd>
+      <dt>Pieces metered to the millisatoshi</dt><dd>Pieces are counted in millisatoshis, while money moves a ticket at a time: 1,000&nbsp;sat by default, and never less than 1&nbsp;sat. The part of the last ticket that was not used is trusted to the seller. For pieces worth less than a ticket there is a second way to pay: <a href="#lottery">the lottery</a>.</dd>
       <dt>A bounded loss</dt><dd>The buyer can lose at most one ticket. A ticket that was not released is never paid.</dd>
       <dt>Lightning's reach</dt><dd>A buyer can pay any seller a Lightning route reaches. The routing, the liquidity and the nodes are Lightning's own. Lightning Stream runs no network and no hub.</dd>
       <dt>The owner's policy</dt><dd>The agent still pays under the owner's signed policy and still holds no key. In the lab the node permissions the wallet's Lightning payer already uses were enough to pay tickets. The seller's software needed only the permissions to read and write invoices, and its node refused it when it tried to send coins.</dd>
@@ -206,8 +207,127 @@
       <dt>What others can see</dt><dd>No transaction on the chain ties a buyer to a seller, and the seller does not learn the buyer's node. But the nodes along the route see a run of equal payments to one seller and can see when each is released, and every node on a ticket's route sees the same hash.</dd>
     </dl>
 
-    <h2 id="http"><span class="n">5</span>Paying over HTTP</h2>
-    <p>The web has had a status code for this since 1997: <code>402 Payment Required</code>. The x402 standard gives it a shape: the server answers with a price and terms, and the client retries with a payment in a header. Lightning Stream uses that shape. The wire and the receipts are built, for the earlier channel. For tickets the seller's 402 gains one more entry in its list of accepted payments, with its own network id, and the retry carries a ticket's secret where it used to carry a signed channel state. That entry is designed, not built. Upstream x402 clients will not know it, so only Lightning Stream clients will be able to pay with tickets.</p>
+    <h2 id="lottery"><span class="n">5</span>Smaller than a ticket: the lottery</h2>
+    <p>Some things are worth less than the smallest payment worth sending. One piece of a shared file may be worth a tenth of a sat. Lightning carries nothing below 1&nbsp;sat, and at the forks' default policy a routing node charges about 1&nbsp;sat to carry any payment at all. A ticket does not help a seller who will earn less than one ticket from a buyer, and in a swarm of forty sellers that is most of them.</p>
+    <p>The answer is old and simple. Do not pay for every piece. Roll a fair die for every piece instead. Most rolls pay nothing. Now and then a roll wins, and a win pays an amount large enough to be worth sending. The odds are set so that the average is the price. With pieces at a tenth of a sat and a win of 64&nbsp;sat, the odds are 1 in 640: over 640 pieces the buyer pays 64&nbsp;sat on average, which is a tenth of a sat for each. Most pieces move no money at all.</p>
+
+    <figure class="fig">
+      <svg viewBox="0 0 720 232" role="img" aria-labelledby="f6t">
+        <title id="f6t">Each piece is a roll made from a half the seller fixed beforehand and a half the buyer sends after the piece arrives; most rolls pay nothing and a win pays 64 sat.</title>
+        <defs><marker id="a6" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path class="arrow-brass" d="M0 0L10 5L0 10z"/></marker></defs>
+        <rect class="box-brass" x="20" y="24" width="200" height="60" rx="8"/>
+        <text class="t" x="36" y="49">Seller's half</text>
+        <text class="t-s" x="36" y="69">fixed before the first piece</text>
+        <text class="t" x="240" y="59" text-anchor="middle">+</text>
+        <rect class="box-brass" x="260" y="24" width="200" height="60" rx="8"/>
+        <text class="t" x="276" y="49">Buyer's half</text>
+        <text class="t-s" x="276" y="69">sent after the piece arrives</text>
+        <path class="ln-brass" d="M460 54H512" marker-end="url(#a6)"/>
+        <rect class="box" x="520" y="24" width="180" height="60" rx="8"/>
+        <text class="t" x="536" y="49">The roll</text>
+        <text class="t-s" x="536" y="69">both sides can check it</text>
+        <text class="t-h" x="29" y="118">640 PIECES AT A TENTH OF A SAT EACH · ONE WIN EXPECTED</text>
+        <rect class="chunk-off" x="29" y="130" width="32" height="40" rx="5"/>
+        <rect class="chunk-off" x="71" y="130" width="32" height="40" rx="5"/>
+        <rect class="chunk-off" x="113" y="130" width="32" height="40" rx="5"/>
+        <rect class="chunk-off" x="155" y="130" width="32" height="40" rx="5"/>
+        <rect class="chunk-off" x="197" y="130" width="32" height="40" rx="5"/>
+        <rect class="chunk-off" x="239" y="130" width="32" height="40" rx="5"/>
+        <rect class="chunk-off" x="281" y="130" width="32" height="40" rx="5"/>
+        <rect class="chunk-off" x="323" y="130" width="32" height="40" rx="5"/>
+        <rect class="chunk-off" x="365" y="130" width="32" height="40" rx="5"/>
+        <rect class="chunk-off" x="407" y="130" width="32" height="40" rx="5"/>
+        <rect class="chunk" x="449" y="130" width="32" height="40" rx="5"/>
+        <rect class="chunk-off" x="491" y="130" width="32" height="40" rx="5"/>
+        <rect class="chunk-off" x="533" y="130" width="32" height="40" rx="5"/>
+        <rect class="chunk-off" x="575" y="130" width="32" height="40" rx="5"/>
+        <rect class="chunk-off" x="617" y="130" width="32" height="40" rx="5"/>
+        <rect class="chunk-off" x="659" y="130" width="32" height="40" rx="5"/>
+        <text class="t-s" x="45" y="155" text-anchor="middle">0</text>
+        <text class="t-s" x="87" y="155" text-anchor="middle">0</text>
+        <text class="t-s" x="129" y="155" text-anchor="middle">0</text>
+        <text class="t-s" x="171" y="155" text-anchor="middle">0</text>
+        <text class="t-s" x="213" y="155" text-anchor="middle">0</text>
+        <text class="t-s" x="255" y="155" text-anchor="middle">0</text>
+        <text class="t-s" x="297" y="155" text-anchor="middle">0</text>
+        <text class="t-s" x="339" y="155" text-anchor="middle">0</text>
+        <text class="t-s" x="381" y="155" text-anchor="middle">0</text>
+        <text class="t-s" x="423" y="155" text-anchor="middle">0</text>
+        <text class="t-m" x="465" y="155" text-anchor="middle">64</text>
+        <text class="t-s" x="507" y="155" text-anchor="middle">0</text>
+        <text class="t-s" x="549" y="155" text-anchor="middle">0</text>
+        <text class="t-s" x="591" y="155" text-anchor="middle">0</text>
+        <text class="t-s" x="633" y="155" text-anchor="middle">0</text>
+        <text class="t-s" x="675" y="155" text-anchor="middle">0</text>
+        <text class="t-s" x="234" y="190" text-anchor="middle">most rolls: nothing to pay</text>
+        <text class="t-good" x="465" y="190" text-anchor="middle">a win · 64 sat</text>
+        <text class="t-s" x="360" y="216" text-anchor="middle">Over many pieces the buyer pays the exact price: 640 × 0.1 sat = 64 sat.</text>
+      </svg>
+      <figcaption><b>Figure 3.</b> One roll for each piece. The seller's half was fixed before the session and the buyer's half comes after the piece, so neither can choose the result, and both can check it.</figcaption>
+    </figure>
+
+    <h3>Why neither side can steer the roll</h3>
+    <p>Each roll is made from two halves. The seller fixes its half of every roll before the session starts and shows only a fingerprint of them, so it cannot change one later. The buyer adds its half only after the piece has arrived, and for content it can check, only after the check passed. The two halves are hashed together and the result decides. When each side fixed its half it could not know the other's, and afterwards both can work out the result for themselves. Because the buyer's half comes after the piece, a seller cannot serve only the pieces that win. This argument treats the hash function, SHA-256, as a fair source of randomness. It is our own, and nobody outside the project has reviewed it.</p>
+
+    <h3>What it feels like</h3>
+    <p>Uneven in the short run, exact in the long run. A miner knows the feeling: no block for a while, then one, and over a year the income matches the work. A seller's income from rolls evens out with the number of wins, and a seller chooses how often it wins by choosing the size of a win: wins in a day are the day's earnings divided by the win size. A buyer sees the same from the other side. One cheap download may cost a third more or a third less than its price, and over many downloads the average is the price. <a href="#costs">The costs, stated plainly</a> has the figures.</p>
+
+    <h3>Two forms</h3>
+    <dl>
+      <dt>The buyer pays after a win</dt><dd>Nothing is locked ahead. When a roll wins, the seller sends an ordinary Lightning invoice with the proof of the win, and the wallet checks the win itself and pays. This is simple, and it needs nothing but ordinary invoices. Its weakness is plain: a buyer can see a win and not pay. The seller notices within seconds and stops serving, and by then the cheat has had about one win's worth of service for free: 64&nbsp;sat on average at that size, and about three times that one time in twenty (simulated). Where a seller would earn less than one win from a buyer in any case, a buyer that never pays gets everything for free. So this form is a cheap and exact way for honest buyers to pay tiny amounts, with a small, bounded loss to each cheat. It is not enforcement.</dd>
+      <dt>A win that pays itself</dt><dd>The buyer first sets money aside in a locked box at the seller: an ordinary stream ticket, locked over Lightning, which only its key opens. Each roll then gives the seller a small chance of drawing the key, in a way that hides from the buyer whether it did. A seller that draws the key opens the box itself. The buyer cannot refuse to pay a win, because it learns of the win only when the money moves. After every roll, won or lost, the seller can check that the key really was there to be drawn. In our tests a buyer that offered rolls with no key in them was caught on half of those rolls, so a cheat gets about two pieces for free in place of a whole win's worth.</dd>
+    </dl>
+    <p><strong>Where the two forms stand.</strong> Both are designed, and both were measured in a regtest lab, by scripts and prototypes. Neither is built into the wallet or into any seller's software. The first will be built first. The second rests on an argument of our own, that a cheating buyer fails the seller's check on at least half of its rolls, which no cryptographer has reviewed; it will not be built until one has. On today's Lightning it also needs one proof for each locked payment, to show the seller that the box's lock and the rolls use the same key. We measured one such proof at a quarter of a second to make, and it needs a setup step that must not be trusted to one party.</p>
+    <p>In the lab a roll of the first form cost about two millionths of a second for both sides together. A win was paid about a quarter of a second after it was rolled, through one routing node, and each win paid that node 1&nbsp;sat, which is 1.6% of a 64&nbsp;sat win. A roll of the second form cost 16 millionths of a second for each side and 200 to 600 bytes; in 20 runs out of 20 the seller collected its win alone, and the buyer's node showed the payment complete 13&nbsp;ms after the win. <a href="#numbers">Numbers</a> has the rest.</p>
+
+    <h2 id="session"><span class="n">6</span>How it comes together</h2>
+    <p>This is one session as it is designed, from the first request to the last, with a seller the buyer stays with and pieces smaller than a ticket. None of it is built yet.</p>
+    <dl>
+      <dt>Terms</dt><dd>A node runner puts a gateway in front of a service it already runs and sets a price for a piece. The gateway answers a first request with its terms: the price of a piece, the size of a win, and so the odds.</dd>
+      <dt>Limits</dt><dd>The wallet checks those terms against the owner's limits: the largest win, the highest odds, what any one seller may be paid, and the budget for the task. Terms outside the limits are refused before anything is paid.</dd>
+      <dt>Set aside</dt><dd>The wallet locks one payment with the seller over Lightning. Nothing has been spent. It is money set aside.</dd>
+      <dt>Roll</dt><dd>Each request carries the buyer's half of a roll. The roll rides on the request, so the service does not wait for it.</dd>
+      <dt>Win</dt><dd>When a roll wins, the seller collects the payment that was set aside. The wallet sees the money move on its own node, and books what its node paid, never a number the seller sends.</dd>
+      <dt>Top up</dt><dd>The wallet sets the next payment aside in the background, and the session goes on.</dd>
+      <dt>Stop</dt><dd>When the buyer stops, the seller cancels the payment that was set aside, and what was not won comes back, as an unused ticket does.</dd>
+    </dl>
+    <p>Which way of paying is used follows from the size of a piece and from how long the seller stays.</p>
+    <div class="table-wrap prose-table">
+      <table>
+        <thead><tr><th>Case</th><th>How it is paid</th></tr></thead>
+        <tbody>
+          <tr><td>A piece worth a ticket or more</td><td>It releases a ticket.</td></tr>
+          <tr><td>Anything smaller, from a seller the buyer stays with</td><td>A roll. The win is sized so that the session expects about sixteen wins, and is never below 64&nbsp;sat when the payment passes through a routing node.</td></tr>
+          <tr><td>A seller touched only briefly, as most sellers in a swarm are</td><td>A roll, paid after a win, with nothing set aside.</td></tr>
+          <tr><td>A single call from a buyer with no session</td><td>One ordinary Lightning payment.</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h2 id="many"><span class="n">7</span>Many sellers at once</h2>
+    <p>Nothing in a ticket ties a buyer to one seller: each ticket is its own Lightning payment. In a five-node lab (a buyer, one routing node, and three seller nodes standing in for up to 200 sellers) one buyer with one channel held tickets with 200 sellers at the same time: two each, 400 tickets, locked in 11 seconds. One request that paid all 200 in the same instant was collected by every seller within 0.8&nbsp;s. A seller that had just appeared could be paid a quarter of a second later through one routing node, and a tenth of a second later over a direct channel. With the lottery's pay-after-win form, 200 sellers that all won in the same instant had all been paid 4.6&nbsp;s later, with nothing held for any of them beforehand.</p>
+    <p>Three limits remain, and each has an answer.</p>
+    <dl>
+      <dt>A ticket cannot be re-aimed</dt><dd>Once a Lightning payment is locked, its route and its receiver are sealed. Money cannot be locked first and pointed at a seller later, and a locked ticket cannot be moved to another seller. What can be done is to lock a new one, which is the quarter second above. The answer is not to wait for it: for content the buyer can check, the seller serves the first piece while the ticket locks, and paying after a win needs no lock at all.</dd>
+      <dt>Tickets are too coarse for small sellers</dt><dd>Through a routing node each collected payment costs about 1&nbsp;sat, so paying one seller less than about 100&nbsp;sat wastes more than 1%, and below 1&nbsp;sat nothing can be paid. In a swarm most sellers earn far less than that. The answer is <a href="#lottery">the lottery</a>.</dd>
+      <dt>Held tickets are a shared, limited resource</dt><dd>A channel carries 483 held payments across all sellers: 60 sellers at 8 tickets each, 241 at 2. A seller that leaves without cancelling keeps its tickets locked for hours, and in a swarm sellers leave all the time. The answer is to hold little: one or two small tickets for each seller when there are many, one where a win pays itself, and none where the buyer pays after a win.</dd>
+    </dl>
+    <p>An owner cannot list sellers it has never heard of. In place of a list of names it approves a kind of spending: a budget for the task, and a small cap on what any one unknown seller can be paid. That part of the policy is designed, not built.</p>
+
+    <h2 id="costs"><span class="n">8</span>The costs, stated plainly</h2>
+    <p>The spreads below are simulations. "Nine days in ten" means the middle nine tenths of the days simulated.</p>
+    <dl>
+      <dt>Uneven income for a seller</dt><dd>A seller that earns about 4,000&nbsp;sat a day in pieces of a tenth of a sat, with wins of 64&nbsp;sat, is paid between 80% and 120% of what it earned nine days in ten, and between 96% and 104% over a month. A seller that earns 1,000&nbsp;sat a day sees 58% to 141% on a day and 92% to 108% over a month. A seller that earns 100&nbsp;sat a day gets no win at all one day in five.</dd>
+      <dt>The seller chooses the trade</dt><dd>A smaller win means steadier income and a larger share lost to routing fees, because each win costs about 1&nbsp;sat for each routing node it passes: 6.25% of a 16&nbsp;sat win, 1.6% of 64, 0.4% of 250, 0.1% of 1,000. A node that runs several services gets steadier income for nothing, because all their wins land on one node: twenty services that each earn 1,000&nbsp;sat a day bring that node within 9% of its earnings on a day.</dd>
+      <dt>Uneven cost for a buyer</dt><dd>A download priced at 1,638&nbsp;sat (4&nbsp;GiB at a tenth of a sat a piece, wins of 64&nbsp;sat) cost between 1,152 and 2,176&nbsp;sat nine times in ten. For it not to stall on an unlucky run more than once in a thousand, the owner must allow 2,795&nbsp;sat, fees included. The budget is a ceiling. The average stays at the price.</dd>
+      <dt>The seller goes first when the buyer pays after a win</dt><dd>By about one win's worth for each new buyer, and by everything where a seller earns less than one win from a buyer. Nothing on today's Lightning can force a buyer to pay a seller it touched only briefly.</dd>
+      <dt>What routing nodes carry</dt><dd>Tickets are held payments, and a win that pays itself needs one held for each seller. A routing node is paid nothing for one that is cancelled. If a seller vanishes with tickets locked, the routing node that opened the channel to it bears a forced close: with 100 tickets of 1,000&nbsp;sat locked that cost about 29,000&nbsp;sat in all at 1&nbsp;sat/vB, which is 29% of the tickets' value, and with 3 tickets 1,530&nbsp;sat (measured on regtest). A locked payment below a channel's dust limit, 354&nbsp;sat in our lab, cannot be claimed on the chain at all. Paying after a win holds nothing, and pays the routing node for every payment it carries.</dd>
+      <dt>Pooling does not work here</dt><dd>Miners even out their income in pools. That does not carry over, because a mining share is proof of work that anyone can check, and a piece served proves nothing to anyone who was not there: a seller and a friendly buyer could invent pieces and draw on the pool for free.</dd>
+      <dt>The deeper help is in Lightning itself</dt><dd>Changes to Lightning would do more than anything we can add on top of it. Point locks first: with them the self-paying win would no longer need its proof. Then a fee for held payments, which would pay routing nodes for what tickets ask of them. Neither exists on the XBT Lightning forks. They are other people's software. We can ask for them, and we cannot promise them.</dd>
+    </dl>
+
+    <h2 id="http"><span class="n">9</span>Paying over HTTP</h2>
+    <p>The web has had a status code for this since 1997: <code>402 Payment Required</code>. The x402 standard gives it a shape: the server answers with a price and terms, and the client retries with a payment in a header. Lightning Stream uses that shape. The wire and the receipts are built, for the earlier channel. For tickets the seller's 402 gains one more entry in its list of accepted payments, with its own network id, and the retry carries a ticket's secret where it used to carry a signed channel state. That entry is designed, not built. The lottery will need an entry of its own, whose terms carry the size of a win and the odds and whose requests carry the roll; it is not specified yet. Upstream x402 clients will not know it, so only Lightning Stream clients will be able to pay with tickets.</p>
 
     <figure class="fig">
       <svg viewBox="0 0 720 340" role="img" aria-labelledby="f3t">
@@ -234,14 +354,14 @@
         <path class="ln-good" d="M505 300H120" marker-end="url(#a3)"/>
         <text class="t-good" x="490" y="292" text-anchor="end">200 OK · data · receipt signed by seller</text>
       </svg>
-      <figcaption><b>Figure 3.</b> The 402 step and the lock happen once. After that every request simply carries the next secret. This is the designed flow; for what was measured see <a href="#numbers">Numbers</a>.</figcaption>
+      <figcaption><b>Figure 4.</b> The 402 step and the lock happen once. After that every request simply carries the next secret. This is the designed flow; for what was measured see <a href="#numbers">Numbers</a>.</figcaption>
     </figure>
 
     <p>Each receipt is signed by the seller and bound to the hash of the request it paid for. With tickets the receipt matters more than before, because it is the only proof of payment the buyer can show: the secret proves nothing. A client that does not check its receipts has no such proof. An answer lost on the way is paid for, since the secret was spent when it left the wallet, and a refusal (a 402) is not signed.</p>
     <p>For a single call from a buyer with no session, an ordinary Lightning payment is the right tool, and a seller's 402 can offer that beside tickets.</p>
     <p>On the wire this is x402 v2. Networks are named in CAIP-2 form. Because XBT and the SHA-256 chain share a genesis block, XBT mainnet is keyed to its fork block, 961,640, instead of genesis: <code>bip122:0000000000000050c1e5f69672f45929</code>. XBT is Bitcoin on BLAKE2b proof of work, and up to that block it has the same history as the SHA-256 chain, so its Lightning invoices look alike on both. What marks an XBT Lightning node, invoice or offer is feature bit 512. The wallet checks it on everything it pays, and it pays only through channels whose funding it can prove exists on XBT alone.</p>
 
-    <h2 id="fair"><span class="n">6</span>Paying only for what checks out</h2>
+    <h2 id="fair"><span class="n">10</span>Paying only for what checks out</h2>
     <p>Paying per piece only helps if a bad piece can be caught. For content that exists before it is sold, such as a file, a dataset or a recorded stream, the seller first signs a <em>manifest</em>: the Merkle root of every chunk it promises to send. Then the stream begins.</p>
 
     <figure class="fig">
@@ -273,13 +393,13 @@
         <text class="t-s" x="605" y="172" text-anchor="middle">never paid</text>
         <text class="t-s" x="232" y="198">The seller risks one chunk. A chunk that fails its proof is not paid for.</text>
       </svg>
-      <figcaption><b>Figure 4.</b> Streamed fair exchange. A seller that tampers with chunk 5 is paid for chunks 1 to 4, which it delivered, and nothing after.</figcaption>
+      <figcaption><b>Figure 5.</b> Streamed fair exchange. A seller that tampers with chunk 5 is paid for chunks 1 to 4, which it delivered, and nothing after.</figcaption>
     </figure>
 
     <p>This is where the order of a ticket turns round: the buyer checks a chunk first and releases its ticket second. The last chunk can be sold the opposite way, as an ordinary Lightning payment to a hash the seller chose, so that its key arrives only with the payment. Fair exchange is built and tested on the earlier channel. On tickets it is designed, and simpler than it was, but not built.</p>
     <p>This only works for fixed content. Nobody can commit to the Merkle root of a model's answer before the answer exists. For generated output, paying per piece still limits what the buyer can lose to one ticket, but it cannot prove that a piece is any good.</p>
 
-    <h2 id="wallet"><span class="n">7</span>A wallet for agents</h2>
+    <h2 id="wallet"><span class="n">11</span>A wallet for agents</h2>
     <p>An AI model should be able to spend, but never to hold a key: a model can be tricked by what it reads. So the agent never signs. It asks a wallet to pay, and the wallet decides.</p>
 
     <figure class="fig">
@@ -307,21 +427,21 @@
         <text class="t-s" x="546" y="182">invoices · offers · tickets</text>
         <path class="ln-brass" d="M470 168H524" marker-end="url(#a5)"/>
       </svg>
-      <figcaption><b>Figure 5.</b> The model sees tools such as <i>quote</i>, <i>pay</i> and <i>balance</i>. The wallet is built so that an agent held to those tools, even a prompt-injected one, can spend only what the policy allows, with the exceptions listed below.</figcaption>
+      <figcaption><b>Figure 6.</b> The model sees tools such as <i>quote</i>, <i>pay</i> and <i>balance</i>. The wallet is built so that an agent held to those tools, even a prompt-injected one, can spend only what the policy allows, with the exceptions listed below.</figcaption>
     </figure>
 
     <p>The wallet speaks MCP, the protocol AI agents already use for tools, so any agent that can call a tool can pay. It pays through the owner's own Lightning node: today XBT Lightning invoices (BOLT&nbsp;11) and offers (BOLT&nbsp;12), and tickets once they are built in. Payments above the owner's threshold wait for the owner's signature from another device. The policy itself is signed by the owner, so the agent cannot rewrite it.</p>
     <p>For tickets the wallet gains a ticket book. The secrets are made inside the wallet's signer, and the agent never sees one before it is spent. Each ticket is counted twice: against a cap on what may be locked when it is locked, and against the budgets when its secret leaves. A released secret is written down before it leaves the signer, so a crash cannot under-count what was spent. Routing fees are counted as spending. All of this is designed, not built: the wallet's Lightning payer today allows one payment in flight at a time, and tickets need several.</p>
     <p>The scope of the wallet's claim is narrow. It covers an agent whose only way to the wallet is the MCP tools. Software that can open the wallet's signer socket directly is outside it, so the socket must stay out of the agent's reach. The policy binds only what goes through the wallet: anyone who holds a broader credential for the Lightning node can spend past it. The policy also limits how much an allowed seller can be paid, not what else that seller does. And the outside review found faults in this very part, the wallet's budget accounting; see <a href="#status">Status</a> for where that stands. One rule that came out of those fixes carries over to tickets unchanged: the wallet books what it released, never a number the seller sends.</p>
 
-    <h2 id="built"><span class="n">8</span>Built and not built</h2>
+    <h2 id="built"><span class="n">12</span>Built and not built</h2>
     <dl class="status">
       <dt>Built</dt><dd>The agent wallet and its policy engine: budgets, per-seller caps, approvals and the log. The wallet's Lightning payer, which pays BOLT&nbsp;11 invoices and BOLT&nbsp;12 offers through the owner's node. The HTTP 402 wire and signed receipts. Fair exchange for fixed content. Pay with work, where a miner pays with pool shares instead of coins. All of it is in the public tree and runs on test networks only.</dd>
-      <dt>Lab-tested</dt><dd>Stream tickets. The lock, release, cancel and failure cases in <a href="#numbers">Numbers</a> were run on three Lightning nodes by scripts. The ticket book in the wallet, the seller's software, the 402 entry for tickets and fair exchange on tickets are not built.</dd>
-      <dt>Planned</dt><dd>A deeper upgrade: a stream output inside a Lightning channel. Two direct peers would add one output to their channel, and the payer would pay out of it by signing a rising total for each piece, with no Lightning payment round per piece. It would bring back exact settlement per piece, which tickets give up. It needs a new channel type in the Lightning node software, so it can only be done with the maintainers of the XBT Lightning forks, and we mean to raise it with them. As designed it covers two direct peers only; tickets would still carry a payment across a route.</dd>
+      <dt>Lab-tested</dt><dd>Stream tickets. The lock, release, cancel and failure cases in <a href="#numbers">Numbers</a> were run on three Lightning nodes by scripts. The ticket book in the wallet, the seller's software, the 402 entry for tickets and fair exchange on tickets are not built. Tickets to many sellers at once, and both forms of <a href="#lottery">the lottery</a>, were run the same way, by scripts and prototypes on three and five Lightning nodes. Neither form of the lottery is built, and the win that pays itself will not be built before a cryptographer has reviewed the argument it rests on.</dd>
+      <dt>Planned</dt><dd>A deeper upgrade: a stream output inside a Lightning channel. Two direct peers would add one output to their channel, and the payer would pay out of it by signing a rising total for each piece, with no Lightning payment round per piece. It would bring back exact settlement per piece, which tickets give up. It needs a new channel type in the Lightning node software, so it can only be done with the maintainers of the XBT Lightning forks, and we mean to raise it with them. As designed it covers two direct peers only; tickets would still carry a payment across a route. For many sellers and for the lottery, the change that would help most is a different one, point locks; see <a href="#costs">The costs, stated plainly</a>.</dd>
     </dl>
 
-    <h2 id="earlier"><span class="n">9</span>The earlier design</h2>
+    <h2 id="earlier"><span class="n">13</span>The earlier design</h2>
     <p>The first version of Lightning Stream did not carry payments over Lightning. It used its own one-way payment channel on the chain: Jeremy Spilman's channel of 2013, in the <code>CHECKLOCKTIMEVERIFY</code> form that BIP&nbsp;65 gives as its example. The buyer locked coins once in an output on the chain, signed a slightly larger running total for every piece, and the seller settled once. To reach many sellers with one channel it added a hub, with each forwarded payment locked by an adaptor signature.</p>
     <p>An outside review of the published code (October 2026) found the hub the weakest part. One-way channels with no revocation give a hub nothing to fall back on when a channel closes or is replaced while a payment is in flight, and that is the problem Lightning's commitment protocol was built to solve. The review advised using Lightning for what a network is good at, reaching many sellers, and keeping the direct channel as a fast path. We went further and moved the whole payment path onto Lightning.</p>
     <dl>
@@ -331,7 +451,7 @@
     </dl>
     <p>An earlier draft of this paper had a section, "Beside Lightning", which argued that Lightning could not hold a buyer's coins under a lock for the length of a session. Hold invoices do that, for a ticket at a time. That section no longer describes Lightning Stream.</p>
 
-    <h2 id="prior"><span class="n">10</span>Prior art</h2>
+    <h2 id="prior"><span class="n">14</span>Prior art</h2>
     <p>Nothing in a ticket is a new mechanism. It is the hold invoice Lightning nodes already have, used the way "stuckless payments" were proposed for Lightning in 2019, and bound to HTTP 402 and to an agent's spending policy. The policy wallet is the part we think is most useful.</p>
     <dl>
       <dt>L402</dt><dd>Lightning Labs' HTTP 402 binding: a macaroon plus a Lightning invoice. Used for metered services it becomes a prepaid balance at the seller. A seller that collects each ticket on arrival, before it is used, is running exactly that in ticket-sized units, and a seller whose node has no hold invoices can do so.</dd>
@@ -341,6 +461,9 @@
       <dt>Routstr and Cashu</dt><dd>Pay-per-token inference with ecash. Payments are instant and private, but the mint holds the money. A locked ticket is held by nobody: it sits in Lightning channels until the buyer releases it or it returns.</dd>
       <dt>Ark</dt><dd>One operator serving many recipients off chain, the shape the retired hub had. Users can always exit on chain alone, but must come back before their coins' expiry to refresh them. Lightning Stream now has no operator of its own.</dd>
     </dl>
+    <h3>Paying by lottery</h3>
+    <p>Paying small amounts by lottery is an old idea. Ronald Rivest described it in 1997, in "Electronic Lottery Tickets as Micropayments", with a bank that honours the winning tickets. Later systems put a contract on a chain in the bank's place: it holds the payer's deposit and pays a winner without the payer's help. Lightning has neither a bank nor such a contract, and that is why the plain form here leaves the seller exposed by about one win.</p>
+    <p>In May 2026 Paul Gerhart, Jay Taylor and Sri Aravinda Krishnan Thyagarajan published "Probabilistic Atomic Swaps for Bitcoin and Friends" (<a href="https://arxiv.org/abs/2605.04975" rel="noopener">arXiv:2605.04975</a>), which builds an exchange that completes with a set probability and enforces itself, and demonstrates it on Lightning. The aim of a win that enforces itself off the chain is theirs first. As we read their paper, each of their rolls is a small paid exchange of its own, where ours keeps one payment locked and lets the roll ride on a request the buyer sends anyway; and theirs comes with a formal treatment, where the check ours depends on is our own argument and has not been reviewed.</p>
     <h3>Where tickets sit</h3>
     <p>Tickets sit between a prepaid balance and a payment per piece. A prepaid balance hands the seller the money before the service. A payment per piece hands it over piece by piece and makes each piece wait. A ticket commits the money before the service and hands it over a ticket at a time, inside the request.</p>
     <div class="table-wrap prose-table">
@@ -358,8 +481,8 @@
     </div>
     <p>The timings and fees in this table were measured on a three-node regtest lab, one hop. A seller's 402 can list more than one of the three.</p>
 
-    <h2 id="numbers"><span class="n">11</span>Numbers</h2>
-    <p>Everything in this section was measured on a three-node regtest lab, one hop: a buyer, one routing node and a seller, all running Lightning Fork <code>v0.21.3-beta-blake2b.17</code> with default settings, on one machine, with two channels of 5,000,000&nbsp;sat. The nodes were driven by scripts, not by the wallet, and all traffic was on loopback, so no figure includes real network latency. The script that reproduces these figures is being prepared for the public tree; until it is there, treat them as our own claim.</p>
+    <h2 id="numbers"><span class="n">15</span>Numbers</h2>
+    <p>Everything in this section was measured on a three-node regtest lab, one hop: a buyer, one routing node and a seller, all running Lightning Fork <code>v0.21.3-beta-blake2b.17</code> with default settings, on one machine, with two channels of 5,000,000&nbsp;sat. The nodes were driven by scripts, not by the wallet, and all traffic was on loopback, so no figure includes real network latency. A script in the public tree, <code>scripts/ln_ticket_regtest.sh</code>, now reruns these cases on four nodes. Its figures differ a little from the ones below and are in the tree's <a href="https://github.com/AwokenLazarus/Lightning-Stream/blob/main/docs/TICKETS.md" rel="noopener"><code>docs/TICKETS.md</code></a>.</p>
     <div class="table-wrap prose-table">
       <table>
         <thead><tr><th>Question</th><th>Measured on a three-node regtest lab, one hop</th></tr></thead>
@@ -380,16 +503,40 @@
         </tbody>
       </table>
     </div>
-    <p>Not measured: more than one hop; real network latency; the fees and routes of mainnet; a seller on the Core Lightning fork; tickets on a direct channel with no routing node; a force close with hundreds of tickets in the channel (it was run with 3); and a seller claiming a ticket on the chain because the routing node stayed down.</p>
+    <p>Not measured: more than one hop; real network latency; the fees and routes of mainnet; a seller on the Core Lightning fork; tickets on a direct channel with no routing node; a force close with hundreds of tickets in the channel (in this lab it was run with 3); and a seller claiming a ticket on the chain because the routing node stayed down. The four-node script has since run a force close with 100 tickets, which is the figure in the table below.</p>
 
-    <h2 id="status"><span class="n">12</span>Status and limits</h2>
+    <h3>The lottery and many sellers</h3>
+    <p>These come from three later runs, all on regtest, on one machine, on loopback, with Lightning Fork nodes. Tickets to many sellers and the pay-after-win lottery ran on five nodes: a buyer, one routing node and three seller nodes. Up to 200 sellers were sessions spread over those three nodes, and a request and its answer were calls inside one program; every invoice, payment, lock, collect and cancel was a real call on a node. The win that pays itself ran on three nodes, with its roll in a prototype of our own. The scripts for these runs are not in the public tree, so treat the figures as our own claim. Rows marked simulated involved no node.</p>
+    <div class="table-wrap prose-table">
+      <table>
+        <thead><tr><th>Question</th><th>Result</th></tr></thead>
+        <tbody>
+          <tr><td>Tickets to many sellers through one channel</td><td>400 tickets to 200 sellers, 2 each, locked in 11.0&nbsp;s. Offered 600 over two channels: all 600 locked, 483 on one and 117 on the other, in 9.2&nbsp;s.</td></tr>
+          <tr><td>A new seller appears: until it holds a ticket</td><td>248&nbsp;ms median through one routing node (30 runs); 0.11&nbsp;s over a direct channel.</td></tr>
+          <tr><td>One request that pays many sellers</td><td>Every seller's collect had returned after 28&nbsp;ms for 10 sellers, 149&nbsp;ms for 50 and 809&nbsp;ms for 200. The buyer's node showed every payment complete after 0.2&nbsp;s, 0.8&nbsp;s and 2.9&nbsp;s.</td></tr>
+          <tr><td>A force close with 100 tickets of 1,000&nbsp;sat</td><td>The routing node paid 4,635&nbsp;sat in fee for the closing transaction and about 29,000&nbsp;sat in all to get its funds back, at 1&nbsp;sat/vB. With 3 tickets: 1,530&nbsp;sat.</td></tr>
+          <tr><td>One roll, pay after a win</td><td>2.3 millionths of a second for both sides together, in Python.</td></tr>
+          <tr><td>A win, until the seller is paid (pay after a win, one routing node)</td><td>With 24 sellers at 400 pieces a second, odds of 1 in 640 and wins of 64&nbsp;sat: 218&nbsp;ms median, 255&nbsp;ms at the longest, 30 wins. With 96 sellers and odds of 1 in 32: 284&nbsp;ms median, 509&nbsp;ms at the longest, 520 wins. Every payment succeeded.</td></tr>
+          <tr><td>Many sellers win in the same instant</td><td>All paid after 0.76&nbsp;s for 24 sellers, 2.3&nbsp;s for 100 and 4.6&nbsp;s for 200.</td></tr>
+          <tr><td>Routing fee for a win</td><td>1&nbsp;sat for each routing node: 1.56% of a 64&nbsp;sat win.</td></tr>
+          <tr><td>A buyer that never pays (simulated)</td><td>It is served 1.00 win's worth before its first win on average, 2.98 one time in twenty.</td></tr>
+          <tr><td>One roll, a win that pays itself</td><td>16 to 19 millionths of a second for each side and 197 to 581 bytes, for odds from 1 in 16 to 1 in 65,536 (a prototype in Rust, one processor core).</td></tr>
+          <tr><td>A buyer that offers rolls with no key in them</td><td>Caught on 49.9%, 50.0% and 50.2% of 200,000 rolls at odds of 1 in 16, 64 and 1,024. No win got through.</td></tr>
+          <tr><td>A win that pays itself, on three nodes</td><td>A 64&nbsp;sat ticket locked through one routing node (209&nbsp;ms), rolls at 1 in 64 until the seller won: the seller collected in 20 runs out of 20. Its collect call took 2.4&nbsp;ms and the buyer's node showed the payment complete 13&nbsp;ms after the win. Paying the same win afterwards with an ordinary payment took 217&nbsp;ms.</td></tr>
+          <tr><td>The proof that ties a ticket's lock to its rolls</td><td>254&nbsp;ms to make on one processor core, 1.35&nbsp;ms to check, 192 bytes.</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p>Not measured for the lottery or for many sellers: sellers that are really separate machines; more than one hop; real network latency and mainnet fees; requests over HTTP; a buyer that does not pay, on real nodes (its gain is simulated); anything on a small computer; the hardened form of one building block that the self-paying win needs, where the prototype uses the simple form; and a proof that needs no trusted setup.</p>
+
+    <h2 id="status"><span class="n">16</span>Status and limits</h2>
     <dl class="status">
       <dt>Works</dt><dd>On XBT's regtest: the agent wallet pays Lightning invoices and offers through a Lightning Fork node under the owner's policy. On the earlier channel, also on regtest: open, pay, stream, close and refund, and a Claude agent given only the wallet's tools bought an analytics API, refused a tampered chunk, and the seller received exactly what it charged.</dd>
-      <dt>Lab-tested</dt><dd>Stream tickets, by scripts on three Lightning nodes; see <a href="#numbers">Numbers</a>. They are not in the wallet or in any release.</dd>
-      <dt>Reviewed</dt><dd>There has been no independent audit. Our internal review found three critical and five high-severity issues; we changed the code for each and added tests. An outside review of the published code (October 2026) then found more serious issues: in the agent wallet's budget accounting, the hub, the pay-with-work audit and the HTTP layer. Six rounds of fixes are in the public tree. Four follow-up audits of our own checked them: the first found 14 items (3 high), the second 20 (6 high), the third 23 (none high, 11 medium), the fourth 18 (none high, 9 medium). After the sixth round every finding is fixed or ends as a stated limit, and two items were open; a later run of the failure cases through the release binaries added three. All five are on the frozen channel's path or on a rail of the Python reference wallet that is off by default. The source tree's <a href="https://github.com/AwokenLazarus/Lightning-Stream/blob/main/docs/LIMITS.md" rel="noopener"><code>docs/LIMITS.md</code></a> lists every limit, the open items and what nobody has reviewed. None of this has been re-reviewed by anyone outside the project, and the review was of the earlier design: nobody outside the project has reviewed tickets. Treat it all as unaudited software.</dd>
+      <dt>Lab-tested</dt><dd>Stream tickets, by scripts on three Lightning nodes; see <a href="#numbers">Numbers</a>. They are not in the wallet or in any release. The same holds for tickets to many sellers and for both forms of the lottery, which ran on three and five nodes.</dd>
+      <dt>Reviewed</dt><dd>There has been no independent audit. Our internal review found three critical and five high-severity issues; we changed the code for each and added tests. An outside review of the published code (October 2026) then found more serious issues: in the agent wallet's budget accounting, the hub, the pay-with-work audit and the HTTP layer. Six rounds of fixes are in the public tree. Four follow-up audits of our own checked them: the first found 14 items (3 high), the second 20 (6 high), the third 23 (none high, 11 medium), the fourth 18 (none high, 9 medium). After the sixth round every finding is fixed or ends as a stated limit, and two items were open; a later run of the failure cases through the release binaries added three. All five are on the frozen channel's path or on a rail of the Python reference wallet that is off by default. The source tree's <a href="https://github.com/AwokenLazarus/Lightning-Stream/blob/main/docs/LIMITS.md" rel="noopener"><code>docs/LIMITS.md</code></a> lists every limit, the open items and what nobody has reviewed. None of this has been re-reviewed by anyone outside the project, and the review was of the earlier design: nobody outside the project has reviewed tickets. Nobody outside the project has reviewed the lottery either: not the fairness of the roll, and not the argument that the win that pays itself rests on. That form will not be built before a cryptographer has reviewed it. Treat it all as unaudited software.</dd>
       <dt>Retired</dt><dd>The hub is retired. The on-chain channel is frozen; see <a href="#earlier">The earlier design</a>.</dd>
-      <dt>Not yet</dt><dd>Tickets in the wallet. The seller's software. The 402 entry for tickets. A test with the Core Lightning fork. XBT mainnet, deliberately on hold: test networks only. An independent audit. A published specification. Packages for Umbrel and StartOS that run beside a Lightning node.</dd>
-      <dt>Trade-offs</dt><dd>Money moves a ticket at a time, and the buyer can lose one ticket. Unused tickets are locked until cancelled or expired. The seller needs a Lightning node with inbound capacity and hold invoices, online while tickets are locked. Routing nodes hold tickets without a fee when they are cancelled. The Lightning nodes on both sides hold hot keys for their channels. XBT's Lightning network is young and small, so a route may not exist.</dd>
+      <dt>Not yet</dt><dd>Tickets in the wallet. The seller's software, and the gateway that puts a price on a service already running. The 402 entry for tickets. The lottery, in either form. A test with the Core Lightning fork. XBT mainnet, deliberately on hold: test networks only. An independent audit. A published specification. Packages for Umbrel and StartOS that run beside a Lightning node.</dd>
+      <dt>Trade-offs</dt><dd>Money moves a ticket at a time, and the buyer can lose one ticket. Unused tickets are locked until cancelled or expired. The seller needs a Lightning node with inbound capacity and hold invoices, online while tickets are locked. Routing nodes hold tickets without a fee when they are cancelled. Paid by lottery, income and cost are uneven in the short run, and where the buyer pays after a win the seller goes first by about one win. The Lightning nodes on both sides hold hot keys for their channels. XBT's Lightning network is young and small, so a route may not exist.</dd>
     </dl>
 
     <div class="callout">
