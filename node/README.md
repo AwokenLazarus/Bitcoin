@@ -16,7 +16,7 @@ RPC **9332**, P2P **9333**. Lightning/mempool keep talking to this node.
 | `umbrel/mempool-hooks/pre-start` | Mempool app hook: widen `blocks.header` for 164-byte headers, `MEMPOOL_BACKEND=electrum` -> host electrs :50011, 800 kWU block weight, local pools JSON |
 | `umbrel/mempool-theme/` | Lazarus look for the mempool frontend: `nginx-mempool.conf` (`sub_filter` injects the theme into the app shell; serves our mining-pool logo and favicons), `www/theme.css` (palette, type, layout), `www/theme.js` (nav + footer links, fee/goggles/chart recolouring), `www/chi-rho*.svg` + `www/favicon*` (the Chi Rho mark and the wreathed crest) |
 | `pools/pools-sync.py`, `pools/pools-overrides.json` | Mining-pool list merge (Kilombino + mempool.guide + ours), priority-ordered pool ids, block re-attribution, and the per-window gateway-tag counts the pie's bands are drawn from; runs from `../systemd/pools-sync.timer` |
-| `umbrel/mempool-patches/` | Backend patch: DATUM template-creator names for any pool (`patch-backend.py` applied by the hook to the pinned image; `datum-template-creator.patch` for upstream) |
+| `umbrel/mempool-patches/` | Backend patches: DATUM template-creator names for any pool, and Knots 29.4.2's `difficulty_blake2b` (`patch-backend.py` applied by the hook to the pinned image; `difficulty_blake2b.py` for a backend run from a directory; the `.patch` files for the source) |
 | `umbrel/docker-compose.snippet.yml` | The volume line to add (do not commit a live compose — it has RPC/Tor env) |
 | `bitcoin.conf.example` | Layout B only |
 | `datum_gateway_config.example.json` | DATUM (cookie path redacted) |

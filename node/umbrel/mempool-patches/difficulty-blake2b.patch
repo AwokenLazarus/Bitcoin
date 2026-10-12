@@ -1,0 +1,40 @@
+diff --git a/backend/src/api/bitcoin/bitcoin-api.interface.ts b/backend/src/api/bitcoin/bitcoin-api.interface.ts
+index 22f800a..96dde94 100644
+--- a/backend/src/api/bitcoin/bitcoin-api.interface.ts
++++ b/backend/src/api/bitcoin/bitcoin-api.interface.ts
+@@ -49,6 +49,7 @@ export namespace IBitcoinApi {
+     nonce: number;                   //  (numeric) The nonce
+     bits: string;                    //  (string) The bits
+     difficulty: number;              //  (numeric) The difficulty
++    difficulty_blake2b?: number;     //  (numeric) Knots 29.4.2 BLAKE2b: difficulty * 2^32, sent instead of difficulty
+     chainwork: string;               //  (string) Expected number of hashes required to produce the chain up to this block (in hex)
+     nTx: number;                     //  (numeric) The number of transactions in the block
+     previousblockhash: string;       //  (string) The hash of the previous block
+diff --git a/backend/src/api/bitcoin/bitcoin-api.ts b/backend/src/api/bitcoin/bitcoin-api.ts
+index 85d548f..df89168 100644
+--- a/backend/src/api/bitcoin/bitcoin-api.ts
++++ b/backend/src/api/bitcoin/bitcoin-api.ts
+@@ -24,7 +24,7 @@ class BitcoinApi implements AbstractBitcoinApi {
+       timestamp: block.time,
+       bits: parseInt(block.bits, 16),
+       nonce: block.nonce,
+-      difficulty: block.difficulty,
++      difficulty: block.difficulty ?? (block.difficulty_blake2b != null ? block.difficulty_blake2b / 4294967296 : undefined),
+       merkle_root: block.merkleroot,
+       tx_count: block.nTx,
+       size: block.size,
+diff --git a/backend/src/api/mining/mining-routes.ts b/backend/src/api/mining/mining-routes.ts
+index 47a6b8f..b84ad19 100644
+--- a/backend/src/api/mining/mining-routes.ts
++++ b/backend/src/api/mining/mining-routes.ts
+@@ -184,7 +184,9 @@ class MiningRoutes {
+     let currentHashrate = 0, currentDifficulty = 0;
+     try {
+       currentHashrate = await bitcoinClient.getNetworkHashPs(1008);
+-      currentDifficulty = await bitcoinClient.getDifficulty();
++      // `getdifficulty` is gone in Knots 29.4.2; getblockchaininfo carries difficulty_blake2b (= difficulty * 2^32).
++      try { currentDifficulty = await bitcoinClient.getDifficulty(); }
++      catch (e) { const bi = await bitcoinClient.getBlockchainInfo(); currentDifficulty = bi.difficulty ?? (bi.difficulty_blake2b / 4294967296); }
+     } catch (e) {
+       logger.debug('Bitcoin Core is not available, using zeroed value for current hashrate and difficulty');
+     }

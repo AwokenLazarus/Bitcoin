@@ -69,3 +69,30 @@ Suggested body:
 > where several pools run DATUM primes and their gateways' tags are currently invisible.
 >
 > Adds unit tests for the detector and the dispatcher.
+
+# mempool backend patch: Knots 29.4.2 `difficulty_blake2b`
+
+## What it changes
+
+Knots 29.4.2 renamed the RPC field `difficulty` to `difficulty_blake2b` (= difficulty * 2^32) in
+`getblock`, `getblockheader`, `getblockchaininfo` and `getmininginfo`, and removed `getdifficulty`.
+A stock mempool 3.3.1 backend then reads `undefined`: every block insert fails with
+`Column 'difficulty' cannot be null`, so nothing after the switch is indexed, and
+`/api/v1/mining/hashrate/*` reports `currentDifficulty: 0`.
+
+Two lines change. `convertBlock` falls back to `difficulty_blake2b / 2^32`, and the hashrate route
+falls back to `getblockchaininfo` when `getdifficulty` throws. Both still read `difficulty` first,
+so the patched backend also runs against a node that sends the old field.
+
+## Files
+
+| File | Purpose |
+|---|---|
+| `difficulty-blake2b.patch` | `git diff` against `mempool/mempool` v3.3.1 (`9332d9d`): the two lines plus the optional field on `IBitcoinApi.Block`. Type-checks with the backend's own `tsc`; the emitted `bitcoin-api.js` is byte-identical to the file the hub has run since 2026-09-21. Apply it before any rebuild from source. |
+| `difficulty_blake2b.py` | The same change to compiled JS in place: `difficulty_blake2b.py <backend package dir> [--check]`. Backs each file up, replaces it by rename, and does nothing on a second run. For a backend run from a directory (the hub's `/opt/mempool-backend/package`, home's `~/mempool-hotfix/backend/package`). |
+| `patch-backend.py` | Imports `difficulty_blake2b.py` and adds its two files to the ones it builds from the Umbrel image, so the pre-start hook mounts them with the DATUM files. `patch-backend.py --files` prints the list the hook mounts. |
+
+Deploy the directory as above; both scripts must sit side by side. The home explorer answers REST
+from the Umbrel `api` container and websockets from `~/mempool-hotfix`, so home needs both the hook
+(container) and `difficulty_blake2b.py ~/mempool-hotfix/backend/package` (then restart
+`mempool-hotfix.service`).

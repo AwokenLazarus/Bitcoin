@@ -3,11 +3,11 @@
 
 Usage: patch-backend.py <docker-compose.yml> <out-dir>
 
-Reads the `api` service image from the compose file, copies the three files touched by
-datum-template-creator.patch out of that image, applies the same change to the compiled JS,
-and writes them under <out-dir>/backend/... for the pre-start hook to bind-mount over
-/backend/package/... The image digest is recorded in <out-dir>/IMAGE so the work is skipped
-when nothing changed.
+Reads the `api` service image from the compose file, copies the files touched by
+datum-template-creator.patch and difficulty-blake2b.patch out of that image, applies the same
+changes to the compiled JS, and writes them under <out-dir>/backend/... for the pre-start hook
+to bind-mount over /backend/package/... The image digest is recorded in <out-dir>/IMAGE so the
+work is skipped when nothing changed.
 
 Exit status is non-zero (and <out-dir>/backend is removed) whenever an anchor is missing, so
 the hook never mounts half-patched files over a backend it does not recognise.
@@ -19,7 +19,11 @@ import subprocess
 import sys
 from pathlib import Path
 
-FILES = ["api/blocks.js", "repositories/BlocksRepository.js", "utils/bitcoin-script.js"]
+import difficulty_blake2b
+
+DATUM_FILES = ["api/blocks.js", "repositories/BlocksRepository.js", "utils/bitcoin-script.js"]
+# The pre-start hook mounts exactly this list; `--files` prints it.
+FILES = DATUM_FILES + list(difficulty_blake2b.FILES)
 
 HELPERS = r'''
 /**
@@ -149,12 +153,16 @@ def patch_helpers(text):
 
 
 def main():
+    if sys.argv[1:] == ["--files"]:
+        print("\n".join(FILES))
+        return
     if len(sys.argv) != 3:
         fail(__doc__.strip().splitlines()[2])
     compose, out = Path(sys.argv[1]), Path(sys.argv[2])
     image = api_image(compose.read_text())
-    # rebuild when the pinned image changes or when this script itself changes
-    stamp = f"{image} {hashlib.sha256(Path(__file__).read_bytes()).hexdigest()[:16]}"
+    # rebuild when the pinned image changes or when either patch script changes
+    scripts = Path(__file__).read_bytes() + Path(difficulty_blake2b.__file__).read_bytes()
+    stamp = f"{image} {hashlib.sha256(scripts).hexdigest()[:16]}"
     marker = out / "IMAGE"
     dest = out / "backend"
     if marker.exists() and marker.read_text().strip() == stamp and all((dest / f).is_file() for f in FILES):
@@ -179,11 +187,17 @@ def main():
             subprocess.run(["docker", "rm", "-f", cid], capture_output=True)
 
     try:
-        for f in FILES[:2]:
+        for f in DATUM_FILES[:2]:
             p = dest / f
             p.write_text(patch_call_sites(p.read_text(), f))
-        p = dest / FILES[2]
+        p = dest / DATUM_FILES[2]
         p.write_text(patch_helpers(p.read_text()))
+        for f in difficulty_blake2b.FILES:
+            p = dest / f
+            try:
+                p.write_text(difficulty_blake2b.patch_text(f, p.read_text()))
+            except difficulty_blake2b.AnchorError as e:
+                fail(str(e))
     except SystemExit:
         shutil.rmtree(dest, ignore_errors=True)
         raise
