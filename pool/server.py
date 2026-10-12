@@ -5384,8 +5384,8 @@ _PUBLIC_SITE = str(CONF.get("public_url") or "https://pool.lazarus-xbt.xyz").rst
 _SEO_PAGES = {
     "/": {
         "en": {
-            "title": "BTCB2 (XBT) Mining Pool for Sia ASICs | Lazarus Pool",
-            "description": "Non-custodial pool for Bitcoin on BLAKE2b proof of work. Point a Goldshell SC, iBeLink BM-S3 or Antminer A3 and get paid in the block itself via TIDES.",
+            "title": "Lazarus Pool (XBT) — Bitcoin mining pool for Sia ASICs",
+            "description": "Lazarus Pool mines Bitcoin. XBT and BTCB2 are the tickers. Point a Siacoin ASIC here and get paid in the block itself.",
             "scroll": "",
         },
         "zh": {
@@ -6099,7 +6099,8 @@ _SEO_INTRO = {
     # Chinese only. The English homepage keeps the hero as its <h1>; /zh/ needs Chinese copy in the
     # markup itself rather than relying on the browser to translate it after load.
     "/": {
-        "zh": ("用 Siacoin BLAKE2b 矿机挖比特币（XBT / BTCB2）", [
+        "zh": ("Lazarus Pool：用 Siacoin 矿机挖比特币", [
+            "Lazarus Pool 挖的是比特币。XBT 和 BTCB2 是代码，blake2b 是工作量证明，所以 Siacoin 矿机能在这里挖。",
             "任何能挖 Siacoin 的 ASIC 都能挖这条链——同为 BLAKE2b，原厂固件即可，不用换硬件。把矿机指向 <b>stratum+tcp://stratum.lazarus-xbt.xyz:23334</b>，用户名填你的收款地址，密码填 <code>x</code>。没有账户，不用注册。",
             "支付走 TIDES 拆分 coinbase：矿池找到区块时，窗口内每个地址都成为该区块的一个输出，直接付到你的地址。没有矿池余额、不用提现（低于 0.005 XBT 的输出会结转到下一笔），矿池也从不持有你的币。自建 DATUM 网关 0% 手续费，并从公共 stratum 的手续费里分得补贴。",
             "<a href=\"/zh/mine-xbt\">如何开始挖</a> · <a href=\"/zh/hardware\">哪些矿机能用</a> · <a href=\"/zh/calculator\">收益计算器</a> · <a href=\"/zh/pools\">各矿池对比</a> · <a href=\"/zh/self-cap\">为什么我们把 stratum 限制在 15%</a>",
@@ -6810,7 +6811,7 @@ _SEO_ARTICLE = {
 # Search engines use <lastmod> only while it stays truthful; a sitemap that says "today" for every
 # URL on every deploy teaches them to ignore it.
 _SEO_MODIFIED = {
-    "/": "2026-09-28",
+    "/": "2026-10-12",
     "/calculator": "2026-09-23",
     "/blocks": "2026-09-23",
     _STRATUM_DOC_PATH: "2026-09-28",
