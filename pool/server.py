@@ -6623,6 +6623,10 @@ def render_pool_index(path, query=""):
                                    "about": {"@id": _PUBLIC_SITE + "/#service"}, "publisher": {"@id": _ORG_ID},
                                    "inLanguage": meta["lang"]}, ensure_ascii=False, separators=(",", ":")),
             raw, count=1)
+    # Primary navigation points to documents, with the same language as this document.
+    if meta["lang"] == "zh-CN":
+        raw = re.sub(r'href="(/(?:connect|blocks|how)?)"(?= data-view-link)',
+                     lambda m: 'href="/zh' + m.group(1) + '"', raw)
     raw = _inject_intro(raw, meta)
     raw = raw if home else _keyword_page(raw, meta)
     raw = rentals.apply_section(raw, rentals.view_rigs(), _rentals_labels(meta["lang"]))

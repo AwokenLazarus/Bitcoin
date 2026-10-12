@@ -357,8 +357,10 @@ export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
     if (url.pathname === "/map") return Response.redirect(`${url.origin}/map/`, 301);
-    if (url.pathname === "/naughtylist") return Response.redirect(`${url.origin}/naughtylist/`, 301);
-    if (url.pathname === "/naughtylist/" || url.pathname === "/naughtylist/index.html") {
+    if (url.pathname === "/naughtylist" || url.pathname === "/naughtylist/index.html") {
+      return Response.redirect(`${url.origin}/naughtylist/${url.search}`, 301);
+    }
+    if (url.pathname === "/naughtylist/") {
       if (request.method !== "GET" && request.method !== "HEAD") return new Response("method not allowed", { status: 405 });
       try {
         return await naughtyPage(request, env, ctx, url);

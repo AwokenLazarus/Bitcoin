@@ -2,3 +2,6 @@
 /miner/* /miner 200
 /zh/miner /miner 200
 /zh/miner/* /miner 200
+/static/ / 301
+/static/index.html / 301
+/static/index / 301

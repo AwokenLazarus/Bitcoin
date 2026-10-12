@@ -19,6 +19,12 @@
     return SUPPORTED.includes(s) ? s : "";
   }
   function detect() {
+    // Public English and Chinese URLs must stay in their declared language, even if
+    // the browser/cookie prefers another language. Miner dashboards remain personalized.
+    const bare = location.pathname.replace(/^\/zh(?=\/|$)/, "") || "/";
+    if (!/^\/miner(\/|$)/.test(bare)) {
+      return /^\/zh(\/|$)/.test(location.pathname) ? "zh-CN" : "en";
+    }
     const q = new URLSearchParams(location.search).get("lang");
     const fromQ = normalize(q);
     if (fromQ) return fromQ;
@@ -142,7 +148,11 @@
 
   function boot() {
     const q = new URLSearchParams(location.search).get("lang");
-    if (normalize(q)) writeCookie(lang);
+    // Old ?lang= links navigate to the matching canonical document before translating.
+    if (normalize(q) && normalize(q) !== lang) {
+      switchTo(q);
+      return;
+    }
     apply();
     document.querySelectorAll("[data-lang]").forEach((btn) => {
       if (btn._lzLang) return;

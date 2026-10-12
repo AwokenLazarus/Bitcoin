@@ -96,7 +96,8 @@ def main():
                 f = static_out / rel
                 f.parent.mkdir(parents=True, exist_ok=True)
                 f.write_bytes(body)
-    # server.py serves index.html only through the renderer, never as /static/index.html's twin.
+    # Never publish the unrendered template as another crawlable homepage.
+    (static_out / "index.html").unlink(missing_ok=True)
     n += sum(1 for _ in static_out.rglob("*") if _.is_file())
 
     # 404.html also switches Pages off its single-page-app fallback, which answered every unknown
