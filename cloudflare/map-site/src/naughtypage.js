@@ -216,7 +216,7 @@ ${finderRows.length ? `
     <dl class="how">
 ${how}
     </dl>
-    <p class="note">A pool not named here is listed in the table above as soon as it finds a block, marked not checked, and none of its payees are classified until its data has been read. Corrections: <a href="https://github.com/AwokenLazarus/Bitcoin/issues" rel="noopener">open an issue</a>.</p>
+    <p class="note">A pool not named here is listed in the table above as soon as it finds a block, marked not checked, and none of its payees are classified until its data has been read. Corrections: <a href="https://github.com/AwokenLazarus/Lazarus-Pool/issues" rel="noopener">open an issue</a>.</p>
 ${SCRIPT}
 ${FOOT}`;
 }
