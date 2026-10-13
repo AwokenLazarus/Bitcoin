@@ -1821,7 +1821,7 @@
     }
   });
   fromHash();
-  // Pretty URLs (/hardware, /mine-xbt, /bip110 …) serve this same page. The server marks the
+  // Pretty URLs (/hardware, /connect, /bip110 …) serve this same page. The server marks the
   // section to open in data-scroll so a crawler-visible URL still lands in the right place.
   if (!location.hash) {
     const dest = document.documentElement.getAttribute("data-scroll");

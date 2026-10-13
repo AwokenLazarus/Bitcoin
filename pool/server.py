@@ -5442,13 +5442,13 @@ _SEO_PAGES = {
     },
     "/connect": {
         "en": {
-            "title": "Connect to Lazarus Pool: XBT Stratum & DATUM Settings",
-            "description": "Point a BLAKE2b ASIC at stratum+tcp://stratum.lazarus-xbt.xyz:23334 with your payout address as the username, or run your own DATUM gateway.",
+            "title": "How to Mine Bitcoin with a Sia ASIC | Lazarus Pool",
+            "description": "Set your Sia ASIC to blake2b, run a DATUM gateway beside a Bitcoin Knots node, point the miner at it with your payout address, and confirm your first share.",
             "scroll": "connect",
         },
         "zh": {
-            "title": "接入 Lazarus Pool — XBT / BTCB2 的 stratum 与 DATUM",
-            "description": "把 BLAKE2b 矿机指向 stratum+tcp://stratum.lazarus-xbt.xyz:23334。用户名是你的比特币（XBT）收款地址。或自建 DATUM 网关，手续费 0%。",
+            "title": "如何用 Siacoin 矿机挖比特币 — Lazarus Pool",
+            "description": "把 Siacoin 矿机设为 BLAKE2b，在 Bitcoin Knots 节点旁运行 DATUM 网关，用你的收款地址把矿机指向网关，确认第一个份额。XBT / BTCB2 为其交易代码。",
             "scroll": "connect",
         },
     },
@@ -5464,27 +5464,15 @@ _SEO_PAGES = {
             "scroll": "connect",
         },
     },
-    "/mine-xbt": {
-        "en": {
-            "title": "How to Mine XBT (BTCB2) with a Sia ASIC | Lazarus Pool",
-            "description": "Step by step: set your Sia-family ASIC to BLAKE2b, point it at the pool with your payout address, and confirm your first share. Stratum or your own DATUM.",
-            "scroll": "connect",
-        },
-        "zh": {
-            "title": "如何挖 XBT（BTCB2）— Lazarus Pool",
-            "description": "用 Siacoin ASIC 挖比特币 XBT / BTCB2。算法是 BLAKE2b，不是 SHA-256。Stratum：stratum+tcp://stratum.lazarus-xbt.xyz:23334，用户名=收款地址，密码 x。",
-            "scroll": "connect",
-        },
-    },
     "/how": {
         "en": {
-            "title": "How Payouts Work on Lazarus Pool: TIDES & DATUM",
-            "description": "Your share of the TIDES window, the DATUM share and coinbase payouts, step by step. No pool balance and no withdrawals: the block pays your address.",
+            "title": "How Lazarus Pool Pays: TIDES, Inside the Block Itself",
+            "description": "Every share enters a TIDES window of eight times network difficulty, and every block pays the whole window in its coinbase. No pool balance, no withdrawal, checkable on chain.",
             "scroll": "how",
         },
         "zh": {
-            "title": "TIDES 如何支付 — Lazarus Pool（比特币 XBT / BTCB2）",
-            "description": "BLAKE2b 比特币（XBT / BTCB2）链上的 TIDES 窗口份额、DATUM 补贴与 coinbase 支付。没有矿池余额，不用提现。",
+            "title": "TIDES 如何支付：在区块里直接付给你 — Lazarus Pool",
+            "description": "每个份额进入相当于全网难度八倍的 TIDES 窗口；每个区块在 coinbase 里支付整个窗口。没有矿池余额，不用提现，链上可核对。",
             "scroll": "how",
         },
     },
@@ -5530,36 +5518,6 @@ _SEO_PAGES = {
             "title": '用 FlyTheElephant DATUM 网关在 Lazarus 挖 XBT | Lazarus Pool',
             "description": '编译并运行 FlyTheElephant 的 datum_gateway，连接 Lazarus Prime（datum.lazarus-xbt.xyz:28915）：节点设置、完整配置、如何确认运行正常，以及我们的实测结果。',
             "scroll": "connect",
-        },
-    },
-    "/profitability": {
-        "en": {
-            "title": "Is Mining XBT Profitable? Sia ASIC Earnings | Lazarus Pool",
-            "description": "Live XBT per TH/s per day at current difficulty, per-machine estimates in XBT and dollars, and what moves the answer: price, difficulty and fees.",
-            "scroll": "hardware",
-        },
-        "zh": {
-            "title": "挖 XBT 划算吗？BLAKE2b 矿机收益 | Lazarus Pool",
-            "description": (
-                "让闲置的 Siacoin 矿机重新赚钱：按当前难度的每 TH/s 每日 XBT / BTCB2 收益、逐台机器的 XBT 与美元"
-                "估算，另加 DATUM 补贴。"
-            ),
-            "scroll": "hardware",
-        },
-    },
-    "/tides": {
-        "en": {
-            "title": "TIDES Payouts: Paid in the Coinbase | Lazarus Pool",
-            "description": "How TIDES splits each block's coinbase across every miner in the window: no pool balance, no withdrawal, every payout checkable on-chain.",
-            "scroll": "how",
-        },
-        "zh": {
-            "title": "TIDES 拆分 coinbase — BLAKE2b 比特币主网首家 | Lazarus Pool",
-            "description": (
-                "Lazarus Pool 是 BLAKE2b 比特币（XBT / BTCB2）主网上第一家用 TIDES 拆分 coinbase 支付的矿池。"
-                "相当于全网难度八倍的滚动窗口内，每个地址都是所出区块的一个输出——天然非托管，没有需要信任的矿池余额。"
-            ),
-            "scroll": "how",
         },
     },
     "/pools": {
@@ -5609,16 +5567,13 @@ _SEO_PAGES = {
     },
     "/calculator": {
         "en": {
-            "title": "BLAKE2b Mining Calculator: XBT (BTCB2) per TH/s | Lazarus",
-            "description": "Enter your hashrate for estimated XBT and dollars per day at live difficulty and price, or pick your machine from the list.",
+            "title": "Mining Calculator: What Your Sia ASIC Earns | Lazarus Pool",
+            "description": "Enter your hashrate for XBT and dollars per day at live difficulty and price, or pick your machine. What moves the answer: difficulty, price, fees and your power cost.",
             "scroll": "calc",
         },
         "zh": {
-            "title": "XBT / BTCB2 挖矿收益计算器 — 按实时难度算每 TH/s 收益",
-            "description": (
-                "输入你的算力，按实时难度、价格与 DATUM 补贴，算出在 BLAKE2b 比特币链上每天大约能拿多少 XBT 和"
-                "多少美元。下方还有每一款 Siacoin 矿机的逐台估算。"
-            ),
+            "title": "挖矿收益计算器：你的 Siacoin 矿机每天能挖多少 — Lazarus Pool",
+            "description": "输入算力，按实时难度与价格算出每天的 XBT 与美元收益，或直接选择机型。影响结果的是难度、价格、交易费和你的电费。",
             "scroll": "calc",
         },
     },
@@ -6121,29 +6076,19 @@ _SEO_INTRO = {
             "Lazarus Pool 挖的是比特币。XBT 和 BTCB2 是代码，blake2b 是工作量证明，所以 Siacoin 矿机能在这里挖。",
             "任何能挖 Siacoin 的 ASIC 都能挖这条链——同为 BLAKE2b，原厂固件即可，不用换硬件。把矿机指向 <b>stratum+tcp://stratum.lazarus-xbt.xyz:23334</b>，用户名填你的收款地址，密码填 <code>x</code>。没有账户，不用注册。",
             "支付走 TIDES 拆分 coinbase：矿池找到区块时，窗口内每个地址都成为该区块的一个输出，直接付到你的地址。没有矿池余额、不用提现（低于 0.005 XBT 的输出会结转到下一笔），矿池也从不持有你的币。自建 DATUM 网关 0% 手续费，并从公共 stratum 的手续费里分得补贴。",
-            "<a href=\"/zh/mine-xbt\">如何开始挖</a> · <a href=\"/zh/hardware\">哪些矿机能用</a> · <a href=\"/zh/calculator\">收益计算器</a> · <a href=\"/zh/pools\">各矿池对比</a> · <a href=\"/zh/self-cap\">为什么我们把 stratum 限制在 15%</a>",
+            "<a href=\"/zh/connect\">如何开始挖</a> · <a href=\"/zh/hardware\">哪些矿机能用</a> · <a href=\"/zh/calculator\">收益计算器</a> · <a href=\"/zh/pools\">各矿池对比</a> · <a href=\"/zh/self-cap\">为什么我们把 stratum 限制在 15%</a>",
         ]),
     },
     "/bip110": {
         "en": ("BIP-110 and BLAKE2b: what actually forked", [
             "BIP-110 is a Bitcoin proposal to restrict non-financial data in transactions for a year. It asked for 55% of hashrate to signal support and peaked near 2.6%, and nodes running it began rejecting blocks that did not signal at height 961,632 on 8 August 2026. That is the moment the chain split. This chain is the BIP-110 branch; the majority chain carried on under SHA-256d, unaffected.",
             "The proof-of-work change is a separate, later decision on this branch. On 30 August 2026 it moved from SHA-256d to BLAKE2b with a Sia-style header: block 961,639 was the last SHA-256d block and 961,640 the first BLAKE2b one. Everything else is still Bitcoin — the 21 million cap, the halving schedule, script, addresses, and every block of history before the split.",
-            "So \u201cBIP-110\u201d is what people call this chain, but BLAKE2b is what decides your hardware. Any ASIC built for Siacoin mines here on stock firmware; no SHA-256 machine can produce a valid share at all. Because the pre-split history is shared with Bitcoin, generate a fresh address for this chain and keep SHA-256 keys well clear. Lazarus Pool mines it with <a href=\"/tides\">TIDES payouts in the coinbase</a> and pays a <a href=\"/datum-subsidy\">subsidy to DATUM miners</a>.",
+            "So \u201cBIP-110\u201d is what people call this chain, but BLAKE2b is what decides your hardware. Any ASIC built for Siacoin mines here on stock firmware; no SHA-256 machine can produce a valid share at all. Because the pre-split history is shared with Bitcoin, generate a fresh address for this chain and keep SHA-256 keys well clear. Lazarus Pool mines it with <a href=\"/how\">TIDES payouts in the coinbase</a> and pays a <a href=\"/datum-subsidy\">subsidy to DATUM miners</a>.",
         ]),
         "zh": ("BIP-110 与 BLAKE2b：到底分叉了什么", [
             "BIP-110 是一项比特币提案，主张在一年内限制交易中的非金融数据。它需要 55% 的算力表态支持，最高只到约 2.6%；运行它的节点从 2026 年 8 月 8 日、961,632 高度起开始拒绝不表态的区块——那一刻链就分开了。本链是 BIP-110 这一支，多数链继续用 SHA-256d，未受影响。",
             "改工作量证明是这一支后来的另一个决定。2026 年 8 月 30 日，它从 SHA-256d 换成了 BLAKE2b（Sia 风格区块头）：961,639 是最后一个 SHA-256d 区块，961,640 是第一个 BLAKE2b 区块。其余部分仍是比特币——2100 万上限、减半周期、脚本、地址，以及分叉前的全部历史。",
-            "所以「BIP-110」是大家对这条链的称呼，但真正决定你用什么硬件的是 BLAKE2b。任何为 Siacoin 而造的 ASIC 用原厂固件就能在这里挖矿；SHA-256 机器根本产不出有效份额。由于分叉前的历史与比特币共享，请为本链另生成新地址，SHA-256 的私钥务必远离。Lazarus Pool 用 <a href=\"/tides\">TIDES 在 coinbase 内支付</a>，并向 <a href=\"/datum-subsidy\">DATUM 矿工发放补贴</a>。",
-        ]),
-    },
-    "/tides": {
-        "en": ("TIDES: paid inside the block, not from a pool balance", [
-            "TIDES keeps a rolling window of accepted shares worth roughly eight times network difficulty — days of pool work, not the last hour. When the pool finds a block, every address in that window becomes an output of that block's coinbase, in proportion to its share of the window and less that miner's fee. A new rig starts near zero and ramps up as its work enters the window and older work ages out.",
-            "Lazarus Pool is the first pool confirmed to run a TIDES split coinbase on BLAKE2b Bitcoin mainnet — not on a testnet and not as a proposal, but in blocks you can open in the explorer and read the outputs of. The consequence matters more than the mechanism: there is no pool balance and no withdrawal (an output under 0.005 XBT is carried forward to your next one), because the pool never holds your coins in the first place. If it vanished tonight, nobody would be owed anything.",
-        ]),
-        "zh": ("TIDES：在区块里直接支付，而不是从矿池余额里提现", [
-            "TIDES 维护一个滚动窗口，容量约为全网难度的八倍——那是好几天的矿池工作量，而不是最近一小时。矿池找到区块时，窗口内每个地址都会成为该区块 coinbase 的一个输出，按其窗口占比支付并扣除该矿工的手续费。新机器从接近零开始，随着新工作进入、旧工作老化而逐步爬升。",
-            "Lazarus Pool 是 BLAKE2b 比特币主网上第一家被确认运行 TIDES 拆分 coinbase 的矿池——不是测试网，也不是提案，而是你可以在浏览器里打开并逐条查看输出的真实区块。比机制更重要的是后果：没有矿池余额、不用提现（低于 0.005 XBT 的输出会结转到下一笔），因为矿池从一开始就不持有你的币。哪怕它今晚消失，也不欠任何人。",
+            "所以「BIP-110」是大家对这条链的称呼，但真正决定你用什么硬件的是 BLAKE2b。任何为 Siacoin 而造的 ASIC 用原厂固件就能在这里挖矿；SHA-256 机器根本产不出有效份额。由于分叉前的历史与比特币共享，请为本链另生成新地址，SHA-256 的私钥务必远离。Lazarus Pool 用 <a href=\"/how\">TIDES 在 coinbase 内支付</a>，并向 <a href=\"/datum-subsidy\">DATUM 矿工发放补贴</a>。",
         ]),
     },
     "/datum-subsidy": {
@@ -6154,16 +6099,6 @@ _SEO_INTRO = {
         "zh": ("DATUM 补贴：为去中心化拿钱", [
             "用自己的 Bitcoin Knots 节点跑自己的 DATUM 网关，意味着区块模板由你构建、交易由你挑选，矿池只提供 coinbase 拆分并校验你的份额。在这里这件事不收你一分手续费——DATUM 矿工 0%——而且它把模板构建权从矿池手里移走，那才是挖矿中心化真正要紧的一环。",
             "Lazarus Pool 是全网第一家用自有 stratum 算力为此出资补贴的矿池。公共 stratum 是捐赠、验证与后备端点，费率 100%，并有 24 小时 / 96 小时、费率为 25%、之后为 100% 的宽限期（宽限期内 12.5 个点给 DATUM 网关）。100% 里的 50 个点并不留下：每找到一个区块，就按比例记给窗口内每一位 DATUM 矿工，无论那个区块是不是由他的模板产出。让网络去中心化比用矿池的 stratum 更赚钱——激励方向本该如此。<a href=\"/connect\">网关配置与可直接复制的 config。</a>",
-        ]),
-    },
-    "/profitability": {
-        "en": ("Is mining Bitcoin XBT profitable?", [
-            "Difficulty on this BLAKE2b chain is still low relative to a full block subsidy, which is the whole reason a Siacoin ASIC that stopped paying for itself on Sia can earn again here. The live figure for XBT per TH/s per day sits in the pool summary and moves with difficulty and price; the machine list below turns it into an estimate in XBT and in dollars for each specific box at today's numbers.",
-            "Read those estimates honestly. They assume the base subsidy with no transaction fees, they use the current difficulty rather than a forecast, they route through your own DATUM gateway with the subsidy included, and they do not subtract electricity — that number is yours and it decides whether any of this works for you. Transaction fees in a found block scale every payout up proportionally. <a href=\"/hardware\">See the machines and their estimates below.</a>",
-        ]),
-        "zh": ("挖比特币 XBT 划算吗？", [
-            "本 BLAKE2b 链的难度相对于完整区块奖励仍然偏低，这正是一台在 Sia 上已经赚不回电费的 Siacoin 矿机能在这里重新赚钱的原因。每 TH/s 每日 XBT 的实时数字就在矿池概览里，随难度与价格变化；下面的机器列表把它换算成每台机器在当前数字下的 XBT 与美元估算。",
-            "请如实看待这些估算：它们按基础奖励计算、不含交易费，用的是当前难度而非预测，走你自己的 DATUM 网关并已计入补贴，而且没有扣除电费——那个数字只有你知道，也正是它决定这件事对你是否成立。区块里的交易费会等比例抬高每一笔支付。<a href=\"/hardware\">机器与估算见下方。</a>",
         ]),
     },
     "/hardware": {
@@ -6187,13 +6122,17 @@ _SEO_INTRO = {
         ]),
     },
     "/connect": {
-        "en": ("Connect a miner to Lazarus Pool", [
-            "Point the miner at <b>stratum+tcp://stratum.lazarus-xbt.xyz:23334</b>, set the username to the address you want paid — optionally <code>address.worker</code> — and the password to <code>x</code>. The algorithm is BLAKE2b with a Sia-style header, not SHA-256d. New sessions start at difficulty 4096 and vardiff steps up toward your hashrate from there. There is no account and no registration; the username is the payout instruction.",
-            "There are two ways in. The public stratum is a donation, validation and fallback endpoint at 100%, with a 24 h / 96 h grace at 25%, then 100%: point a miner at it to confirm it connects and submits shares while your own node and DATUM gateway are still coming online, or as a fallback if your own gateway goes down. Our node builds the templates, which is the one-line setup, but Bitcoin Knots has announced a rule to invalidate payouts to addresses that hash through any pool's stratum, so it is not a way to be paid. Running your own Bitcoin Knots node and DATUM gateway costs 0% and pays you a <a href=\"/datum-subsidy\">share of that stratum fee</a> on every block, because you are building the templates yourself. Both land in the same TIDES window under your address, so switching later keeps the accepted work you already have. For a longer Knots + DATUM walkthrough, use <a href=\"https://convoy.xyz/getstarted\">CONVOY’s get-started guide</a> (also in <a href=\"https://convoy.xyz/getstarted?lang=zh\">中文</a>), then come back here for this pool’s host, port, and pubkey.",
+        "en": ("How to mine Bitcoin with a Sia ASIC", [
+            "You need three things: an ASIC that hashes BLAKE2b, a fresh address on this chain to be paid to, and a DATUM gateway running beside a Bitcoin Knots node. If you already own a Siacoin miner you have the first one — this is the same algorithm, so stock firmware works. The gateway is how you mine here: point its datum section at <b>datum.lazarus-xbt.xyz:28915</b> with the pool pubkey below, set your payout address, and point your miners at the gateway. Each ASIC hashes a plain BLAKE2b header with a Sia-style framing, not SHA-256d; new sessions start at difficulty 4096 and vardiff steps up toward your hashrate from there.",
+            "Running your own node and gateway costs 0% and pays you a <a href=\"/datum-subsidy\">share of the public stratum's fee</a> on every block, because you are building the templates yourself. Tested gateways with full configs: <a href=\"/ratum\">Ratum</a> and <a href=\"/flytheelephant\">FlyTheElephant</a>. For a longer Knots + DATUM walkthrough, use <a href=\"https://convoy.xyz/getstarted\">CONVOY’s get-started guide</a> (also in <a href=\"https://convoy.xyz/getstarted?lang=zh\">中文</a>), then come back here for this pool’s host, port, and pubkey.",
+            "The public stratum, <b>stratum+tcp://stratum.lazarus-xbt.xyz:23334</b> (username your address, optionally <code>address.worker</code>; password <code>x</code>), is the donation, validation and fallback endpoint at 100%, with a 24 h / 96 h grace at 25%, then 100%. Point a miner at it to confirm it connects and submits shares while your gateway is still coming online, or as a fallback if your gateway goes down. Bitcoin Knots has announced a rule to invalidate payouts to addresses that hash through any pool's stratum, so it is not a way to be paid. Both routes land in the same TIDES window under your address, so switching keeps the accepted work you already have.",
+            "One warning worth reading twice: this chain shares every block of history with SHA-256 Bitcoin up to block 961,640, so an address holding real BTC should never be used here. Generate a fresh address for this chain. Payouts arrive as outputs in the coinbase of blocks the pool finds, with no balance to withdraw. Coinbase outputs normally spend after 100 confirmations; under the temporary Knots #419 rule a newly mined coin waits 6,480 confirmations, and nodes will not relay any coinbase spend below that, so a payout takes about 45 days to become spendable. <a href=\"/hardware\">Which machines work</a> · <a href=\"/how\">how the payout is calculated</a>.",
         ]),
-        "zh": ("把矿机接入 Lazarus Pool", [
-            "把矿机指向 <b>stratum+tcp://stratum.lazarus-xbt.xyz:23334</b>，用户名填你要收款的地址（也可以写成 <code>地址.worker</code>），密码填 <code>x</code>。算法是 BLAKE2b（Sia 风格区块头），不是 SHA-256d。新会话从难度 4096 起步，之后 vardiff 会朝你的算力逐步调整。没有账户，也不用注册——用户名就是收款指令。",
-            "有两条路。公共 stratum 是捐赠、验证与后备端点，费率 100%，并有 24 小时 / 96 小时、费率为 25%、之后为 100% 的宽限期：在自己的节点和 DATUM 网关仍在上线时，或在自己的网关中断时作为后备，把矿机指向它即可确认能够连接并提交份额。模板由我们的节点构建，配置只有一行，但 Bitcoin Knots 已宣布将判定通过任何矿池 stratum 出算力的地址所获付款无效，所以它不是拿得到付款的路。自己跑 Bitcoin Knots 节点和 DATUM 网关则是 0%，而且因为模板是你自己构建的，每个区块还会把<a href=\"/datum-subsidy\">那笔 stratum 手续费的一部分</a>付给你。两条路都记入同一个 TIDES 窗口、同一个地址，所以以后切换不会丢掉已积累的工作量。更完整的 Knots + DATUM 说明见 <a href=\"https://convoy.xyz/getstarted?lang=zh\">CONVOY 入门指南（中文）</a>（<a href=\"https://convoy.xyz/getstarted\">English</a>），然后回到本页填写本池的主机、端口和公钥。",
+        "zh": ("如何用 Siacoin 矿机挖比特币", [
+            "你需要三样东西：一台能算 BLAKE2b 的 ASIC、一个本链专用的新收款地址，以及一个跟着 Bitcoin Knots 节点运行的 DATUM 网关。如果你已经有 Siacoin 矿机，第一样就有了——算法相同，原厂固件即可。网关才是在这里挖矿的方式：把它的 datum 配置指向 <b>datum.lazarus-xbt.xyz:28915</b> 并填入下方的矿池公钥，设置你的收款地址，再把矿机指向这个网关。矿机算的是带 Sia 风格封装的普通 BLAKE2b 区块头，不是 SHA-256d；新会话从难度 4096 起步，之后 vardiff 会朝你的算力逐步调整。",
+            "自己跑节点和网关费率为 0%，而且因为模板是你自己构建的，每个区块还会把<a href=\"/zh/datum-subsidy\">公共 stratum 手续费的一部分</a>付给你。实测过并附完整配置的网关：<a href=\"/zh/ratum\">Ratum</a> 和 <a href=\"/zh/flytheelephant\">FlyTheElephant</a>。更完整的 Knots + DATUM 说明见 <a href=\"https://convoy.xyz/getstarted?lang=zh\">CONVOY 入门指南（中文）</a>（<a href=\"https://convoy.xyz/getstarted\">English</a>），然后回到本页填写本池的主机、端口和公钥。",
+            "公共 stratum <b>stratum+tcp://stratum.lazarus-xbt.xyz:23334</b>（用户名填你的地址，也可以写成 <code>地址.worker</code>；密码填 <code>x</code>）是捐赠、验证与后备端点，费率 100%，并有 24 小时 / 96 小时、费率为 25%、之后为 100% 的宽限期。在你的网关仍在上线时，或在网关中断时作为后备，把矿机指向它即可确认能够连接并提交份额。Bitcoin Knots 已宣布将判定通过任何矿池 stratum 出算力的地址所获付款无效，所以它不是拿得到付款的路。两条路都记入同一个 TIDES 窗口、同一个地址，所以切换不会丢掉已积累的工作量。",
+            "有一条提醒值得看两遍：本链与 SHA-256 比特币共享 961,640 高度之前的全部历史，因此持有真实 BTC 的地址绝不可在此使用，请为本链另生成一个新地址。收益以矿池所出区块 coinbase 中的输出形式到账，没有余额需要提现。coinbase 输出通常 100 个确认后可动用；在临时的 Knots #419 规则下，新挖出的币要等 6,480 个确认（约 45 天）才能动用。<a href=\"/zh/hardware\">哪些机器能用</a> · <a href=\"/zh/how\">支付如何计算</a>。",
         ]),
     },
     "/ratum": {"en": _RATUM_INTRO_EN, "zh": _RATUM_INTRO_ZH},
@@ -6212,7 +6151,7 @@ _SEO_INTRO = {
             "<p><b>4. Point your miners at the gateway,</b> not at us: <code>stratum+tcp://&lt;your gateway's LAN IP&gt;:23334</code>, username <code>youraddress.worker</code>, password <code>x</code>. The part before the first <code>.</code> is who gets paid.</p>",
             '<p><b>5. Check it.</b> Within a minute your gateway shows under <a href="#gateways">Gateways</a> as <code>v0.4.1-beta/&lt;commit&gt;</code> with fee path DATUM, and your address appears under <a href="#miners">Miners</a> after its first share. The gateway\'s own dashboard is on port 7152. Its log should say <i>DATUM Server MOTD</i> with our Proverbs line; a found block shows here with its split.</p>',
             '<p><b>If it does not connect.</b> <i>DATUM not connected and configured for pooled mining only! Rejecting connection</i> means the gateway has no pool session, so it turns miners away (their firmware then fails over to their backup pool): check <code>pool_host</code>, <code>pool_port</code> and that <code>pool_pubkey</code> is the whole key from this page; a wrong key never gets past the handshake. A tip stuck at 961,639 is an old Knots or peers on the other chain. <i>Refused</i> in the log with an upgrade message means your node built a block the chain rejected; upgrade Knots and reconnect, and it lets you back in by itself.</p>',
-            '<p><b>What we measured.</b> We ran this gateway against our own Prime and Knots 29.4.2 on regtest, most recently <code>master</code> <code>280cf54</code> on 9&nbsp;October 2026, where blocks found by an Antminer A3 and by a generic miner each paid all 60 miners in the window: handshake and pubkey pinning, the split in every found block paying every miner in the window, <code>address.worker</code> and bare-address usernames, the 0% DATUM fee path, reconnects, Prime\'s template checks and refusals all pass. One thing does not, and it is shared by every C DATUM gateway today (iohzrd and CONVOY too): for a fraction of a second after each new block, and for as long as the pool\'s split is late, the gateway can hand out a job whose coinbase pays only the pool. A small patch fixes it by serving the empty subsidy-only job, or nothing, until the split is in. It is not in <code>master</code> yet (it still applies to <code>280cf54</code>), so apply it yourself: <a href="https://github.com/AwokenLazarus/Bitcoin/blob/main/lazarus/patches/datum-gateway-fte-late-coinbaser.patch" target="_blank" rel="noreferrer">datum-gateway-fte-late-coinbaser.patch</a> (<code>patch -p1 &lt;</code> it before <code>cmake</code>).</p>',
+            '<p><b>What we measured.</b> We ran this gateway against our own Prime and Knots 29.4.2 on regtest, most recently <code>master</code> <code>280cf54</code> on 9&nbsp;October 2026, where blocks found by an Antminer A3 and by a generic miner each paid all 60 miners in the window: handshake and pubkey pinning, the split in every found block paying every miner in the window, <code>address.worker</code> and bare-address usernames, the 0% DATUM fee path, reconnects, Prime\'s template checks and refusals all pass. One thing does not, and it is shared by every C DATUM gateway today (iohzrd and CONVOY too): for a fraction of a second after each new block, and for as long as the pool\'s split is late, the gateway can hand out a job whose coinbase pays only the pool. A small patch fixes it by serving the empty subsidy-only job, or nothing, until the split is in. It is not in <code>master</code> yet (it still applies to <code>280cf54</code>), so apply it yourself: <a href="https://github.com/AwokenLazarus/Lazarus-Pool/blob/main/lazarus/patches/datum-gateway-fte-late-coinbaser.patch" target="_blank" rel="noreferrer">datum-gateway-fte-late-coinbaser.patch</a> (<code>patch -p1 &lt;</code> it before <code>cmake</code>).</p>',
         ]),
         "zh": ('用 FlyTheElephant 网关在 Lazarus 挖矿', [
             '<p><a href="https://github.com/FlyTheElephant1/datum_gateway" target="_blank" rel="noreferrer">FlyTheElephant1/datum_gateway</a> 是这条链上的一个 DATUM 网关：基于 CONVOY 的 BLAKE2b 代码，加上 FlyTheElephant 自己的改进。它的 <code>master</code> 让每台矿机都拿到矿池完整的分账（16&nbsp;KB coinbase），并按区块的 weight 和 sigop 上限裁剪这个 coinbase，所以完整分账永远不会让你的区块无效。无需任何补丁即可连接 Lazarus。FlyTheElephant 也在我们 Discord 的 <code>#support</code> 频道帮矿工配置，谢谢他。</p>',
@@ -6228,27 +6167,21 @@ _SEO_INTRO = {
             '<p><b>4. 矿机指向你的网关，</b>而不是我们：<code>stratum+tcp://&lt;网关的局域网 IP&gt;:23334</code>，用户名 <code>你的地址.worker</code>，密码 <code>x</code>。第一个 <code>.</code> 之前的部分就是收款地址。</p>',
             '<p><b>5. 确认运行。</b>一分钟内你的网关会出现在 <a href="#gateways">Gateways</a>，显示为 <code>v0.4.1-beta/&lt;commit&gt;</code>、费用路径 DATUM；第一个份额之后你的地址会出现在 <a href="#miners">Miners</a>。网关自己的面板在 7152 端口。日志里应出现 <i>DATUM Server MOTD</i> 和我们的箴言；找到的区块会连同分账显示在这里。</p>',
             '<p><b>连不上时。</b>日志出现 <i>DATUM not connected and configured for pooled mining only! Rejecting connection</i>，表示网关没有矿池会话，于是拒绝矿机（矿机固件会切到备用矿池）：检查 <code>pool_host</code>、<code>pool_port</code>，以及 <code>pool_pubkey</code> 是否是本页的完整公钥；公钥错误过不了握手。区块高度卡在 961,639 说明 Knots 版本过旧或连到了另一条链的节点。日志中出现带升级提示的 <i>Refused</i>，说明你的节点出过被链拒绝的区块；升级 Knots 后重连，会自动放行。</p>',
-            '<p><b>我们的实测。</b>我们在 regtest 上用自己的 Prime 和 Knots 29.4.2 测试了这个网关，最近一次是 2026 年 10 月 9 日测试 <code>master</code> <code>280cf54</code>，蚂蚁 A3 和通用矿机找到的区块都付给了窗口里的全部 60 位矿工：握手与公钥校验、每个找到的区块都付给窗口里的所有矿工、<code>地址.worker</code> 与纯地址用户名、0% 的 DATUM 费用路径、断线重连、Prime 的模板检查与拒绝，全部通过。有一项没通过，而且目前所有 C 语言 DATUM 网关（包括 iohzrd 和 CONVOY）都有：每个新区块之后的片刻，以及矿池分账迟到的整个期间，网关可能下发一个只付给矿池的 coinbase 任务。一个小补丁可以修复：分账到达之前只发只含区块补贴的空任务，或者不发任务。它还没有进入 <code>master</code>（对 <code>280cf54</code> 仍可直接打上），所以请自己打上：<a href="https://github.com/AwokenLazarus/Bitcoin/blob/main/lazarus/patches/datum-gateway-fte-late-coinbaser.patch" target="_blank" rel="noreferrer">datum-gateway-fte-late-coinbaser.patch</a>（在 <code>cmake</code> 之前 <code>patch -p1 &lt;</code>）。</p>',
-        ]),
-    },
-    "/mine-xbt": {
-        "en": ("How to mine Bitcoin XBT (BTCB2)", [
-            "You need three things: an ASIC that hashes BLAKE2b, an address on this chain to be paid to, and the pool endpoint. If you already own a Siacoin miner you have the first one — this is the same algorithm, so stock firmware works. Point it at <b>stratum+tcp://stratum.lazarus-xbt.xyz:23334</b> with your address as the username and <code>x</code> as the password, and it will start hashing immediately.",
-            "One warning worth reading twice: this chain shares every block of history with SHA-256 Bitcoin up to block 961,640, so an address holding real BTC should never be used here. Generate a fresh address for this chain. Payouts arrive as outputs in the coinbase of blocks the pool finds, with no balance to withdraw. Coinbase outputs normally spend after 100 confirmations; under the temporary Knots #419 rule a newly mined coin waits 6,480 confirmations, and nodes will not relay any coinbase spend below that, so a payout takes about 45 days to become spendable. <a href=\"/hardware\">Which machines work</a> · <a href=\"/tides\">how the payout is calculated</a>.",
-        ]),
-        "zh": ("如何挖比特币 XBT（BTCB2）", [
-            "你需要三样东西：一台能算 BLAKE2b 的 ASIC、一个本链的收款地址，以及矿池地址。如果你已经有 Siacoin 矿机，第一样就有了——算法相同，原厂固件即可。把它指向 <b>stratum+tcp://stratum.lazarus-xbt.xyz:23334</b>，用户名填你的地址，密码填 <code>x</code>，立刻就能开始工作。",
-            "有一条提醒值得看两遍：本链与 SHA-256 比特币共享 961,640 高度之前的全部历史，因此持有真实 BTC 的地址绝不可在此使用，请为本链另生成一个新地址。收益以矿池所出区块 coinbase 中的输出形式到账，没有余额需要提现。coinbase 输出通常 100 个确认后可动用；在临时的 Knots #419 规则下，新挖出的币要等 6,480 个确认（约 45 天）才能动用。<a href=\"/hardware\">哪些机器能用</a> · <a href=\"/tides\">支付如何计算</a>。",
+            '<p><b>我们的实测。</b>我们在 regtest 上用自己的 Prime 和 Knots 29.4.2 测试了这个网关，最近一次是 2026 年 10 月 9 日测试 <code>master</code> <code>280cf54</code>，蚂蚁 A3 和通用矿机找到的区块都付给了窗口里的全部 60 位矿工：握手与公钥校验、每个找到的区块都付给窗口里的所有矿工、<code>地址.worker</code> 与纯地址用户名、0% 的 DATUM 费用路径、断线重连、Prime 的模板检查与拒绝，全部通过。有一项没通过，而且目前所有 C 语言 DATUM 网关（包括 iohzrd 和 CONVOY）都有：每个新区块之后的片刻，以及矿池分账迟到的整个期间，网关可能下发一个只付给矿池的 coinbase 任务。一个小补丁可以修复：分账到达之前只发只含区块补贴的空任务，或者不发任务。它还没有进入 <code>master</code>（对 <code>280cf54</code> 仍可直接打上），所以请自己打上：<a href="https://github.com/AwokenLazarus/Lazarus-Pool/blob/main/lazarus/patches/datum-gateway-fte-late-coinbaser.patch" target="_blank" rel="noreferrer">datum-gateway-fte-late-coinbaser.patch</a>（在 <code>cmake</code> 之前 <code>patch -p1 &lt;</code>）。</p>',
         ]),
     },
     "/how": {
-        "en": ("How your hashrate becomes a payout", [
+        "en": ("How Lazarus Pool pays: TIDES, inside the block itself", [
             "Your miner hashes a plain BLAKE2b header and knows nothing about any of this. Every share it sends is rebuilt into a full header and hashed again by Prime, the pool server; accepted work is credited to the address in your username and enters the TIDES window. The window holds the last eight times network difficulty of accepted work, which is days of pool work rather than a recent average.",
-            "When a block is found, Prime has already handed every gateway the same coinbase output list — the one shown under Next payout — and a share whose coinbase pays anything else is refused. So whoever's machine finds the block, that block pays the whole window. There is no pool balance to withdraw and no operator holding your coins between blocks. <a href=\"/tides\">More on the TIDES window</a> · <a href=\"/connect\">connect a miner</a>.",
+            "When the pool finds a block, every address in that window becomes an output of that block's coinbase, in proportion to its share of the window and less that miner's fee. A new rig starts near zero and ramps up as its work enters the window and older work ages out.",
+            "Prime has already handed every gateway the same coinbase output list — the one shown under Next payout — and a share whose coinbase pays anything else is refused. So whoever's machine finds the block, that block pays the whole window. There is no pool balance to withdraw and no operator holding your coins between blocks.",
+            "Lazarus Pool is the first pool confirmed to run a TIDES split coinbase on BLAKE2b Bitcoin mainnet — not on a testnet and not as a proposal, but in blocks you can open in the explorer and read the outputs of. An output under 0.005 XBT is carried forward to your next one. If the pool vanished tonight, nobody would be owed anything. <a href=\"/non-custodial\">Why there is nothing to trust</a> · <a href=\"/connect\">connect a miner</a>.",
         ]),
-        "zh": ("你的算力如何变成收益", [
+        "zh": ("TIDES 如何支付：在区块里直接付给你", [
             "你的矿机只是在算一个普通的 BLAKE2b 区块头，对这一切一无所知。它发出的每个份额都会被矿池服务端 Prime 重建成完整区块头并重新哈希；被接受的工作量记到你用户名里的地址上，并进入 TIDES 窗口。窗口容纳最近相当于全网难度八倍的工作量，那是好几天的矿池工作量，而不是一个近期平均值。",
-            "找到区块时，Prime 早已把同一份 coinbase 输出列表发给了每个网关——就是「下一次支付」里显示的那份——凡是 coinbase 支付其他内容的份额都会被拒绝。所以无论谁的机器出块，那个区块都支付给整个窗口。没有矿池余额需要提现，区块之间也没有谁替你保管币。<a href=\"/tides\">了解 TIDES 窗口</a> · <a href=\"/connect\">接入矿机</a>。",
+            "矿池找到区块时，窗口内每个地址都会成为该区块 coinbase 的一个输出，按其窗口占比支付并扣除该矿工的手续费。新机器从接近零开始，随着新工作进入、旧工作老化而逐步爬升。",
+            "Prime 早已把同一份 coinbase 输出列表发给了每个网关——就是「下一次支付」里显示的那份——凡是 coinbase 支付其他内容的份额都会被拒绝。所以无论谁的机器出块，那个区块都支付给整个窗口。没有矿池余额需要提现，区块之间也没有谁替你保管币。",
+            "Lazarus Pool 是 BLAKE2b 比特币主网上第一家被确认运行 TIDES 拆分 coinbase 的矿池——不是测试网，也不是提案，而是你可以在浏览器里打开并逐条查看输出的真实区块。低于 0.005 XBT 的输出会结转到你的下一笔。哪怕矿池今晚消失，也不欠任何人。<a href=\"/zh/non-custodial\">为什么没有需要信任的对象</a> · <a href=\"/zh/connect\">接入矿机</a>。",
         ]),
     },
     "/pools": {
@@ -6280,33 +6213,35 @@ _SEO_INTRO = {
     "/non-custodial": {
         "en": ("No pool balance, no withdrawal, nothing to trust", [
             "Almost every mining pool credits your work to a balance and pays that balance out later — when it passes a threshold, when a block matures, when a batch cycle runs. That gap between earning and holding is where mining money has always gone missing: exits, hacks, thresholds you never reach, a dust balance stranded when you unplug. Lazarus does not have the gap, because it never takes custody in the first place.",
-            "Your payout is an output of the block itself. Prime hands every gateway the same coinbase output list before any work goes out, and a share whose coinbase pays anything other than that list is refused — so whichever machine finds the block, that block's coinbase pays every address in the <a href=\"/tides\">TIDES window</a> directly. The pool never receives your coins, which means it cannot hold, batch, freeze or lose them.",
+            "Your payout is an output of the block itself. Prime hands every gateway the same coinbase output list before any work goes out, and a share whose coinbase pays anything other than that list is refused — so whichever machine finds the block, that block's coinbase pays every address in the <a href=\"/how\">TIDES window</a> directly. The pool never receives your coins, which means it cannot hold, batch, freeze or lose them.",
             "In practice: no account, no registration, no KYC, no withdrawal button, no pending balance (an output under 0.005 XBT is carried forward to your next one), and nothing owed to anyone if this pool disappeared tonight. Coinbase outputs are spendable after 100 confirmations like any other — except right now: the temporary Knots #419 rule makes every newly mined coin on this chain, at every pool and for every solo miner, wait 6,480 confirmations instead. A pool that pays you \u201conce your balance passes a threshold\u201d or \u201cat maturity\u201d is holding your coins in between; that is a real difference in what you are trusting, and it is worth knowing which kind you are on. <a href=\"/pools\">Compare the pools on this chain.</a>",
         ]),
         "zh": ("没有矿池余额，不用提现，没有需要信任的对象", [
             "几乎所有矿池都会把你的工作量记成一笔余额，之后再支付出去——攒够起付线时、区块成熟时、批量支付周期跑到时。赚到和拿到之间这段空隙，正是挖矿的钱历来消失的地方：跑路、被盗、永远攒不到的起付线、拔机后卡住的零星余额。Lazarus 没有这段空隙，因为它从一开始就不接管你的币。",
-            "你的收益是区块本身的一个输出。在任何工作下发之前，Prime 就把同一份 coinbase 输出列表交给了每个网关，凡是 coinbase 支付了这份列表以外内容的份额都会被拒绝——所以无论哪台机器出块，那个区块的 coinbase 都直接支付给 <a href=\"/tides\">TIDES 窗口</a>里的每一个地址。矿池从不收到你的币，也就无从代持、批量、冻结或弄丢。",
+            "你的收益是区块本身的一个输出。在任何工作下发之前，Prime 就把同一份 coinbase 输出列表交给了每个网关，凡是 coinbase 支付了这份列表以外内容的份额都会被拒绝——所以无论哪台机器出块，那个区块的 coinbase 都直接支付给 <a href=\"/how\">TIDES 窗口</a>里的每一个地址。矿池从不收到你的币，也就无从代持、批量、冻结或弄丢。",
             "具体就是：没有账户、不用注册、没有 KYC、没有提现按钮、没有待发余额（低于 0.005 XBT 的输出会结转到下一笔）；哪怕这家矿池今晚消失，也不欠任何人。coinbase 输出和其他输出一样，通常 100 个确认后即可动用——但眼下临时的 Knots #419 规则让本链每一枚新挖出的币（任何矿池、任何独挖者）都要等 6,480 个确认。一家说「余额攒够起付线才付」或「成熟后再付」的矿池，在这中间是替你拿着币的；你信任的东西因此不同，值得先弄清自己在哪一种上。<a href=\"/pools\">对比本链各矿池</a>。",
         ]),
     },
     "/calculator": {
-        "en": ("XBT / BTCB2 mining calculator", [
+        "en": ("Mining calculator: what your Sia ASIC earns per day", [
             "Type your hashrate into <a href=\"#calc\">the calculator further down this page</a> and it works out what that hashrate is worth per day on the BLAKE2b Bitcoin chain right now. The arithmetic is deliberately dull: the pool publishes a live XBT-per-TH/s-per-day figure from current network difficulty and the block subsidy, and your estimate is that figure multiplied by your hashrate, converted at the current price.",
-            "What is in the number and what is not, because this is where calculators lie. It uses the difficulty right now, not a forecast, and difficulty is what will actually change your earnings. It assumes the base subsidy with no transaction fees, so a block with fees in it pays more than this says. It assumes the DATUM path with the subsidy included, which is the 0% route. It does not subtract electricity — that figure is yours, and it is the one that decides whether any of this works. <a href=\"/hardware\">Per-machine estimates for every Siacoin ASIC</a> are listed below, and <a href=\"/profitability\">whether mining XBT pays at all</a> goes into it further.",
+            "Is it profitable? Difficulty on this chain is still low relative to a full block subsidy, which is the whole reason a Siacoin ASIC that stopped paying for itself on Sia can earn again here. The live figure moves with difficulty and price; the machine list below turns it into an estimate in XBT and in dollars for each specific box at today's numbers.",
+            "What is in the number and what is not, because this is where calculators lie. It uses the difficulty right now, not a forecast, and difficulty is what will actually change your earnings. It assumes the base subsidy with no transaction fees, so a block with fees in it pays more than this says. It assumes the DATUM path with the subsidy included, which is the 0% route. It does not subtract electricity — that figure is yours, and it is the one that decides whether any of this works. <a href=\"/hardware\">Per-machine estimates for every Siacoin ASIC</a>.",
         ]),
-        "zh": ("XBT / BTCB2 挖矿收益计算器", [
+        "zh": ("挖矿收益计算器：你的 Siacoin 矿机每天能挖多少", [
             "把你机器的总算力填进<a href=\"#calc\">本页下方的计算器</a>，它会算出这份算力此刻在 BLAKE2b 比特币链上每天值多少。算法故意做得很直白：矿池会按当前全网难度和区块奖励公布一个实时的「每 TH/s 每日 XBT」数字，你的估算就是这个数字乘上你的算力，再按当前价格折算成美元。",
-            "这个数字包含什么、不包含什么——计算器就是在这里骗人的。它用的是此刻的难度，不是预测，而难度才是真正会改变你收益的东西。它按基础奖励计算、不含交易费，所以带交易费的区块会比这里显示的多。它按含补贴的 DATUM 路径计算，也就是 0% 那条路。它没有扣电费——那个数字只有你知道，也正是它决定这件事是否成立。下方有<a href=\"/hardware\">每一款 Siacoin 矿机的逐台估算</a>，<a href=\"/profitability\">挖 XBT 到底划不划算</a>另有更细的说明。",
+            "划算吗？本链的难度相对于完整区块奖励仍然偏低，这正是一台在 Sia 上已经赚不回电费的 Siacoin 矿机能在这里重新赚钱的原因。实时数字随难度与价格变化；下面的机器列表把它换算成每台机器在当前数字下的 XBT 与美元估算。",
+            "这个数字包含什么、不包含什么——计算器就是在这里骗人的。它用的是此刻的难度，不是预测，而难度才是真正会改变你收益的东西。它按基础奖励计算、不含交易费，所以带交易费的区块会比这里显示的多。它按含补贴的 DATUM 路径计算，也就是 0% 那条路。它没有扣电费——那个数字只有你知道，也正是它决定这件事是否成立。<a href=\"/zh/hardware\">每一款 Siacoin 矿机的逐台估算</a>。",
         ]),
     },
     "/blocks": {
         "en": ("Blocks found by Lazarus Pool", [
             "Every block this pool has found on the BLAKE2b Bitcoin (XBT / BTCB2) chain is listed below with its height, when it landed, and what it paid. Because payouts are a split coinbase rather than a pool balance, each of these blocks <em>is</em> a payout run: opening one shows the outputs it made and the addresses they went to.",
-            "That makes the whole payout history checkable by anyone without asking us for anything. Find a block from a period you were mining, open its coinbase, and your address should appear with the share of the <a href=\"/tides\">TIDES window</a> it held at the time, less its fee. Nothing is reconstructed from our database for that check — it is on chain. <a href=\"/non-custodial\">Why there is no balance to reconcile.</a>",
+            "That makes the whole payout history checkable by anyone without asking us for anything. Find a block from a period you were mining, open its coinbase, and your address should appear with the share of the <a href=\"/how\">TIDES window</a> it held at the time, less its fee. Nothing is reconstructed from our database for that check — it is on chain. <a href=\"/non-custodial\">Why there is no balance to reconcile.</a>",
         ]),
         "zh": ("Lazarus Pool 找到的区块", [
             "本矿池在 BLAKE2b 比特币（XBT / BTCB2）链上找到的每一个区块都列在下方，含高度、出块时间和支付金额。由于支付走的是拆分 coinbase 而不是矿池余额，这里每一个区块<em>本身</em>就是一次发工资：打开它就能看到它产生的输出以及收款地址。",
-            "这让整段支付历史任何人都能自行核对，不必向我们索取任何东西。找一个你当时在挖的区块，打开它的 coinbase，你的地址应当出现在其中，金额对应你当时在 <a href=\"/tides\">TIDES 窗口</a>里的占比并扣除手续费。这项核对完全不依赖我们的数据库重算——它就在链上。<a href=\"/non-custodial\">为什么这里没有余额需要对账</a>。",
+            "这让整段支付历史任何人都能自行核对，不必向我们索取任何东西。找一个你当时在挖的区块，打开它的 coinbase，你的地址应当出现在其中，金额对应你当时在 <a href=\"/how\">TIDES 窗口</a>里的占比并扣除手续费。这项核对完全不依赖我们的数据库重算——它就在链上。<a href=\"/non-custodial\">为什么这里没有余额需要对账</a>。",
         ]),
     },
     "/api": {
@@ -6328,7 +6263,11 @@ for _p in _SEO_PAGES:
     if _p != "/":
         _SEO_ALIASES[_p + "/"] = _p
 _SEO_ALIASES["/bip-110"] = "/bip110"
-_SEO_ALIASES["/mine-btcb2"] = "/mine-xbt"
+_SEO_ALIASES["/mine-btcb2"] = "/connect"
+# Pages merged on 2026-10-13 (#48): each pair said the same thing at two URLs.
+_SEO_ALIASES["/mine-xbt"] = "/connect"
+_SEO_ALIASES["/tides"] = "/how"
+_SEO_ALIASES["/profitability"] = "/calculator"
 
 # A plain-markdown protocol reference. Nobody else documents how a BLAKE2b share on this chain is
 # actually derived, so this is the page a developer or a model looking for it should land on, and
@@ -6391,7 +6330,7 @@ valid when `pow <= target`.
 Payouts are a split coinbase, so the pool hands every gateway the same coinbase output
 list before any work goes out, and a share whose coinbase pays anything other than that
 list is refused. The current list is public at `/api/coinbaser` — it is the next block's
-payout, published before the block exists. See SITEPLACEHOLDER/tides.
+payout, published before the block exists. See SITEPLACEHOLDER/how.
 
 ## Running your own templates
 
@@ -6429,13 +6368,13 @@ _LLMS_TXT = """# Lazarus Pool
 ## Facts
 
 - Site: {site}/
-- How to mine: {site}/mine-xbt
+- How to mine: {site}/connect
 - Hardware (Siacoin ASICs, with earnings estimates): {site}/hardware
 - Rent BLAKE2b hashrate: {site}/rentals
 - Earnings calculator: {site}/calculator
-- Is it profitable: {site}/profitability
+- Is it profitable: {site}/calculator
 - The BIP-110 fork: {site}/bip110
-- TIDES payouts: {site}/tides
+- TIDES payouts: {site}/how
 - DATUM subsidy: {site}/datum-subsidy
 - Mine with a Ratum gateway (ratum-gateway): {site}/ratum
 - Mine with the FlyTheElephant gateway: {site}/flytheelephant
@@ -6448,7 +6387,7 @@ _LLMS_TXT = """# Lazarus Pool
 - Public stratum: a donation, validation and fallback endpoint at 100% (50 points to DATUM gateways, 50 to the pool address), with a 24 h grace at 25% (12.5 points), or 96 h if the address mined through a DATUM gateway on Lazarus in the prior 30 days, then 100%. Point a miner at stratum+tcp://stratum.lazarus-xbt.xyz:23334 to confirm it connects and submits shares while your own node and DATUM gateway are still coming online, or as a fallback if your own gateway goes down. Bitcoin Knots has announced a rule to invalidate coinbase payouts to addresses that hash through any pool's stratum (SV1); moving to another pool does not avoid it. Run your own DATUM gateway.
 - Coinbase maturity: Knots 29.4.2 (#419) holds coinbases mined from block 973,440 until block 979,920 (about 5 Nov 2026) for 6,480 blocks instead of 100, so a payout from block N is spendable at about block N + 6,480. DATUM gateway nodes must run Knots 29.4.2 or later.
 - MCP server for AI assistants (read-only, no login, Streamable HTTP): https://mcp.lazarus-xbt.xyz/mcp (guide: https://mcp.lazarus-xbt.xyz)
-- GitHub: https://github.com/AwokenLazarus/Bitcoin
+- GitHub: https://github.com/AwokenLazarus/Lazarus-Pool
 - Discord: https://discord.gg/fD33dJXnzz
 - Chinese: any URL under /zh/, e.g. {site}/zh/hardware
 
@@ -6784,21 +6723,21 @@ _SEO_KEEP = {
     "/hardware": ("hardware",),
     "/rentals": ("rentals",),
     "/calculator": ("hardware",),
-    "/profitability": ("hardware",),
     "/connect": ("connect",),
-    "/mine-xbt": ("connect",),
-    "/ratum": ("connect",),
+    "/ratum": (),
     "/datum-subsidy": ("learn",),
-    "/flytheelephant": ("connect", "gateways"),
+    "/flytheelephant": ("gateways",),
     "/how": ("how",),
-    "/tides": ("how",),
-    "/non-custodial": ("how",),
-    "/bip110": ("learn",),
+    "/non-custodial": ("payout",),
+    "/bip110": (),
     "/pools": ("pools",),
-    "/self-cap": ("pools",),
+    "/self-cap": (),
     "/blocks": ("payout", "blocks"),
     "/api": (),
 }
+# The operator notice stays on the dashboard and the gateway pages; on every other article it was
+# the first thing a crawler read, identical across 30 URLs.
+_NOTICE_PAGES = {"/connect", "/ratum", "/flytheelephant", "/datum-subsidy"}
 # Hash targets that stand for a section without being its id (mirrors ALIAS in app.js).
 _HASH_ALIAS = {"top": "fees", "datum": "connect", "ratum": "connect", "mine": "connect", "window": "payout", "payouts": "dashboard"}
 _TOP_SECTION = re.compile(r'\n  <section\b[^>]*\bid="([^"]+)"[^>]*>.*?\n  </section>', re.S)
@@ -6808,31 +6747,27 @@ _ORG_ID = "https://lazarus-xbt.xyz/#org"
 # a page's modified date only when its words change, never per deploy. /blocks and /calculator are
 # live data and a tool, so they stay plain WebPages.
 _SEO_ARTICLE = {
-    "/hardware": ("Article", "2026-09-13", "2026-10-08"),
-    "/rentals": ("Article", "2026-10-08", "2026-10-08"),
-    "/profitability": ("Article", "2026-09-13", "2026-09-23"),
-    "/pools": ("Article", "2026-09-13", "2026-09-27"),
-    "/self-cap": ("Article", "2026-09-13", "2026-09-23"),
-    "/non-custodial": ("Article", "2026-09-13", "2026-09-27"),
-    "/tides": ("Article", "2026-09-13", "2026-09-27"),
-    "/bip110": ("Article", "2026-09-13", "2026-09-23"),
-    "/how": ("Article", "2026-09-13", "2026-09-23"),
-    "/mine-xbt": ("TechArticle", "2026-09-13", "2026-09-28"),
-    "/connect": ("TechArticle", "2026-09-13", "2026-09-28"),
-    "/ratum": ("TechArticle", "2026-09-28", "2026-09-28"),
-    "/datum-subsidy": ("TechArticle", "2026-09-13", "2026-09-23"),
-    "/flytheelephant": ("TechArticle", "2026-09-28", "2026-09-28"),
-    "/api": ("TechArticle", "2026-09-13", "2026-09-23"),
+    "/hardware": ("Article", "2026-09-13", "2026-10-13"),
+    "/rentals": ("Article", "2026-10-08", "2026-10-13"),
+    "/pools": ("Article", "2026-09-13", "2026-10-13"),
+    "/self-cap": ("Article", "2026-09-13", "2026-10-13"),
+    "/non-custodial": ("Article", "2026-09-13", "2026-10-13"),
+    "/bip110": ("Article", "2026-09-13", "2026-10-13"),
+    "/how": ("Article", "2026-09-13", "2026-10-13"),
+    "/connect": ("TechArticle", "2026-09-13", "2026-10-13"),
+    "/ratum": ("TechArticle", "2026-09-28", "2026-10-13"),
+    "/datum-subsidy": ("TechArticle", "2026-09-13", "2026-10-13"),
+    "/flytheelephant": ("TechArticle", "2026-09-28", "2026-10-13"),
+    "/api": ("TechArticle", "2026-09-13", "2026-10-13"),
 }
 # The sitemap pages that are not articles, with the date their crawlable copy last changed. Same
 # rule as _SEO_ARTICLE: bump a date in the commit that changes that page's words, never per deploy.
-# Search engines use <lastmod> only while it stays truthful; a sitemap that says "today" for every
-# URL on every deploy teaches them to ignore it.
+# cloudflare/pool-site/tests/lastmod.py fails the build when a page's text changed and its date did
+# not, so a stale date cannot ship unnoticed.
 _SEO_MODIFIED = {
-    "/": "2026-10-12",
-    "/calculator": "2026-09-23",
-    "/blocks": "2026-09-23",
-    _STRATUM_DOC_PATH: "2026-09-28",
+    "/": "2026-10-13",
+    "/calculator": "2026-10-13",
+    "/blocks": "2026-10-13",
 }
 _OG_IMAGE = "https://pool.lazarus-xbt.xyz/static/og-pool.png"
 
@@ -6850,6 +6785,11 @@ def _keyword_page(raw, meta):
         return ""
 
     raw = _TOP_SECTION.sub(cut, raw)
+    # The no-JavaScript summary describes the dashboard; the article is already readable without
+    # scripts, and on /zh/ the summary was English.
+    raw = re.sub(r'<noscript id="nojs-summary">.*?</noscript>\n?', "", raw, count=1, flags=re.S)
+    if meta["path"] not in _NOTICE_PAGES:
+        raw = re.sub(r'<aside class="softfork urgent" id="gatewaynotice".*?</aside>\n', "", raw, count=1, flags=re.S)
     home = "/zh/" if meta["lang"] == "zh-CN" else "/"
 
     def relink(m):
@@ -6966,19 +6906,16 @@ _INDEXNOW_PATH = f"/{_INDEXNOW_KEY}.txt"
 # how to mine, what it earns, or which pool to use is worth more than one browsing the API docs.
 _SITEMAP_ORDER = (
     ("/", "hourly", "1.0"),
-    ("/mine-xbt", "weekly", "0.9"),
     ("/hardware", "daily", "0.9"),
     ("/rentals", "daily", "0.8"),
-    ("/profitability", "daily", "0.9"),
     ("/calculator", "daily", "0.9"),
     ("/pools", "weekly", "0.9"),
-    ("/connect", "weekly", "0.8"),
+    ("/connect", "weekly", "0.9"),
     ("/ratum", "weekly", "0.8"),
     ("/datum-subsidy", "weekly", "0.8"),
     ("/flytheelephant", "weekly", "0.8"),
     ("/self-cap", "weekly", "0.8"),
     ("/non-custodial", "weekly", "0.8"),
-    ("/tides", "weekly", "0.8"),
     ("/bip110", "weekly", "0.8"),
     ("/blocks", "hourly", "0.7"),
     ("/how", "weekly", "0.7"),
@@ -7005,11 +6942,6 @@ def robots_txt():
         "# stays allowed while everything below it is blocked.\n"
         "Allow: /api\n"
         "Disallow: /api/\n"
-        "\n"
-        "# One page per miner address, instantiable without limit and identical in structure for\n"
-        "# every address. Nothing to index; still linked and reachable for the miner who wants it.\n"
-        "Disallow: /miner\n"
-        "Disallow: /zh/miner\n"
         "\n"
         f"Sitemap: {_PUBLIC_SITE}/sitemap.xml\n"
     )
@@ -7051,12 +6983,7 @@ def sitemap_xml():
                 f"  <url><loc>{_xml_attr(loc)}</loc><lastmod>{_lastmod(freq, p)}</lastmod>"
                 f"{alts}<changefreq>{freq}</changefreq><priority>{prio}</priority></url>"
             )
-    # The protocol reference is one English document with no Chinese twin, so it declares no
-    # alternates rather than pointing hreflang at a page that does not exist.
-    urls.append(
-        f"  <url><loc>{_xml_attr(_PUBLIC_SITE + _STRATUM_DOC_PATH)}</loc>"
-        f"<lastmod>{_lastmod('weekly', _STRATUM_DOC_PATH)}</lastmod><changefreq>monthly</changefreq><priority>0.7</priority></url>"
-    )
+    # The protocol reference is linked from every page's footer; it is a text file, not a page.
     return (
         '<?xml version="1.0" encoding="UTF-8"?>\n'
         '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9" xmlns:xhtml="http://www.w3.org/1999/xhtml">\n'

@@ -40,7 +40,7 @@ export const FAQ = [
       "With your own DATUM gateway you run a Bitcoin Knots node for this chain, build your own block templates, pay 0% and earn the DATUM bonus; the pool only supplies the coinbase split. " +
       "The public stratum needs no node. It is a donation, validation and fallback endpoint at 100%, with a 24 h / 96 h grace at 25%, then 100%, and it is capped (see 'self-cap'). Bitcoin Knots has also announced a future rule to invalidate coinbase payouts to addresses that hash through any pool's stratum (SV1); moving to another pool does not avoid it. " +
       "The pool therefore recommends your own DATUM gateway for everyone who can run a node.",
-    links: [`${S}/mine-xbt`, "https://convoy.xyz/getstarted"],
+    links: [`${S}/connect`, "https://convoy.xyz/getstarted"],
   },
   {
     id: "connect",
@@ -50,7 +50,7 @@ export const FAQ = [
       "Public stratum: stratum+tcp://stratum.lazarus-xbt.xyz:23334, username = your XBT payout address optionally followed by .workername, password x. Algorithm: BLAKE2b with a Sia-style header (any Siacoin ASIC; SHA-256 machines will not work). " +
       "DATUM: run Bitcoin Knots 29.4.2 (or later) for this chain, build a DATUM gateway, and put the pool's DATUM host (datum.lazarus-xbt.xyz), port (28915) and pool pubkey in its datum section; set mining.pool_address to your payout address and point your machines at your gateway. " +
       "connection_info returns the exact values including the pubkey. After connecting, check miner_overview with your address or gateway_status with your gateway's name.",
-    links: [`${S}/connect`, `${S}/mine-xbt`, "https://convoy.xyz/getstarted"],
+    links: [`${S}/connect`, "https://convoy.xyz/getstarted"],
   },
   {
     id: "ratum",
@@ -92,7 +92,7 @@ export const FAQ = [
     answer:
       "Gateways must run Bitcoin Knots 29.4.2 or later. Its long-coinbase-maturity rule (see 'coinbase-maturity') is consensus from block 973,440; an older node can build a block that spends a coinbase too young under the new rule, and the chain rejects that block. " +
       "A rejected block pays nobody, so it costs every miner in the TIDES window, not only the gateway that built it. gateway_status shows a gateway's build and any flags.",
-    links: [`${S}/mine-xbt`],
+    links: [`${S}/connect`],
   },
   {
     id: "tides",
@@ -102,7 +102,7 @@ export const FAQ = [
       "TIDES keeps a rolling window of recent work worth about eight times network difficulty. When any block is found, its coinbase pays every address in the window in proportion to its work there. " +
       "A new miner's share grows until the window has turned over once (roughly the time the pool takes to do eight network-difficulties of work); a miner who stops keeps being paid by blocks found until their work ages out. " +
       "There is no pool balance, no withdrawal and no custody: every payout is an output of a block's own coinbase, sent straight to the address.",
-    links: [`${S}/tides`, `${S}/non-custodial`],
+    links: [`${S}/how`, `${S}/non-custodial`],
   },
   {
     id: "carry",
@@ -112,7 +112,7 @@ export const FAQ = [
       "Each coinbase output must be at least the pool's minimum output (0.005 XBT as of 26 Sep 2026; miner_audit shows the live figure). If your share of a block is below it, or the coinbase is already full, your earned value is not lost: it is added to your carry. " +
       "Carry is paid, on top of your share, in the first later coinbase where share plus carry clears the minimum. The DATUM bonus is credited as carry too. " +
       "miner_audit reports your carry, whether you are in the coinbase being built right now, and the reason if not.",
-    links: [`${S}/tides`],
+    links: [`${S}/how`],
   },
   {
     id: "min-payout",
@@ -197,7 +197,7 @@ export const FAQ = [
       "paid: coinbase outputs to you that have matured and been counted as paid. immature: outputs already on chain but still inside the maturity wait, with the next unlock heights. carry: earned value waiting for an output (see 'carry'). " +
       "make_goods: amounts the pool owes you from partial or pool-only blocks, split into queued (waiting for a height), paid and failed. bonus: DATUM bonus credited so far. window: your share of the current TIDES window and what the next block would pay you. " +
       "Figures marked estimate (earnings per day, unlock dates) depend on luck and on how fast blocks come; heights are exact, dates are not. Every amount can be checked with verify_payout.",
-    links: [`${S}/tides`],
+    links: [`${S}/how`],
   },
   {
     id: "privacy",
