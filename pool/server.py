@@ -2505,8 +2505,26 @@ def split_user(u):
     return addr, worker
 
 
+# merge_prime_online() asks the database about every identity in Prime's window, and a miner
+# page needs the merged list twice. Built per request, that list kept both read replicas busy
+# and every other request waiting behind it (2026-10-13). One build is shared for a few
+# seconds instead; responses built from it are already cached for 5 s.
+_ONLINE_TTL_S = 3.0
+_online_cache = {"ts": 0.0, "rows": None}
+_online_lock = threading.Lock()
+
+
 def online_miners():
-    return merge_prime_online(list(state.get("miners") or []))
+    """The merged online list: a fresh copy of each row, so a caller may change its own."""
+    c = _online_cache
+    rows = c["rows"]
+    if rows is None or time.time() - c["ts"] >= _ONLINE_TTL_S:
+        with _online_lock:
+            rows = c["rows"]
+            if rows is None or time.time() - c["ts"] >= _ONLINE_TTL_S:
+                rows = merge_prime_online(list(state.get("miners") or []))
+                c["rows"], c["ts"] = rows, time.time()
+    return [dict(m) for m in rows]
 
 
 def ascii_from_hex(hx):

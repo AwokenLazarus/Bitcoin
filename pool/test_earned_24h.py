@@ -413,5 +413,29 @@ class Page(unittest.TestCase):
         self.assertIn("矿池不为你保管余额", zh["noBalance"])
 
 
+class OnlineMinersIsBuiltOnce(unittest.TestCase):
+    """A miner page reads the merged online list twice; it is built once and shared briefly."""
+
+    def setUp(self):
+        server._online_cache.update({"ts": 0.0, "rows": None})
+        self.addCleanup(server._online_cache.update, {"ts": 0.0, "rows": None})
+
+    def test_second_read_reuses_the_build_and_rows_are_copies(self):
+        rows = [{"address": A, "worker": "w1", "hr_ghs": 1.0}]
+        with mock.patch.object(server, "merge_prime_online", return_value=rows) as build:
+            first = server.online_miners()
+            first[0]["hr_ghs"] = 99.0
+            second = server.online_miners()
+        self.assertEqual(build.call_count, 1)
+        self.assertEqual(second[0]["hr_ghs"], 1.0)
+
+    def test_rebuilt_after_the_ttl(self):
+        with mock.patch.object(server, "merge_prime_online", return_value=[]) as build:
+            server.online_miners()
+            server._online_cache["ts"] -= server._ONLINE_TTL_S + 1
+            server.online_miners()
+        self.assertEqual(build.call_count, 2)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
