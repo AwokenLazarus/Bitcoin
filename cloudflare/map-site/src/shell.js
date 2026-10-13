@@ -21,7 +21,7 @@ export const HEAD = (title, description, canonical, current = "", css = "") => `
 <meta name="description" content="${esc(description)}">
 <link rel="canonical" href="${esc(canonical)}">
 <meta property="og:type" content="website">
-<meta property="og:site_name" content="Lazarus · Bitcoin BLAKE2b">
+<meta property="og:site_name" content="Lazarus Pool">
 <meta property="og:title" content="${esc(title)}">
 <meta property="og:description" content="${esc(description)}">
 <meta property="og:url" content="${esc(canonical)}">

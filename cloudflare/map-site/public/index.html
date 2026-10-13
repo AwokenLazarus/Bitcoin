@@ -7,7 +7,7 @@
 <meta name="description" content="Lazarus Pool mines Bitcoin. This site is the chain, the wallets, and how mining works. The pool is at https://pool.lazarus-xbt.xyz/. XBT and BTCB2 are the tickers.">
 <link rel="canonical" href="https://lazarus-xbt.xyz/">
 <meta property="og:type" content="website">
-<meta property="og:site_name" content="Lazarus · Bitcoin BLAKE2b">
+<meta property="og:site_name" content="Lazarus Pool">
 <meta property="og:title" content="Lazarus Pool — Bitcoin mining, wallets, and the chain">
 <meta property="og:description" content="Lazarus Pool mines Bitcoin. This site is the chain, the wallets, and how mining works. The pool is at https://pool.lazarus-xbt.xyz/. XBT and BTCB2 are the tickers.">
 <meta property="og:url" content="https://lazarus-xbt.xyz/">
@@ -66,10 +66,10 @@
   {
    "@type": "WebSite",
    "@id": "https://lazarus-xbt.xyz/#website",
-   "name": "Lazarus XBT",
+   "name": "Lazarus Pool",
    "alternateName": [
     "Lazarus",
-    "Lazarus Pool",
+    "Lazarus XBT",
     "Lazarus · Bitcoin BLAKE2b"
    ],
    "url": "https://lazarus-xbt.xyz/",
@@ -185,6 +185,11 @@
         <p>Every pool as a solar system and every DATUM gateway as a planet, built from coinbase tags. Hover a world to see what it mines and how.</p>
         <span class="more">lazarus-xbt.xyz/map →</span>
       </a>
+      <a class="card" href="/stream/" data-reveal>
+        <h3>Lightning Stream <span class="tag">Whitepaper</span></h3>
+        <p>Lightning Stream lets people and AI agents pay Lightning node runners for a service piece by piece as it arrives, over ordinary XBT Lightning channels: a few small payments are locked ahead, each request releases one, and the unused ones come back. For pieces too small to pay one by one, a fair lottery pays the exact price on average.</p>
+        <span class="more">lazarus-xbt.xyz/stream →</span>
+      </a>
       <a class="card" href="/key/" data-reveal>
         <h3>Lazarus Key <span class="tag">Wallet</span></h3>
         <p>A hardware wallet for XBT: Block's Bitkey app, forked so the device you already own signs on this chain. Replay-protected, and able to read from nothing but your own node.</p>
@@ -200,7 +205,7 @@
         <p>Connect Claude, ChatGPT or any MCP-capable assistant to live pool and chain data, and ask it about your miners in plain language.</p>
         <span class="more">mcp.lazarus-xbt.xyz →</span>
       </a>
-      <a class="card" href="https://github.com/AwokenLazarus/Bitcoin" rel="noopener" data-reveal>
+      <a class="card" href="https://github.com/AwokenLazarus/Lazarus-Pool" rel="noopener" data-reveal>
         <h3>Source <span class="tag">Open</span></h3>
         <p>Node builds, the DATUM Prime pool server, the gateway, and the tools behind these sites. Read it, run it, fork it.</p>
         <span class="more">github.com/AwokenLazarus →</span>
@@ -266,7 +271,7 @@
           <h3>Running a node?</h3>
           <p>Gateway operators build blocks from their own node, so the node's rules are the ones that count. Run <strong>Bitcoin Knots 29.4.2</strong> or later: an older node will accept blocks the network rejects, and everything it mines on top of them is wasted.</p>
           <div class="btn-row">
-            <a class="btn small" href="https://github.com/AwokenLazarus/Bitcoin/tree/main/node" rel="noopener">Node setup</a>
+            <a class="btn small" href="https://github.com/AwokenLazarus/Lazarus-Pool/tree/main/node" rel="noopener">Node setup</a>
             <a class="btn small ghost" href="https://github.com/bitcoinknots/bitcoin/pull/419" rel="noopener">Read the change</a>
           </div>
         </div>
@@ -328,18 +333,19 @@
       <a href="https://mempool.lazarus-xbt.xyz" rel="noopener">Block explorer</a>
       <a href="/map/">Galaxy map</a>
       <a href="/ecosystem/#pools">Pool directory</a>
+      <a href="/stream/">Stream whitepaper</a>
     </div>
     <div class="footer-col">
       <p class="category">Mine</p>
-      <a href="https://pool.lazarus-xbt.xyz" rel="noopener">XBT mining pool</a>
+      <a href="https://pool.lazarus-xbt.xyz" rel="noopener">Lazarus Pool</a>
       <a href="https://pool.lazarus-xbt.xyz/connect" rel="noopener">Connect a Siacoin ASIC</a>
-      <a href="https://pool.lazarus-xbt.xyz/hardware" rel="noopener">ASICs that mine XBT</a>
+      <a href="https://pool.lazarus-xbt.xyz/hardware" rel="noopener">ASICs that mine here</a>
       <a href="https://pool.lazarus-xbt.xyz/how" rel="noopener">How the pool pays</a>
       <a href="/ecosystem/#pools">Other pools</a>
     </div>
     <div class="footer-col">
       <p class="category">Build</p>
-      <a href="https://github.com/AwokenLazarus/Bitcoin" rel="noopener">Source on GitHub</a>
+      <a href="https://github.com/AwokenLazarus/Lazarus-Pool" rel="noopener">Source on GitHub</a>
       <a href="https://github.com/AwokenLazarus/lazarus-key" rel="noopener">Lazarus Key source</a>
       <a href="/ecosystem/#software">Software</a>
       <a href="https://mcp.lazarus-xbt.xyz" rel="noopener">MCP server</a>
@@ -353,7 +359,7 @@
     </div>
   </div>
   <div class="wrap footer-bottom">
-    <span>Lazarus · Bitcoin BLAKE2b (XBT). Public data, no accounts, no custody.</span>
+    <span>Lazarus Pool · Bitcoin on blake2b proof of work (XBT). Public data, no accounts, no custody.</span>
     <span class="live">live</span>
   </div>
 </footer>
