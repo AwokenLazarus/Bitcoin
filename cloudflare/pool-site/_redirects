@@ -5,3 +5,14 @@
 /static/ / 301
 /static/index.html / 301
 /static/index / 301
+# Pages merged on 2026-10-13 (#48) and legacy spellings. 301 so the surviving page inherits.
+/mine-xbt /connect 301
+/zh/mine-xbt /zh/connect 301
+/mine-btcb2 /connect 301
+/zh/mine-btcb2 /zh/connect 301
+/tides /how 301
+/zh/tides /zh/how 301
+/profitability /calculator 301
+/zh/profitability /zh/calculator 301
+/bip-110 /bip110 301
+/zh/bip-110 /zh/bip110 301

@@ -35,6 +35,9 @@ for url in urls:
     page = Page(text)
     assert page.canonical == [url], (url, page.canonical)
     assert not page.noindex and page.h1 == 1, (url, page.h1)
+    if path not in ('/', '/zh/'):
+        assert 'id="nojs-summary"' not in text, (url, 'dashboard no-JS summary on an article page')
+        assert 'lang="en"' not in text.split('<body', 1)[1][:200] or not prefix, url
     prefix = '/zh' if path.startswith('/zh/') else ''
     assert page.lang == ('zh-CN' if prefix else 'en'), url
     for key, target in {'home':'/', 'mine':'/connect', 'payouts':'/blocks', 'learn':'/how'}.items():
@@ -42,7 +45,7 @@ for url in urls:
     assert set(page.alts) == {'en', 'zh-CN', 'x-default'}, url
     for alt in page.alts.values(): assert alt in urls, (url, alt)
     count += 1
-assert count == 36, count
+assert count == 30, count  # 15 documents in two languages
 assert not (out/'static/index.html').exists(), 'raw template is publicly exported'
 assert 'Disallow: /\n' not in (out/'robots.txt').read_text()
 for route in ['/static/', '/static/index.html', '/static/index']:

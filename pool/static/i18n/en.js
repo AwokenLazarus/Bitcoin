@@ -8,6 +8,12 @@ window.LZ_I18N_DICTS["en"] = {
     "minerTitleAddr": "{short} — Lazarus Pool"
   },
   "skip": "Skip to pool status",
+  "nojs": {
+    "p1": "Lazarus Pool is a mining pool for Bitcoin (XBT and BTCB2 are the tickers), the <a href=\"/bip110\">BIP-110 Bitcoin fork</a> that mines with BLAKE2b instead of SHA-256d. Any ASIC that can mine Siacoin can mine it. You mine with your own DATUM gateway pointed at <code>datum.lazarus-xbt.xyz:28915</code>, at 0% plus the <a href=\"/datum-subsidy\">DATUM subsidy</a>. The public stratum, <code>stratum+tcp://stratum.lazarus-xbt.xyz:23334</code> (username = your payout address, password <code>x</code>), is a donation, validation and fallback endpoint at 100%, with 50 points to DATUM gateways and 50 to the pool, and a 24 h / 96 h grace at 25%, then 100%. <a href=\"/how\">TIDES</a> pays every miner inside the coinbase of each block found, so the pool never holds your coins.",
+    "p2": "Lazarus Pool is the first pool confirmed to pay TIDES as a split coinbase on BLAKE2b Bitcoin mainnet, and the first pool anywhere to use its stratum hashers to subsidize DATUM miners — paying miners for securing and decentralizing the network instead of charging them for it.",
+    "p3": "Nothing is ever held for you: payouts are <a href=\"/non-custodial\">outputs of the block itself</a>, with no balance and no withdrawal. Once its stratum passes 15% of network hashrate the pool <a href=\"/self-cap\">relays new miners to another pool</a> rather than keep growing. <a href=\"/pools\">How the pools on this chain compare</a>.",
+    "p4": "See <a href=\"/hardware\">Siacoin BLAKE2b ASICs</a> and their estimated earnings, <a href=\"/rentals\">rent BLAKE2b hashrate</a> onto your own node, work out <a href=\"/calculator\">what your hashrate earns per day</a>, or read <a href=\"/connect\">how to point a miner here</a>. Longer DATUM gateway setup: <a href=\"https://convoy.xyz/getstarted\">CONVOY get started</a> / <a href=\"https://convoy.xyz/getstarted?lang=zh\">中文</a>. Developers: <a href=\"/stratum-protocol.md\">the stratum protocol on this chain</a> and the <a href=\"/api\">public API</a>. Block explorer: <a href=\"https://mempool.lazarus-xbt.xyz\">mempool.lazarus-xbt.xyz</a>. 中文：<a href=\"/zh/\">简体中文版</a>."
+  },
   "skipMiner": "Skip to miner stats",
   "lang": {
     "group": "Language",

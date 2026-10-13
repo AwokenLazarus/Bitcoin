@@ -26,13 +26,13 @@
   const root = document.documentElement;
   let current = null;
 
-  // Each crawlable URL (/tides, /hardware, ...) is this same page with that topic's article put
+  // Each crawlable URL (/how, /hardware, ...) is this same page with that topic's article put
   // at the top of <main> by the server. The article belongs to the view its topic lives in, and
   // that view is what the URL opens.
   const PATH_VIEW = {
-    "/how": "learn", "/bip110": "learn", "/tides": "learn", "/non-custodial": "learn", "/self-cap": "learn", "/pools": "learn",
+    "/how": "learn", "/bip110": "learn", "/non-custodial": "learn", "/self-cap": "learn", "/pools": "learn",
     "/datum-subsidy": "learn", "/api": "learn",
-    "/connect": "mine", "/mine-xbt": "mine", "/ratum": "mine", "/flytheelephant": "mine", "/hardware": "mine", "/rentals": "mine", "/profitability": "mine", "/calculator": "mine",
+    "/connect": "mine", "/ratum": "mine", "/flytheelephant": "mine", "/hardware": "mine", "/rentals": "mine", "/calculator": "mine",
     "/blocks": "payouts",
   };
   const pagePath = location.pathname.replace(/^\/zh(?=\/|$)/, "").replace(/\/$/, "") || "/";

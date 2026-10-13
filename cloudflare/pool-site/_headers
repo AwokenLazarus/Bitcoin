@@ -15,3 +15,8 @@
   Cache-Control: public, max-age=0, s-maxage=3600
 /stratum-protocol.md
   Content-Type: text/markdown; charset=utf-8
+# The *.pages.dev hosts serve the same site as the custom domain; keep them out of search results.
+https://:project.pages.dev/*
+  X-Robots-Tag: noindex
+https://:version.:project.pages.dev/*
+  X-Robots-Tag: noindex
