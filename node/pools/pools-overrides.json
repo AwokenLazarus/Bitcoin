@@ -48,6 +48,67 @@
       "pool": true
     },
     {
+      "name": "RIPTIDE",
+      "link": "https://tides.maveth.ca",
+      "addresses": [],
+      "tags": [
+        "RIPTIDE"
+      ],
+      "pool": true,
+      "_comment": "Riptide is a DATUM pool: its coinbase starts RIPTIDE 0x0F <gateway>, and TIDES pays its miners in the same coinbase. As a plain tag pool it matched after members who are on the list by payout address or by their own tag (Crickey, PlebMiner, MIISSBLUEE, Snowman27), so 41 of its blocks between 975,713 and 977,120 showed under those names. Reported by its operator MaVeTh, 2026-10-14."
+    },
+    {
+      "name": "Paperclip Pool",
+      "link": "https://pool.paperclippool.xyz/",
+      "addresses": [],
+      "tags": [
+        "PaperclipPool"
+      ],
+      "pool": true,
+      "_comment": "DATUM pool (PaperclipPool 0x0F <gateway>); a member's payout address put 12 of its blocks under Connor's Lab."
+    },
+    {
+      "name": "Blockvase",
+      "link": "https://blockvase.com/",
+      "addresses": [],
+      "tags": [
+        "Blockvase"
+      ],
+      "pool": true,
+      "_comment": "DATUM pool (Blockvase 0x0F <gateway>); a member's payout address put 5 of its blocks under SpammersGFY."
+    },
+    {
+      "name": "Omega Pool",
+      "link": "https://omegapool.tech",
+      "addresses": [],
+      "tags": [
+        "pool.iohzrd.tech",
+        "omegapool.tech"
+      ],
+      "pool": true,
+      "_comment": "DATUM pool (omegapool.tech 0x0F <gateway>); a member's payout address put 20 of its 32 omegapool.tech blocks under Nutty Maximalist."
+    },
+    {
+      "name": "Rabid Pool",
+      "link": "",
+      "addresses": [],
+      "tags": [
+        "Rabid Pool"
+      ],
+      "pool": true,
+      "_comment": "DATUM pool (Rabid Pool 0x0F <gateway>); a member's payout address put 8 of its 9 blocks under LVYT."
+    },
+    {
+      "name": "TerminusPool",
+      "link": "",
+      "addresses": [],
+      "tags": [
+        "TerminusPool"
+      ],
+      "pool": true,
+      "_comment": "DATUM pool (TerminusPool 0x0F <gateway>), on no upstream list; a member's payout address put its 3 blocks under StaxSats133."
+    },
+    {
       "name": "Pow.re",
       "link": "https://pow.re",
       "addresses": [],

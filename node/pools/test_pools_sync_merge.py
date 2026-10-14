@@ -44,7 +44,7 @@ class DatumMinersGeneric(unittest.TestCase):
     def test_named_pools_outrank_datumminers(self):
         prio = {s: p for s, _, p in _merged()}
         self.assertEqual(prio["convoy"], 2)
-        self.assertEqual(prio["riptide"], 2)
+        self.assertEqual(prio["riptide"], 1)
         self.assertEqual(prio["datumminers"], 5)
         self.assertEqual(prio["datum"], 5)
         self.assertEqual(prio["lazarus"], 0)
@@ -56,6 +56,45 @@ class DatumMinersGeneric(unittest.TestCase):
         self.assertEqual(_hit(matchers, "Lazarus\x0fMeteking\x00"), "lazarus")
         self.assertEqual(_hit(matchers, "DATUM"), "datumminers")
         self.assertEqual(_hit(matchers, "DATUM solo mined"), "datumminers")
+
+class DatumPoolsBeatTheirMembers(unittest.TestCase):
+    """A DATUM pool's coinbase pays its miners and names the gateway, so a member listed by payout
+    address or by its own tag must not take the pool's block (MaVeTh, 2026-10-14: Riptide showed
+    under Crickey, PlebMiner and others)."""
+
+    def setUp(self):
+        ov = json.loads((HERE / "pools-overrides.json").read_text())
+        guide = [{"name": "Crickey", "link": "", "addresses": ["bc1qcrickeymember"], "regexes": ["Crickey"]},
+                 {"name": "Connor's Lab", "link": "", "addresses": ["bc1qconnormember"], "regexes": ["connorslab"]},
+                 {"name": "SpammersGFY", "link": "", "addresses": ["bc1qspammember"], "regexes": ["SpammersGFY"]}]
+        self.merged = PS.merge([], guide, ov)
+        self.matchers = _matchers(self.merged)
+
+    def _block(self, text, addrs=()):
+        for slug, aset, regs, _ids in self.matchers:
+            if (aset & set(addrs)) or any(r.search(text) for r in regs):
+                return slug
+        return None
+
+    def test_shared_band(self):
+        prio = {s: p for s, _, p in self.merged}
+        for slug in ("riptide", "paperclippool", "blockvase", "omegapool", "rabidpool", "terminuspool"):
+            self.assertEqual(prio[slug], 1, slug)
+
+    def test_member_address_does_not_take_the_pools_block(self):
+        self.assertEqual(self._block("RIPTIDE\x0fGresham's Law\x00", ["bc1qcrickeymember"]), "riptide")
+        self.assertEqual(self._block("PaperclipPool\x0fMeramecMonitor\x00", ["bc1qconnormember"]), "paperclippool")
+        self.assertEqual(self._block("Blockvase\x0fDATUM User\x00", ["bc1qspammember"]), "blockvase")
+        self.assertEqual(self._block("omegapool.tech\x0fNutty Maximalist\x00", ["bc1qspammember"]), "omegapool")
+        self.assertEqual(self._block("Rabid Pool\x0fRabid Pool\x00", ["bc1qspammember"]), "rabidpool")
+
+    def test_gateway_named_after_a_listed_pool_is_still_the_pools_block(self):
+        self.assertEqual(self._block("RIPTIDE\x0fPlebMiner\x00"), "riptide")
+
+    def test_member_mining_alone_keeps_its_own_name(self):
+        self.assertEqual(self._block("Crickey", ["bc1qcrickeymember"]), "crickey")
+        self.assertEqual(self._block("solo\x0fPlebMiner\x00"), "plebminer")
+
 
 # Real coinbases from this chain, so the gateway-band rule is tested against what miners send.
 CB_POOL_OWN = "039adb0e14416c706861506f6f6c0f416c706861506f6f6c00030e92100e5cdb000000000000000000000000"
