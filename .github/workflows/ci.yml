@@ -53,3 +53,39 @@ jobs:
       # so a syntax error reaches the host intact. This is the cheapest guard against that.
       - name: compile all
         run: python3 -m compileall -q pool miner node patches scripts
+
+  sites:
+    # Merges to main are deployed to the websites automatically, but only once this job has
+    # passed for that commit (AgentLaz's site-autodeploy reads its result). Keep it to the
+    # checks a website change must pass; anything slow or flaky here holds every deploy.
+    name: sites — pool, hub, MCP
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          # sitemap dates are read from git history
+          fetch-depth: 0
+
+      - name: pool backend tests
+        run: |
+          python3 -m pip install -q pytest
+          # one file per run: the modules patch server globals and do not share a session well
+          for t in pool/test_*.py; do python3 -m pytest -q -p no:cacheprovider "$t"; done
+
+      - name: pool site build and checks
+        run: |
+          python3 cloudflare/pool-site/build-from-tree.py --out "$RUNNER_TEMP/pool-dist"
+          python3 cloudflare/pool-site/tests/indexing.py "$RUNNER_TEMP/pool-dist"
+          python3 cloudflare/pool-site/tests/lastmod.py "$RUNNER_TEMP/pool-dist"
+          node cloudflare/pool-site/tests/language.mjs
+
+      - name: hub checks
+        working-directory: cloudflare/map-site
+        run: |
+          node scripts/test-indexing.mjs
+          node scripts/sitemap-lastmod.mjs --check
+          node scripts/test-naughtylist.mjs
+
+      - name: MCP tests
+        working-directory: cloudflare/mcp
+        run: node test/run.mjs
