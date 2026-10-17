@@ -37,6 +37,7 @@ ADDR = "bc1qminera"
 BLOCK = "ab" * 32
 OTHER = "cd" * 32
 LOST = "11" * 32
+MAKEGOOD = "ef" * 32
 OAS_URL = "https://spec.openapis.org/oas/3.1/schema/2022-10-07"
 OAS_CACHE = Path(tempfile.gettempdir()) / "openapi-3.1.schema.json"
 
@@ -68,11 +69,26 @@ class ApiContract(unittest.TestCase):
         self.addCleanup(setattr, server, "NO_WRITE", self._no_write)
         self.tmp = Path(tempfile.mkdtemp(prefix="api-contract-"))
         self.log_path = self.tmp / "blocks.jsonl"
-        self.log_path.write_text("")
+        # One pool-only block that owes ADDR a make-good, so the make-good fields have rows.
+        self.log_path.write_text(
+            json.dumps(
+                {
+                    "ts": int(time.time()),
+                    "height": 150,
+                    "hash": MAKEGOOD,
+                    "kind": "pool-only",
+                    "owed_sats": 312_500_000,
+                    "split": [[ADDR, 1_000_000], ["bc1qpool", 311_500_000]],
+                    "gateway": "bb" * 8,
+                }
+            )
+            + "\n"
+        )
         self._blocks_log = server.BLOCKS_LOG
         server.BLOCKS_LOG = self.log_path
         server._block_log_latest_cache["sig"] = None
         server._block_log_cache.update(sig=None, found={}, finder={}, n=0)
+        server._makegood_owed_cache.update(sig=None, rows=[])
         now = time.time()
         server._prime_doc_cache.update(
             doc={

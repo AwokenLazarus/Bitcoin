@@ -476,6 +476,17 @@
   // coinbase matures (height + 100), then broadcast, then paid.
   const MAKEGOOD_PENDING = new Set(["owed", "queued", "broadcast"]);
   const makegoodPending = (m) => (m.makegoods || []).filter((r) => MAKEGOOD_PENDING.has(String(r.status || "").toLowerCase()));
+  // What a make-good pays: `net_sats` (the gross less any custody fee) from a server that sends
+  // it, else the gross.
+  const mgNet = (r) => (r.net_sats != null ? Number(r.net_sats) : r.sats != null ? Number(r.sats) : Math.round(Number(r.btc) * 1e8)) || 0;
+  // Under a make-good's amount: the gross and the custody fee when the fee wallet charged this
+  // address, or a caution while a block past the fee's start height is still unsigned.
+  function custodyNote(r) {
+    const fee = Number(r.custody_fee_sats) || 0;
+    if (fee > 0) return `<br><small class="faint">${t("miner.mgCustody", { gross: satsExact(r.sats), fee: satsExact(fee) })}</small>`;
+    if (r.custody === "pending") return `<br><small class="faint">${t("miner.mgCustodyMay")}</small>`;
+    return "";
+  }
   function makegoodTable(m, ctx) {
     const rows = m.makegoods || [];
     if (!rows.length) return "";
@@ -496,7 +507,7 @@
           : "\u2014";
         return `<tr>
           <td class="num">${blockLink(r)}</td>
-          <td class="num" title="${amtExact(r.btc)}">${satsExact(r.sats != null ? r.sats : Number(r.btc) * 1e8)}${ctx.money ? ctx.money(r.btc) : ""}</td>
+          <td class="num" title="${amtExact(mgNet(r) / 1e8)}">${satsExact(mgNet(r))}${ctx.money ? ctx.money(mgNet(r) / 1e8) : ""}${custodyNote(r)}</td>
           <td>${kindPill(r.kind)}</td>
           <td class="num">${r.payable_at ? num(r.payable_at) : "\u2014"}</td>
           <td>${whenTxt}</td>
@@ -506,7 +517,7 @@
       })
       .join("");
     const pend = makegoodPending(m);
-    const pendSats = pend.reduce((a, r) => a + (Number(r.sats) || Math.round(Number(r.btc) * 1e8) || 0), 0);
+    const pendSats = pend.reduce((a, r) => a + mgNet(r), 0);
     return `
         <div${panelAttr("makegoodTable")}>
           <p class="kicker table-label">${pend.length ? t("miner.mgLabelPending", { n: pend.length, amt: satsExact(pendSats) }) : t("miner.mgLabel")}</p>
@@ -824,8 +835,8 @@
     const mgNextAt = Number(m.makegood_next_payable_at) || 0;
     const mgLeft = mgPend.length ? Math.min(...mgPend.map((r) => Number(r.blocks_to_payable) || 0)) : 0;
     const mgLatest = mgPend.length ? mgPend.reduce((a, r) => (Number(r.height) > Number(a.height) ? r : a), mgPend[0]) : null;
-    const mgPendSats = mgPend.reduce((a, r) => a + (Number(r.sats) || Math.round(Number(r.btc) * 1e8) || 0), 0);
-    const carryMakegood = mgLatest ? t("miner.carryMakegood", { amt: satsExact(mgLatest.sats != null ? mgLatest.sats : Number(mgLatest.btc) * 1e8), height: num(mgLatest.height) }) : "";
+    const mgPendSats = mgPend.reduce((a, r) => a + mgNet(r), 0);
+    const carryMakegood = mgLatest ? t("miner.carryMakegood", { amt: satsExact(mgNet(mgLatest)), height: num(mgLatest.height) }) : "";
     const carryCell = (m) =>
       carryBtc > 0 || mgLatest
         ? panelBox("carry", `<dt>${t("miner.carry")}</dt><dd title="${amtExact(carryBtc)}">${amt(carryBtc)}${money(carryBtc)}<small>${t("miner.carrySub")}${carryMakegood}</small></dd>`)
@@ -838,6 +849,7 @@
       else if (Number(m.makegood_failed_blocks) > 0) sub = t("miner.mgCellFailed");
       else sub = t("miner.mgCellAllPaid", { amt: satsExact(Math.round(mgPaidBtc * 1e8)) });
       const lm = m.makegood_long_maturity ? `<br>${t("miner.mgLongMaturity", { start: num(m.long_maturity_start), release: num(m.long_maturity_release) })}` : "";
+      if (Number(m.makegood_custody_fee_sats) > 0) sub += t("miner.mgCustodyTotal", { amt: satsExact(m.makegood_custody_fee_sats) });
       return panelBox("makegood", `<dt>${t("miner.makegood")}</dt><dd title="${amtExact(mgPendBtc)}">${amt(mgPendBtc)}${money(mgPendBtc)}<small>${sub}${lm}</small></dd>`);
     };
     // Earned in the last 24 hours: coinbase outputs and make-goods from blocks found in that
@@ -850,7 +862,8 @@
         return panelBox("earned", `<dt>${t("miner.earned24")}</dt><dd>${t("miner.earned24Unavailable")}<small>${t("miner.earned24UnavailableSub")}</small></dd>`);
       }
       const total = Number(e.total_sats) / 1e8;
-      const failed = Number(e.makegood_failed_sats) > 0 ? t("miner.earned24Failed", { amt: satsExact(e.makegood_failed_sats) }) : "";
+      const failed = (Number(e.makegood_failed_sats) > 0 ? t("miner.earned24Failed", { amt: satsExact(e.makegood_failed_sats) }) : "")
+        + (Number(e.makegood_custody_fee_sats) > 0 ? t("miner.earned24Custody", { amt: satsExact(e.makegood_custody_fee_sats) }) : "");
       const note = t("miner.earned24Note", { need: num(m.maturity_confs || 100), a: `<a data-mtab="payouts" href="${esc(payoutsHref)}">`, enda: "</a>" });
       return panelBox("earned", `<dt>${t("miner.earned24")}</dt><dd title="${esc(t("miner.earned24Since", { amt: amtExact(total), when: when(e.since_ts) }))}">${amt(total)}${money(total)}<small>${t("miner.earned24Split", { n: Number(e.blocks) || 0, blocks: amtSats(e.block_sats), mg: amtSats(e.makegood_sats) })}${failed}<br>${note}</small></dd>`);
     };

@@ -70,9 +70,19 @@ window.LZ_I18N_DICTS["en"] = {
     "text": "Some gateways on this pool run an <b>out-of-date DATUM gateway</b>. A block found through one can pay the whole reward to the pool address instead of paying each miner directly. Nobody loses that reward, but the pool has to hold those funds and pay every miner their share itself, as a <b>make-good</b>, once the block matures (about 45 days). <b>If you run a gateway, update it to a current build</b> so your blocks pay miners directly. Questions? <b>Join our Discord and ask for help.</b>",
     "setup": "Update your gateway →",
     "discord": "Ask for help on Discord",
-    "dismiss": "Dismiss notice"
+    "dismiss": "Dismiss notice",
+    "custodyText": "Gateways on <b>out-of-date DATUM builds</b> have been warned for a long time. They produce pool-only and partial coinbases, and the pool has to hold miners' money until each block matures and pay it out as a <b>make-good</b>. <b>From block {height}, a miner whose gateway produces these coinbases is paid {pct}% less in those make-goods</b>, a fee for the pool holding that money. Miners on current gateways are paid in full. <b>Update to a current gateway.</b> Need help? <b>Ask in our Discord.</b>"
+  },
+  "minerwarn": {
+    "kicker": "Action needed",
+    "title": "Your gateway is out of date",
+    "text": "This address mines through a DATUM gateway on an <b>out-of-date build</b> that is producing improperly split coinbases (pool-only or partial). Gateways like this have been warned for a long time. <b>You must update.</b> From block {height}, {pct}% of what the pool pays you for those coinbases is kept as a fee for custodying them. Miners on current gateways are paid in full.",
+    "textFee": "A make-good to this address in the last 7 days carried the {pct}% custody fee. From block {height}, that fee falls only on miners whose own gateway is producing pool-only or partial coinbases. <b>Update to a current DATUM gateway</b> and you are paid in full.",
+    "setup": "Update your gateway →",
+    "discord": "Ask for help on Discord"
   },
   "hero": {
+    "custodyFee": "Custody fee: from block {height}, when a gateway on an out-of-date DATUM build leaves a pool-only or partial coinbase, the make-good pays {pct}% less to the miners whose own gateway is producing these coinbases. The pool keeps it for holding that money until the coinbase matures. Miners on current gateways are paid in full.",
     "eyebrow": "Bitcoin (XBT / BTCB2) · BLAKE2b · DATUM · TIDES · ",
     "title": "Lazarus Pool.<br>The Bitcoin mining pool for Sia ASICs.<br><em>Get paid in the block itself.</em>",
     "define": "Lazarus Pool mines Bitcoin. XBT and BTCB2 are the tickers, and blake2b is the proof of work, so a Siacoin ASIC can mine here. <a href=\"/connect\">Connect a miner</a>.",
@@ -972,6 +982,9 @@ window.LZ_I18N_DICTS["en"] = {
     "mgPayableBlocks": "{n} blocks",
     "mgPayableNow": "now",
     "mgTxSigned": "signed, not yet broadcast",
+    "mgCustody": "{gross} owed − {fee} custody fee",
+    "mgCustodyMay": "custody fee may apply if your gateway is out of date",
+    "mgCustodyTotal": " · {amt} kept as custody fee",
     "thKind": "Block kind",
     "thPayableAt": "Payable from",
     "thLands": "Lands in",
@@ -1039,6 +1052,7 @@ window.LZ_I18N_DICTS["en"] = {
     },
     "earned24Note": "Earned is not spendable yet: block outputs {a}mature after {need} confirmations{enda}, and make-goods pay when due.",
     "earned24Failed": " · {amt} in a failed make-good is not counted",
+    "earned24Custody": " · {amt} custody fee taken off make-goods",
     "earned24Since": "{amt} from blocks found since {when}",
     "earned24Unavailable": "unavailable",
     "earned24UnavailableSub": "the pool could not read its block records just now · this is not zero, check back shortly",

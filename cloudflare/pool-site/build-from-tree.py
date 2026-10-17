@@ -10,6 +10,12 @@ sitemap's <lastmod> dates.
     python3 cloudflare/pool-site/build-from-tree.py            # -> cloudflare/pool-site/dist
     python3 cloudflare/pool-site/build-from-tree.py --out /tmp/x
 
+The custody fee on make-goods is the one setting that changes crawlable words (fee card, /how,
+FAQ, llms.txt, the gateway notice). Give the build the same values as the node's config.json,
+with --custody-fee-bps / --custody-from-height or POOL_CUSTODY_FEE_BPS / POOL_CUSTODY_FROM_HEIGHT;
+unset is off, as on the node. Turning it on changes those pages' text, so tests/lastmod.py then
+wants their dates bumped in pool/server.py.
+
 This is the build command for the Cloudflare Pages Git integration (output directory
 cloudflare/pool-site/dist). Nothing here talks to the network: /api/* keeps going through
 _worker.js and the ORIGIN_URL / ACCESS_* variables the Pages project already holds.
@@ -33,6 +39,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", default=str(HERE / "dist"))
     ap.add_argument("--public-url", default=PUBLIC_URL)
+    ap.add_argument("--custody-fee-bps", type=int, default=int(os.environ.get("POOL_CUSTODY_FEE_BPS") or 0))
+    ap.add_argument("--custody-from-height", type=int, default=int(os.environ.get("POOL_CUSTODY_FROM_HEIGHT") or 0))
     a = ap.parse_args()
 
     port = free_port()
@@ -40,7 +48,10 @@ def main():
     cfg = POOL / "config.json"
     if cfg.exists():
         raise SystemExit(f"{cfg} exists; a tree build must not run against a real node config")
-    cfg.write_text(json.dumps({"public_url": a.public_url, "listen_port": port}))
+    conf = {"public_url": a.public_url, "listen_port": port}
+    if a.custody_fee_bps:
+        conf.update(custody_fee_bps=a.custody_fee_bps, custody_from_height=a.custody_from_height)
+    cfg.write_text(json.dumps(conf))
     env = dict(os.environ, POOL_DB=str(work / "pool.sqlite"))
     runner = (
         "import sys; sys.path.insert(0, sys.argv[1]); import server;"

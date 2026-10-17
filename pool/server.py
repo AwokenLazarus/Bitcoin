@@ -729,6 +729,85 @@ _makegood_owed_cache = {"sig": None, "rows": []}
 _makegood_jobs_cache = {"sig": None, "jobs": {}}
 _makegood_tx_cache = {}  # txid -> (checked_at, confirmations or None)
 
+# Custody fee (Mike, 2026-10-17). A pool-only or partial coinbase leaves the pool holding the
+# dropped payees' money until it matures. From `custody_from_height` on, the fee wallet pays
+# `custody_fee_bps` less in the make-good to the payees whose own gateway is actively mining such
+# coinbases (fee_wallet.py `active_offenders`, plus the block's own finder), and keeps the
+# difference for that custody; every other payee is paid in full. The wallet decides who pays
+# when it signs and records it in the queue job (`custody_charged`, `custody_bps`), so this page
+# never recomputes it: a payee paid the fee only if its job names it. The two keys here must match
+# FEE_CUSTODY_BPS / FEE_CUSTODY_FROM_HEIGHT. 0 = off, and a fee without a start height is off too
+# (the wallet refuses to start that way).
+CUSTODY_FEE_BPS = int(CONF.get("custody_fee_bps", 0) or 0)
+CUSTODY_FROM_HEIGHT = int(CONF.get("custody_from_height", 0) or 0)
+if not 0 <= CUSTODY_FEE_BPS < 10000 or (CUSTODY_FEE_BPS and CUSTODY_FROM_HEIGHT <= 0):
+    print("custody_fee_off: needs 0 < custody_fee_bps < 10000 and custody_from_height > 0", flush=True)
+    CUSTODY_FEE_BPS = 0
+
+
+def custody_on():
+    return CUSTODY_FEE_BPS > 0 and CUSTODY_FROM_HEIGHT > 0
+
+
+def dust_floor(addr):
+    """Smallest output the fee wallet will pay to `addr`. Copied from fee_wallet.py so the two
+    agree to the satoshi; change both or neither."""
+    if addr.startswith("1"):
+        return 546
+    if addr.startswith("3"):
+        return 540
+    if addr.startswith("bc1p"):
+        return 330
+    return 294
+
+
+def custody_cut_sats(address, sats, bps):
+    """The fee wallet's `custody_cut` for one charged payee: `sats * bps // 10000`, or 0 when
+    the rest would be under the address's dust floor (the wallet then pays it in full)."""
+    sats = int(sats or 0)
+    if bps <= 0:
+        return 0
+    cut = sats * int(bps) // 10000
+    return 0 if sats - cut < dust_floor(str(address or "")) else cut
+
+
+def stamp_custody(row, job=None):
+    """Add `custody_fee_sats`, `net_sats` and `custody` to a make-good row. `sats` stays the
+    gross the coinbase left unpaid; `net_sats` is what the make-good pays.
+
+    `custody` is "charged" when the wallet's signed job names this address in `custody_charged`,
+    "pending" for a block at or after the start height that is still owed with no job (it may apply
+    if the payee's gateway is out of date; the wallet decides when it signs), else ""."""
+    fee, mark = 0, ""
+    if job is not None and row.get("address") in (job.get("custody_charged") or []):
+        try:
+            bps = int(job.get("custody_bps") or 0)
+        except (TypeError, ValueError):
+            bps = 0
+        fee = custody_cut_sats(row.get("address"), row.get("sats"), bps)
+        mark = "charged" if fee else ""
+    elif job is None and custody_on() and int(row.get("height") or 0) >= CUSTODY_FROM_HEIGHT and row.get("status") == "owed":
+        mark = "pending"
+    row["custody_fee_sats"] = fee
+    row["net_sats"] = int(row.get("sats") or 0) - fee
+    row["custody"] = mark
+    return row
+
+
+def _makegood_net(row):
+    """What a make-good row pays: `net_sats` once stamped, else its gross."""
+    return int(row["net_sats"] if "net_sats" in row else row.get("sats") or 0)
+
+
+def custody_view():
+    """The custody fee as the API and pages show it; percent 0 when it is off."""
+    on = custody_on()
+    return {
+        "bps": CUSTODY_FEE_BPS if on else 0,
+        "percent": CUSTODY_FEE_BPS / 100.0 if on else 0.0,
+        "from_height": CUSTODY_FROM_HEIGHT if on else 0,
+    }
+
 
 def _split_items(rec):
     """[(address, sats)] of the split primed issued for a block, in coinbase order."""
@@ -947,6 +1026,7 @@ def makegood_rows_for(address, tip=None):
     for r in rows:
         r.update(makegood_status(r["height"], r["hash"], tip, jobs, settlements))
         r["btc"] = r["sats"] / 1e8
+        stamp_custody(r, jobs.get(f"makegood-{int(r['height'])}"))
     rows.sort(key=lambda r: -r["height"])
     return rows
 
@@ -966,10 +1046,18 @@ def makegoods_payload():
                 "ts": r["ts"],
                 "kind": r["kind"],
                 "owed_sats": 0,
+                "custody_fee_sats": 0,
+                "net_sats": 0,
                 "payees": 0,
                 "verified": True,
             }
+        # owed_sats stays the gross the coinbase left unpaid; net_sats is what the make-good
+        # pays after the custody fee, and the totals below are sums of it.
+        job = jobs.get(f"makegood-{int(r['height'])}")
+        fee = stamp_custody({"address": r["address"], "sats": r["sats"]}, job or {})["custody_fee_sats"]
         b["owed_sats"] += r["sats"]
+        b["custody_fee_sats"] += fee
+        b["net_sats"] += r["sats"] - fee
         b["payees"] += 1
         b["verified"] = b["verified"] and bool(r["verified"])
     blocks = []
@@ -981,10 +1069,13 @@ def makegoods_payload():
     return {
         "tip": tip,
         "maturity_confs": current_maturity_confs(tip),
-        "pending_sats": sum(b["owed_sats"] for b in pending),
+        "pending_sats": sum(b["net_sats"] for b in pending),
         "pending_blocks": len(pending),
-        "paid_sats": sum(b["owed_sats"] for b in blocks if b["status"] == "paid"),
+        "paid_sats": sum(b["net_sats"] for b in blocks if b["status"] == "paid"),
         "failed_blocks": sum(1 for b in blocks if b["status"] == "failed"),
+        # Kept as the custody fee on make-goods that are pending or paid (not failed ones).
+        "custody_fee_sats": sum(b["custody_fee_sats"] for b in blocks if b["status"] in MAKEGOOD_EARNED),
+        "custody": custody_view(),
         "blocks": blocks,
     }
 
@@ -1030,14 +1121,16 @@ def earned_window(address, fb_rows, makegoods, now=None, window_s=EARNED_WINDOW_
         return None
     in_window = [r for r in makegoods if block_ts.get(r["hash"], int(r.get("ts") or 0)) >= since]
     counted = [r for r in in_window if r["status"] in MAKEGOOD_EARNED]
-    makegood_sats = sum(int(r["sats"]) for r in counted)
+    # Make-goods count at what they pay: the gross less any custody fee, which is reported beside.
+    makegood_sats = sum(_makegood_net(r) for r in counted)
     return {
         "block_sats": block_sats,
         "makegood_sats": makegood_sats,
         "total_sats": block_sats + makegood_sats,
         "blocks": blocks,
         "makegood_blocks": len({r["hash"] for r in counted}),
-        "makegood_failed_sats": sum(int(r["sats"]) for r in in_window if r["status"] == "failed"),
+        "makegood_custody_fee_sats": sum(int(r["sats"]) - _makegood_net(r) for r in counted),
+        "makegood_failed_sats": sum(_makegood_net(r) for r in in_window if r["status"] == "failed"),
         "window_s": int(window_s),
         "since_ts": since,
     }
@@ -3288,6 +3381,81 @@ def gateway_names_by_address():
     return out
 
 
+# --- Out-of-date gateways --------------------------------------------------------------------
+# A gateway on an out-of-date DATUM build drops payees from the coinbase (partial) or pays the
+# whole reward to the pool (pool-only); the newest builds in gateways.json split correctly. Who
+# counts as mining through one is the fee wallet's rule (fee_wallet.py `offenders_from`, the same
+# as the admin dashboard's offender list): the payout identity of a connected gateway session
+# that sends pool-only full jobs on at least 0.5% of 50 or more accepted, or whose gateway's
+# latest block in the last 30 days (orphans aside) was pool-only or partial. Those identities are
+# the payees the wallet charges the custody fee, so the miner page warns exactly them.
+OFFENDER_MIN_ACCEPTED = 50
+OFFENDER_POOL_ONLY_RATE = 0.005
+OFFENDER_BLOCK_WINDOW_S = 30 * 86400
+_offender_blocks_cache = {"key": None, "latest": {}}
+
+
+def _gateway_latest_blocks(now):
+    """gateway -> kind of its latest non-orphan block in the last 30 days, from blocks.jsonl."""
+    sig, by_hash = _block_log_latest()
+    if sig is None:
+        return {}
+    c = _offender_blocks_cache
+    # The window slides, so the key carries the time too; ten minutes is plenty for a warning.
+    key = (sig, int(now) // 600)
+    if c["key"] == key:
+        return c["latest"]
+    latest = {}
+    for rec in by_hash.values():
+        gw, kind, ts = rec.get("gateway"), str(rec.get("kind") or ""), int(rec.get("ts") or 0)
+        if not gw or kind.startswith("orphan") or now - ts > OFFENDER_BLOCK_WINDOW_S:
+            continue
+        if gw not in latest or ts >= latest[gw][0]:
+            latest[gw] = (ts, kind)
+    out = {gw: kind for gw, (_ts, kind) in latest.items()}
+    c.update(key=key, latest=out)
+    return out
+
+
+def gateway_offenders(clients=None, now=None):
+    """identity -> short reason, for every payout identity the fee wallet would charge now."""
+    now = time.time() if now is None else now
+    if clients is None:
+        clients = (state.get("prime_meta") or {}).get("clients") or []
+    latest = _gateway_latest_blocks(now)
+    out = {}
+    for c in clients or []:
+        if not isinstance(c, dict):
+            continue
+        ident = str(c.get("identity") or "")
+        if not ident or c.get("offline"):
+            continue
+        try:
+            acc, pof = int(c.get("accepted") or 0), int(c.get("pool_only_full_jobs") or 0)
+        except (TypeError, ValueError):
+            continue
+        kind = latest.get(str(c.get("gateway") or ""), "")
+        if kind in MAKEGOOD_KINDS:
+            out.setdefault(ident, f"gateway's latest block was {kind}")
+        elif acc >= OFFENDER_MIN_ACCEPTED and pof / acc >= OFFENDER_POOL_ONLY_RATE:
+            out.setdefault(ident, f"gateway sends pool-only work ({100.0 * pof / acc:.1f}% of accepted jobs)")
+    return out
+
+
+def gateway_outdated_for(address, makegoods=(), clients=None, now=None):
+    """(outdated, reason, custody_fee_recent) for the miner page.
+
+    `outdated` is True while `address` is the identity of a gateway the rule above calls out of
+    date; `reason` says why, or that a make-good in the last 7 days carried a custody fee, or is
+    ''. `custody_fee_recent` is that make-good test alone."""
+    now = time.time() if now is None else now
+    reason = gateway_offenders(clients, now).get(address, "")
+    recent = any(int(r.get("custody_fee_sats") or 0) > 0 and int(r.get("ts") or 0) >= now - 7 * 86400 for r in makegoods or [])
+    if reason:
+        return True, reason, recent
+    return False, ("a make-good in the last 7 days carried a custody fee" if recent else ""), recent
+
+
 def stamp_gateway_names(rows, names=None):
     """Attach `gateway_name` / `gateway` from `gateway_names_by_address` onto miner dicts."""
     names = names if names is not None else gateway_names_by_address()
@@ -4668,7 +4836,10 @@ def pool_payload():
                     and not isinstance(prime.get("stratum_grace_fee_bps"), bool)
                     else ""
                 )
+                + (" " + custody_fee_sentence("en") if custody_on() else "")
             ),
+            # Custody fee on make-goods for pool-only and partial coinbases (percent 0: off).
+            "custody": custody_view(),
         },
         "stratum": f"stratum+tcp://{STRATUM_HOST}:{STRATUM_PORT}",
         "stratum_asic": f"stratum+tcp://{STRATUM_HOST}:{STRATUM_PORT}",
@@ -5094,6 +5265,9 @@ def miner_payload(address, payouts_offset=0, payouts_limit=PAYOUTS_PAGE):
     known = known or bool(makegoods)
     # Null, never zero, when the coinbases could not be read: the page says "unavailable".
     earned_24h = None if splits_unreadable or not address else earned_window(address, fb_rows, makegoods)
+    mg_counted = [r for r in makegoods if r["status"] in MAKEGOOD_EARNED]
+    gw_outdated, gw_reason, custody_recent = gateway_outdated_for(address, makegoods) if address else (False, "", False)
+    custody = custody_view()
     found_here = address_found_blocks(address, fb_rows)
     out = {
         "address": address if known else "",
@@ -5160,8 +5334,10 @@ def miner_payload(address, payouts_offset=0, payouts_limit=PAYOUTS_PAGE):
         # Make-goods: the split a partial or pool-only coinbase owed this address but did
         # not place, paid later from the pool's reserved output. `makegoods` is the full
         # ledger; the totals are the pending (owed, queued or broadcast) and paid sums.
+        # Each row's `sats` is the gross the coinbase left unpaid; `custody_fee_sats` is what the
+        # make-good keeps as the custody fee and `net_sats` what it pays. The totals are net.
         "makegoods": makegoods,
-        "makegood_pending_btc": sum(r["sats"] for r in mg_pending) / 1e8,
+        "makegood_pending_btc": sum(r["net_sats"] for r in mg_pending) / 1e8,
         "makegood_pending_blocks": len(mg_pending),
         "makegood_next_payable_at": min((r["payable_at"] for r in mg_pending), default=0),
         # Knots #419: a pending make-good on a block in the long-maturity window pays at the
@@ -5169,8 +5345,18 @@ def miner_payload(address, payouts_offset=0, payouts_limit=PAYOUTS_PAGE):
         "makegood_long_maturity": any(int(r.get("height") or 0) >= LONG_MATURITY_START and int(r.get("payable_at") or 0) >= LONG_MATURITY_RELEASE for r in mg_pending),
         "long_maturity_start": LONG_MATURITY_START,
         "long_maturity_release": LONG_MATURITY_RELEASE,
-        "makegood_paid_btc": sum(r["sats"] for r in makegoods if r["status"] == "paid") / 1e8,
+        "makegood_paid_btc": sum(r["net_sats"] for r in makegoods if r["status"] == "paid") / 1e8,
         "makegood_failed_blocks": sum(1 for r in makegoods if r["status"] == "failed"),
+        # Custody fee on this address's pending and paid make-goods, and the fee's settings
+        # (percent 0 when it is off). The page warns from these and `gateway_outdated`.
+        "makegood_custody_fee_sats": sum(r["custody_fee_sats"] for r in mg_counted),
+        "custody_fee_percent": custody["percent"],
+        "custody_from_height": custody["from_height"],
+        "custody_fee_recent": custody_recent,
+        # True while this address mines through a gateway on an out-of-date DATUM build (one that
+        # found a partial or pool-only block in the last 30 days, or sends pool-only work).
+        "gateway_outdated": gw_outdated,
+        "gateway_outdated_reason": gw_reason,
         # Coinbase outputs and make-goods from blocks found in the last 24 hours, in sats.
         # Earned, not spendable: see `maturity_confs` and each make-good's `payable_at`.
         "earned_24h": earned_24h,
@@ -5679,6 +5865,8 @@ API_CATALOG = (
             ApiField("miners_online", "integer", "count", "Payout addresses with a live session.", "当前有会话的收款地址数。"),
             ApiField("fees.datum_percent", "number", "percent", "Fee on work that arrives through a miner's own DATUM gateway.", "经矿工自建 DATUM 网关到来的工作量所收的费率。"),
             ApiField("fees.stratum_percent", "number", "percent", "Fee on work that arrives through the public stratum.", "经公共 stratum 到来的工作量所收的费率。"),
+            ApiField("fees.custody.percent", "number", "percent", "Custody fee a make-good for a pool-only or partial coinbase keeps, from fees.custody.from_height on, from each payee whose own gateway is producing such coinbases. Miners on current gateways are paid in full. 0 when there is none.", "自 fees.custody.from_height 起，仅矿池或部分分账 coinbase 的补付向自身网关正在产生这类 coinbase 的每位收款人保留的托管费率。使用当前版本网关的矿工全额到账。没有时为 0。"),
+            ApiField("fees.custody.from_height", "integer", "blocks", "First block whose make-goods carry the custody fee. 0 when there is none.", "其补付开始收取托管费的第一个区块。没有时为 0。"),
             ApiField("datum.pool_host", "string", "", "Host a DATUM gateway connects to.", "DATUM 网关要连接的主机。"),
             ApiField("datum.pool_port", "integer", "port", "Port a DATUM gateway connects to.", "DATUM 网关要连接的端口。"),
             ApiField("datum.pool_pubkey", "string", "hex", "Pool public key a gateway must pin. Empty until Prime has published one.", "网关必须钉住的矿池公钥。Prime 尚未公布时为空。"),
@@ -5746,7 +5934,16 @@ API_CATALOG = (
             ApiField("payouts_total", "integer", "blocks", "How many rows blocks_found has in all. Null when it could not be counted.", "blocks_found 的总行数；无法统计时为 null。", nullable=True),
             ApiField("payouts_offset", "integer", "blocks", "Offset of this page.", "本页的偏移量。"),
             ApiField("payouts_limit", "integer", "blocks", "Page size used.", "本页的行数上限。"),
-            ApiField("earned_24h", "object", "", "Earnings from blocks found in the last 24 hours. Null when a coinbase in that window cannot be read. When it is an object, block_sats, makegood_sats and total_sats are sats.", "最近 24 小时所出区块带来的收益。窗口内有读不到的 coinbase 时为 null。为对象时，block_sats、makegood_sats 与 total_sats 的单位是聪。", nullable=True),
+            ApiField("earned_24h", "object", "", "Earnings from blocks found in the last 24 hours. Null when a coinbase in that window cannot be read. When it is an object, block_sats, makegood_sats and total_sats are sats; makegood_sats counts make-goods at what they pay, after the custody fee in makegood_custody_fee_sats.", "最近 24 小时所出区块带来的收益。窗口内有读不到的 coinbase 时为 null。为对象时，block_sats、makegood_sats 与 total_sats 的单位是聪；makegood_sats 按补付实际支付的金额计，即已扣除 makegood_custody_fee_sats 中的托管费。", nullable=True),
+            ApiField("makegoods[].sats", "integer", "sats", "What a partial or pool-only coinbase left unpaid to this address: the gross its make-good owes.", "部分分账或仅矿池 coinbase 未付给该地址的金额：其补付所欠的原额。"),
+            ApiField("makegoods[].custody_fee_sats", "integer", "sats", "Custody fee the make-good keeps from that gross. Charged only to a payee whose own gateway is producing pool-only or partial coinbases, as the fee wallet recorded when it signed; 0 for everyone else, before the fee's start height, before the make-good is signed, or when the rest would be under the address's dust floor.", "补付从该原额中保留的托管费。只向自身网关正在产生仅矿池或部分分账 coinbase 的收款人收取，以手续费钱包签名时的记录为准；其他人、起始高度之前、补付尚未签名时，或扣费后低于该地址的粉尘下限时为 0。"),
+            ApiField("makegoods[].net_sats", "integer", "sats", "What the make-good pays: sats less custody_fee_sats.", "补付实际支付的金额：sats 减去 custody_fee_sats。"),
+            ApiField("makegood_pending_btc", "number", "XBT", "Make-goods still on their way to this address, net of the custody fee.", "仍在付往该地址途中的补付，已扣除托管费。"),
+            ApiField("makegood_custody_fee_sats", "integer", "sats", "Custody fee kept from this address's pending and paid make-goods.", "从该地址待付与已付补付中保留的托管费。"),
+            ApiField("custody_fee_percent", "number", "percent", "The custody fee on make-goods for pool-only and partial coinbases. 0 when there is none.", "仅矿池与部分分账 coinbase 补付的托管费率。没有时为 0。"),
+            ApiField("custody_from_height", "integer", "blocks", "First block whose make-goods carry the custody fee. 0 when there is none.", "其补付开始收取托管费的第一个区块。没有时为 0。"),
+            ApiField("gateway_outdated", "boolean", "", "True while this address is the payout identity of a connected DATUM gateway on an out-of-date build: its latest block in the last 30 days was pool-only or partial, or it sends pool-only work (at least 0.5% of 50 or more accepted jobs). The same rule decides who pays the custody fee.", "该地址是一个在线、版本过时的 DATUM 网关的收款身份时为 true：该网关最近 30 天内的最新区块是仅矿池或部分分账，或它发送仅矿池工作（在 50 个及以上已接受任务中至少占 0.5%）。托管费由谁承担也按同一规则判定。"),
+            ApiField("gateway_outdated_reason", "string", "", "Why, in a few words. Also set when gateway_outdated is false but a make-good in the last 7 days carried a custody fee; empty otherwise.", "简短的原因。gateway_outdated 为 false、但最近 7 天内有补付被收取托管费时也会填写；否则为空。"),
         ),
     ),
     ApiEndpoint(
@@ -5853,8 +6050,12 @@ API_CATALOG = (
         "矿池欠下或已经支付的补差，每个区块一行。",
         (
             ApiField("tip", "integer", "blocks", "Chain height used to judge maturity. 0 when the node did not answer.", "用来判断成熟度的链高度。节点未应答时为 0。"),
-            ApiField("pending_sats", "integer", "sats", "Sats still owed.", "仍欠的聪。"),
-            ApiField("blocks", "array", "", "One object per block. Fields inside a block may change.", "每个区块一个对象。对象内部的字段可能变化。"),
+            ApiField("pending_sats", "integer", "sats", "Sats still owed, net of the custody fee.", "仍欠的聪，已扣除托管费。"),
+            ApiField("custody_fee_sats", "integer", "sats", "Custody fee kept from make-goods that are pending or paid.", "从待付与已付补付中保留的托管费。"),
+            ApiField("blocks", "array", "", "One object per block. Fields inside a block not listed here may change.", "每个区块一个对象。对象内部未在此列出的字段可能变化。"),
+            ApiField("blocks[].owed_sats", "integer", "sats", "What that block's coinbase left unpaid to miners, before the custody fee.", "该区块 coinbase 未付给矿工的金额，未扣托管费。"),
+            ApiField("blocks[].custody_fee_sats", "integer", "sats", "Custody fee that block's make-good keeps.", "该区块的补付保留的托管费。"),
+            ApiField("blocks[].net_sats", "integer", "sats", "What that block's make-good pays: owed_sats less custody_fee_sats.", "该区块的补付实际支付的金额：owed_sats 减去 custody_fee_sats。"),
         ),
     ),
     ApiEndpoint(
@@ -5911,6 +6112,8 @@ def _place_field(props, required, parts, field):
             props[key] = node
             if key not in required:
                 required.append(key)
+        # An array also listed as a field of its own (`blocks`, then `blocks[].x`) gets its items here.
+        node.setdefault("items", {"type": "object", "properties": {}, "required": [], "additionalProperties": True})
         _place_field(node["items"]["properties"], node["items"]["required"], parts[1:], field)
         return
     node = props.get(key)
@@ -6423,6 +6626,7 @@ GATEWAYSPLACEHOLDER
 - Own DATUM gateway: 0%, plus the DATUM subsidy taken from the public-stratum fee
 - Public stratum: donation, validation and fallback endpoint at 100% (50 points to DATUM gateways, 50 to the pool), with a 24 h / 96 h grace at 25% (12.5 points during the grace), then 100%
 - Solo stratum: closed
+CUSTODYPLACEHOLDER
 
 ## Hardware
 
@@ -6539,6 +6743,48 @@ def _xml_attr(s):
     return html.escape(str(s or ""), quote=True)
 
 
+def custody_fee_sentence(lang):
+    """The custody fee in one sentence for the fee lists (homepage, /how, FAQ, llms.txt,
+    /api/pool). Only called while the fee is on: with it off the pages say nothing new. The
+    words are hero.custodyFee in static/i18n, the same string pool.js shows."""
+    return _custody_text("hero.custodyFee", lang)
+
+
+def _custody_text(key, lang):
+    """An i18n string about the custody fee with {height} and {pct} filled in."""
+    v = custody_view()
+    en = _i18n_dict("en")
+    text = _i18n_t(key, _i18n_dict("zh-CN") if lang.startswith("zh") else en, en)
+    return text.replace("{height}", f"{v['from_height']:,}").replace("{pct}", f"{v['percent']:g}")
+
+
+def _inject_custody(raw, meta):
+    """Add the custody-fee line to the fee card, the fees FAQ answer and /how, while it is on."""
+    if not custody_on():
+        return raw
+    lang = "zh" if meta["lang"] == "zh-CN" else "en"
+    line = custody_fee_sentence(lang)
+    # The site-wide gateway notice takes its custody copy here, so a page read without scripts
+    # says the same as pool.js will; `data-custody` gives the notice its new dismiss key.
+    notice = _custody_text("gatewaynotice.custodyText", lang)
+    raw = raw.replace('<aside class="softfork urgent" id="gatewaynotice"', '<aside class="softfork urgent" id="gatewaynotice" data-custody', 1)
+    raw = re.sub(r'<p class="softfork-text" data-i18n-html="gatewaynotice\.text">.*?</p>',
+                 lambda _m: f'<p class="softfork-text">{notice}</p>', raw, count=1, flags=re.S)
+    raw = re.sub(
+        r'(<p class="fee-lede-cta">.*?</p>)',
+        lambda m: m.group(1) + f'\n        <p class="note fee-lede-custody" id="fee-custody">{html.escape(line)}</p>',
+        raw, count=1, flags=re.S)
+    # The FAQ's structured data is English on every page, so its answer gets the English line.
+    raw = re.sub(
+        r'("name":"What are Lazarus Pool fees\?","acceptedAnswer":\{"@type":"Answer","text":")((?:[^"\\]|\\.)*)(")',
+        lambda m: m.group(1) + m.group(2) + json.dumps(" " + custody_fee_sentence("en"), ensure_ascii=False)[1:-1] + m.group(3),
+        raw, count=1)
+    if meta["path"] == "/how":
+        raw = re.sub(r'(<section class="seo-intro".*?)(\n    </div>\n  </section>)',
+                     lambda m: m.group(1) + f"\n      <p>{html.escape(line)}</p>" + m.group(2), raw, count=1, flags=re.S)
+    return raw
+
+
 def render_pool_index(path, query=""):
     """Homepage HTML with path/lang-specific title, description, canonical, and scroll target."""
     raw = _order_gateway_pick((STATIC / "index.html").read_text(encoding="utf-8"))
@@ -6586,6 +6832,7 @@ def render_pool_index(path, query=""):
         raw = re.sub(r'href="(/(?:connect|blocks|how)?)"(?= data-view-link)',
                      lambda m: 'href="/zh' + m.group(1) + '"', raw)
     raw = _inject_intro(raw, meta)
+    raw = _inject_custody(raw, meta)
     raw = raw if home else _keyword_page(raw, meta)
     raw = rentals.apply_section(raw, rentals.view_rigs(), _rentals_labels(meta["lang"]))
     return _localize_zh(raw) if meta["lang"] == "zh-CN" else raw
@@ -6758,7 +7005,7 @@ _SEO_ARTICLE = {
     "/ratum": ("TechArticle", "2026-09-28", "2026-10-13"),
     "/datum-subsidy": ("TechArticle", "2026-09-13", "2026-10-13"),
     "/flytheelephant": ("TechArticle", "2026-09-28", "2026-10-13"),
-    "/api": ("TechArticle", "2026-09-13", "2026-10-13"),
+    "/api": ("TechArticle", "2026-09-13", "2026-10-17"),
 }
 # The sitemap pages that are not articles, with the date their crawlable copy last changed. Same
 # rule as _SEO_ARTICLE: bump a date in the commit that changes that page's words, never per deploy.
@@ -7020,7 +7267,13 @@ def _llms_gateways():
 
 
 def llms_txt():
-    return _LLMS_TXT.replace("GATEWAYSPLACEHOLDER\n", _llms_gateways()).replace("SITEPLACEHOLDER", _PUBLIC_SITE)
+    # The custody-fee line is in the fee list only while the fee is on.
+    custody = f"- {custody_fee_sentence('en')}\n" if custody_on() else ""
+    return (
+        _LLMS_TXT.replace("GATEWAYSPLACEHOLDER\n", _llms_gateways())
+        .replace("CUSTODYPLACEHOLDER\n", custody)
+        .replace("SITEPLACEHOLDER", _PUBLIC_SITE)
+    )
 
 
 _GW_PICK = re.compile(r'(<ol class="gw-rank"[^>]*>\n)(.*?)(\n[ \t]*</ol>)', re.S)

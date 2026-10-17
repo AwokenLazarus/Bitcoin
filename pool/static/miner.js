@@ -6,8 +6,9 @@
   const t = (k, vars) => (window.LZ_I18N ? LZ_I18N.t(k, vars) : (_t ? _t(k, vars) : k));
   const loc = () => (window.LZ_I18N && LZ_I18N.locale()) || undefined;
 
-  // Address from the path: /miner/<addr>. Fall back to ?addr= and #<addr> for old links.
-  const m = location.pathname.match(/^\/miner\/([^/]+)/);
+  // Address from the path: /miner/<addr> or /zh/miner/<addr>. Fall back to ?addr= and #<addr>
+  // for old links.
+  const m = location.pathname.match(/^(?:\/zh)?\/miner\/([^/]+)/);
   const addr = decodeURIComponent((m && m[1]) || new URLSearchParams(location.search).get("addr") || "").trim();
   const tabFromHash = () => {
     const h = location.hash.slice(1);
@@ -116,6 +117,24 @@
         : t("miner.makegoodTitle");
     }
     $("nav-live").hidden = false;
+    custodyWarning(d);
+  }
+
+  // Red banner while the custody fee is on and this address mines through an out-of-date gateway,
+  // or one of its make-goods in the last 7 days carried the fee. Fee off: never shown.
+  function custodyWarning(d) {
+    const el = $("minerwarn");
+    if (!el) return;
+    const pct = Number(d.custody_fee_percent) || 0;
+    const height = Number(d.custody_from_height) || 0;
+    const on = pct > 0 && height > 0 && (d.gateway_outdated === true || d.custody_fee_recent === true);
+    el.hidden = !on;
+    if (!on) return;
+    const vars = { pct: String(pct), height: num(height) };
+    $("minerwarn-title").textContent = t("minerwarn.title");
+    $("minerwarn-text").innerHTML = t(d.gateway_outdated === true ? "minerwarn.text" : "minerwarn.textFee", vars);
+    const zh = (document.documentElement.lang || "").startsWith("zh");
+    $("minerwarn-setup").href = zh ? "/zh/connect" : "/connect";
   }
 
   let busy = false;

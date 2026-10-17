@@ -70,9 +70,19 @@ window.LZ_I18N_DICTS["zh-CN"] = {
     "text": "本矿池上有部分网关运行的是<b>过时的 DATUM 网关</b>。通过这类网关挖出的区块，可能把全部奖励付给矿池地址，而不是直接付给每位矿工。这笔奖励不会丢失，但矿池必须代为保管这些资金，并在区块成熟后（约 45 天）以<b>补付</b>的方式把每位矿工应得的份额付给他们。<b>如果你运行网关，请更新到当前版本</b>，让你的区块直接付给矿工。有疑问？<b>请加入我们的 Discord 寻求帮助。</b>",
     "setup": "更新你的网关 →",
     "discord": "到 Discord 寻求帮助",
-    "dismiss": "关闭公告"
+    "dismiss": "关闭公告",
+    "custodyText": "<b>过时版本的 DATUM 网关</b>早已被反复提醒。它们会产生仅矿池或部分分账的 coinbase，矿池不得不代管矿工的钱，直到区块成熟后再以<b>补付</b>付出。<b>自区块 {height} 起，网关产生这类 coinbase 的矿工，在这些补付中将少得 {pct}%</b>，作为矿池代管这笔钱的费用。使用当前版本网关的矿工照常全额到账。<b>请更新到当前版本的网关。</b>需要帮助？<b>请到我们的 Discord 提问。</b>"
+  },
+  "minerwarn": {
+    "kicker": "需要处理",
+    "title": "你的网关版本过时",
+    "text": "此地址正通过一个<b>过时版本的 DATUM 网关</b>挖矿，它产生的 coinbase 分账不正确（仅矿池或部分分账）。这类网关早已被反复提醒。<b>你必须更新。</b>自区块 {height} 起，矿池为这类 coinbase 付给你的金额中，有 {pct}% 将作为代管费用被保留。使用当前版本网关的矿工照常全额到账。",
+    "textFee": "最近 7 天内付给此地址的一笔补付被收取了 {pct}% 的托管费。自区块 {height} 起，此费只由自身网关产生仅矿池或部分分账 coinbase 的矿工承担。<b>更新到当前版本的 DATUM 网关</b>，即可全额到账。",
+    "setup": "更新你的网关 →",
+    "discord": "到 Discord 寻求帮助"
   },
   "hero": {
+    "custodyFee": "托管费：自区块 {height} 起，过时版本的 DATUM 网关留下仅矿池或部分分账的 coinbase 时，补付对自身网关产生这类 coinbase 的矿工少付 {pct}%，由矿池留作在该 coinbase 成熟前代管这笔钱的费用。使用当前版本网关的矿工照常全额到账。",
     "eyebrow": "比特币（XBT / BTCB2）· BLAKE2b · DATUM · TIDES · ",
     "title": "Lazarus Pool。<br>挖比特币。<br><em>在区块里直接拿到钱。</em>",
     "define": "Lazarus Pool 挖的是比特币。XBT 和 BTCB2 是代码，blake2b 是工作量证明，所以 Siacoin 矿机能在这里挖。<a href=\"/zh/connect\">接入矿机</a>。",
@@ -972,6 +982,9 @@ window.LZ_I18N_DICTS["zh-CN"] = {
     "mgPayableBlocks": "{n} 个区块",
     "mgPayableNow": "现在",
     "mgTxSigned": "已签名，尚未广播",
+    "mgCustody": "应付 {gross} − 托管费 {fee}",
+    "mgCustodyMay": "如你的网关版本过时，可能收取托管费",
+    "mgCustodyTotal": " · 其中 {amt} 作为托管费保留",
     "thKind": "区块类型",
     "thPayableAt": "可支付起点",
     "thLands": "到账",
@@ -1036,6 +1049,7 @@ window.LZ_I18N_DICTS["zh-CN"] = {
     "earned24Split": "区块：{blocks}（{n} 个区块）· 补付：{mg}",
     "earned24Note": "收益尚不可花费：区块输出{a}满 {need} 个确认后成熟{enda}，补付在到期时支付。",
     "earned24Failed": " · 另有 {amt} 的补付失败，未计入",
+    "earned24Custody": " · 补付已扣托管费 {amt}",
     "earned24Since": "{amt}，来自 {when} 以来找到的区块",
     "earned24Unavailable": "暂不可用",
     "earned24UnavailableSub": "矿池暂时无法读取区块记录 · 这不代表为零，请稍后再看",

@@ -68,6 +68,13 @@
         <h2 id="miner-title" class="mono addr-title">—</h2>
         <p class="section-lede" id="miner-lede" data-i18n="miner.lede">Live hashrate, workers, TIDES window share and every coinbase that has paid this address.</p>
       </header>
+      <aside class="softfork urgent" id="minerwarn" role="alert" aria-labelledby="minerwarn-title" style="margin: 0 0 1.2rem" hidden>
+        <div class="softfork-row">
+          <p class="softfork-head"><span class="softfork-tag" data-i18n="minerwarn.kicker">Action needed</span><strong class="softfork-title" id="minerwarn-title" data-i18n="minerwarn.title">Your gateway is out of date</strong></p>
+          <p class="softfork-text" id="minerwarn-text"></p>
+          <p class="softfork-actions"><a class="btn small" id="minerwarn-setup" href="/connect" data-i18n="minerwarn.setup">Update your gateway →</a> <a class="btn small ghost" href="https://discord.gg/fD33dJXnzz" target="_blank" rel="noreferrer" data-i18n="minerwarn.discord">Ask for help on Discord</a></p>
+        </div>
+      </aside>
       <div class="hero-stats" aria-live="polite" data-i18n-aria="miner.summaryAria" aria-label="Miner summary">
         <span class="chip" data-live id="mc-hr"><span data-i18n="miner.hr">Hashrate</span> <b>—</b></span>
         <span class="chip" id="mc-avg" data-i18n-title="miner.avgTitle" title="Average of the per-minute samples over the last hour"><span data-i18n="miner.avg">1h avg</span> <b>—</b></span>
@@ -117,11 +124,11 @@
 </footer>
 
 <script src="/static/i18n.js?v=seo1"></script>
-<script src="/static/i18n/en.js?v=x143"></script>
-<script src="/static/i18n/zh-CN.js?v=x143"></script>
+<script src="/static/i18n/en.js?v=cust1"></script>
+<script src="/static/i18n/zh-CN.js?v=cust1"></script>
 <script>LZ_I18N.boot();</script>
-<script src="/static/shared.js?v=x143"></script>
+<script src="/static/shared.js?v=cust1"></script>
 <script src="/static/chart.js?v=app4"></script>
-<script src="/static/miner.js?v=seo1"></script>
+<script src="/static/miner.js?v=cust1"></script>
 </body>
 </html>
